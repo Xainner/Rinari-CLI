@@ -13,7 +13,7 @@ verificable.
 | `feature-agent` | Loop agéntico avanzado | planificación explícita, verificación automática, retry, persistencia de contexto |
 | `feature-history` | Historial y sesiones | listar/borrar sesiones, resume del agente, exportar conversaciones |
 | `feature-config` | Configuración | wizard `rinari setup`, `rinari doctor`, más perfiles |
-| `feature-mcp` | Integración MCP + búsqueda web | Model Context Protocol, herramientas externas, búsqueda web como tool |
+| `feature-mcp` | Integración MCP + búsqueda web | ✅ **MERGEADA a main** (web_search DuckDuckGo, servidores MCP como tools dinámicas) |
 
 ## Flujo de trabajo
 
