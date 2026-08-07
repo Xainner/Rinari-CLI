@@ -232,9 +232,9 @@ def render_welcome(
     latency_ms: int | None = None,
     tools_count: int = 0,
 ) -> None:
-    """Pinta el dashboard de bienvenida: info + logo lado a lado, sugerencias abajo."""
+    """Pinta el dashboard de bienvenida: logo centrado, info y sugerencias debajo."""
+    from rich.align import Align
     from rich.console import Group
-    from rich.table import Table
     from rich.text import Text
 
     console = Console()
@@ -249,20 +249,13 @@ def render_welcome(
         latency_ms=latency_ms,
         tools_count=tools_count,
     )
-    # separar info de sugerencias: las sugerencias van debajo, a ancho completo
+    # separar info de sugerencias: las sugerencias van al final
     header, _, suggestions = info.partition("[bold]Sugerencias:[/bold]")
     header = header.rstrip()
     suggestions = suggestions.strip()
 
-    logo = Text(render_logo_side())
-    table = Table(
-        show_header=False, show_edge=False, pad_edge=False,
-        expand=False, box=None,
-    )
-    table.add_column(overflow="fold")
-    table.add_column(overflow="fold", vertical="middle")
-    table.add_row(Text.from_markup(header), logo)
-    content = Group(table)
+    content: list = [Align(Text(render_logo_compact()), align="center")]
+    content.append(Align(Text.from_markup(header), align="center"))
     if suggestions:
-        content = Group(table, Text.from_markup(f"\n[bold]Sugerencias:[/bold] {suggestions}"))
-    console.print(Panel(content, border_style="magenta", padding=(1, 2)))
+        content.append(Align(Text.from_markup(f"[bold]Sugerencias:[/bold] {suggestions}"), align="center"))
+    console.print(Panel(Group(*content), border_style="magenta", padding=(1, 2)))
