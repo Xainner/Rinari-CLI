@@ -172,6 +172,49 @@ def list_dir(args: dict, cwd: str) -> dict:
     return {"entries": entries}
 
 
+def edit_file(args: dict, cwd: str) -> dict:
+    """Edita un archivo reemplazando un bloque (old → new).
+
+    Más quirúrgico que write_file: solo toca la parte indicada.
+    - old debe ser único (o pasar count=N para N ocurrencias)
+    - Devuelve la línea donde se aplicó el cambio
+    """
+    path = _resolve(cwd, args.get("path", ""))
+    old = args.get("old", "")
+    new = args.get("new", "")
+    count = int(args.get("count", 1))
+    if not old:
+        return {"ok": False, "error": "Se requiere 'old' (texto a reemplazar)"}
+    if not path.is_file():
+        return {"ok": False, "error": f"Archivo no existe: {args.get('path')}"}
+
+    content = path.read_text(encoding="utf-8", errors="replace")
+    occurrences = content.count(old)
+    if occurrences == 0:
+        return {"ok": False, "error": f"No se encontró el texto en {args.get('path')}"}
+    if occurrences < count:
+        return {
+            "ok": False,
+            "error": f"Se encontraron {occurrences} ocurrencia(s), se pidieron {count}",
+        }
+    if count == 1 and occurrences > 1:
+        return {
+            "ok": False,
+            "error": (
+                f"Ambigüedad: el texto aparece {occurrences} veces — incluye más "
+                f"contexto o usa count={occurrences}"
+            ),
+        }
+
+    new_content = content.replace(old, new, count)
+    path.write_text(new_content, encoding="utf-8")
+
+    # Línea del primer cambio (1-indexed): posición del texto nuevo insertado
+    idx = new_content.find(new)
+    line = new_content[:idx].count("\n") + 1 if idx >= 0 else 1
+    return {"ok": True, "path": str(path.relative_to(Path(cwd).resolve())), "line": line, "count": count}
+
+
 def _git(cwd: str, *args: str) -> subprocess.CompletedProcess:
     """Ejecuta git con encoding seguro (MSYS emite bytes no-UTF8)."""
     return subprocess.run(
@@ -294,6 +337,27 @@ TOOL_DEFS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "edit_file",
+            "description": (
+                "Edita un archivo reemplazando un bloque de texto (old → new) sin "
+                "reescribir el archivo completo. El 'old' debe ser único en el archivo "
+                "(usa count=N si hay repeticiones, o incluye más contexto). Devuelve la línea del cambio."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path relativo al cwd"},
+                    "old": {"type": "string", "description": "Texto exacto a reemplazar (puede ser multilínea)"},
+                    "new": {"type": "string", "description": "Texto de reemplazo"},
+                    "count": {"type": "number", "description": "Cuántas ocurrencias reemplazar (default 1)"},
+                },
+                "required": ["path", "old", "new"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "search_files",
             "description": "Busca una regex dentro de archivos del proyecto. Devuelve file, línea y contenido.",
             "parameters": {
@@ -399,6 +463,7 @@ class ToolRegistry:
         "run_command": run_command,
         "read_file": read_file,
         "write_file": write_file,
+        "edit_file": edit_file,
         "search_files": search_files,
         "list_dir": list_dir,
         "git_status": git_status,
