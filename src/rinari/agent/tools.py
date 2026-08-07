@@ -20,6 +20,8 @@ import sys
 import time
 from pathlib import Path
 
+import httpx
+
 
 class ToolError(ValueError):
     pass
@@ -285,6 +287,58 @@ def run_tests(args: dict, cwd: str) -> dict:
     }
 
 
+def web_search(args: dict, cwd: str) -> dict:
+    """Busca en la web con DuckDuckGo Lite (sin API key).
+
+    Devuelve hasta 'limit' resultados: {title, url, snippet}.
+    """
+    from urllib.parse import unquote, urlparse
+    from html import unescape
+
+    query = (args.get("query") or "").strip()
+    limit = int(args.get("limit", 5))
+    if not query:
+        return {"ok": False, "error": "Se requiere 'query'"}
+
+    params = {"q": query}
+    # UA simple: el UA completo (con detalles de Windows) dispara anti-bot 202
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        with httpx.Client(timeout=15.0, follow_redirects=True) as client:
+            resp = client.get("https://lite.duckduckgo.com/lite/", params=params, headers=headers)
+        if resp.status_code != 200:
+            return {"ok": False, "error": f"DuckDuckGo respondió HTTP {resp.status_code}"}
+        html = resp.content.decode("utf-8", errors="replace")
+    except httpx.HTTPError as e:
+        return {"ok": False, "error": f"Error de red: {e}"}
+
+    results = []
+    # Bloques: <a ... class='result-link'>TITLE</a> ... <td class='result-snippet'>SNIPPET</td>
+    title_re = re.compile(r"class=['\"]result-link['\"][^>]*>(.*?)</a>", re.DOTALL)
+    snippet_re = re.compile(r"class=['\"]result-snippet['\"]>(.*?)</td>", re.DOTALL)
+    titles = title_re.findall(html)
+    snippets = snippet_re.findall(html)
+
+    # URLs: el href viene como //duckduckgo.com/l/?uddg=<encoded>
+    url_re = re.compile(r"href=\"([^\"]*uddg=([^\"]+?))&amp;rut=", re.DOTALL)
+    raw_urls = url_re.findall(html)
+
+    for i, title in enumerate(titles):
+        clean_title = re.sub(r"<[^>]+>", "", title).strip()
+        url = ""
+        if i < len(raw_urls):
+            raw = raw_urls[i][1]
+            decoded = unquote(raw)
+            url = unescape(decoded)
+        snippet = ""
+        if i < len(snippets):
+            snippet = re.sub(r"<[^>]+>", "", snippets[i]).strip()
+        results.append({"title": clean_title, "url": url, "snippet": snippet[:300]})
+        if len(results) >= limit:
+            break
+    return {"ok": True, "query": query, "results": results}
+
+
 def _git(cwd: str, *args: str) -> subprocess.CompletedProcess:
     """Ejecuta git con encoding seguro (MSYS emite bytes no-UTF8)."""
     return subprocess.run(
@@ -520,6 +574,25 @@ TOOL_DEFS: list[dict] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": (
+                "Busca en la web usando DuckDuckGo (sin API key). Devuelve "
+                "resultados con título, url y snippet. Útil para documentación, "
+                "errores conocidos, sintaxis, noticias."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Búsqueda (en español o inglés)"},
+                    "limit": {"type": "number", "description": "Máximo de resultados (default 5)"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
 
 DANGEROUS_PATTERNS = [
@@ -558,6 +631,7 @@ class ToolRegistry:
         "git_diff": git_diff,
         "git_commit": git_commit,
         "run_tests": run_tests,
+        "web_search": web_search,
         }
 
     def openai_schemas(self) -> list[dict]:
