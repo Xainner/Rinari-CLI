@@ -527,6 +527,72 @@ def _model_set_cmd(
 app.add_typer(model_app, name="model")
 
 
+def diagnose_profile(name: str, prof: dict, make_client=None) -> tuple[bool, str]:
+    """Diagnostica un perfil: expansión de env, conexión al endpoint, modelos.
+
+    Devuelve (ok, mensaje). make_client se inyecta en tests.
+    """
+    from rinari.config import ConfigError, _expand_env
+
+    try:
+        api_key = _expand_env(prof.get("api_key") or "") or None
+    except ConfigError as e:
+        return False, f"env rota: {e}"
+
+    client = make_client or LLMClient(
+        base_url=prof["base_url"], api_key=api_key, model=prof.get("model", ""),
+    )
+    # listar modelos directamente: lanza LLMError con el detalle real si cae
+    try:
+        models = client.list_models_detailed()
+    except Exception as e:  # noqa: BLE001
+        return False, f"endpoint caído: {e}"
+    active = prof.get("model")
+    in_list = any(m.get("id") == active for m in models) if models else False
+    if active and models and not in_list:
+        # alias probable: llama.cpp acepta cualquier nombre aunque liste otro
+        # (1 modelo listado, activo distinto = alias del servidor)
+        if len(models) == 1:
+            return True, (f"⚠ {len(models)} modelo(s) listado: '{models[0].get('id')}' "
+                          f"— el activo '{active}' es un alias (funciona igual)")
+        return False, f"modelo activo '{active}' no está en el endpoint ({len(models)} modelos)"
+    return True, f"{len(models)} modelo(s), activo: {active or '—'}"
+
+
+@app.command()
+def doctor():
+    """Diagnostica la configuración: revisa todos los perfiles y endpoints."""
+    from rinari.config import load_config
+
+    cfg = load_config()
+    all_ok = True
+    console.print("[bold magenta]rinari doctor[/bold magenta] (✿◠‿◠)\n")
+
+    # perfiles a revisar: default + los nombrados
+    checks = [("default", cfg.default)]
+    checks += [(name, prof) for name, prof in sorted(cfg.profiles.items())]
+
+    for name, prof in checks:
+        prof_dict = {
+            "base_url": prof.base_url,
+            "model": prof.model,
+            "api_key": prof.api_key,
+        }
+        ok, msg = diagnose_profile(name, prof_dict)
+        if not ok:
+            all_ok = False
+        icon = "[green]✓[/green]" if ok else "[red]✗[/red]"
+        label = f"[bold]{name}[/bold]" if name == "default" else f"[cyan]{name}[/cyan]"
+        console.print(f"  {icon} {label}: {msg}")
+
+    if all_ok:
+        console.print("\n[green]✓ Todo en orden. Rinari está lista. (✿◠‿◠)[/green]")
+    else:
+        console.print("\n[red]✗ Hay perfiles con problemas.[/red] "
+                      "[yellow]Revisa arriba o usa `rinari setup` para corregir.[/yellow]")
+        raise typer.Exit(1)
+
+
 @app.command()
 def setup(
     profile: str = typer.Option(None, "--name", "-n", help="Nombre del perfil (default: 'default')"),
