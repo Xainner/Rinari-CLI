@@ -1,0 +1,28 @@
+[project]
+name = "qwencli"
+version = "0.1.0"
+description = "Nuestra propia CLI con LLM — REPL chat + agente de código contra modelos locales (vLLM/LiteLLM/llama.cpp)"
+readme = "README.md"
+authors = [
+    { name = "Xainner", email = "jose.arojasgu@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.28.1",
+    "prompt-toolkit>=3.0.53",
+    "rich>=15.0.0",
+    "typer>=0.27.1",
+]
+
+[project.scripts]
+qwencli = "qwencli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.0,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
