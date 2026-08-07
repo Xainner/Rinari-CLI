@@ -133,11 +133,7 @@ def _agent_interactive(
     latency_ms = None
     endpoint_ok = False
     try:
-        probe_client = LLMClient(
-            base_url=current.base_url,
-            api_key=current.api_key,
-            model=current.model,
-        )
+        probe_client = _make_client(current)
         endpoint_ok = check_endpoint_health(probe_client)
         if endpoint_ok:
             latency_ms = measure_endpoint_latency(probe_client)
@@ -165,11 +161,7 @@ def _agent_interactive(
     def build_client(profile_name: str):
         nonlocal current
         current = cfg.get_profile(profile_name)
-        return LLMClient(
-            base_url=current.base_url,
-            api_key=current.api_key,
-            model=current.model,
-        )
+        return _make_client(current)
 
     while True:
         try:
@@ -325,6 +317,16 @@ def _get_config() -> tuple:
         raise typer.Exit(1)
 
 
+def _make_client(profile) -> LLMClient:
+    """Crea un LLMClient desde un Profile (respeta el provider)."""
+    return LLMClient(
+        base_url=profile.base_url,
+        api_key=profile.api_key,
+        model=profile.model,
+        provider=getattr(profile, "provider", "openai") or "openai",
+    )
+
+
 def _build_client(profile_name: str) -> tuple[LLMClient, object]:
     cfg = load_config()
     try:
@@ -332,12 +334,7 @@ def _build_client(profile_name: str) -> tuple[LLMClient, object]:
     except ConfigError as e:
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(1)
-    client = LLMClient(
-        base_url=profile.base_url,
-        api_key=profile.api_key,
-        model=profile.model,
-    )
-    return client, profile
+    return _make_client(profile), profile
 
 
 @app.command()
@@ -407,11 +404,7 @@ def chat(
             history.append_message(session.session_id, session.messages[-1])
 
         try:
-            client = LLMClient(
-                base_url=current.base_url,
-                api_key=current.api_key,
-                model=current.model,
-            )
+            client = _make_client(current)
             console.print("[dim]⏳ pensando…[/dim]", end="\r")
             acc = DeltaAccumulator()
             for event in client.chat_stream(session.messages, temperature=current.temperature):
@@ -460,11 +453,35 @@ def pick_model_index(models: list[dict], choice: str) -> str:
     """Devuelve el id del modelo según el índice elegido por el usuario."""
     try:
         idx = int(choice.strip())
-    except ValueError:
-        raise ConfigError(f"'{choice}' no es un número. Elige el número del modelo.")
-    if idx < 0 or idx >= len(models):
-        raise ConfigError(f"Índice {idx} fuera de rango (hay {len(models)} modelos).")
+    except ValueError as e:
+        raise ConfigError(f"'{choice}' no es un número válido.") from e
+    if not (0 <= idx < len(models)):
+        raise ConfigError(f"Índice fuera de rango: 0–{len(models) - 1}.")
     return models[idx]["id"]
+
+
+def pick_provider(choice: str) -> str:
+    """Devuelve el nombre del provider por el índice elegido."""
+    from rinari.config import PROVIDERS
+
+    try:
+        idx = int(choice.strip())
+    except ValueError as e:
+        raise ConfigError(f"'{choice}' no es un número válido.") from e
+    names = list(PROVIDERS)
+    if not (0 <= idx < len(names)):
+        raise ConfigError(f"Índice fuera de rango: 0–{len(names) - 1}.")
+    return names[idx]
+
+
+def format_providers() -> str:
+    """Lista los providers numerados con su descripción (para el wizard)."""
+    from rinari.config import PROVIDERS
+
+    lines = []
+    for i, (name, spec) in enumerate(PROVIDERS.items()):
+        lines.append(f"  [bold]{i}[/bold] → {name} — {spec['description']}")
+    return "\n".join(lines)
 
 
 def format_model_list(models: list[dict]) -> str:
@@ -593,49 +610,96 @@ def doctor():
         raise typer.Exit(1)
 
 
+def _setup_list_models(base_url: str, api_key: str | None, provider: str = "openai") -> list[dict]:
+    """Lista modelos del endpoint para el wizard (inyectable en tests)."""
+    from rinari.client import LLMClient
+
+    client = LLMClient(base_url=base_url, api_key=api_key, model="", provider=provider)
+    return client.list_models_detailed()
+
+
 @app.command()
 def setup(
     profile: str = typer.Option(None, "--name", "-n", help="Nombre del perfil (default: 'default')"),
-    base_url: str = typer.Option(None, "--base-url", help="Endpoint OpenAI-compatible"),
+    base_url: str = typer.Option(None, "--base-url", help="Endpoint del proveedor"),
     api_key: str = typer.Option(None, "--api-key", help="API key (o deja vacío)"),
+    provider: str = typer.Option(None, "--provider", help="Proveedor (openai, anthropic, local…)"),
 ):
-    """Wizard interactivo: conecta al endpoint, lista modelos y crea el perfil."""
-    from rinari.config import set_profile_model
+    """Wizard interactivo: elige provider, conecta, lista modelos y crea el perfil."""
+    import os
+
+    from rinari.config import PROVIDERS, set_profile_model
     from rinari.ui import render_logo_compact
 
     name = profile or "default"
     console.print(render_logo_compact())
     console.print("\n[bold magenta]Setup de Rinari[/bold magenta] (✿◠‿◠)\n")
 
-    # 1. base_url
     cfg = load_config()
+
+    # 0. elegir provider (salta si viene --provider)
+    if provider is None:
+        console.print("[bold]¿Qué proveedor usas?[/bold]")
+        console.print(format_providers() + "\n")
+        try:
+            choice = input("Elige el número del provider: ").strip()
+        except EOFError:
+            choice = ""
+        if not choice:
+            # default: el provider del perfil actual, o local
+            try:
+                provider = cfg.get_profile(name).provider or "openai"
+            except ConfigError:
+                provider = "local"
+        else:
+            try:
+                provider = pick_provider(choice)
+            except ConfigError as e:
+                console.print(f"[red]{e}[/red]")
+                raise typer.Exit(1)
+    provider = provider or "openai"
+    if provider not in PROVIDERS:
+        console.print(f"[red]Provider '{provider}' desconocido. "
+                      f"Válidos: {', '.join(PROVIDERS)}[/red]")
+        raise typer.Exit(1)
+    spec = PROVIDERS[provider]
+
+    # 1. base_url (default: el del provider, o el perfil actual)
     if base_url is None:
+        default_url = spec["base_url"] or ""
         try:
             current = cfg.get_profile(name)
-            default_url = current.base_url
+            if current.base_url and current.provider == provider:
+                default_url = current.base_url
         except ConfigError:
-            default_url = cfg.default.base_url
+            pass
         try:
-            base_url = input(f"Endpoint OpenAI-compatible [default: {default_url}]: ").strip()
+            prompt = f"Endpoint [default: {default_url}]: " if default_url else "Endpoint: "
+            base_url = input(prompt).strip()
         except EOFError:
             base_url = ""
         if not base_url:
+            if not default_url:
+                console.print("[red]Necesito un endpoint. Usa --base-url o elige un provider "
+                              "con endpoint por defecto.[/red]")
+                raise typer.Exit(1)
             base_url = default_url
 
-    # 2. api_key (opcional)
+    # 2. api_key: env var del provider si existe, si no pregunta
     if api_key is None:
-        try:
-            api_key = input("API key (vacío si no requiere): ").strip() or None
-        except EOFError:
-            api_key = None
+        api_key = os.environ.get(spec["env_var"]) if spec["env_var"] else None
+        if not api_key:
+            try:
+                api_key = input("API key (vacío si no requiere): ").strip() or None
+            except EOFError:
+                api_key = None
 
     # 3. conectar y listar modelos reales
-    from rinari.client import LLMClient, LLMError
+    from rinari.client import LLMError
 
-    client = LLMClient(base_url=base_url, api_key=api_key or None, model="")
     console.print(f"\n[cyan]Conectando a {base_url}…[/cyan]")
     try:
-        models = client.list_models_detailed()
+        models = _setup_list_models(base_url, api_key or None, provider=provider)
     except LLMError as e:
         console.print(f"[red]✗ No se pudo listar modelos: {e}[/red]")
         raise typer.Exit(1)
@@ -660,9 +724,10 @@ def setup(
     # 5. guardar
     set_profile_model(
         cfg.path.parent, name, model_id, base_url=base_url, api_key=api_key,
+        provider=provider,
     )
     console.print(
-        f"\n[green]✓ Perfil '{name}' listo:[/green] {base_url} → [bold]{model_id}[/bold]\n"
+        f"\n[green]✓ Perfil '{name}' listo:[/green] {provider} → {base_url} → [bold]{model_id}[/bold]\n"
         f"  Pruébalo con: [bold]rinari run \"hola\" --profile {name}[/bold]"
     )
 

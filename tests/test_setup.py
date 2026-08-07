@@ -60,6 +60,79 @@ def test_format_model_list():
     assert "0" in out and "1" in out
 
 
+def test_pick_provider_by_index():
+    """pick_provider devuelve el nombre del provider por índice."""
+    from rinari.cli import pick_provider
+
+    assert pick_provider("0") == "openai"
+    assert pick_provider("1") == "anthropic"
+
+
+def test_pick_provider_invalid():
+    """Índice inválido → ConfigError con la lista de providers."""
+    from rinari.cli import pick_provider
+
+    with pytest.raises(ConfigError):
+        pick_provider("99")
+    with pytest.raises(ConfigError):
+        pick_provider("abc")
+
+
+def test_provider_listing():
+    """format_providers lista los providers numerados con su descripción."""
+    from rinari.cli import format_providers
+
+    out = format_providers()
+    assert "anthropic" in out
+    assert "openrouter" in out
+    assert "local" in out
+    assert "0" in out
+
+
+def test_setup_wizard_asks_provider(fake_home, monkeypatch):
+    """El wizard pide provider primero y crea el perfil con él."""
+    from rinari import cli
+    from rinari.config import set_profile_model
+
+    set_profile_model(fake_home / ".rinari", "default", "m0", base_url="http://x/v1")
+    monkeypatch.setattr(cli, "_setup_list_models",
+                        lambda base_url, api_key, provider="openai": [
+                            {"id": "claude-sonnet-4"},
+                        ])
+
+    result = runner.invoke(
+        app, ["setup", "--name", "ant"],
+        input="1\n\n\n0\n",  # provider=anthropic, url default, sin key, modelo 0
+    )
+    assert result.exit_code == 0
+    cfg = load_config(fake_home / ".rinari")
+    prof = cfg.get_profile("ant")
+    assert prof.provider == "anthropic"
+    assert prof.base_url == "https://api.anthropic.com/v1"
+    assert prof.model == "claude-sonnet-4"
+
+
+def test_setup_wizard_local_provider(fake_home, monkeypatch):
+    """Provider 'local' usa su base_url por defecto."""
+    from rinari import cli
+    from rinari.config import set_profile_model
+
+    set_profile_model(fake_home / ".rinari", "default", "m0", base_url="http://x/v1")
+    monkeypatch.setattr(cli, "_setup_list_models",
+                        lambda base_url, api_key, provider="openai": [
+                            {"id": "qwen3.6-27b"},
+                        ])
+
+    result = runner.invoke(
+        app, ["setup", "--name", "casita"],
+        input="5\n\n\n0\n",  # provider=local (índice 5), url default, sin key, modelo 0
+    )
+    assert result.exit_code == 0
+    cfg = load_config(fake_home / ".rinari")
+    prof = cfg.get_profile("casita")
+    assert prof.provider == "local"
+
+
 def test_models_command_shows_active(fake_home, monkeypatch):
     """`rinari models` muestra el modelo activo del perfil + lista."""
     from types import SimpleNamespace

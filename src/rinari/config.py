@@ -25,7 +25,68 @@ DEFAULT_CONFIG = {
         "model": "qwen3.6-27b",
         "temperature": 0.7,
         "api_key": None,
+        "provider": "local",
     }
+}
+
+# Providers soportados: api_format define cómo habla el cliente.
+# - "openai": POST /chat/completions, Authorization Bearer (vLLM, LiteLLM,
+#   llama.cpp, OpenRouter, DeepSeek, Gemini, etc.)
+# - "anthropic": POST /v1/messages con x-api-key + anthropic-version (API nativa)
+PROVIDERS: dict[str, dict] = {
+    "openai": {
+        "api_format": "openai",
+        "base_url": "https://api.openai.com/v1",
+        "env_var": "OPENAI_API_KEY",
+        "description": "OpenAI API oficial",
+    },
+    "anthropic": {
+        "api_format": "anthropic",
+        "base_url": "https://api.anthropic.com/v1",
+        "env_var": "ANTHROPIC_API_KEY",
+        "description": "Anthropic Claude (API nativa)",
+    },
+    "openrouter": {
+        "api_format": "openai",
+        "base_url": "https://openrouter.ai/api/v1",
+        "env_var": "OPENROUTER_API_KEY",
+        "description": "OpenRouter (multi-modelo)",
+    },
+    "deepseek": {
+        "api_format": "openai",
+        "base_url": "https://api.deepseek.com/v1",
+        "env_var": "DEEPSEEK_API_KEY",
+        "description": "DeepSeek",
+    },
+    "gemini": {
+        "api_format": "openai",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "env_var": "GEMINI_API_KEY",
+        "description": "Google Gemini (compat OpenAI)",
+    },
+    "local": {
+        "api_format": "openai",
+        "base_url": "http://localhost:11434/v1",
+        "env_var": "",
+        "description": "Local (llama.cpp / Ollama / vLLM, sin key)",
+    },
+    "custom": {
+        "api_format": "openai",
+        "base_url": "",
+        "env_var": "",
+        "description": "Endpoint OpenAI-compatible propio",
+    },
+}
+
+# Modelos sugeridos por provider (para el wizard de setup)
+SUGGESTED_MODELS: dict[str, list[str]] = {
+    "openai": ["gpt-4o", "gpt-4o-mini", "o3-mini"],
+    "anthropic": ["claude-sonnet-4-5", "claude-opus-4-1", "claude-haiku-4-5"],
+    "openrouter": ["anthropic/claude-sonnet-4", "openai/gpt-4o", "deepseek/deepseek-chat"],
+    "deepseek": ["deepseek-chat", "deepseek-reasoner"],
+    "gemini": ["gemini-2.5-pro", "gemini-2.5-flash"],
+    "local": ["qwen3.6-27b"],
+    "custom": [],
 }
 
 
@@ -39,6 +100,7 @@ class Profile:
     model: str
     api_key: str | None = None
     temperature: float = 0.7
+    provider: str = "openai"
     extra: dict = field(default_factory=dict)
 
 
@@ -103,6 +165,7 @@ def load_config(config_dir: Path | str | None = None) -> Config:
             model=merged["model"],
             api_key=merged.get("api_key") or None,
             temperature=float(merged.get("temperature", 0.7)),
+            provider=merged.get("provider") or "openai",
         )
 
     default_profile = Profile(
@@ -110,6 +173,7 @@ def load_config(config_dir: Path | str | None = None) -> Config:
         model=defaults["model"],
         api_key=defaults.get("api_key") or None,
         temperature=float(defaults.get("temperature", 0.7)),
+        provider=defaults.get("provider") or "openai",
     )
     return Config(profiles=profiles, default=default_profile, path=path)
 
@@ -137,6 +201,7 @@ def set_profile_model(
     model: str,
     base_url: str | None = None,
     api_key: str | None = None,
+    provider: str | None = None,
 ) -> Path:
     """Cambia el modelo de un perfil (creándolo si hace falta) y guarda.
 
@@ -152,6 +217,7 @@ def set_profile_model(
                 base_url=base_url, model=model,
                 api_key=api_key if api_key is not None else cfg.default.api_key,
                 temperature=cfg.default.temperature,
+                provider=provider or cfg.default.provider,
             )
         else:
             new_default = replace(cfg.default, model=model)
@@ -170,13 +236,14 @@ def set_profile_model(
                 base_url=base_url, model=model,
                 api_key=api_key,
                 temperature=cfg.default.temperature,
+                provider=provider or "openai",
             )
         else:
             cur = profiles[profile_name]
             new_key = api_key if api_key is not None else cur.api_key
             profiles[profile_name] = (
                 Profile(base_url=base_url, model=model, api_key=new_key,
-                        temperature=cur.temperature)
+                        temperature=cur.temperature, provider=provider or cur.provider)
                 if base_url is not None else replace(cur, model=model)
             )
         d = cfg.default
@@ -188,6 +255,8 @@ def set_profile_model(
     lines.append(f'model = "{d.model}"')
     if d.api_key:
         lines.append(f'api_key = "{d.api_key}"')
+    if d.provider and d.provider != "openai":
+        lines.append(f'provider = "{d.provider}"')
     lines.append(f"temperature = {d.temperature}")
     for name, p in sorted(profiles.items()):
         lines.append(f'\n[profile.{name}]')
@@ -195,6 +264,8 @@ def set_profile_model(
         lines.append(f'model = "{p.model}"')
         if p.api_key:
             lines.append(f'api_key = "{p.api_key}"')
+        if p.provider and p.provider != "openai":
+            lines.append(f'provider = "{p.provider}"')
         lines.append(f"temperature = {p.temperature}")
     config_dir.mkdir(parents=True, exist_ok=True)
     path = config_dir / "config.toml"

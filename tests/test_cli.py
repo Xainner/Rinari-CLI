@@ -44,7 +44,7 @@ def patch_llm_client(monkeypatch):
 
     orig_init = client_mod.LLMClient.__init__
 
-    def fake_init(self, base_url, api_key=None, model="qwen3.6-27b", timeout=300.0, transport=None):
+    def fake_init(self, base_url, api_key=None, model="qwen3.6-27b", timeout=300.0, transport=None, provider="openai"):
         # Inyecta MockTransport SIEMPRE (ignora el real)
         orig_init(self, base_url=base_url, api_key=api_key, model=model, timeout=timeout,
                   transport=make_transport_ok())
