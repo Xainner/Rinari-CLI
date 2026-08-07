@@ -125,7 +125,7 @@ def test_setup_wizard_local_provider(fake_home, monkeypatch):
 
     result = runner.invoke(
         app, ["setup", "--name", "casita"],
-        input="5\n\n\n0\n",  # provider=local (índice 5), url default, sin key, modelo 0
+        input="6\n\n\n0\n",  # provider=local (índice 6), url default, sin key, modelo 0
     )
     assert result.exit_code == 0
     cfg = load_config(fake_home / ".rinari")

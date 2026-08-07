@@ -16,8 +16,17 @@ def test_providers_table_has_common_providers():
     assert "openai" in PROVIDERS
     assert "anthropic" in PROVIDERS
     assert "openrouter" in PROVIDERS
+    assert "opencode" in PROVIDERS
     assert "local" in PROVIDERS
     assert "custom" in PROVIDERS
+
+
+def test_opencode_provider_shape():
+    """OpenCode Zen es OpenAI-compatible con su endpoint real."""
+    spec = PROVIDERS["opencode"]
+    assert spec["api_format"] == "openai"
+    assert spec["base_url"] == "https://console.opencode.ai/zen/v1"
+    assert spec["env_var"] == "OPENCODE_API_KEY"
 
 
 def test_provider_shape():

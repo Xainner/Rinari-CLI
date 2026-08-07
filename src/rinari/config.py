@@ -52,6 +52,12 @@ PROVIDERS: dict[str, dict] = {
         "env_var": "OPENROUTER_API_KEY",
         "description": "OpenRouter (multi-modelo)",
     },
+    "opencode": {
+        "api_format": "openai",
+        "base_url": "https://console.opencode.ai/zen/v1",
+        "env_var": "OPENCODE_API_KEY",
+        "description": "OpenCode Zen (openai-compatible)",
+    },
     "deepseek": {
         "api_format": "openai",
         "base_url": "https://api.deepseek.com/v1",
@@ -83,6 +89,7 @@ SUGGESTED_MODELS: dict[str, list[str]] = {
     "openai": ["gpt-4o", "gpt-4o-mini", "o3-mini"],
     "anthropic": ["claude-sonnet-4-5", "claude-opus-4-1", "claude-haiku-4-5"],
     "openrouter": ["anthropic/claude-sonnet-4", "openai/gpt-4o", "deepseek/deepseek-chat"],
+    "opencode": ["anthropic/claude-sonnet-4", "openai/gpt-4o", "deepseek/deepseek-chat"],
     "deepseek": ["deepseek-chat", "deepseek-reasoner"],
     "gemini": ["gemini-2.5-pro", "gemini-2.5-flash"],
     "local": ["qwen3.6-27b"],
