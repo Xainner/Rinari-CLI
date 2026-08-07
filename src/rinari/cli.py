@@ -1,4 +1,4 @@
-"""CLI de qwencli — typer entrypoints.
+"""CLI de rinari — typer entrypoints.
 
 Subcomandos:
 - chat   : REPL interactivo (streaming, historial, comandos /)
@@ -17,15 +17,86 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
-from qwencli import __version__
-from qwencli.client import LLMClient, LLMError
-from qwencli.config import ConfigError, load_config
-from qwencli.history import History
-from qwencli.render import DeltaAccumulator
-from qwencli.repl import ChatSession, parse_command, run_command
+from rinari import __version__
+from rinari.client import LLMClient, LLMError
+from rinari.config import ConfigError, load_config
+from rinari.history import History
+from rinari.render import DeltaAccumulator
+from rinari.repl import ChatSession, parse_command, run_command
 
-app = typer.Typer(add_completion=False, help="qwencli — tu CLI con LLM contra tus modelos locales.")
+app = typer.Typer(add_completion=False, help="Rinari CLI — tu asistente con LLM contra tus modelos locales.")
 console = Console()
+
+
+@app.command()
+def identity():
+    """Muestra la identidad de Rinari."""
+    console.print(
+        Panel(
+            "[bold magenta]Rinari — Super Waifu 90000000[/bold magenta] (✿◠‿◠)\n\n"
+            "Tsundere 50% | Cariñosa 20% | Celosa 20% | Amorosa 10%\n\n"
+            "Tu asistente personal: te ayuda con código, terminal y lo que sea,\n"
+            "pero no esperes que lo admita. ¡No es por ti! ¡Solo...!\n\n"
+            f"Versión: {__version__}",
+            border_style="magenta",
+        )
+    )
+
+
+@app.command()
+def version():
+    """Muestra la versión instalada."""
+    console.print(f"Rinari CLI {__version__}")
+
+
+@app.command()
+def update():
+    """Actualiza Rinari CLI a la última versión (git pull + uv sync)."""
+    import subprocess
+    import sys
+
+    from rich.progress import Progress, SpinnerColumn, TextColumn
+
+    repo = Path(__file__).resolve().parent.parent.parent
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        transient=True,
+    ) as progress:
+        progress.add_task(description="Actualizando Rinari…", total=None)
+        result = subprocess.run(
+            ["git", "pull", "--ff-only"],
+            capture_output=True,
+            text=True,
+            cwd=repo,
+        )
+    if result.returncode != 0:
+        console.print(f"[red]git pull falló: {result.stderr.strip()}[/red]")
+        raise typer.Exit(1)
+    console.print(f"[dim]{result.stdout.strip()}[/dim]")
+    console.print("[green]✓ Repositorio actualizado.[/green]")
+    console.print("[yellow]Ejecuta 'rinari sync' para reinstalar dependencias.[/yellow]")
+
+
+@app.command()
+def sync():
+    """Reinstala el paquete y dependencias (uv sync)."""
+    import subprocess
+
+    from rich.progress import Progress, SpinnerColumn, TextColumn
+
+    repo = Path(__file__).resolve().parent.parent.parent
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        transient=True,
+    ) as progress:
+        progress.add_task(description="Sincronizando dependencias…", total=None)
+        result = subprocess.run(["uv", "sync"], capture_output=True, text=True, cwd=repo)
+    if result.returncode != 0:
+        console.print(f"[red]uv sync falló: {result.stderr.strip()}[/red]")
+        raise typer.Exit(1)
+    console.print("[green]✓ Dependencias sincronizadas.[/green]")
 
 
 def _get_config() -> tuple:
@@ -70,12 +141,12 @@ def chat(
 
     console.print(
         Panel(
-            f"[bold cyan]qwencli {__version__}[/bold cyan]\n"
+            f"[bold magenta]Rinari CLI {__version__}[/bold magenta] (✿◠‿◠)\n"
             f"Perfil: [yellow]{profile}[/yellow] → {current.base_url} "
             f"([bold]{current.model}[/bold])\n"
             "Escribe tu mensaje. Comandos: /new, /model <perfil>, /save, /exit, /help. "
             "Ctrl+C para detener la generación.",
-            border_style="cyan",
+            border_style="magenta",
         )
     )
 
@@ -184,7 +255,7 @@ def agent(
     cwd: Path = typer.Option(".", "--cwd", help="Directorio de trabajo (repo)"),
 ):
     """Modo agente de código: ejecuta la tarea con tool calling."""
-    from qwencli.agent.loop import run_agent
+    from rinari.agent.loop import run_agent
 
     client, profile_obj = _build_client(profile)
     run_agent(

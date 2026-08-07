@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from qwencli.config import ConfigError, Profile, load_config, save_config
+from rinari.config import ConfigError, Profile, load_config, save_config
 
 DEFAULT_TOML = """
 [default]

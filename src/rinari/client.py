@@ -1,4 +1,4 @@
-"""Cliente OpenAI-compatible con streaming SSE para qwencli.
+"""Cliente OpenAI-compatible con streaming SSE para rinari.
 
 Habla con cualquier endpoint OpenAI-compatible: vLLM, LiteLLM, llama.cpp.
 Soporta:

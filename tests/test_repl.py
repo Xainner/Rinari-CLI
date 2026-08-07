@@ -2,7 +2,7 @@
 
 import pytest
 
-from qwencli.repl import SYSTEM_PROMPT, ChatSession, parse_command, run_command
+from rinari.repl import SYSTEM_PROMPT, ChatSession, parse_command, run_command
 
 
 def test_parse_command_new():

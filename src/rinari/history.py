@@ -1,7 +1,7 @@
 """Historial de conversaciones en SQLite.
 
 Cada sesión tiene un id, perfil, created_at y una lista de mensajes JSON.
-Persistencia: ~/.qwencli/history.sqlite por defecto.
+Persistencia: ~/.rinari/history.sqlite por defecto.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ class HistoryError(Exception):
 class History:
     def __init__(self, db_path: Path | str | None = None):
         if db_path is None:
-            db_path = Path.home() / ".qwencli" / "history.sqlite"
+            db_path = Path.home() / ".rinari" / "history.sqlite"
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.db_path))

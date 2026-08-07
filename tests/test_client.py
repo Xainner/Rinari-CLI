@@ -5,7 +5,7 @@ import json
 import httpx
 import pytest
 
-from qwencli.client import LLMError, LLMClient
+from rinari.client import LLMError, LLMClient
 
 BASE = "http://test.local/v1"
 MODEL = "qwen3.6-27b"

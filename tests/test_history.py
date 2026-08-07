@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from qwencli.history import History, HistoryError
+from rinari.history import History, HistoryError
 
 
 @pytest.fixture

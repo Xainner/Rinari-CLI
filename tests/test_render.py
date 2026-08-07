@@ -1,6 +1,6 @@
 """Tests para el rendering de streaming con rich."""
 
-from qwencli.render import DeltaAccumulator, strip_ansi
+from rinari.render import DeltaAccumulator, strip_ansi
 
 
 def test_accumulator_builds_text():

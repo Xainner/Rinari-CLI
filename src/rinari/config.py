@@ -1,6 +1,6 @@
-"""Configuración de qwencli: perfiles con base_url, api_key, model, temperature.
+"""Configuración de rinari: perfiles con base_url, api_key, model, temperature.
 
-Los perfiles viven en ~/.qwencli/config.toml. Soporta:
+Los perfiles viven en ~/.rinari/config.toml. Soporta:
 - Sección [default] cuyos valores heredan los perfiles.
 - ${ENV_VAR} expansion en api_key y cualquier campo string.
 """
@@ -80,7 +80,7 @@ def _apply_defaults(profile: dict, defaults: dict) -> dict:
 
 
 def load_config(config_dir: Path | str | None = None) -> Config:
-    config_dir = Path(config_dir) if config_dir else Path.home() / ".qwencli"
+    config_dir = Path(config_dir) if config_dir else Path.home() / ".rinari"
     path = config_dir / "config.toml"
     defaults = dict(DEFAULT_CONFIG["default"])
 
@@ -119,7 +119,7 @@ def save_config(config_dir: Path | str, profiles: dict[str, Profile]) -> Path:
     config_dir = Path(config_dir)
     config_dir.mkdir(parents=True, exist_ok=True)
     path = config_dir / "config.toml"
-    lines = ['# qwencli config — perfiles de endpoints OpenAI-compatibles\n']
+    lines = ['# rinari config — perfiles de endpoints OpenAI-compatibles\n']
     for name, p in sorted(profiles.items()):
         lines.append(f'\n[profile.{name}]')
         lines.append(f'base_url = "{p.base_url}"')

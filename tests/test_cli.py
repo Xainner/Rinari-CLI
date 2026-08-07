@@ -9,7 +9,7 @@ import httpx
 import pytest
 from typer.testing import CliRunner
 
-from qwencli.cli import app
+from rinari.cli import app
 
 runner = CliRunner()
 
@@ -40,7 +40,7 @@ def make_transport_ok(content: str = "respuesta"):
 @pytest.fixture(autouse=True)
 def patch_llm_client(monkeypatch):
     """Fuerza un transport mock en LLMClient para todos los tests del CLI."""
-    from qwencli import client as client_mod
+    from rinari import client as client_mod
 
     orig_init = client_mod.LLMClient.__init__
 
@@ -55,7 +55,7 @@ def patch_llm_client(monkeypatch):
 @pytest.fixture(autouse=True)
 def fake_home_config(monkeypatch, tmp_path):
     """Config sin key para no depender del HOME real."""
-    from qwencli import config as config_mod
+    from rinari import config as config_mod
 
     monkeypatch.setattr(config_mod.Path, "home", staticmethod(lambda: tmp_path))
     monkeypatch.setenv("SAT_KEY", "sk-test")
@@ -89,3 +89,57 @@ def test_unknown_profile_fails_cleanly():
     result = runner.invoke(app, ["run", "hola", "--profile", "nope"])
     assert result.exit_code == 1
     assert "no existe" in result.stdout
+
+
+def test_identity_shows_rinari():
+    result = runner.invoke(app, ["identity"])
+    assert result.exit_code == 0
+    assert "Rinari" in result.stdout
+    assert "Tsundere" in result.stdout
+
+
+def test_version_shows_version():
+    result = runner.invoke(app, ["version"])
+    assert result.exit_code == 0
+    assert "Rinari CLI" in result.stdout
+
+
+def test_update_runs_git_pull(monkeypatch):
+    """update llama a git pull en el repo (mockeamos subprocess)."""
+    import subprocess
+
+    calls = {}
+
+    def fake_run(cmd, **kwargs):
+        calls["cmd"] = cmd
+        calls["cwd"] = kwargs.get("cwd")
+        return type("R", (), {"returncode": 0, "stdout": "Already up to date.", "stderr": ""})()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = runner.invoke(app, ["update"])
+    assert result.exit_code == 0
+    assert calls["cmd"][:2] == ["git", "pull"]
+    assert calls["cwd"] is not None  # apunta al repo
+
+
+def test_sync_runs_uv_sync(monkeypatch):
+    import subprocess
+
+    calls = {}
+
+    def fake_run(cmd, **kwargs):
+        calls["cmd"] = cmd
+        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = runner.invoke(app, ["sync"])
+    assert result.exit_code == 0
+    assert calls["cmd"] == ["uv", "sync"]
+
+
+def test_system_prompt_has_rinari_identity():
+    from rinari.repl import SYSTEM_PROMPT
+
+    assert "Rinari" in SYSTEM_PROMPT
+    assert "tsundere" in SYSTEM_PROMPT.lower()
+    assert "NUNCA digas" in SYSTEM_PROMPT
