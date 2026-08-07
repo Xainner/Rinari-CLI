@@ -129,3 +129,74 @@ def save_config(config_dir: Path | str, profiles: dict[str, Profile]) -> Path:
         lines.append(f"temperature = {p.temperature}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
+
+
+def set_profile_model(
+    config_dir: Path | str,
+    profile_name: str,
+    model: str,
+    base_url: str | None = None,
+    api_key: str | None = None,
+) -> Path:
+    """Cambia el modelo de un perfil (creándolo si hace falta) y guarda.
+
+    Relee el config, modifica el perfil indicado (o [default] si el nombre
+    es 'default'), y escribe el archivo. Devuelve el path escrito.
+    """
+    config_dir = Path(config_dir)
+    cfg = load_config(config_dir)
+
+    if profile_name == "default":
+        if base_url is not None:
+            new_default = Profile(
+                base_url=base_url, model=model,
+                api_key=api_key if api_key is not None else cfg.default.api_key,
+                temperature=cfg.default.temperature,
+            )
+        else:
+            new_default = replace(cfg.default, model=model)
+        # default se guarda como sección [default] + perfiles aparte
+        profiles = dict(cfg.profiles)
+        d = new_default
+    else:
+        profiles = dict(cfg.profiles)
+        if profile_name not in profiles:
+            if base_url is None:
+                raise ConfigError(
+                    f"El perfil '{profile_name}' no existe. Usa `rinari setup` para crearlo, "
+                    f"o pasa --base-url. Perfiles: {', '.join(cfg.profile_names())}"
+                )
+            profiles[profile_name] = Profile(
+                base_url=base_url, model=model,
+                api_key=api_key,
+                temperature=cfg.default.temperature,
+            )
+        else:
+            cur = profiles[profile_name]
+            new_key = api_key if api_key is not None else cur.api_key
+            profiles[profile_name] = (
+                Profile(base_url=base_url, model=model, api_key=new_key,
+                        temperature=cur.temperature)
+                if base_url is not None else replace(cur, model=model)
+            )
+        d = cfg.default
+
+    # reconstruir el archivo completo: default + perfiles
+    lines = ['# rinari config — perfiles de endpoints OpenAI-compatibles\n']
+    lines.append('[default]')
+    lines.append(f'base_url = "{d.base_url}"')
+    lines.append(f'model = "{d.model}"')
+    if d.api_key:
+        lines.append(f'api_key = "{d.api_key}"')
+    lines.append(f"temperature = {d.temperature}")
+    for name, p in sorted(profiles.items()):
+        lines.append(f'\n[profile.{name}]')
+        lines.append(f'base_url = "{p.base_url}"')
+        lines.append(f'model = "{p.model}"')
+        if p.api_key:
+            lines.append(f'api_key = "{p.api_key}"')
+        lines.append(f"temperature = {p.temperature}")
+    config_dir.mkdir(parents=True, exist_ok=True)
+    path = config_dir / "config.toml"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path

@@ -161,13 +161,17 @@ class LLMClient:
             raise LLMError(f"No se pudo conectar a {self.base_url}: {e}") from e
 
     def list_models(self) -> list[str]:
+        return [m["id"] for m in self.list_models_detailed()]
+
+    def list_models_detailed(self) -> list[dict]:
+        """Modelos del endpoint como dicts completos ({id, owned_by, created, ...})."""
         try:
             with self._client() as client:
                 resp = client.get(f"{self.base_url}/models")
                 if resp.status_code != 200:
                     raise LLMError(self._error_message(resp.status_code, resp.text))
                 data = resp.json()
-                return [m["id"] for m in data.get("data", [])]
+                return list(data.get("data", []))
         except LLMError:
             raise
         except httpx.HTTPError as e:

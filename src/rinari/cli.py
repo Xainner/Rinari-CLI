@@ -456,16 +456,149 @@ def run(
         raise typer.Exit(1)
 
 
+def pick_model_index(models: list[dict], choice: str) -> str:
+    """Devuelve el id del modelo según el índice elegido por el usuario."""
+    try:
+        idx = int(choice.strip())
+    except ValueError:
+        raise ConfigError(f"'{choice}' no es un número. Elige el número del modelo.")
+    if idx < 0 or idx >= len(models):
+        raise ConfigError(f"Índice {idx} fuera de rango (hay {len(models)} modelos).")
+    return models[idx]["id"]
+
+
+def format_model_list(models: list[dict]) -> str:
+    """Numera los modelos para mostrarlos en el wizard."""
+    lines = []
+    for i, m in enumerate(models):
+        mid = m.get("id", "?")
+        owner = m.get("owned_by")
+        extra = f" [dim]({owner})[/dim]" if owner else ""
+        lines.append(f"  [bold]{i}[/bold] → {mid}{extra}")
+    return "\n".join(lines)
+
+
 @app.command()
 def models(profile: str = typer.Option("default", "--profile", "-p", help="Perfil de configuración")):
-    """Lista los modelos disponibles en el endpoint del perfil."""
-    client, _ = _build_client(profile)
+    """Lista los modelos disponibles en el endpoint del perfil (activo marcado)."""
+    client, prof = _build_client(profile)
     try:
-        for m in client.list_models():
-            console.print(m)
+        detailed = client.list_models_detailed()
     except LLMError as e:
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
+    if not detailed:
+        console.print("[yellow]El endpoint no devolvió modelos.[/yellow]")
+        raise typer.Exit(0)
+    console.print(
+        Panel(
+            f"[bold magenta]Modelos en '{profile}'[/bold magenta]\n"
+            f"  Activo: [bold]{prof.model}[/bold]\n\n"
+            + format_model_list(detailed),
+            border_style="magenta",
+        )
+    )
+
+
+model_app = typer.Typer(help="Gestiona el modelo del perfil: set <modelo>")
+
+
+@model_app.command("set")
+def _model_set_cmd(
+    model_name: str = typer.Argument(..., help="Nombre del modelo"),
+    profile: str = typer.Option("default", "--profile", "-p", help="Perfil de configuración"),
+):
+    """Cambia el modelo del perfil y guarda el config."""
+    from rinari.config import load_config, set_profile_model
+
+    cfg = load_config()
+    try:
+        current = cfg.get_profile(profile)
+    except ConfigError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+    set_profile_model(cfg.path.parent, profile, model_name)
+    console.print(
+        f"[green]✓ Modelo de '{profile}' actualizado:[/green] "
+        f"[bold]{current.model}[/bold] → [bold]{model_name}[/bold]"
+    )
+
+
+app.add_typer(model_app, name="model")
+
+
+@app.command()
+def setup(
+    profile: str = typer.Option(None, "--name", "-n", help="Nombre del perfil (default: 'default')"),
+    base_url: str = typer.Option(None, "--base-url", help="Endpoint OpenAI-compatible"),
+    api_key: str = typer.Option(None, "--api-key", help="API key (o deja vacío)"),
+):
+    """Wizard interactivo: conecta al endpoint, lista modelos y crea el perfil."""
+    from rinari.config import set_profile_model
+    from rinari.ui import render_logo_compact
+
+    name = profile or "default"
+    console.print(render_logo_compact())
+    console.print("\n[bold magenta]Setup de Rinari[/bold magenta] (✿◠‿◠)\n")
+
+    # 1. base_url
+    cfg = load_config()
+    if base_url is None:
+        try:
+            current = cfg.get_profile(name)
+            default_url = current.base_url
+        except ConfigError:
+            default_url = cfg.default.base_url
+        try:
+            base_url = input(f"Endpoint OpenAI-compatible [default: {default_url}]: ").strip()
+        except EOFError:
+            base_url = ""
+        if not base_url:
+            base_url = default_url
+
+    # 2. api_key (opcional)
+    if api_key is None:
+        try:
+            api_key = input("API key (vacío si no requiere): ").strip() or None
+        except EOFError:
+            api_key = None
+
+    # 3. conectar y listar modelos reales
+    from rinari.client import LLMClient, LLMError
+
+    client = LLMClient(base_url=base_url, api_key=api_key or None, model="")
+    console.print(f"\n[cyan]Conectando a {base_url}…[/cyan]")
+    try:
+        models = client.list_models_detailed()
+    except LLMError as e:
+        console.print(f"[red]✗ No se pudo listar modelos: {e}[/red]")
+        raise typer.Exit(1)
+    if not models:
+        console.print("[red]✗ El endpoint no devolvió modelos.[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[green]✓ {len(models)} modelo(s) encontrado(s):[/green]\n")
+    console.print(format_model_list(models))
+
+    # 4. elegir modelo
+    try:
+        choice = input("\nElige el número del modelo: ").strip()
+    except EOFError:
+        choice = ""
+    try:
+        model_id = pick_model_index(models, choice or "0")
+    except ConfigError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+
+    # 5. guardar
+    set_profile_model(
+        cfg.path.parent, name, model_id, base_url=base_url, api_key=api_key,
+    )
+    console.print(
+        f"\n[green]✓ Perfil '{name}' listo:[/green] {base_url} → [bold]{model_id}[/bold]\n"
+        f"  Pruébalo con: [bold]rinari run \"hola\" --profile {name}[/bold]"
+    )
 
 
 @app.command()
