@@ -44,29 +44,26 @@ def test_render_logo_scales_to_width():
 
 
 def test_scaled_art_uses_density_ramp():
-    """El downscale usa caracteres de densidad (no solo '#'), para que el arte
-    no se vea grueso: las zonas con poca tinta se ven delicadas."""
+    """El downscale usa un carácter uniforme fino (':') — forma conservada,
+    sin fragmentarse como con la rampa de densidad."""
     logo = render_logo(max_width=60)
-    chars = set(c for c in logo if c != " ")
-    # al menos un carácter 'ligero' ('.', ':', '-', ...) además del denso
-    light = {".", ":", "-", "=", "*", "+"}
-    assert chars & light, f"sin caracteres ligeros en: {sorted(chars)}"
+    chars = set(c for c in logo if c not in " \n")
+    # carácter uniforme: solo ':' (más nada de la rampa antigua)
+    assert chars <= {":"}, f"caracteres inesperados: {sorted(chars)}"
 
 
 def test_density_maps_ink_ratio():
-    """Bloques densos producen caracteres más pesados que bloques claros."""
+    """Cualquier bloque con tinta produce el carácter fino, los vacíos espacio."""
     from rinari.ui import _scale_art
 
-    # dos bloques horizontales: izquierda casi llena, derecha casi vacía
     art = (
         "#### # \n"
         "#### # \n"
     )
     out = _scale_art(art, max_width=2, target_height=1)
-    left, right = out[0], out[1]
-    # izquierda (tinta densa) debe pesar más que derecha (poca tinta)
-    ramp = "#=-:. "
-    assert ramp.index(left) < ramp.index(right), f"{left!r} debería pesar más que {right!r}"
+    # bloque con tinta → ':', sin tinta → espacio
+    assert ":" in out
+    assert set(c for c in out if c != " ") <= {":"}
 
 
 def test_render_logo_full_when_fits():
