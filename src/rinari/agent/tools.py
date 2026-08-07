@@ -172,6 +172,76 @@ def list_dir(args: dict, cwd: str) -> dict:
     return {"entries": entries}
 
 
+def _git(cwd: str, *args: str) -> subprocess.CompletedProcess:
+    """Ejecuta git con encoding seguro (MSYS emite bytes no-UTF8)."""
+    return subprocess.run(
+        ["git", "-C", cwd, *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+
+
+def git_status(args: dict, cwd: str) -> dict:
+    """Estado del repo: rama, limpio?, cambios (modificados/nuevos/borrados)."""
+    proc = _git(cwd, "status", "--porcelain=v1")
+    if proc.returncode != 0:
+        return {"ok": False, "error": (proc.stderr or "no es un repo git").strip()[:300]}
+    branch = _git(cwd, "branch", "--show-current").stdout.strip() or "detached"
+    changes = []
+    for line in proc.stdout.splitlines():
+        if len(line) < 4:
+            continue
+        status, path = line[:2].strip(), line[3:].strip()
+        changes.append({"status": status or "?", "path": path})
+    return {
+        "ok": True,
+        "branch": branch,
+        "clean": len(changes) == 0,
+        "changes": changes,
+    }
+
+
+def git_diff(args: dict, cwd: str) -> dict:
+    """Diff de los cambios sin commitear (working tree + staged + untracked)."""
+    max_lines = int(args.get("max_lines", 200))
+    # Marca untracked como intent-to-add para que aparezcan en el diff
+    _git(cwd, "add", "-N", ".")
+    proc = _git(cwd, "diff", "HEAD")
+    if proc.returncode != 0:
+        # Repo sin commits: diff del working tree
+        proc = _git(cwd, "diff")
+        if proc.returncode != 0:
+            return {"ok": False, "error": (proc.stderr or "no es un repo git").strip()[:300]}
+    # Limpia el index (no toca el working tree)
+    _git(cwd, "reset", "-q")
+    diff = proc.stdout
+    lines = diff.splitlines()
+    truncated = len(lines) > max_lines
+    return {
+        "ok": True,
+        "diff": "\n".join(lines[:max_lines]),
+        "truncated": truncated,
+        "total_lines": len(lines),
+    }
+
+
+def git_commit(args: dict, cwd: str) -> dict:
+    """Hace git add -A + commit con el mensaje dado."""
+    message = args.get("message", "").strip()
+    if not message:
+        return {"ok": False, "error": "Se requiere un mensaje de commit"}
+    add = _git(cwd, "add", "-A")
+    if add.returncode != 0:
+        return {"ok": False, "error": (add.stderr or "git add falló").strip()[:300]}
+    commit = _git(cwd, "commit", "-m", message)
+    if commit.returncode != 0:
+        return {"ok": False, "error": (commit.stderr or "git commit falló").strip()[:300]}
+    return {"ok": True, "commit": commit.stdout.strip().splitlines()[-1] if commit.stdout.strip() else None}
+
+
 TOOL_DEFS: list[dict] = [
     {
         "type": "function",
@@ -249,6 +319,55 @@ TOOL_DEFS: list[dict] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_status",
+            "description": (
+                "Estado del repositorio git: rama actual, si está limpio, y la "
+                "lista de cambios (modificados, nuevos, borrados)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_diff",
+            "description": (
+                "Diff de los cambios sin commitear (working tree + staged). "
+                "Usa max_lines para limitar la salida."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "max_lines": {"type": "number", "description": "Máximo de líneas del diff (default 200)"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_commit",
+            "description": (
+                "Hace git add -A y commit de todos los cambios con el mensaje dado. "
+                "MODIFICA EL HISTORIAL — requiere aprobación."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string", "description": "Mensaje del commit (conventional: feat:, fix:, docs:)"},
+                },
+                "required": ["message"],
+            },
+        },
+    },
 ]
 
 DANGEROUS_PATTERNS = [
@@ -257,6 +376,8 @@ DANGEROUS_PATTERNS = [
     r"\bdd\s+if=",
     r"\bgit\s+push\b",
     r"\bgit\s+reset\s+--hard\b",
+    r"\bgit\s+commit\b",
+    r"\bgit\s+checkout\s+--\b",
     r"\bcurl\b.*\|\s*(ba|z)?sh\b",
     r"\bsudo\b",
     r"\bshutdown\b|\breboot\b",
@@ -280,7 +401,10 @@ class ToolRegistry:
         "write_file": write_file,
         "search_files": search_files,
         "list_dir": list_dir,
-    }
+        "git_status": git_status,
+        "git_diff": git_diff,
+        "git_commit": git_commit,
+        }
 
     def openai_schemas(self) -> list[dict]:
         return TOOL_DEFS
