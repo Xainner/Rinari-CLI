@@ -380,7 +380,7 @@ def chat(
         cmd, args = parse_command(line)
         if cmd is not None:
             try:
-                msg = run_command(cmd, args, session)
+                msg = run_command(cmd, args, session, config_dir=cfg.path.parent)
                 if msg:
                     console.print(msg)
                 if cmd == "model":

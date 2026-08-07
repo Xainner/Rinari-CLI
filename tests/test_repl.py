@@ -53,6 +53,47 @@ def test_run_model_without_name_raises():
         run_command("model", "", session)
 
 
+def test_run_model_switches_model_when_not_profile(tmp_path):
+    """/model <modelo>: si no es un perfil, cambia el modelo del perfil actual."""
+    from rinari.config import load_config, set_profile_model
+    from rinari.repl import run_command
+
+    set_profile_model(tmp_path, "casa", "antes", base_url="http://x/v1")
+    session = ChatSession(history=None, profile="casa")
+
+    msg = run_command("model", "gpt-4o", session, config_dir=tmp_path)
+    assert "gpt-4o" in msg
+    assert load_config(tmp_path).get_profile("casa").model == "gpt-4o"
+    # el perfil no cambia
+    assert session.profile == "casa"
+
+
+def test_run_model_profile_takes_priority(tmp_path):
+    """Si el nombre coincide con un perfil, cambia de perfil (no el modelo)."""
+    from rinari.config import set_profile_model
+    from rinari.repl import run_command
+
+    set_profile_model(tmp_path, "sat", "m-sat", base_url="http://x/v1")
+    session = ChatSession(history=None, profile="casa")
+
+    msg = run_command("model", "sat", session, config_dir=tmp_path)
+    assert session.profile == "sat"
+    assert "sat" in msg
+
+
+def test_run_model_lists_models_when_no_args(tmp_path):
+    """/model sin args: lista los modelos del endpoint y sugiere elegir."""
+    from rinari.config import load_config, set_profile_model
+    from rinari.repl import run_command
+
+    set_profile_model(tmp_path, "default", "m1", base_url="http://x/v1")
+    session = ChatSession(history=None, profile="default")
+
+    msg = run_command("model", "", session, config_dir=tmp_path)
+    assert "m1" in msg
+    assert "model set" in msg or "/model" in msg
+
+
 def test_run_exit_raises_systemexit():
     session = ChatSession(history=None, profile="casa")
     with pytest.raises(SystemExit):
