@@ -42,7 +42,7 @@ class ScriptedClient:
         raise NotImplementedError
 
     def chat(self, messages, temperature=0.7, max_tokens=None, tools=None):
-        self.requests.append(messages)
+        self.requests.append(list(messages))  # copia: el loop muta messages después
         if not self.responses:
             raise AssertionError("No hay más respuestas scripteadas")
         return self.responses.pop(0)
@@ -243,3 +243,66 @@ def test_agent_tracks_steps(workdir):
     assert len(result["steps"]) >= 2
     assert result["steps"][0]["type"] == "tool_call"
     assert result["steps"][-1]["type"] == "final"
+
+
+def test_agent_accepts_existing_messages(workdir):
+    """Modo interactivo: pasa el historial previo, la tarea se appendea."""
+    client = ScriptedClient([final_msg("respuesta del segundo turno")])
+    registry = RecordingRegistry()
+
+    prev_messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "Tarea: primera"},
+        {"role": "assistant", "content": "primera respuesta"},
+    ]
+
+    result = run_agent(
+        task="segunda tarea",
+        client=client,
+        cwd=workdir,
+        registry=registry,
+        auto_approve=True,
+        max_iterations=5,
+        messages=prev_messages,
+    )
+    # El cliente recibió el historial previo + la nueva tarea
+    sent = client.requests[0]
+    assert sent[:3] == prev_messages
+    assert sent[3] == {"role": "user", "content": "Tarea: segunda tarea"}
+    # El resultado devuelve el historial completo para encadenar turnos
+    assert result["messages"] == prev_messages + [
+        {"role": "user", "content": "Tarea: segunda tarea"},
+        {"role": "assistant", "content": "respuesta del segundo turno"},
+    ]
+
+
+def test_agent_returned_messages_chainable(workdir):
+    """Dos turnos encadenados: el historial del primero alimenta al segundo."""
+    client = ScriptedClient(
+        [
+            tool_call_msg([{"id": "c1", "name": "run_command", "arguments": {"command": "echo a"}}]),
+            final_msg("primera respuesta"),
+        ]
+    )
+    registry = RecordingRegistry({"run_command": {"ok": True, "stdout": "a\n", "exit_code": 0}})
+
+    first = run_agent(
+        task="turno 1", client=client, cwd=workdir, registry=registry,
+        auto_approve=True, max_iterations=5,
+    )
+    assert first["status"] == "done"
+
+    # Segundo turno con el historial del primero
+    client2 = ScriptedClient([final_msg("segunda respuesta")])
+    registry2 = RecordingRegistry()
+    second = run_agent(
+        task="turno 2", client=client2, cwd=workdir, registry=registry2,
+        auto_approve=True, max_iterations=5,
+        messages=first["messages"],
+    )
+    sent = client2.requests[0]
+    # El contexto del turno 1 (incluida la tool call y su resultado) se mantiene
+    assert sent[0]["role"] == "system"
+    assert any(m["role"] == "tool" for m in sent)
+    assert sent[-1] == {"role": "user", "content": "Tarea: turno 2"}
+    assert second["messages"][-1] == {"role": "assistant", "content": "segunda respuesta"}

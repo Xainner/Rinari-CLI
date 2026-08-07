@@ -44,15 +44,21 @@ def run_agent(
     approver: Callable[[str, dict, str], bool] | None = None,
     max_iterations: int = 10,
     render_callback: Callable[[dict], None] | None = None,
+    messages: list[dict] | None = None,
 ) -> dict:
-    """Ejecuta la tarea con el loop agéntico. Devuelve {status, final, steps, iterations}.
+    """Ejecuta la tarea con el loop agéntico. Devuelve {status, final, steps, iterations, messages}.
 
     client: objeto con .chat(messages, temperature) → str, y .chat_stream para
             streaming. En tests se inyecta un ScriptedClient.
+    messages: historial previo (modo interactivo). Si es None, se construye
+              desde cero con build_agent_messages(task).
     """
     registry = registry or ToolRegistry()
     approver = approver or _default_approver
-    messages = build_agent_messages(task)
+    if messages is None:
+        messages = build_agent_messages(task)
+    else:
+        messages = list(messages) + [{"role": "user", "content": f"Tarea: {task}"}]
     steps: list[dict] = []
     iterations = 0
 
@@ -78,11 +84,13 @@ def run_agent(
                 "final": None,
                 "steps": steps,
                 "iterations": iterations,
+                "messages": messages,
             }
 
         parsed = _parse_response(response)
 
         if parsed["final"] is not None and not parsed["tool_calls"]:
+            messages.append({"role": "assistant", "content": parsed["final"]})
             steps.append({"type": "final", "content": parsed["final"]})
             if render_callback:
                 render_callback({"type": "final", "content": parsed["final"]})
@@ -91,10 +99,12 @@ def run_agent(
                 "final": parsed["final"],
                 "steps": steps,
                 "iterations": iterations,
+                "messages": messages,
             }
 
         if not parsed["tool_calls"]:
             # Respuesta sin contenido ni tools: terminar para no loopear
+            messages.append({"role": "assistant", "content": parsed["final"] or ""})
             steps.append({"type": "final", "content": parsed["final"] or ""})
             if render_callback:
                 render_callback({"type": "final", "content": parsed["final"] or ""})
@@ -103,6 +113,7 @@ def run_agent(
                 "final": parsed["final"] or "",
                 "steps": steps,
                 "iterations": iterations,
+                "messages": messages,
             }
 
         # Ejecutar tool calls
@@ -170,6 +181,7 @@ def run_agent(
         "final": None,
         "steps": steps,
         "iterations": iterations,
+        "messages": messages,
     }
 
 

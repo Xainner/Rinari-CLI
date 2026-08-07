@@ -167,3 +167,117 @@ def test_agent_command_runs_loop(monkeypatch, tmp_path):
     assert result.exit_code == 0
     assert calls["task"] == "crea un archivo"
     assert "Tarea completada" in result.stdout
+
+
+def test_agent_without_task_enters_interactive_mode(monkeypatch, tmp_path):
+    """agent sin tarea → modo interactivo: mantiene contexto entre turnos."""
+    from rinari import cli as cli_mod
+    from rinari.agent import loop as loop_mod
+
+    inputs = iter(["primera tarea", "segunda tarea", "/exit"])
+    calls = []
+
+    def fake_run_agent(task, client, cwd, auto_approve, max_iterations, render_callback, messages=None):
+        calls.append({"task": task, "messages": messages})
+        prev = list(messages) if messages else []
+        return {
+            "status": "done",
+            "final": f"respuesta a {task}",
+            "steps": [],
+            "iterations": 1,
+            "messages": prev
+            + [
+                {"role": "user", "content": f"Tarea: {task}"},
+                {"role": "assistant", "content": f"respuesta a {task}"},
+            ],
+        }
+
+    monkeypatch.setattr(loop_mod, "run_agent", fake_run_agent)
+    monkeypatch.setattr(cli_mod.console, "input", lambda prompt="": next(inputs))
+
+    result = runner.invoke(app, ["agent", "--cwd", str(tmp_path)])
+    assert result.exit_code == 0
+    # Dos tareas procesadas
+    assert len(calls) == 2
+    assert calls[0]["task"] == "primera tarea"
+    assert calls[0]["messages"] is None  # primer turno sin contexto
+    assert calls[1]["task"] == "segunda tarea"
+    assert calls[1]["messages"] is not None  # contexto encadenado del turno 1
+    assert calls[1]["messages"][-1]["content"] == "respuesta a primera tarea"
+
+
+def test_agent_interactive_new_resets_context(monkeypatch, tmp_path):
+    """/new reinicia el contexto del agente."""
+    from rinari import cli as cli_mod
+    from rinari.agent import loop as loop_mod
+
+    inputs = iter(["tarea 1", "/new", "tarea 2", "/exit"])
+    calls = []
+
+    def fake_run_agent(task, client, cwd, auto_approve, max_iterations, render_callback, messages=None):
+        calls.append({"task": task, "messages": messages})
+        prev = list(messages) if messages else []
+        return {
+            "status": "done",
+            "final": f"respuesta a {task}",
+            "steps": [],
+            "iterations": 1,
+            "messages": prev
+            + [
+                {"role": "user", "content": f"Tarea: {task}"},
+                {"role": "assistant", "content": f"respuesta a {task}"},
+            ],
+        }
+
+    monkeypatch.setattr(loop_mod, "run_agent", fake_run_agent)
+    monkeypatch.setattr(cli_mod.console, "input", lambda prompt="": next(inputs))
+
+    result = runner.invoke(app, ["agent", "--cwd", str(tmp_path)])
+    assert result.exit_code == 0
+    assert len(calls) == 2
+    assert calls[0]["messages"] is None
+    assert calls[1]["messages"] is None  # /new limpió el contexto
+
+
+def test_bare_rinari_enters_interactive(monkeypatch, tmp_path):
+    """rinari sin subcomando → entra al modo interactivo agéntico."""
+    from rinari import cli as cli_mod
+    from rinari.agent import loop as loop_mod
+
+    inputs = iter(["/exit"])
+    monkeypatch.setattr(cli_mod.console, "input", lambda prompt="": next(inputs))
+
+    result = runner.invoke(app, ["--cwd", str(tmp_path)])
+    assert result.exit_code == 0
+    assert "modo interactivo" in result.stdout.lower() or "rinari" in result.stdout.lower()
+
+
+def test_normalize_cwd_msys_path():
+    """/c/Users/x → C:\\Users\\x (estilo MSYS a Windows)."""
+    from pathlib import Path
+
+    from rinari.cli import _normalize_cwd
+
+    p = _normalize_cwd(Path("/c/Users/Test/Proyecto"))
+    assert str(p).startswith("C:\\Users\\Test\\Proyecto") or str(p).startswith("C:/Users/Test/Proyecto")
+
+
+def test_normalize_cwd_tilde():
+    """~/proyecto → <home>/proyecto."""
+    from pathlib import Path
+
+    from rinari.cli import _normalize_cwd
+
+    p = _normalize_cwd(Path("~/proyecto"))
+    assert str(p).endswith("proyecto")
+    assert str(Path.home()) in str(p)
+
+
+def test_normalize_cwd_windows_path():
+    """C:\\Users\\x se mantiene igual."""
+    from pathlib import Path
+
+    from rinari.cli import _normalize_cwd
+
+    p = _normalize_cwd(Path("C:\\Users\\Test\\Proyecto"))
+    assert "C:\\Users\\Test\\Proyecto" in str(p)

@@ -25,8 +25,173 @@ from rinari.history import History
 from rinari.render import DeltaAccumulator
 from rinari.repl import ChatSession, parse_command, run_command
 
-app = typer.Typer(add_completion=False, help="Rinari CLI — tu asistente con LLM contra tus modelos locales.")
+app = typer.Typer(
+    add_completion=False,
+    help="Rinari CLI — tu asistente con LLM contra tus modelos locales.",
+    invoke_without_command=True,
+)
 console = Console()
+
+
+def _normalize_cwd(cwd: Path) -> Path:
+    """Convierte paths estilo MSYS (/c/Users/...) a Windows (C:\\Users\\...) y resuelve ~.
+
+    typer/click ya convierte `/c/Users` a `C:/c/Users` (o `\\c\\Users` según el
+    drive actual). Detectamos el drive duplicado en ambos formatos y lo corregimos.
+    """
+    import re
+
+    s = str(cwd)
+    if s.startswith("~"):
+        s = str(Path.home()) + s[1:]
+    else:
+        # 'C:/c/Users/...' o 'C:\c\Users\...' → 'C:/Users/...'
+        m = re.match(r"^([A-Za-z]):[\\/]\1[\\/]", s)
+        if m:
+            s = s[m.end() - 1 :]
+        else:
+            # '\c\Users\...' o '/c/Users/...' → '<drive_actual>:/Users/...'
+            m2 = re.match(r"^[\\/]([a-z])[\\/]", s)
+            if m2:
+                drive = Path.cwd().drive or "C:"
+                s = f"{drive}/{s[2:]}"
+    return Path(s).resolve()
+
+
+def _agent_on_step(step: dict) -> None:
+    """Renderiza un paso del agente en vivo."""
+    from rinari.render import render_status
+
+    t = step["type"]
+    if t == "tool_call":
+        name = step.get("name", "")
+        args = step.get("arguments", {})
+        cmd = args.get("command") or args.get("path") or ""
+        render_status(f"🔧 {name} {cmd}", style="cyan")
+    elif t == "tool_result":
+        result = step.get("result", {})
+        if result.get("ok") is False or result.get("error"):
+            render_status(f"⚠️ Resultado con error: {result.get('error', '')[:120]}", style="red")
+    elif t == "tool_denied":
+        render_status("🚫 Comando denegado", style="yellow")
+    elif t == "error":
+        render_status(f"❌ {step.get('message', '')}", style="red")
+
+
+def _agent_interactive(
+    profile: str = "default",
+    cwd: Path = Path("."),
+    auto_approve: bool = False,
+    max_iterations: int = 10,
+) -> None:
+    """REPL agéntico tipo Codex/Claude CLI: das tareas y Rinari trabaja con
+    tools, manteniendo el contexto del repo entre turnos."""
+    from rinari.agent.loop import run_agent
+
+    cfg = load_config()
+    try:
+        current = cfg.get_profile(profile)
+    except ConfigError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+
+    workdir = _normalize_cwd(cwd)
+    repo_name = workdir.name or str(workdir)
+    messages: list[dict] | None = None
+    current_profile = profile
+    approve = auto_approve
+
+    console.print(
+        Panel(
+            f"[bold magenta]Rinari — modo agente interactivo[/bold magenta] (✿◠‿◠)\n"
+            f"Perfil: [yellow]{current_profile}[/yellow] → {current.base_url} ([bold]{current.model}[/bold])\n"
+            f"Repo: [cyan]{workdir}[/cyan]\n"
+            "Escribe una tarea y Rinari la ejecuta con tools. "
+            "Comandos: /new, /model <perfil>, /approve (toggle), /exit, /help. Ctrl+C para detener.",
+            border_style="magenta",
+        )
+    )
+
+    def build_client(profile_name: str):
+        nonlocal current
+        current = cfg.get_profile(profile_name)
+        return LLMClient(
+            base_url=current.base_url,
+            api_key=current.api_key,
+            model=current.model,
+        )
+
+    while True:
+        try:
+            line = console.input(f"[bold magenta]rinari@{repo_name}[/bold magenta] > ")
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n[dim]Adiós (✿◠‿◠)[/dim]")
+            break
+
+        if not line.strip():
+            continue
+
+        # Comandos de barra
+        if line.strip().startswith("/"):
+            cmd, args = parse_command(line)
+            if cmd == "exit":
+                break
+            if cmd == "new":
+                messages = None
+                console.print("🧹 Contexto reiniciado.")
+                continue
+            if cmd == "model":
+                name = args.strip()
+                if not name:
+                    console.print("[red]Uso: /model <perfil>[/red]")
+                    continue
+                try:
+                    build_client(name)
+                    current_profile = name
+                    console.print(f"🔀 Perfil cambiado a '{name}'.")
+                except ConfigError as e:
+                    console.print(f"[red]{e}[/red]")
+                continue
+            if cmd == "approve":
+                approve = not approve
+                console.print(
+                    f"[{'green' if approve else 'yellow'}]Aprobación automática: {'ON' if approve else 'OFF'}[/]"
+                )
+                continue
+            if cmd == "help":
+                console.print(
+                    "Comandos: /new (nuevo contexto), /model <perfil>, /approve (toggle aprobación), "
+                    "/exit, /help. O escribe una tarea."
+                )
+                continue
+            console.print(f"[red]Comando desconocido: /{cmd}[/red]")
+            continue
+
+        # Tarea → loop agéntico (encadena el contexto)
+        try:
+            client = build_client(current_profile)
+        except ConfigError as e:
+            console.print(f"[red]{e}[/red]")
+            continue
+
+        console.print("[dim]⏳ Rinari está trabajando…[/dim]")
+        result = run_agent(
+            task=line.strip(),
+            client=client,
+            cwd=str(workdir),
+            auto_approve=approve,
+            max_iterations=max_iterations,
+            render_callback=_agent_on_step,
+            messages=messages,
+        )
+        messages = result.get("messages", messages)
+
+        if result["status"] == "done" and result.get("final"):
+            console.print(Markdown(result["final"]))
+        elif result["status"] == "max_iterations":
+            console.print("[yellow]⚠️ Se alcanzó el límite de iteraciones — puedes seguir con otra tarea.[/yellow]")
+        else:
+            console.print("[red]❌ El agente falló en esta tarea.[/red]")
 
 
 @app.command()
@@ -251,17 +416,25 @@ def models(profile: str = typer.Option("default", "--profile", "-p", help="Perfi
 
 @app.command()
 def agent(
-    task: str = typer.Argument(..., help="Tarea a realizar"),
+    task: str | None = typer.Argument(None, help="Tarea a realizar. Si se omite, entra en modo interactivo"),
     profile: str = typer.Option("default", "--profile", "-p", help="Perfil de configuración"),
     cwd: Path = typer.Option(".", "--cwd", help="Directorio de trabajo (repo)"),
     auto_approve: bool = typer.Option(False, "--auto-approve", "-y", help="Aprobar comandos automáticamente"),
     max_iterations: int = typer.Option(10, "--max-iterations", help="Máximo de iteraciones del loop"),
 ):
-    """Modo agente de código: ejecuta la tarea con tool calling."""
+    """Modo agente de código: ejecuta la tarea con tool calling (o modo interactivo)."""
     from rinari.agent.loop import run_agent
-    from rinari.render import render_status
 
-    client, profile_obj = _build_client(profile)
+    if task is None:
+        _agent_interactive(
+            profile=profile,
+            cwd=cwd,
+            auto_approve=auto_approve,
+            max_iterations=max_iterations,
+        )
+        return
+
+    client, _ = _build_client(profile)
     console.print(
         Panel(
             f"[bold magenta]Rinari agente[/bold magenta] (✿◠‿◠)\n"
@@ -271,29 +444,13 @@ def agent(
         )
     )
 
-    def on_step(step: dict) -> None:
-        t = step["type"]
-        if t == "tool_call":
-            name = step.get("name", "")
-            args = step.get("arguments", {})
-            cmd = args.get("command") or args.get("path") or ""
-            render_status(f"🔧 {name} {cmd}", style="cyan")
-        elif t == "tool_result":
-            result = step.get("result", {})
-            if result.get("ok") is False or result.get("error"):
-                render_status(f"⚠️ Resultado con error: {result.get('error', '')[:120]}", style="red")
-        elif t == "tool_denied":
-            render_status("🚫 Comando denegado", style="yellow")
-        elif t == "error":
-            render_status(f"❌ {step.get('message', '')}", style="red")
-
     result = run_agent(
         task=task,
         client=client,
-        cwd=str(cwd.resolve()),
+        cwd=str(_normalize_cwd(cwd)),
         auto_approve=auto_approve,
         max_iterations=max_iterations,
-        render_callback=on_step,
+        render_callback=_agent_on_step,
     )
 
     if result["status"] == "done":
@@ -304,6 +461,23 @@ def agent(
         console.print("[yellow]⚠️ Se alcanzó el límite de iteraciones.[/yellow]")
     else:
         console.print("[red]❌ El agente falló.[/red]")
+
+
+@app.callback(invoke_without_command=True)
+def main_default(
+    ctx: typer.Context,
+    profile: str = typer.Option("default", "--profile", "-p", help="Perfil de configuración"),
+    cwd: Path = typer.Option(".", "--cwd", help="Directorio de trabajo (repo)"),
+    auto_approve: bool = typer.Option(False, "--auto-approve", "-y", help="Aprobar comandos automáticamente"),
+):
+    """Sin subcomando → modo agente interactivo (como codex/claude)."""
+    if ctx.invoked_subcommand is None:
+        _agent_interactive(
+            profile=profile,
+            cwd=cwd,
+            auto_approve=auto_approve,
+            max_iterations=10,
+        )
 
 
 def main() -> None:
