@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="readme-img.png" alt="Rinari — tu waifu de la terminal" width="420"/>
+
 # Rinari CLI (✿◠‿◠)
 
 ### Tu asistente personal de IA en la terminal — tsundere por defecto, competente por necesidad.
@@ -27,14 +29,6 @@
 - 🔒 **Privacidad**: tus prompts nunca salen de tu red
 
 > *"¡No es por ti! ¡Solo... construí esto porque quería."* — Rinari, probablemente
-
-## 🖼️ Así se ve
-
-<div align="center">
-
-![Rinari CLI](readme-img.png)
-
-</div>
 
 ## 🚀 Instalación
 
