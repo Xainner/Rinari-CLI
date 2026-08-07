@@ -44,8 +44,8 @@ def render_logo_compact() -> str:
 
 
 def render_logo_side() -> str:
-    """Logo aún más compacto (~34×22) para caber al lado de la info en 80 cols."""
-    return render_logo(max_width=34, target_height=22)
+    """Logo compacto (~30×20) para la columna derecha del dashboard."""
+    return render_logo(max_width=30, target_height=20)
 
 
 def _scale_art(art: str, max_width: int, target_height: int | None = None) -> str:
@@ -232,9 +232,11 @@ def render_welcome(
     latency_ms: int | None = None,
     tools_count: int = 0,
 ) -> None:
-    """Pinta el dashboard de bienvenida: logo centrado, info y sugerencias debajo."""
+    """Pinta el dashboard: info a la izquierda, logo centrado a la derecha,
+    sugerencias abajo a ancho completo."""
     from rich.align import Align
     from rich.console import Group
+    from rich.table import Table
     from rich.text import Text
 
     console = Console()
@@ -249,13 +251,22 @@ def render_welcome(
         latency_ms=latency_ms,
         tools_count=tools_count,
     )
-    # separar info de sugerencias: las sugerencias van al final
+    # separar info de sugerencias: las sugerencias van abajo, a ancho completo
     header, _, suggestions = info.partition("[bold]Sugerencias:[/bold]")
     header = header.rstrip()
     suggestions = suggestions.strip()
 
-    content: list = [Align(Text(render_logo_compact()), align="center")]
-    content.append(Align(Text.from_markup(header), align="center"))
+    table = Table(
+        show_header=False, show_edge=False, pad_edge=False,
+        expand=True, box=None,
+    )
+    table.add_column(ratio=1, overflow="fold", vertical="middle")
+    table.add_column(ratio=1, overflow="fold", vertical="middle")
+    table.add_row(
+        Text.from_markup(header),
+        Align(Text(render_logo_side()), align="center"),
+    )
+    content = Group(table)
     if suggestions:
-        content.append(Align(Text.from_markup(f"[bold]Sugerencias:[/bold] {suggestions}"), align="center"))
-    console.print(Panel(Group(*content), border_style="magenta", padding=(1, 2)))
+        content = Group(table, Align(Text.from_markup(f"[bold]Sugerencias:[/bold] {suggestions}"), align="center"))
+    console.print(Panel(content, border_style="magenta", padding=(1, 2)))
