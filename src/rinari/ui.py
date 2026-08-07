@@ -1,6 +1,6 @@
 """Vista de inicio de Rinari: banner con logo, estado del sistema y sugerencias.
 
-- render_logo(): genera el ASCII art de RINARI con pyfiglet
+- render_logo(): el arte ASCII de Rinari (asset, hecho a mano)
 - git_info(): estado del repo (branch, clean/dirty, commit corto)
 - check_endpoint_health(): verifica que el endpoint responde (con timeout corto)
 - build_welcome(): arma el texto del dashboard
@@ -12,19 +12,66 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from pyfiglet import Figlet
 from rich.console import Console
 from rich.panel import Panel
 
 from rinari import __version__
 
 LOGO_FONT = "slant"
+_ASSET = Path(__file__).parent / "assets" / "rinari_ascii.txt"
 
 
-def render_logo() -> str:
-    """Genera el ASCII art de RINARI."""
-    fig = Figlet(font=LOGO_FONT)
-    return fig.renderText("RINARI").rstrip("\n")
+def render_logo(max_width: int | None = None) -> str:
+    """El arte ASCII de Rinari (silueta con alas), o el figlet como fallback.
+
+    Si max_width se da y el arte lo excede, se escala por densidad (downscale)
+    preservando la silueta.
+    """
+    art = _ASSET.read_text(encoding="utf-8").rstrip("\n") if _ASSET.exists() else None
+    if art is None:
+        from pyfiglet import Figlet
+
+        art = Figlet(font=LOGO_FONT).renderText("RINARI").rstrip("\n")
+    if max_width is None:
+        return art
+    return _scale_art(art, max_width)
+
+
+def _scale_art(art: str, max_width: int) -> str:
+    """Escala arte ASCII por densidad para que quepa en max_width.
+
+    Agrupa celdas en bloques proporcionales; un bloque con tinta (>=1 char)
+    se convierte en un solo carácter de tinta — la silueta se conserva.
+    """
+    lines = [l for l in art.split("\n") if l]
+    if not lines:
+        return art
+    width = max(len(l) for l in lines)
+    height = len(lines)
+    if width <= max_width:
+        return art
+
+    sx = width / max_width
+    sy = max(1.0, sx * 0.62)  # proporción vertical: ~1.6:1 horizontal
+    out_h = max(1, int(height / sy))
+    out: list[str] = []
+    for oy in range(out_h):
+        y0 = int(oy * sy)
+        y1 = max(y0 + 1, int((oy + 1) * sy))
+        row: list[str] = []
+        for ox in range(max_width):
+            x0 = int(ox * sx)
+            x1 = max(x0 + 1, int((ox + 1) * sx))
+            # tinta = cualquier carácter no espacio en el bloque
+            ink = False
+            for yy in range(y0, min(y1, height)):
+                line = lines[yy]
+                if len(line) > x0 and any(c != " " for c in line[x0:x1]):
+                    ink = True
+                    break
+            row.append("#" if ink else " ")
+        out.append("".join(row).rstrip())
+    return "\n".join(out)
 
 
 def git_info(repo_path: Path | str) -> dict:
@@ -80,10 +127,11 @@ def build_welcome(
     endpoint_ok: bool,
     version: str = __version__,
     sessions_count: int = 0,
+    max_width: int | None = None,
 ) -> str:
     """Construye el texto del dashboard de bienvenida."""
     lines = [
-        render_logo(),
+        render_logo(max_width=max_width),
         "",
         f"[bold magenta]Rinari CLI[/bold magenta] [dim]v{version}[/dim] (✿◠‿◠)",
         "",
@@ -140,5 +188,6 @@ def render_welcome(
         git=git,
         endpoint_ok=endpoint_ok,
         sessions_count=sessions_count,
+        max_width=console.width - 4,  # dejar espacio para el borde del panel
     )
     console.print(Panel(welcome, border_style="magenta", padding=(1, 2)))

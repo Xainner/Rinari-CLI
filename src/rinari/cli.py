@@ -337,9 +337,10 @@ def chat(
 
     from rinari.ui import render_logo
 
+    console_width = console.width - 4
     console.print(
         Panel(
-            f"[bold magenta]{render_logo()}[/bold magenta]\n\n"
+            f"[bold magenta]{render_logo(max_width=console_width)}[/bold magenta]\n\n"
             f"[bold magenta]Rinari CLI {__version__}[/bold magenta] (✿◠‿◠)\n"
             f"Perfil: [yellow]{profile}[/yellow] → {current.base_url} "
             f"([bold]{current.model}[/bold])\n"

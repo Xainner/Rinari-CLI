@@ -13,8 +13,40 @@ from rinari.ui import (
 def test_render_logo_contains_rinari():
     logo = render_logo()
     assert logo.strip()  # no vacío
-    assert len(logo.splitlines()) >= 3  # ASCII art multlínea
-    assert any(c in logo for c in "|/_\\")  # tiene trazos de figlet
+    assert len(logo.splitlines()) >= 30  # arte grande multlínea
+    # trazos del arte de Rinari (puntos, guiones, slashes)
+    assert any(c in logo for c in "./-\\|:")
+
+
+def test_render_logo_is_rinari_art():
+    """El logo es el arte de Rinari (asset, silueta punteada), no el figlet."""
+    logo = render_logo()
+    lines = logo.splitlines()
+    # silueta grande: 63 líneas, trazos . - : =
+    assert len(lines) >= 40
+    assert any("." in line for line in lines)
+    assert any("-" in line for line in lines)
+    assert any(":" in line for line in lines)
+    # el figlet genérico usa / y \\; el arte de Rinari no
+    assert not any("/" in line for line in lines)
+
+
+def test_render_logo_scales_to_width():
+    """El arte se escala para caber en terminales angostas."""
+    logo = render_logo(max_width=60)
+    lines = logo.splitlines()
+    assert all(len(l) <= 60 for l in lines)
+    assert len(lines) >= 20  # sigue siendo una silueta reconocible
+    # conserva la forma: tiene trazos en muchas líneas
+    assert sum(1 for l in lines if l.strip()) >= 20
+
+
+def test_render_logo_full_when_fits():
+    """Con ancho suficiente devuelve el arte completo (sin cortar)."""
+    logo = render_logo(max_width=200)
+    lines = logo.splitlines()
+    assert len(lines) >= 60  # completo, no escalado
+    assert any(len(l) > 100 for l in lines)
 
 
 def test_build_welcome_contains_profile_info():
