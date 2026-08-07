@@ -25,7 +25,15 @@ def test_opencode_provider_shape():
     """OpenCode Zen es OpenAI-compatible con su endpoint real."""
     spec = PROVIDERS["opencode"]
     assert spec["api_format"] == "openai"
-    assert spec["base_url"] == "https://console.opencode.ai/zen/v1"
+    assert spec["base_url"] == "https://opencode.ai/zen/v1"
+    assert spec["env_var"] == "OPENCODE_API_KEY"
+
+
+def test_opencode_go_provider_shape():
+    """OpenCode Go tiene su propio endpoint de modelos abiertos."""
+    spec = PROVIDERS["opencode-go"]
+    assert spec["api_format"] == "openai"
+    assert spec["base_url"] == "https://opencode.ai/zen/go/v1"
     assert spec["env_var"] == "OPENCODE_API_KEY"
 
 
