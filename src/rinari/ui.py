@@ -268,5 +268,11 @@ def render_welcome(
     )
     content = Group(table)
     if suggestions:
-        content = Group(table, Align(Text.from_markup(f"[bold]Sugerencias:[/bold] {suggestions}"), align="center"))
+        # separación vertical: sugerencias bajadas con líneas en blanco
+        content = Group(
+            table,
+            Text(""),
+            Text(""),
+            Align(Text.from_markup(f"[bold]Sugerencias:[/bold] {suggestions}"), align="center"),
+        )
     console.print(Panel(content, border_style="magenta", padding=(1, 2)))
