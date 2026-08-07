@@ -12,7 +12,7 @@ verificable.
 | `feature-ui` | Interfaz y rendering | ✅ **MERGEADA a main** (logo ASCII de Rinari, dashboard con latencia/tools, streaming en vivo del agente) |
 | `feature-agent` | Loop agéntico avanzado | 🌿 activa (planificación explícita, verificación automática, retry, persistencia de contexto) |
 | `feature-history` | Historial y sesiones | listar/borrar sesiones, resume del agente, exportar conversaciones |
-| `feature-config` | Configuración | wizard `rinari setup`, `rinari doctor`, más perfiles |
+| `feature-config` | Configuración | ✅ **MERGEADA a main** (wizard `rinari setup` multi-provider, `rinari doctor`, gestión de modelos, README genérico) |
 | `feature-mcp` | Integración MCP + búsqueda web | ✅ **MERGEADA a main** (web_search DuckDuckGo, servidores MCP como tools dinámicas) |
 
 ## Flujo de trabajo
