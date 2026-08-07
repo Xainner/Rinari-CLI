@@ -21,8 +21,8 @@ ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 DEFAULT_CONFIG = {
     "default": {
-        "base_url": "http://192.168.0.3:8020/v1",
-        "model": "qwen3.6-27b",
+        "base_url": "http://localhost:8080/v1",
+        "model": "local-model",
         "temperature": 0.7,
         "api_key": None,
         "provider": "local",
@@ -92,7 +92,7 @@ SUGGESTED_MODELS: dict[str, list[str]] = {
     "opencode": ["anthropic/claude-sonnet-4", "openai/gpt-4o", "deepseek/deepseek-chat"],
     "deepseek": ["deepseek-chat", "deepseek-reasoner"],
     "gemini": ["gemini-2.5-pro", "gemini-2.5-flash"],
-    "local": ["qwen3.6-27b"],
+    "local": ["local-model"],
     "custom": [],
 }
 

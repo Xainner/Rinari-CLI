@@ -78,9 +78,9 @@ def test_diagnose_profile_alias_model():
     from rinari.cli import diagnose_profile
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"data": [{"id": "Huihui-...Q4_K.gguf"}]})
+        return httpx.Response(200, json={"data": [{"id": "llama-3-8b-instruct"}]})
 
-    prof = {"base_url": "http://x/v1", "model": "qwen3.6-27b", "api_key": None}
+    prof = {"base_url": "http://x/v1", "model": "test-model", "api_key": None}
     ok, msg = diagnose_profile("casa", prof, make_client=LLMClient(
         base_url="http://x/v1", transport=httpx.MockTransport(handler)))
     assert ok is True

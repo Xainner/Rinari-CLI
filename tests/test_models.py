@@ -17,14 +17,14 @@ def test_list_models_detailed_returns_dicts():
     """Devuelve los dicts completos de /v1/models."""
     client = make_client({
         "data": [
-            {"id": "qwen3.6-27b", "owned_by": "xainner", "created": 1000},
+            {"id": "test-model", "owned_by": "local", "created": 1000},
             {"id": "llama-3.1-8b", "owned_by": "meta", "created": 2000},
         ]
     })
     models = client.list_models_detailed()
     assert len(models) == 2
-    assert models[0]["id"] == "qwen3.6-27b"
-    assert models[0]["owned_by"] == "xainner"
+    assert models[0]["id"] == "test-model"
+    assert models[0]["owned_by"] == "local"
 
 
 def test_list_models_detailed_missing_fields():

@@ -33,7 +33,7 @@ class LLMClient:
         self,
         base_url: str,
         api_key: str | None = None,
-        model: str = "qwen3.6-27b",
+        model: str = "local-model",
         timeout: float = 300.0,
         transport: httpx.BaseTransport | None = None,
         provider: str = "openai",

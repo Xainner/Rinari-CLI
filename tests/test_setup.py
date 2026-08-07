@@ -54,8 +54,8 @@ def test_format_model_list():
     """format_model_list numera los modelos para el wizard."""
     from rinari.cli import format_model_list
 
-    out = format_model_list([{"id": "qwen3.6-27b"}, {"id": "llama-8b"}])
-    assert "qwen3.6-27b" in out
+    out = format_model_list([{"id": "test-model"}, {"id": "llama-8b"}])
+    assert "test-model" in out
     assert "llama-8b" in out
     assert "0" in out and "1" in out
 
@@ -120,7 +120,7 @@ def test_setup_wizard_local_provider(fake_home, monkeypatch):
     set_profile_model(fake_home / ".rinari", "default", "m0", base_url="http://x/v1")
     monkeypatch.setattr(cli, "_setup_list_models",
                         lambda base_url, api_key, provider="openai": [
-                            {"id": "qwen3.6-27b"},
+                            {"id": "test-model"},
                         ])
 
     result = runner.invoke(

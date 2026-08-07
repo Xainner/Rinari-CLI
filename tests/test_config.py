@@ -9,18 +9,18 @@ from rinari.config import ConfigError, Profile, load_config, save_config
 
 DEFAULT_TOML = """
 [default]
-base_url = "http://192.168.0.3:8020/v1"
-model = "qwen3.6-27b"
+base_url = "http://test-endpoint/v1"
+model = "test-model"
 temperature = 0.7
 
 [profile.casa]
-base_url = "http://192.168.0.3:8020/v1"
-model = "qwen3.6-27b"
+base_url = "http://test-endpoint/v1"
+model = "test-model"
 
 [profile.sat]
-base_url = "https://api.xainner.com/v1"
-api_key = "${SAT_KEY}"
-model = "qwen3.6-27b"
+base_url = "https://api.example.com/v1"
+api_key = "${MY_API_KEY}"
+model = "test-model"
 temperature = 0.3
 """
 
@@ -36,30 +36,30 @@ def test_default_profile_has_defaults(config_dir):
     cfg = load_config(config_dir)
     p = cfg.get_profile("casa")
     assert isinstance(p, Profile)
-    assert p.base_url == "http://192.168.0.3:8020/v1"
-    assert p.model == "qwen3.6-27b"
+    assert p.base_url == "http://test-endpoint/v1"
+    assert p.model == "test-model"
     assert p.temperature == 0.7  # hereda del default
 
 
 def test_custom_profile_overrides_default(config_dir, monkeypatch):
-    monkeypatch.setenv("SAT_KEY", "sk-test-123")
+    monkeypatch.setenv("MY_API_KEY", "sk-test-123")
     cfg = load_config(config_dir)
     p = cfg.get_profile("sat")
-    assert p.base_url == "https://api.xainner.com/v1"
+    assert p.base_url == "https://api.example.com/v1"
     assert p.temperature == 0.3
 
 
 def test_api_key_env_expansion(config_dir, monkeypatch):
-    monkeypatch.setenv("SAT_KEY", "sk-test-123")
+    monkeypatch.setenv("MY_API_KEY", "sk-test-123")
     cfg = load_config(config_dir)
     p = cfg.get_profile("sat")
     assert p.api_key == "sk-test-123"
 
 
 def test_missing_env_var_raises(config_dir, monkeypatch):
-    monkeypatch.delenv("SAT_KEY", raising=False)
+    monkeypatch.delenv("MY_API_KEY", raising=False)
     cfg = load_config(config_dir)
-    with pytest.raises(ConfigError, match="SAT_KEY"):
+    with pytest.raises(ConfigError, match="MY_API_KEY"):
         cfg.get_profile("sat")
 
 
@@ -81,8 +81,8 @@ def test_save_and_reload(tmp_path):
         tmp_path,
         {
             "casa": Profile(
-                base_url="http://192.168.0.3:8020/v1",
-                model="qwen3.6-27b",
+                base_url="http://test-endpoint/v1",
+                model="test-model",
                 api_key=None,
                 temperature=0.5,
             )
@@ -90,5 +90,5 @@ def test_save_and_reload(tmp_path):
     )
     cfg = load_config(tmp_path)
     p = cfg.get_profile("casa")
-    assert p.base_url == "http://192.168.0.3:8020/v1"
+    assert p.base_url == "http://test-endpoint/v1"
     assert p.temperature == 0.5
