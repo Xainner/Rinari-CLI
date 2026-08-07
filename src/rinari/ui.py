@@ -51,10 +51,14 @@ def render_logo_side() -> str:
 def _scale_art(art: str, max_width: int, target_height: int | None = None) -> str:
     """Escala arte ASCII por densidad para que quepa en max_width.
 
-    Agrupa celdas en bloques proporcionales; un bloque con tinta (>=1 char)
-    se convierte en un solo carácter de tinta — la silueta se conserva.
+    Agrupa celdas en bloques proporcionales; la proporción de tinta de cada
+    bloque se mapea a un carácter de la rampa de densidad — así las zonas
+    con poca tinta se ven delicadas y el arte no queda 'grueso'.
     target_height comprime también verticalmente (logo compacto).
     """
+    # rampa de densidad: de denso a ligero (más tinta → carácter más pesado).
+    # Solo 5 niveles: suficiente gradación sin ruido, la silueta se distingue.
+    ramp = "#=-:. "
     lines = [l for l in art.split("\n") if l]
     if not lines:
         return art
@@ -77,14 +81,23 @@ def _scale_art(art: str, max_width: int, target_height: int | None = None) -> st
         for ox in range(max_width):
             x0 = int(ox * sx)
             x1 = max(x0 + 1, int((ox + 1) * sx))
-            # tinta = cualquier carácter no espacio en el bloque
-            ink = False
+            # densidad de tinta = celdas con tinta / celdas totales del bloque
+            cells = 0
+            ink = 0
             for yy in range(y0, min(y1, height)):
                 line = lines[yy]
-                if len(line) > x0 and any(c != " " for c in line[x0:x1]):
-                    ink = True
-                    break
-            row.append("#" if ink else " ")
+                if len(line) > x0:
+                    chunk = line[x0:x1]
+                    cells += len(chunk)
+                    ink += sum(1 for c in chunk if c != " ")
+            if ink == 0:
+                row.append(" ")
+                continue
+            ratio = ink / max(cells, 1)
+            # ratio 0..1 → índice de la rampa INVERTIDO: más tinta = índice menor
+            # (carácter pesado), poca tinta = índice mayor (carácter ligero).
+            idx = max(0, min(len(ramp) - 2, int((1.0 - ratio) * (len(ramp) - 1))))
+            row.append(ramp[idx])
         out.append("".join(row).rstrip())
     return "\n".join(out)
 
