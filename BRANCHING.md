@@ -9,8 +9,8 @@ verificable.
 | Rama | Propósito | Estado |
 |---|---|---|
 | `feature-tools` | Ampliar el tool registry del agente | ✅ **MERGEADA a main** (git status/diff/commit, edit_file, run_tests con detección uv) |
-| `feature-ui` | Interfaz y rendering | 🌿 activa (dashboard de bienvenida con logo, health check, estado git) |
-| `feature-agent` | Loop agéntico avanzado | planificación explícita, verificación automática, retry, persistencia de contexto |
+| `feature-ui` | Interfaz y rendering | ✅ **MERGEADA a main** (logo ASCII de Rinari, dashboard con latencia/tools, streaming en vivo del agente) |
+| `feature-agent` | Loop agéntico avanzado | 🌿 activa (planificación explícita, verificación automática, retry, persistencia de contexto) |
 | `feature-history` | Historial y sesiones | listar/borrar sesiones, resume del agente, exportar conversaciones |
 | `feature-config` | Configuración | wizard `rinari setup`, `rinari doctor`, más perfiles |
 | `feature-mcp` | Integración MCP + búsqueda web | ✅ **MERGEADA a main** (web_search DuckDuckGo, servidores MCP como tools dinámicas) |
