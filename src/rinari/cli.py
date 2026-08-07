@@ -356,12 +356,11 @@ def chat(
     history = History()
     session = ChatSession(history=history, profile=profile, session_id=resume)
 
-    from rinari.ui import render_logo
+    from rinari.ui import render_logo_compact
 
-    console_width = console.width - 4
     console.print(
         Panel(
-            f"[bold magenta]{render_logo(max_width=console_width)}[/bold magenta]\n\n"
+            f"[bold magenta]{render_logo_compact()}[/bold magenta]\n\n"
             f"[bold magenta]Rinari CLI {__version__}[/bold magenta] (✿◠‿◠)\n"
             f"Perfil: [yellow]{profile}[/yellow] → {current.base_url} "
             f"([bold]{current.model}[/bold])\n"

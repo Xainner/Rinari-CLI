@@ -21,38 +21,53 @@ LOGO_FONT = "slant"
 _ASSET = Path(__file__).parent / "assets" / "rinari_ascii.txt"
 
 
-def render_logo(max_width: int | None = None) -> str:
+def render_logo(max_width: int | None = None, target_height: int | None = None) -> str:
     """El arte ASCII de Rinari (silueta con alas), o el figlet como fallback.
 
     Si max_width se da y el arte lo excede, se escala por densidad (downscale)
-    preservando la silueta.
+    preservando la silueta. target_height comprime también verticalmente
+    (logo compacto para la columna lateral).
     """
     art = _ASSET.read_text(encoding="utf-8").rstrip("\n") if _ASSET.exists() else None
     if art is None:
         from pyfiglet import Figlet
 
         art = Figlet(font=LOGO_FONT).renderText("RINARI").rstrip("\n")
-    if max_width is None:
+    if max_width is None and target_height is None:
         return art
-    return _scale_art(art, max_width)
+    return _scale_art(art, max_width or 200, target_height)
 
 
-def _scale_art(art: str, max_width: int) -> str:
+def render_logo_compact() -> str:
+    """Logo de Rinari compacto (~40×26) para la columna derecha del dashboard."""
+    return render_logo(max_width=40, target_height=26)
+
+
+def render_logo_side() -> str:
+    """Logo aún más compacto (~34×22) para caber al lado de la info en 80 cols."""
+    return render_logo(max_width=34, target_height=22)
+
+
+def _scale_art(art: str, max_width: int, target_height: int | None = None) -> str:
     """Escala arte ASCII por densidad para que quepa en max_width.
 
     Agrupa celdas en bloques proporcionales; un bloque con tinta (>=1 char)
     se convierte en un solo carácter de tinta — la silueta se conserva.
+    target_height comprime también verticalmente (logo compacto).
     """
     lines = [l for l in art.split("\n") if l]
     if not lines:
         return art
     width = max(len(l) for l in lines)
     height = len(lines)
-    if width <= max_width:
+    if width <= max_width and target_height is None:
         return art
 
     sx = width / max_width
-    sy = max(1.0, sx * 0.62)  # proporción vertical: ~1.6:1 horizontal
+    if target_height is not None:
+        sy = height / max(target_height, 1)
+    else:
+        sy = max(1.0, sx * 0.62)  # proporción vertical: ~1.6:1 horizontal
     out_h = max(1, int(height / sy))
     out: list[str] = []
     for oy in range(out_h):
@@ -164,10 +179,9 @@ def build_welcome(
     tools_count: int = 0,
     max_width: int | None = None,
 ) -> str:
-    """Construye el texto del dashboard de bienvenida."""
+    """Construye el texto del dashboard de bienvenida (sin el logo; el logo
+    se renderiza a la derecha en render_welcome como columna compacta)."""
     lines = [
-        render_logo(max_width=max_width),
-        "",
         f"[bold magenta]Rinari CLI[/bold magenta] [dim]v{version}[/dim] (✿◠‿◠)",
         "",
         f"  Perfil : [yellow]{profile}[/yellow]",
@@ -218,9 +232,13 @@ def render_welcome(
     latency_ms: int | None = None,
     tools_count: int = 0,
 ) -> None:
-    """Pinta el dashboard de bienvenida en la terminal."""
+    """Pinta el dashboard de bienvenida: info + logo lado a lado, sugerencias abajo."""
+    from rich.console import Group
+    from rich.table import Table
+    from rich.text import Text
+
     console = Console()
-    welcome = build_welcome(
+    info = build_welcome(
         profile=profile,
         model=model,
         base_url=base_url,
@@ -230,6 +248,21 @@ def render_welcome(
         sessions_count=sessions_count,
         latency_ms=latency_ms,
         tools_count=tools_count,
-        max_width=console.width - 4,  # dejar espacio para el borde del panel
     )
-    console.print(Panel(welcome, border_style="magenta", padding=(1, 2)))
+    # separar info de sugerencias: las sugerencias van debajo, a ancho completo
+    header, _, suggestions = info.partition("[bold]Sugerencias:[/bold]")
+    header = header.rstrip()
+    suggestions = suggestions.strip()
+
+    logo = Text(render_logo_side())
+    table = Table(
+        show_header=False, show_edge=False, pad_edge=False,
+        expand=False, box=None,
+    )
+    table.add_column(overflow="fold")
+    table.add_column(overflow="fold", vertical="middle")
+    table.add_row(Text.from_markup(header), logo)
+    content = Group(table)
+    if suggestions:
+        content = Group(table, Text.from_markup(f"\n[bold]Sugerencias:[/bold] {suggestions}"))
+    console.print(Panel(content, border_style="magenta", padding=(1, 2)))
