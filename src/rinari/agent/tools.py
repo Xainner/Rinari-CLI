@@ -215,6 +215,72 @@ def edit_file(args: dict, cwd: str) -> dict:
     return {"ok": True, "path": str(path.relative_to(Path(cwd).resolve())), "line": line, "count": count}
 
 
+def run_tests(args: dict, cwd: str) -> dict:
+    """Detecta el framework de tests del repo y ejecuta la suite.
+
+    - pytest si hay pyproject.toml con [tool.pytest] o pytest.ini o tests/
+    - npm test si hay package.json con script test
+    - --command overridea la detección
+    """
+    command = args.get("command")
+    max_output = int(args.get("max_output", 4000))
+    base = Path(cwd).resolve()
+    framework = None
+
+    if command:
+        framework = "custom"
+    else:
+        # pytest: pyproject.toml con config pytest, pytest.ini, o dir tests/ con .py
+        has_pytest_config = (
+            (base / "pytest.ini").exists()
+            or (base / "pyproject.toml").exists()
+            and "[tool.pytest" in (base / "pyproject.toml").read_text(encoding="utf-8", errors="replace")
+        )
+        tests_dir = base / "tests"
+        if has_pytest_config or (tests_dir.is_dir() and any(tests_dir.glob("test_*.py"))):
+            framework = "pytest"
+            command = "python -m pytest -q"
+        elif (base / "package.json").exists():
+            try:
+                import json as _json
+
+                pkg = _json.loads((base / "package.json").read_text(encoding="utf-8"))
+                if "test" in (pkg.get("scripts") or {}):
+                    framework = "npm"
+                    command = "npm test"
+            except (ValueError, OSError):
+                pass
+
+    if not command:
+        return {
+            "ok": False,
+            "error": "No se encontró un framework de tests (pytest/npm). Pasa --command para usar uno custom.",
+        }
+
+    shell = os.environ.get("SHELL", "bash" if sys.platform == "win32" else "sh")
+    try:
+        proc = subprocess.run(
+            [shell, "-c", command],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=cwd,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "framework": framework, "exit_code": -1, "output": "", "error": "Tests excedieron 300s"}
+    output = proc.stdout + proc.stderr
+    truncated = len(output) > max_output
+    return {
+        "ok": proc.returncode == 0,
+        "framework": framework,
+        "exit_code": proc.returncode,
+        "output": output[:max_output],
+        "truncated": truncated,
+    }
+
+
 def _git(cwd: str, *args: str) -> subprocess.CompletedProcess:
     """Ejecuta git con encoding seguro (MSYS emite bytes no-UTF8)."""
     return subprocess.run(
@@ -432,6 +498,24 @@ TOOL_DEFS: list[dict] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_tests",
+            "description": (
+                "Detecta y ejecuta la suite de tests del repo (pytest o npm test). "
+                "Usa --command para un comando custom. Devuelve exit code y output."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Comando custom (opcional, overridea la detección)"},
+                    "max_output": {"type": "number", "description": "Máximo de chars del output (default 4000)"},
+                },
+                "required": [],
+            },
+        },
+    },
 ]
 
 DANGEROUS_PATTERNS = [
@@ -469,6 +553,7 @@ class ToolRegistry:
         "git_status": git_status,
         "git_diff": git_diff,
         "git_commit": git_commit,
+        "run_tests": run_tests,
         }
 
     def openai_schemas(self) -> list[dict]:
