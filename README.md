@@ -50,6 +50,14 @@ Los perfiles heredan de `[default]`. La `api_key` admite `${ENV_VAR}` (se expand
 ## Uso
 
 ```bash
+# MODO INTERACTIVO (como codex/claude CLI) — abres y te quedas dentro:
+rinari                          # entra directo al modo agente interactivo
+rinari --cwd ~/mi-proyecto      # en un repo específico
+rinari -p sat                   # con otro perfil
+#   → prompt: rinari@mi-proyecto > escribe tareas una tras otra
+#     el contexto del repo y las herramientas se mantienen entre turnos
+#     comandos: /new, /model <perfil>, /approve (toggle), /exit, /help
+
 # Chat interactivo (streaming, historial, comandos /)
 rinari chat --profile casa
 rinari chat --resume 3          # continúa la sesión 3
@@ -61,7 +69,7 @@ echo "hola" | rinari run "resume esto"
 # Listar modelos del endpoint
 rinari models --profile net
 
-# Modo agente de código (tool calling)
+# Modo agente one-shot (ejecuta y termina)
 rinari agent "refactoriza el módulo auth" --cwd ~/mi-proyecto
 rinari agent "arregla el test que falla" -y --max-iterations 15
 
