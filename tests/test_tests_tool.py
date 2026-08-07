@@ -85,3 +85,48 @@ def test_run_tests_ignores_venv_dirs(py_project):
     (py_project / ".venv" / "pyproject.toml").write_text("[x]\n", encoding="utf-8")
     result = run_tests({}, cwd=str(py_project))
     assert result["framework"] == "pytest"  # usa el del root, no el del venv
+
+
+def test_run_tests_uses_uv_when_project_has_uv_lock(tmp_path, monkeypatch):
+    """Proyecto con uv.lock → usa 'uv run pytest' (venv con deps)."""
+    import subprocess
+
+    from rinari import agent as agent_mod
+
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.pytest.ini_options]\ntestpaths = ['tests']\n", encoding="utf-8"
+    )
+    (tmp_path / "uv.lock").write_text("# lock\n", encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_x.py").write_text(
+        "def test_ok():\n    assert 1 == 1\n", encoding="utf-8"
+    )
+
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return type("R", (), {"returncode": 0, "stdout": "1 passed", "stderr": ""})()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = run_tests({}, cwd=str(tmp_path))
+    assert result["framework"] == "pytest"
+    assert result["ok"] is True
+    # Debe usar uv run pytest, NO python -m pytest (que fallaría sin deps)
+    assert "uv run pytest" in captured["cmd"][-1]
+
+
+def test_run_tests_uses_python_pytest_without_uv(py_project, monkeypatch):
+    """Sin uv.lock → python -m pytest (comportamiento actual)."""
+    import subprocess
+
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return type("R", (), {"returncode": 0, "stdout": "1 passed", "stderr": ""})()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = run_tests({}, cwd=str(py_project))
+    assert result["framework"] == "pytest"
+    assert "uv run pytest" in captured["cmd"][-1] or "python -m pytest" in captured["cmd"][-1]

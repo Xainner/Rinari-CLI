@@ -239,7 +239,11 @@ def run_tests(args: dict, cwd: str) -> dict:
         tests_dir = base / "tests"
         if has_pytest_config or (tests_dir.is_dir() and any(tests_dir.glob("test_*.py"))):
             framework = "pytest"
-            command = "python -m pytest -q"
+            # Proyecto uv (uv.lock) → uv run pytest usa el venv con deps
+            if (base / "uv.lock").exists() or (base / ".venv").exists():
+                command = "uv run pytest -q"
+            else:
+                command = "python -m pytest -q"
         elif (base / "package.json").exists():
             try:
                 import json as _json
