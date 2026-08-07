@@ -111,15 +111,34 @@ def _agent_interactive(
     current_profile = profile
     approve = auto_approve
 
-    console.print(
-        Panel(
-            f"[bold magenta]Rinari — modo agente interactivo[/bold magenta] (✿◠‿◠)\n"
-            f"Perfil: [yellow]{current_profile}[/yellow] → {current.base_url} ([bold]{current.model}[/bold])\n"
-            f"Repo: [cyan]{workdir}[/cyan]\n"
-            "Escribe una tarea y Rinari la ejecuta con tools. "
-            "Comandos: /new, /model <perfil>, /approve (toggle), /exit, /help. Ctrl+C para detener.",
-            border_style="magenta",
+    from rinari.history import History
+    from rinari.ui import check_endpoint_health, git_info, render_welcome
+
+    # Health check rápido del endpoint (no bloquea si tarda)
+    try:
+        probe_client = LLMClient(
+            base_url=current.base_url,
+            api_key=current.api_key,
+            model=current.model,
         )
+        endpoint_ok = check_endpoint_health(probe_client)
+    except Exception:  # noqa: BLE001
+        endpoint_ok = False
+
+    sessions_count = 0
+    try:
+        sessions_count = len(History().list_sessions(limit=100))
+    except Exception:  # noqa: BLE001
+        pass
+
+    render_welcome(
+        profile=current_profile,
+        model=current.model,
+        base_url=current.base_url,
+        repo_name=repo_name,
+        git=git_info(workdir),
+        endpoint_ok=endpoint_ok,
+        sessions_count=sessions_count,
     )
 
     def build_client(profile_name: str):
@@ -316,8 +335,11 @@ def chat(
     history = History()
     session = ChatSession(history=history, profile=profile, session_id=resume)
 
+    from rinari.ui import render_logo
+
     console.print(
         Panel(
+            f"[bold magenta]{render_logo()}[/bold magenta]\n\n"
             f"[bold magenta]Rinari CLI {__version__}[/bold magenta] (✿◠‿◠)\n"
             f"Perfil: [yellow]{profile}[/yellow] → {current.base_url} "
             f"([bold]{current.model}[/bold])\n"
