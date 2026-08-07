@@ -517,7 +517,68 @@ def models(profile: str = typer.Option("default", "--profile", "-p", help="Perfi
     )
 
 
-model_app = typer.Typer(help="Gestiona el modelo del perfil: set <modelo>")
+model_app = typer.Typer(help="Gestiona el modelo del perfil: sin args abre el selector")
+
+
+def _model_list_models(base_url: str, api_key: str | None, provider: str = "openai") -> list[dict]:
+    """Lista modelos del endpoint para el picker (inyectable en tests)."""
+    from rinari.client import LLMClient
+
+    client = LLMClient(base_url=base_url, api_key=api_key, model="", provider=provider)
+    try:
+        return client.list_models_detailed()
+    except Exception:  # noqa: BLE001 — el picker cae a nombre manual
+        return []
+
+
+@model_app.callback(invoke_without_command=True)
+def _model_picker(
+    ctx: typer.Context,
+    profile: str = typer.Option("default", "--profile", "-p", help="Perfil de configuración"),
+):
+    """Sin subcomando: selector interactivo de modelos del endpoint."""
+    from rinari.config import load_config, set_profile_model
+
+    # si viene un subcomando (set), el subcomando lo maneja
+    if ctx.invoked_subcommand:
+        return
+
+    cfg = load_config()
+    try:
+        current = cfg.get_profile(profile)
+    except ConfigError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[bold magenta]Modelos en '{profile}'[/bold magenta] (✿◠‿◠)\n")
+    console.print(f"  Activo: [bold]{current.model}[/bold]\n")
+
+    models = _model_list_models(current.base_url, current.api_key, current.provider)
+    if models:
+        console.print(format_model_list(models))
+        try:
+            choice = input("\nElige el número del modelo (o escribe uno a mano): ").strip()
+        except EOFError:
+            choice = ""
+        try:
+            model_id = pick_model_index(models, choice) if choice.isdigit() else (choice or current.model)
+        except ConfigError:
+            model_id = choice or current.model
+    else:
+        console.print("[yellow]El endpoint no devolvió modelos. Escribe el nombre a mano.[/yellow]")
+        try:
+            model_id = input("Modelo: ").strip()
+        except EOFError:
+            model_id = ""
+        if not model_id:
+            console.print("[red]Sin modelo, no hay nada que hacer. Abortando.[/red]")
+            raise typer.Exit(1)
+
+    set_profile_model(cfg.path.parent, profile, model_id)
+    console.print(
+        f"[green]✓ Modelo de '{profile}' actualizado:[/green] "
+        f"[bold]{current.model}[/bold] → [bold]{model_id}[/bold]"
+    )
 
 
 @model_app.command("set")

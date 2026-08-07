@@ -168,3 +168,55 @@ def test_model_set_missing_profile(fake_home):
     result = runner.invoke(app, ["model", "set", "x", "--profile", "nope"])
     assert result.exit_code != 0
     assert "no existe" in result.output.lower() or "setup" in result.output.lower()
+
+
+def test_model_picker_lists_and_saves(fake_home, monkeypatch):
+    """`rinari model` sin args: lista modelos del endpoint y guarda el elegido."""
+    from rinari import cli
+    from rinari.config import set_profile_model
+
+    set_profile_model(fake_home / ".rinari", "default", "antes", base_url="http://x/v1")
+    monkeypatch.setattr(cli, "_model_list_models",
+                        lambda base_url, api_key, provider="openai": [
+                            {"id": "modelo-a"},
+                            {"id": "modelo-b"},
+                        ])
+
+    result = runner.invoke(app, ["model"], input="1\n")  # elige modelo-b
+    assert result.exit_code == 0
+    assert "modelo-a" in result.output
+    assert "modelo-b" in result.output
+    cfg = load_config(fake_home / ".rinari")
+    assert cfg.get_profile("default").model == "modelo-b"
+
+
+def test_model_picker_custom_name(fake_home, monkeypatch):
+    """El picker acepta escribir el nombre a mano (si el endpoint no lista)."""
+    from rinari import cli
+    from rinari.config import set_profile_model
+
+    set_profile_model(fake_home / ".rinari", "default", "antes", base_url="http://x/v1")
+    monkeypatch.setattr(cli, "_model_list_models",
+                        lambda base_url, api_key, provider="openai": [])
+
+    result = runner.invoke(app, ["model"], input="mi-modelo\n")
+    assert result.exit_code == 0
+    cfg = load_config(fake_home / ".rinari")
+    assert cfg.get_profile("default").model == "mi-modelo"
+
+
+def test_model_picker_profile_flag(fake_home, monkeypatch):
+    """El picker respeta --profile."""
+    from rinari import cli
+    from rinari.config import set_profile_model
+
+    set_profile_model(fake_home / ".rinari", "casa", "antes", base_url="http://x/v1")
+    monkeypatch.setattr(cli, "_model_list_models",
+                        lambda base_url, api_key, provider="openai": [
+                            {"id": "modelo-x"},
+                        ])
+
+    result = runner.invoke(app, ["model", "--profile", "casa"], input="0\n")
+    assert result.exit_code == 0
+    cfg = load_config(fake_home / ".rinari")
+    assert cfg.get_profile("casa").model == "modelo-x"
