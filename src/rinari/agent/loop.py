@@ -45,6 +45,7 @@ def run_agent(
     max_iterations: int = 10,
     render_callback: Callable[[dict], None] | None = None,
     messages: list[dict] | None = None,
+    mcp_servers: dict | None = None,
 ) -> dict:
     """Ejecuta la tarea con el loop agéntico. Devuelve {status, final, steps, iterations, messages}.
 
@@ -52,6 +53,8 @@ def run_agent(
             streaming. En tests se inyecta un ScriptedClient.
     messages: historial previo (modo interactivo). Si es None, se construye
               desde cero con build_agent_messages(task).
+    mcp_servers: dict[str, MCPServer] — expone las tools de esos servidores
+                 MCP como tools dinámicas del agente.
     """
     registry = registry or ToolRegistry()
     approver = approver or _default_approver
@@ -62,18 +65,31 @@ def run_agent(
     steps: list[dict] = []
     iterations = 0
 
+    # Bridge MCP: conecta bajo demanda y resuelve tools
+    mcp_bridge = MCPToolBridge(mcp_servers) if mcp_servers else None
+    mcp_schemas = mcp_bridge.schemas() if mcp_bridge else []
+
+    def _all_schemas() -> list[dict]:
+        return registry.openai_schemas() + mcp_schemas
+
+    def _execute_tool(name: str, args: dict) -> dict:
+        """Ejecuta tool nativa o MCP según el nombre."""
+        if mcp_bridge and mcp_bridge.has_tool(name):
+            return mcp_bridge.call(name, args)
+        return registry.execute(name, args, cwd)
+
     while iterations < max_iterations:
         iterations += 1
         try:
             if hasattr(client, "chat_message"):
                 response = client.chat_message(
                     messages,
-                    tools=registry.openai_schemas(),
+                    tools=_all_schemas(),
                 )
             else:
                 response = client.chat(
                     messages,
-                    tools=registry.openai_schemas(),
+                    tools=_all_schemas(),
                 )
         except LLMError as e:
             steps.append({"type": "error", "message": str(e)})
@@ -138,7 +154,7 @@ def run_agent(
                     render_callback({"type": "tool_denied", "name": name, "arguments": args})
             else:
                 try:
-                    result = registry.execute(name, args, cwd)
+                    result = _execute_tool(name, args)
                 except Exception as e:  # noqa: BLE001
                     result = {"ok": False, "error": str(e)}
 
@@ -183,6 +199,75 @@ def run_agent(
         "iterations": iterations,
         "messages": messages,
     }
+
+
+class MCPToolBridge:
+    """Conecta servidores MCP y expone sus tools como tools del agente.
+
+    Conecta bajo demanda (lazy): listar tools al iniciar, ejecutar al llamar.
+    Cada servidor abre su propia conexión stdio.
+    """
+
+    def __init__(self, servers: dict):
+        self._servers = servers or {}
+        self._by_name: dict[str, tuple[str, str]] = {}  # tool_name -> (server_name, mcp_name)
+        self._connections: dict[str, MCPConnection] = {}
+        self._schemas: list[dict] = []
+        self._loaded = False
+
+    def _load(self) -> None:
+        if self._loaded:
+            return
+        from rinari.mcp import MCPConnection, build_openai_schemas
+
+        for server_name, server in self._servers.items():
+            try:
+                conn = MCPConnection(server)
+                conn.__enter__()
+                tools = conn.list_tools()
+                self._connections[server_name] = conn
+                for t in tools:
+                    self._by_name[t.name] = (server_name, t.name)
+                self._schemas.extend(build_openai_schemas(tools))
+            except Exception as e:  # noqa: BLE001
+                # Servidor caído: no bloquea al agente, se reporta como error al llamar
+                self._by_name[f"__mcp_error_{server_name}"] = (server_name, "")
+                self._schemas.append(
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": f"__mcp_error_{server_name}",
+                            "description": f"Servidor MCP '{server_name}' no disponible: {e}",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                )
+        self._loaded = True
+
+    def schemas(self) -> list[dict]:
+        self._load()
+        return self._schemas
+
+    def has_tool(self, name: str) -> bool:
+        self._load()
+        return name in self._by_name and not name.startswith("__mcp_error_")
+
+    def call(self, name: str, arguments: dict) -> dict:
+        self._load()
+        entry = self._by_name.get(name)
+        if entry is None:
+            return {"ok": False, "error": f"Tool MCP desconocida: {name}"}
+        server_name, mcp_name = entry
+        if name.startswith("__mcp_error_"):
+            return {"ok": False, "error": f"Servidor MCP '{server_name}' no disponible"}
+        conn = self._connections.get(server_name)
+        if conn is None:
+            return {"ok": False, "error": f"Servidor MCP '{server_name}' no conectado"}
+        try:
+            result = conn.call_tool(mcp_name, arguments)
+            return {"ok": True, "result": result}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": f"MCP '{mcp_name}': {e}"}
 
 
 def _parse_response(response) -> dict:

@@ -152,7 +152,7 @@ def test_agent_command_runs_loop(monkeypatch, tmp_path):
 
     calls = {}
 
-    def fake_run_agent(task, client, cwd, auto_approve, max_iterations, render_callback):
+    def fake_run_agent(task, client, cwd, auto_approve, max_iterations, render_callback, **kwargs):
         calls["task"] = task
         calls["cwd"] = cwd
         return {
@@ -177,7 +177,7 @@ def test_agent_without_task_enters_interactive_mode(monkeypatch, tmp_path):
     inputs = iter(["primera tarea", "segunda tarea", "/exit"])
     calls = []
 
-    def fake_run_agent(task, client, cwd, auto_approve, max_iterations, render_callback, messages=None):
+    def fake_run_agent(task, client, cwd, auto_approve, max_iterations, render_callback, messages=None, **kwargs):
         calls.append({"task": task, "messages": messages})
         prev = list(messages) if messages else []
         return {
@@ -214,7 +214,7 @@ def test_agent_interactive_new_resets_context(monkeypatch, tmp_path):
     inputs = iter(["tarea 1", "/new", "tarea 2", "/exit"])
     calls = []
 
-    def fake_run_agent(task, client, cwd, auto_approve, max_iterations, render_callback, messages=None):
+    def fake_run_agent(task, client, cwd, auto_approve, max_iterations, render_callback, messages=None, **kwargs):
         calls.append({"task": task, "messages": messages})
         prev = list(messages) if messages else []
         return {
