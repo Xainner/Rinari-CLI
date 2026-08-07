@@ -172,6 +172,189 @@ def list_dir(args: dict, cwd: str) -> dict:
     return {"entries": entries}
 
 
+def edit_file(args: dict, cwd: str) -> dict:
+    """Edita un archivo reemplazando un bloque (old → new).
+
+    Más quirúrgico que write_file: solo toca la parte indicada.
+    - old debe ser único (o pasar count=N para N ocurrencias)
+    - Devuelve la línea donde se aplicó el cambio
+    """
+    path = _resolve(cwd, args.get("path", ""))
+    old = args.get("old", "")
+    new = args.get("new", "")
+    count = int(args.get("count", 1))
+    if not old:
+        return {"ok": False, "error": "Se requiere 'old' (texto a reemplazar)"}
+    if not path.is_file():
+        return {"ok": False, "error": f"Archivo no existe: {args.get('path')}"}
+
+    content = path.read_text(encoding="utf-8", errors="replace")
+    occurrences = content.count(old)
+    if occurrences == 0:
+        return {"ok": False, "error": f"No se encontró el texto en {args.get('path')}"}
+    if occurrences < count:
+        return {
+            "ok": False,
+            "error": f"Se encontraron {occurrences} ocurrencia(s), se pidieron {count}",
+        }
+    if count == 1 and occurrences > 1:
+        return {
+            "ok": False,
+            "error": (
+                f"Ambigüedad: el texto aparece {occurrences} veces — incluye más "
+                f"contexto o usa count={occurrences}"
+            ),
+        }
+
+    new_content = content.replace(old, new, count)
+    path.write_text(new_content, encoding="utf-8")
+
+    # Línea del primer cambio (1-indexed): posición del texto nuevo insertado
+    idx = new_content.find(new)
+    line = new_content[:idx].count("\n") + 1 if idx >= 0 else 1
+    return {"ok": True, "path": str(path.relative_to(Path(cwd).resolve())), "line": line, "count": count}
+
+
+def run_tests(args: dict, cwd: str) -> dict:
+    """Detecta el framework de tests del repo y ejecuta la suite.
+
+    - pytest si hay pyproject.toml con [tool.pytest] o pytest.ini o tests/
+    - npm test si hay package.json con script test
+    - --command overridea la detección
+    """
+    command = args.get("command")
+    max_output = int(args.get("max_output", 4000))
+    base = Path(cwd).resolve()
+    framework = None
+
+    if command:
+        framework = "custom"
+    else:
+        # pytest: pyproject.toml con config pytest, pytest.ini, o dir tests/ con .py
+        has_pytest_config = (
+            (base / "pytest.ini").exists()
+            or (base / "pyproject.toml").exists()
+            and "[tool.pytest" in (base / "pyproject.toml").read_text(encoding="utf-8", errors="replace")
+        )
+        tests_dir = base / "tests"
+        if has_pytest_config or (tests_dir.is_dir() and any(tests_dir.glob("test_*.py"))):
+            framework = "pytest"
+            # Proyecto uv (uv.lock) → uv run pytest usa el venv con deps
+            if (base / "uv.lock").exists() or (base / ".venv").exists():
+                command = "uv run pytest -q"
+            else:
+                command = "python -m pytest -q"
+        elif (base / "package.json").exists():
+            try:
+                import json as _json
+
+                pkg = _json.loads((base / "package.json").read_text(encoding="utf-8"))
+                if "test" in (pkg.get("scripts") or {}):
+                    framework = "npm"
+                    command = "npm test"
+            except (ValueError, OSError):
+                pass
+
+    if not command:
+        return {
+            "ok": False,
+            "error": "No se encontró un framework de tests (pytest/npm). Pasa --command para usar uno custom.",
+        }
+
+    shell = os.environ.get("SHELL", "bash" if sys.platform == "win32" else "sh")
+    try:
+        proc = subprocess.run(
+            [shell, "-c", command],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=cwd,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "framework": framework, "exit_code": -1, "output": "", "error": "Tests excedieron 300s"}
+    output = proc.stdout + proc.stderr
+    truncated = len(output) > max_output
+    return {
+        "ok": proc.returncode == 0,
+        "framework": framework,
+        "exit_code": proc.returncode,
+        "output": output[:max_output],
+        "truncated": truncated,
+    }
+
+
+def _git(cwd: str, *args: str) -> subprocess.CompletedProcess:
+    """Ejecuta git con encoding seguro (MSYS emite bytes no-UTF8)."""
+    return subprocess.run(
+        ["git", "-C", cwd, *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+
+
+def git_status(args: dict, cwd: str) -> dict:
+    """Estado del repo: rama, limpio?, cambios (modificados/nuevos/borrados)."""
+    proc = _git(cwd, "status", "--porcelain=v1")
+    if proc.returncode != 0:
+        return {"ok": False, "error": (proc.stderr or "no es un repo git").strip()[:300]}
+    branch = _git(cwd, "branch", "--show-current").stdout.strip() or "detached"
+    changes = []
+    for line in proc.stdout.splitlines():
+        if len(line) < 4:
+            continue
+        status, path = line[:2].strip(), line[3:].strip()
+        changes.append({"status": status or "?", "path": path})
+    return {
+        "ok": True,
+        "branch": branch,
+        "clean": len(changes) == 0,
+        "changes": changes,
+    }
+
+
+def git_diff(args: dict, cwd: str) -> dict:
+    """Diff de los cambios sin commitear (working tree + staged + untracked)."""
+    max_lines = int(args.get("max_lines", 200))
+    # Marca untracked como intent-to-add para que aparezcan en el diff
+    _git(cwd, "add", "-N", ".")
+    proc = _git(cwd, "diff", "HEAD")
+    if proc.returncode != 0:
+        # Repo sin commits: diff del working tree
+        proc = _git(cwd, "diff")
+        if proc.returncode != 0:
+            return {"ok": False, "error": (proc.stderr or "no es un repo git").strip()[:300]}
+    # Limpia el index (no toca el working tree)
+    _git(cwd, "reset", "-q")
+    diff = proc.stdout
+    lines = diff.splitlines()
+    truncated = len(lines) > max_lines
+    return {
+        "ok": True,
+        "diff": "\n".join(lines[:max_lines]),
+        "truncated": truncated,
+        "total_lines": len(lines),
+    }
+
+
+def git_commit(args: dict, cwd: str) -> dict:
+    """Hace git add -A + commit con el mensaje dado."""
+    message = args.get("message", "").strip()
+    if not message:
+        return {"ok": False, "error": "Se requiere un mensaje de commit"}
+    add = _git(cwd, "add", "-A")
+    if add.returncode != 0:
+        return {"ok": False, "error": (add.stderr or "git add falló").strip()[:300]}
+    commit = _git(cwd, "commit", "-m", message)
+    if commit.returncode != 0:
+        return {"ok": False, "error": (commit.stderr or "git commit falló").strip()[:300]}
+    return {"ok": True, "commit": commit.stdout.strip().splitlines()[-1] if commit.stdout.strip() else None}
+
+
 TOOL_DEFS: list[dict] = [
     {
         "type": "function",
@@ -224,6 +407,27 @@ TOOL_DEFS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "edit_file",
+            "description": (
+                "Edita un archivo reemplazando un bloque de texto (old → new) sin "
+                "reescribir el archivo completo. El 'old' debe ser único en el archivo "
+                "(usa count=N si hay repeticiones, o incluye más contexto). Devuelve la línea del cambio."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path relativo al cwd"},
+                    "old": {"type": "string", "description": "Texto exacto a reemplazar (puede ser multilínea)"},
+                    "new": {"type": "string", "description": "Texto de reemplazo"},
+                    "count": {"type": "number", "description": "Cuántas ocurrencias reemplazar (default 1)"},
+                },
+                "required": ["path", "old", "new"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "search_files",
             "description": "Busca una regex dentro de archivos del proyecto. Devuelve file, línea y contenido.",
             "parameters": {
@@ -249,6 +453,73 @@ TOOL_DEFS: list[dict] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_status",
+            "description": (
+                "Estado del repositorio git: rama actual, si está limpio, y la "
+                "lista de cambios (modificados, nuevos, borrados)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_diff",
+            "description": (
+                "Diff de los cambios sin commitear (working tree + staged). "
+                "Usa max_lines para limitar la salida."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "max_lines": {"type": "number", "description": "Máximo de líneas del diff (default 200)"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_commit",
+            "description": (
+                "Hace git add -A y commit de todos los cambios con el mensaje dado. "
+                "MODIFICA EL HISTORIAL — requiere aprobación."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string", "description": "Mensaje del commit (conventional: feat:, fix:, docs:)"},
+                },
+                "required": ["message"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_tests",
+            "description": (
+                "Detecta y ejecuta la suite de tests del repo (pytest o npm test). "
+                "Usa --command para un comando custom. Devuelve exit code y output."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Comando custom (opcional, overridea la detección)"},
+                    "max_output": {"type": "number", "description": "Máximo de chars del output (default 4000)"},
+                },
+                "required": [],
+            },
+        },
+    },
 ]
 
 DANGEROUS_PATTERNS = [
@@ -257,6 +528,8 @@ DANGEROUS_PATTERNS = [
     r"\bdd\s+if=",
     r"\bgit\s+push\b",
     r"\bgit\s+reset\s+--hard\b",
+    r"\bgit\s+commit\b",
+    r"\bgit\s+checkout\s+--\b",
     r"\bcurl\b.*\|\s*(ba|z)?sh\b",
     r"\bsudo\b",
     r"\bshutdown\b|\breboot\b",
@@ -278,9 +551,14 @@ class ToolRegistry:
         "run_command": run_command,
         "read_file": read_file,
         "write_file": write_file,
+        "edit_file": edit_file,
         "search_files": search_files,
         "list_dir": list_dir,
-    }
+        "git_status": git_status,
+        "git_diff": git_diff,
+        "git_commit": git_commit,
+        "run_tests": run_tests,
+        }
 
     def openai_schemas(self) -> list[dict]:
         return TOOL_DEFS
