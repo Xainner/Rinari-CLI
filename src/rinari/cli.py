@@ -493,6 +493,15 @@ def main_default(
 
 
 def main() -> None:
+    # Aislar el proceso de entornos Python ajenos (p.ej. el venv de Hermes que
+    # inyecta su site-packages vía PYTHONPATH en sys.path al arrancar el binario).
+    # Un pydantic_core de otro entorno rompe el import de mcp con
+    # "ModuleNotFoundError: pydantic_core._pydantic_core".
+    import os as _os
+    import sys as _sys
+
+    _os.environ.pop("PYTHONPATH", None)
+    _sys.path = [p for p in _sys.path if "hermes-agent" not in p]
     app()
 
 
