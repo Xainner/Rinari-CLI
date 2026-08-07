@@ -58,6 +58,16 @@ def _normalize_cwd(cwd: Path) -> Path:
     return Path(s).resolve()
 
 
+def _load_mcp_servers() -> dict:
+    """Carga los servidores MCP del config. Vacío si no hay o falla."""
+    try:
+        from rinari.mcp import load_mcp_servers
+
+        return load_mcp_servers()
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def _agent_on_step(step: dict) -> None:
     """Renderiza un paso del agente en vivo."""
     from rinari.render import render_status
@@ -183,6 +193,7 @@ def _agent_interactive(
             max_iterations=max_iterations,
             render_callback=_agent_on_step,
             messages=messages,
+            mcp_servers=_load_mcp_servers(),
         )
         messages = result.get("messages", messages)
 
@@ -451,6 +462,7 @@ def agent(
         auto_approve=auto_approve,
         max_iterations=max_iterations,
         render_callback=_agent_on_step,
+        mcp_servers=_load_mcp_servers(),
     )
 
     if result["status"] == "done":
@@ -481,6 +493,15 @@ def main_default(
 
 
 def main() -> None:
+    # Aislar el proceso de entornos Python ajenos (p.ej. el venv de Hermes que
+    # inyecta su site-packages vía PYTHONPATH en sys.path al arrancar el binario).
+    # Un pydantic_core de otro entorno rompe el import de mcp con
+    # "ModuleNotFoundError: pydantic_core._pydantic_core".
+    import os as _os
+    import sys as _sys
+
+    _os.environ.pop("PYTHONPATH", None)
+    _sys.path = [p for p in _sys.path if "hermes-agent" not in p]
     app()
 
 
