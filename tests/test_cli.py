@@ -143,3 +143,27 @@ def test_system_prompt_has_rinari_identity():
     assert "Rinari" in SYSTEM_PROMPT
     assert "tsundere" in SYSTEM_PROMPT.lower()
     assert "NUNCA digas" in SYSTEM_PROMPT
+
+
+def test_agent_command_runs_loop(monkeypatch, tmp_path):
+    """agent orquesta el loop con el cwd indicado."""
+    from rinari import agent as agent_mod
+    from rinari.agent import loop as loop_mod
+
+    calls = {}
+
+    def fake_run_agent(task, client, cwd, auto_approve, max_iterations, render_callback):
+        calls["task"] = task
+        calls["cwd"] = cwd
+        return {
+            "status": "done",
+            "final": "Listo (✿◠‿◠)",
+            "steps": [{"type": "final", "content": "Listo (✿◠‿◠)"}],
+            "iterations": 1,
+        }
+
+    monkeypatch.setattr(loop_mod, "run_agent", fake_run_agent)
+    result = runner.invoke(app, ["agent", "crea un archivo", "--cwd", str(tmp_path)])
+    assert result.exit_code == 0
+    assert calls["task"] == "crea un archivo"
+    assert "Tarea completada" in result.stdout

@@ -126,6 +126,40 @@ class LLMClient:
         except httpx.HTTPError as e:
             raise LLMError(f"No se pudo conectar a {self.base_url}: {e}") from e
 
+    def chat_message(
+        self,
+        messages: list[dict],
+        temperature: float = 0.7,
+        max_tokens: int | None = None,
+        tools: list[dict] | None = None,
+    ) -> dict:
+        """Llamada no-stream que devuelve el message COMPLETO (con tool_calls).
+
+        Para el modo agente: necesitamos los tool_calls, no solo el content.
+        """
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+            "temperature": temperature,
+        }
+        if max_tokens:
+            payload["max_tokens"] = max_tokens
+        if tools:
+            payload["tools"] = tools
+
+        try:
+            with self._client() as client:
+                resp = client.post(f"{self.base_url}/chat/completions", json=payload)
+                if resp.status_code != 200:
+                    raise LLMError(self._error_message(resp.status_code, resp.text))
+                data = resp.json()
+                return data["choices"][0].get("message") or {}
+        except LLMError:
+            raise
+        except httpx.HTTPError as e:
+            raise LLMError(f"No se pudo conectar a {self.base_url}: {e}") from e
+
     def list_models(self) -> list[str]:
         try:
             with self._client() as client:

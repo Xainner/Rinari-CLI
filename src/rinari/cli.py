@@ -14,6 +14,7 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 
@@ -253,17 +254,56 @@ def agent(
     task: str = typer.Argument(..., help="Tarea a realizar"),
     profile: str = typer.Option("default", "--profile", "-p", help="Perfil de configuración"),
     cwd: Path = typer.Option(".", "--cwd", help="Directorio de trabajo (repo)"),
+    auto_approve: bool = typer.Option(False, "--auto-approve", "-y", help="Aprobar comandos automáticamente"),
+    max_iterations: int = typer.Option(10, "--max-iterations", help="Máximo de iteraciones del loop"),
 ):
     """Modo agente de código: ejecuta la tarea con tool calling."""
     from rinari.agent.loop import run_agent
+    from rinari.render import render_status
 
     client, profile_obj = _build_client(profile)
-    run_agent(
+    console.print(
+        Panel(
+            f"[bold magenta]Rinari agente[/bold magenta] (✿◠‿◠)\n"
+            f"Perfil: [yellow]{profile}[/yellow] | cwd: [cyan]{cwd}[/cyan]\n"
+            f"Tarea: [bold]{task}[/bold]",
+            border_style="magenta",
+        )
+    )
+
+    def on_step(step: dict) -> None:
+        t = step["type"]
+        if t == "tool_call":
+            name = step.get("name", "")
+            args = step.get("arguments", {})
+            cmd = args.get("command") or args.get("path") or ""
+            render_status(f"🔧 {name} {cmd}", style="cyan")
+        elif t == "tool_result":
+            result = step.get("result", {})
+            if result.get("ok") is False or result.get("error"):
+                render_status(f"⚠️ Resultado con error: {result.get('error', '')[:120]}", style="red")
+        elif t == "tool_denied":
+            render_status("🚫 Comando denegado", style="yellow")
+        elif t == "error":
+            render_status(f"❌ {step.get('message', '')}", style="red")
+
+    result = run_agent(
         task=task,
         client=client,
-        profile=profile_obj,
-        cwd=str(cwd),
+        cwd=str(cwd.resolve()),
+        auto_approve=auto_approve,
+        max_iterations=max_iterations,
+        render_callback=on_step,
     )
+
+    if result["status"] == "done":
+        console.print("\n[bold green]✓ Tarea completada.[/bold green]")
+        if result["final"]:
+            console.print(Markdown(result["final"]))
+    elif result["status"] == "max_iterations":
+        console.print("[yellow]⚠️ Se alcanzó el límite de iteraciones.[/yellow]")
+    else:
+        console.print("[red]❌ El agente falló.[/red]")
 
 
 def main() -> None:
