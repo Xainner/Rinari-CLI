@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import re
 
+from rich.panel import Panel
+
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -60,3 +62,43 @@ def render_status(message: str, style: str = "yellow") -> None:
     """Renderiza un mensaje de estado (pasos del agente, etc.)."""
     console = Console()
     console.print(Text(f"• {message}", style=style))
+
+
+class ToolSpinner:
+    """Spinner de rich que gira mientras una tool se ejecuta.
+
+    rich arranca un thread de refresh interno en start(); el hilo principal
+    puede bloquearse ejecutando la tool mientras el spinner sigue animando.
+    """
+
+    def __init__(self) -> None:
+        self._status = None
+        self._console = None
+
+    def start(self, message: str) -> None:
+        self._console = Console()
+        self._status = self._console.status(message, spinner="dots")
+        self._status.start()
+
+    def stop(self) -> None:
+        if self._status is not None:
+            self._status.stop()
+            self._status = None
+
+    def is_active(self) -> bool:
+        return self._status is not None
+
+
+def render_tool_result(result: dict, max_output: int = 800) -> None:
+    """Resalta el resultado de una tool: output en panel, errores en rojo."""
+    console = Console()
+    if result.get("ok") is False or result.get("error"):
+        err = str(result.get("error") or "")[:max_output]
+        console.print(Text(f"⚠️  {err}", style="red"))
+        return
+    stdout = str(result.get("stdout") or "").strip()
+    if stdout:
+        preview = stdout[:max_output]
+        if len(stdout) > max_output:
+            preview += f"\n… ({len(stdout) - max_output} caracteres más)"
+        console.print(Panel(preview, border_style="cyan", title="output", padding=(0, 1)))

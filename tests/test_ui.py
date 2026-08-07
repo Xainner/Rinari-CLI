@@ -5,7 +5,9 @@ import subprocess
 from rinari.ui import (
     build_welcome,
     check_endpoint_health,
+    count_tools,
     git_info,
+    measure_endpoint_latency,
     render_logo,
 )
 
@@ -157,3 +159,46 @@ def test_check_endpoint_health_http_error():
 
     client = LLMClient(base_url="http://x/v1", transport=httpx.MockTransport(handler))
     assert check_endpoint_health(client) is False
+
+
+def test_measure_latency_ok():
+    """Endpoint responde → latencia en ms (>= 0)."""
+    import httpx
+
+    from rinari.client import LLMClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [{"id": "qwen3.6-27b"}]})
+
+    client = LLMClient(base_url="http://x/v1", transport=httpx.MockTransport(handler))
+    latency = measure_endpoint_latency(client)
+    assert latency is not None
+    assert latency >= 0
+
+
+def test_measure_latency_down():
+    """Endpoint caído → None (sin colgar)."""
+    import httpx
+
+    from rinari.client import LLMClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused")
+
+    client = LLMClient(base_url="http://x/v1", transport=httpx.MockTransport(handler))
+    assert measure_endpoint_latency(client) is None
+
+
+def test_count_tools_positive():
+    """Hay al menos las tools nativas registradas."""
+    assert count_tools() >= 10
+
+
+def test_build_welcome_shows_latency_and_tools():
+    welcome = build_welcome(
+        profile="casa", model="m", base_url="u", repo_name="r",
+        git={}, endpoint_ok=True, version="v", sessions_count=0,
+        latency_ms=42, tools_count=11,
+    )
+    assert "42 ms" in welcome
+    assert "11" in welcome

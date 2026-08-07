@@ -118,6 +118,39 @@ def check_endpoint_health(client, timeout: float = 3.0) -> bool:
             client.timeout = old_timeout
 
 
+def measure_endpoint_latency(client, timeout: float = 3.0) -> float | None:
+    """Latencia del endpoint en ms, o None si está caído."""
+    import time
+
+    from rinari.client import LLMError
+
+    old_timeout = getattr(client, "timeout", None)
+    try:
+        client.timeout = timeout
+        start = time.perf_counter()
+        client.list_models()
+        return round((time.perf_counter() - start) * 1000)
+    except (LLMError, Exception):  # noqa: BLE001
+        return None
+    finally:
+        if old_timeout is not None:
+            client.timeout = old_timeout
+
+
+def count_tools() -> int:
+    """Cantidad de tools disponibles para el agente (nativas + MCP)."""
+    from rinari.agent.tools import ToolRegistry
+
+    n = len(ToolRegistry()._TOOLS)
+    try:
+        from rinari.mcp import load_mcp_servers
+
+        n += len(load_mcp_servers())
+    except Exception:  # noqa: BLE001 - MCP opcional
+        pass
+    return n
+
+
 def build_welcome(
     profile: str,
     model: str,
@@ -127,6 +160,8 @@ def build_welcome(
     endpoint_ok: bool,
     version: str = __version__,
     sessions_count: int = 0,
+    latency_ms: int | None = None,
+    tools_count: int = 0,
     max_width: int | None = None,
 ) -> str:
     """Construye el texto del dashboard de bienvenida."""
@@ -152,12 +187,15 @@ def build_welcome(
         lines.append(f"  Repo   : [cyan]{repo_name}[/cyan] [dim](no es repo git)[/dim]")
 
     if endpoint_ok:
-        lines.append("  Estado : [green]✓ endpoint conectado[/green]")
+        lat = f" [dim]({latency_ms} ms)[/dim]" if latency_ms is not None else ""
+        lines.append(f"  Estado : [green]✓ endpoint conectado[/green]{lat}")
     else:
         lines.append("  Estado : [red]✗ endpoint sin conexión[/red]")
 
     if sessions_count:
         lines.append(f"  Historial: {sessions_count} sesión(es) guardada(s)")
+    if tools_count:
+        lines.append(f"  Tools  : [bold]{tools_count}[/bold] disponibles")
 
     lines += [
         "",
@@ -177,6 +215,8 @@ def render_welcome(
     git: dict,
     endpoint_ok: bool,
     sessions_count: int = 0,
+    latency_ms: int | None = None,
+    tools_count: int = 0,
 ) -> None:
     """Pinta el dashboard de bienvenida en la terminal."""
     console = Console()
@@ -188,6 +228,8 @@ def render_welcome(
         git=git,
         endpoint_ok=endpoint_ok,
         sessions_count=sessions_count,
+        latency_ms=latency_ms,
+        tools_count=tools_count,
         max_width=console.width - 4,  # dejar espacio para el borde del panel
     )
     console.print(Panel(welcome, border_style="magenta", padding=(1, 2)))

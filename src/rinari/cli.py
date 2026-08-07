@@ -69,19 +69,28 @@ def _load_mcp_servers() -> dict:
 
 
 def _agent_on_step(step: dict) -> None:
-    """Renderiza un paso del agente en vivo."""
-    from rinari.render import render_status
+    """Renderiza un paso del agente en vivo, con spinner mientras la tool corre."""
+    from rinari.render import ToolSpinner, render_status, render_tool_result
 
     t = step["type"]
     if t == "tool_call":
         name = step.get("name", "")
         args = step.get("arguments", {})
         cmd = args.get("command") or args.get("path") or ""
-        render_status(f"🔧 {name} {cmd}", style="cyan")
+        label = f"{name} {cmd}".strip()
+        render_status(f"🔧 {label}", style="cyan")
+        # spinner animado mientras la tool se ejecuta
+        spinner = ToolSpinner()
+        spinner.start(f"⏳ {name} ejecutando…")
+        _agent_on_step._spinner = spinner
     elif t == "tool_result":
+        # detener el spinner antes de pintar el resultado
+        spinner = getattr(_agent_on_step, "_spinner", None)
+        if spinner is not None:
+            spinner.stop()
+            _agent_on_step._spinner = None
         result = step.get("result", {})
-        if result.get("ok") is False or result.get("error"):
-            render_status(f"⚠️ Resultado con error: {result.get('error', '')[:120]}", style="red")
+        render_tool_result(result)
     elif t == "tool_denied":
         render_status("🚫 Comando denegado", style="yellow")
     elif t == "error":
@@ -112,9 +121,17 @@ def _agent_interactive(
     approve = auto_approve
 
     from rinari.history import History
-    from rinari.ui import check_endpoint_health, git_info, render_welcome
+    from rinari.ui import (
+        check_endpoint_health,
+        count_tools,
+        git_info,
+        measure_endpoint_latency,
+        render_welcome,
+    )
 
     # Health check rápido del endpoint (no bloquea si tarda)
+    latency_ms = None
+    endpoint_ok = False
     try:
         probe_client = LLMClient(
             base_url=current.base_url,
@@ -122,6 +139,8 @@ def _agent_interactive(
             model=current.model,
         )
         endpoint_ok = check_endpoint_health(probe_client)
+        if endpoint_ok:
+            latency_ms = measure_endpoint_latency(probe_client)
     except Exception:  # noqa: BLE001
         endpoint_ok = False
 
@@ -139,6 +158,8 @@ def _agent_interactive(
         git=git_info(workdir),
         endpoint_ok=endpoint_ok,
         sessions_count=sessions_count,
+        latency_ms=latency_ms,
+        tools_count=count_tools(),
     )
 
     def build_client(profile_name: str):
