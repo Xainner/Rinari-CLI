@@ -92,9 +92,8 @@ def test_agent_completes_after_tool_roundtrip(workdir):
     assert result["final"] == "Listo, ejecuté el comando."
     # El resultado del tool se devolvió al modelo en la segunda llamada
     second_call = client.requests[1]
-    last = second_call[-1]
-    assert last["role"] == "tool"
-    assert "hi" in last["content"]
+    assert any(m["role"] == "tool" and "hi" in m["content"] for m in second_call)
+    assert any(m["role"] == "system" and "presupuesto" in m["content"] for m in second_call)
 
 
 def test_agent_loops_multiple_tools(workdir):
@@ -155,9 +154,7 @@ def test_agent_tool_error_returned_to_model(workdir):
         auto_approve=True, max_iterations=5,
     )
     second_call = client.requests[1]
-    last = second_call[-1]
-    assert last["role"] == "tool"
-    assert "no existe" in last["content"]
+    assert any(m["role"] == "tool" and "no existe" in m["content"] for m in second_call)
 
 
 def test_agent_denied_command_not_executed(workdir):
@@ -179,8 +176,8 @@ def test_agent_denied_command_not_executed(workdir):
     assert registry.calls == []  # nunca se ejecutó
     # El modelo recibió un tool result de "denegado"
     second_call = client.requests[1]
-    last = second_call[-1]
-    assert "denegad" in last["content"].lower() or "negad" in last["content"].lower()
+    assert any("denegad" in m["content"].lower() or "negad" in m["content"].lower()
+               for m in second_call if m["role"] == "tool")
 
 
 def test_agent_auto_approve_skips_approver(workdir):

@@ -235,7 +235,18 @@ def _agent_interactive(
         if result["status"] == "done" and result.get("final"):
             console.print(Markdown(result["final"]))
         elif result["status"] == "max_iterations":
-            console.print("[yellow]⚠️ Se alcanzó el límite de iteraciones — puedes seguir con otra tarea.[/yellow]")
+            last_step = result["steps"][-1] if result["steps"] else {}
+            last_desc = last_step.get("name") or last_step.get("type", "")
+            console.print(
+                f"[yellow]⚠️ Presupuesto agotado: {result['iterations']} iteraciones, "
+                f"{result.get('tool_count', 0)} tools ejecutadas.[/yellow]"
+            )
+            if last_desc:
+                console.print(f"[dim]Último paso: {last_desc}[/dim]")
+            console.print(
+                "[dim]Sigue con otra tarea para continuar, o usa "
+                "[bold]--max-iterations 25[/bold] para tareas grandes.[/dim]"
+            )
         else:
             console.print("[red]❌ El agente falló en esta tarea.[/red]")
 
@@ -1132,7 +1143,11 @@ def agent(
         if result["final"]:
             console.print(Markdown(result["final"]))
     elif result["status"] == "max_iterations":
-        console.print("[yellow]⚠️ Se alcanzó el límite de iteraciones.[/yellow]")
+        console.print(
+            f"[yellow]⚠️ Presupuesto agotado: {result['iterations']} iteraciones, "
+            f"{result.get('tool_count', 0)} tools ejecutadas. "
+            f"Reintenta con --max-iterations {result['iterations'] * 2}.[/yellow]"
+        )
     else:
         console.print("[red]❌ El agente falló.[/red]")
 

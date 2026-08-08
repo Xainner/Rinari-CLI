@@ -83,6 +83,7 @@ def run_agent(
     approver: Callable[[str, dict, str], bool] | None = None,
     max_iterations: int = 10,
     max_retries: int = 2,
+    reminder_threshold: int = 3,
     render_callback: Callable[[dict], None] | None = None,
     messages: list[dict] | None = None,
     mcp_servers: dict | None = None,
@@ -201,17 +202,41 @@ def run_agent(
         }
 
     def _llm_call() -> tuple[dict | str, int]:
-        """Llama al modelo con reintentos ante errores transitorios."""
+        """Llama al modelo con reintentos ante errores transitorios.
+
+        Cuando quedan pocas iteraciones (reminder_threshold), inyecta un
+        aviso al modelo para que priorice cerrar la tarea (estilo Codex).
+        """
         attempts = max_retries + 1
+        remaining = max_iterations - iterations
+        call_messages = messages
+        if 0 < remaining <= reminder_threshold:
+            # inyectar en el mensaje system EXISTENTE (al inicio) — algunos
+            # servidores (llama.cpp) rechazan system messages al final
+            call_messages = list(messages)
+            reminder = (
+                f"⚠️ IMPORTANTE: te quedan {remaining} iteración(es) de "
+                "presupuesto. Prioriza COMPLETAR la tarea ahora: si estás "
+                "cerca de terminar, da tu respuesta final; si te falta mucho, "
+                "termina con lo esencial y reporta qué quedó pendiente."
+            )
+            for i, m in enumerate(call_messages):
+                if m.get("role") == "system":
+                    merged = dict(m)
+                    merged["content"] = f"{m.get('content', '')}\n\n{reminder}"
+                    call_messages[i] = merged
+                    break
+            else:
+                call_messages.insert(0, {"role": "system", "content": reminder})
         for attempt in range(attempts):
             try:
                 if hasattr(client, "chat_message"):
                     return client.chat_message(
-                        messages,
+                        call_messages,
                         tools=_all_schemas(),
                     ), 0
                 return client.chat(
-                    messages,
+                    call_messages,
                     tools=_all_schemas(),
                 ), 0
             except LLMError as e:
@@ -224,6 +249,7 @@ def run_agent(
 
     def _finalize(status: str, final: str | None) -> dict:
         """Arma el resultado final y opcionalmente persiste la sesión."""
+        tool_count = sum(1 for s in steps if s.get("type") == "tool_result")
         result = {
             "status": status,
             "final": final,
@@ -231,6 +257,7 @@ def run_agent(
             "iterations": iterations,
             "messages": messages,
             "plan": plan,
+            "tool_count": tool_count,
         }
         if persist:
             saved = save_agent_session(task, messages, steps, status, history=history)
