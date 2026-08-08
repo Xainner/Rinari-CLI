@@ -17,7 +17,7 @@ runner = CliRunner()
 def make_transport_ok(content: str = "respuesta"):
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/models"):
-            return httpx.Response(200, json={"data": [{"id": "qwen3.6-27b"}, {"id": "otro"}]})
+            return httpx.Response(200, json={"data": [{"id": "test-model"}, {"id": "otro"}]})
         body = json.loads(request.content)
         if body.get("stream"):
             chunk = {
@@ -44,7 +44,7 @@ def patch_llm_client(monkeypatch):
 
     orig_init = client_mod.LLMClient.__init__
 
-    def fake_init(self, base_url, api_key=None, model="qwen3.6-27b", timeout=300.0, transport=None):
+    def fake_init(self, base_url, api_key=None, model="test-model", timeout=300.0, transport=None, provider="openai"):
         # Inyecta MockTransport SIEMPRE (ignora el real)
         orig_init(self, base_url=base_url, api_key=api_key, model=model, timeout=timeout,
                   transport=make_transport_ok())
@@ -58,7 +58,7 @@ def fake_home_config(monkeypatch, tmp_path):
     from rinari import config as config_mod
 
     monkeypatch.setattr(config_mod.Path, "home", staticmethod(lambda: tmp_path))
-    monkeypatch.setenv("SAT_KEY", "sk-test")
+    monkeypatch.setenv("MY_API_KEY", "sk-test")
 
 
 def test_run_one_shot_streams_to_stdout():
@@ -82,7 +82,7 @@ def test_run_no_stream():
 def test_models_lists_ids():
     result = runner.invoke(app, ["models"])
     assert result.exit_code == 0
-    assert "qwen3.6-27b" in result.stdout
+    assert "test-model" in result.stdout
 
 
 def test_unknown_profile_fails_cleanly():
@@ -95,7 +95,7 @@ def test_identity_shows_rinari():
     result = runner.invoke(app, ["identity"])
     assert result.exit_code == 0
     assert "Rinari" in result.stdout
-    assert "Tsundere" in result.stdout
+    assert "maid" in result.stdout
 
 
 def test_version_shows_version():
@@ -138,11 +138,12 @@ def test_sync_runs_uv_sync(monkeypatch):
 
 
 def test_system_prompt_has_rinari_identity():
-    from rinari.repl import SYSTEM_PROMPT
+    from rinari.identity import build_chat_prompt
 
-    assert "Rinari" in SYSTEM_PROMPT
-    assert "tsundere" in SYSTEM_PROMPT.lower()
-    assert "NUNCA digas" in SYSTEM_PROMPT
+    prompt = build_chat_prompt()
+    assert "Rinari" in prompt
+    assert "maid" in prompt.lower()
+    assert "NUNCA digas" in prompt or "nunca digas" in prompt.lower()
 
 
 def test_agent_command_runs_loop(monkeypatch, tmp_path):

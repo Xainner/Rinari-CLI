@@ -27,8 +27,8 @@ def mcp_config_dir(tmp_path):
     (tmp_path / "config.toml").write_text(
         f"""
 [profile.casa]
-base_url = "http://192.168.0.3:8020/v1"
-model = "qwen3.6-27b"
+base_url = "http://test-endpoint/v1"
+model = "test-model"
 
 [mcp.servers.test]
 command = "{py_escaped}"

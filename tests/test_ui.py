@@ -77,8 +77,8 @@ def test_render_logo_full_when_fits():
 def test_build_welcome_contains_profile_info():
     welcome = build_welcome(
         profile="casa",
-        model="qwen3.6-27b",
-        base_url="http://192.168.0.3:8020/v1",
+        model="test-model",
+        base_url="http://test-endpoint/v1",
         repo_name="mi-repo",
         git={"branch": "feature-ui", "clean": True, "commit": "abc1234"},
         endpoint_ok=True,
@@ -86,7 +86,7 @@ def test_build_welcome_contains_profile_info():
         sessions_count=5,
     )
     assert "casa" in welcome
-    assert "qwen3.6-27b" in welcome
+    assert "test-model" in welcome
     assert "feature-ui" in welcome
     assert "0.1.0" in welcome
 
@@ -153,7 +153,7 @@ def test_check_endpoint_health_ok():
     from rinari.client import LLMClient
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"data": [{"id": "qwen3.6-27b"}]})
+        return httpx.Response(200, json={"data": [{"id": "test-model"}]})
 
     client = LLMClient(base_url="http://x/v1", transport=httpx.MockTransport(handler))
     assert check_endpoint_health(client) is True
@@ -191,7 +191,7 @@ def test_measure_latency_ok():
     from rinari.client import LLMClient
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"data": [{"id": "qwen3.6-27b"}]})
+        return httpx.Response(200, json={"data": [{"id": "test-model"}]})
 
     client = LLMClient(base_url="http://x/v1", transport=httpx.MockTransport(handler))
     latency = measure_endpoint_latency(client)
