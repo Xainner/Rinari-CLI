@@ -156,6 +156,14 @@ def _apply_defaults(profile: dict, defaults: dict) -> dict:
     return merged
 
 
+_BASE_KEYS = {"base_url", "model", "api_key", "temperature", "provider"}
+
+
+def _extra_keys(merged: dict) -> dict:
+    """Claves desconocidas del perfil (max_iterations, etc.) para Profile.extra."""
+    return {k: v for k, v in merged.items() if k not in _BASE_KEYS}
+
+
 def load_config(config_dir: Path | str | None = None) -> Config:
     config_dir = Path(config_dir) if config_dir else Path.home() / ".rinari"
     path = config_dir / "config.toml"
@@ -181,6 +189,7 @@ def load_config(config_dir: Path | str | None = None) -> Config:
             api_key=merged.get("api_key") or None,
             temperature=float(merged.get("temperature", 0.7)),
             provider=merged.get("provider") or "openai",
+            extra=_extra_keys(merged),
         )
 
     default_profile = Profile(
@@ -189,6 +198,7 @@ def load_config(config_dir: Path | str | None = None) -> Config:
         api_key=defaults.get("api_key") or None,
         temperature=float(defaults.get("temperature", 0.7)),
         provider=defaults.get("provider") or "openai",
+        extra=_extra_keys(defaults),
     )
     user_name = None
     if isinstance(data.get("user"), dict):

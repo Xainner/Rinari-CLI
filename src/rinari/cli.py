@@ -102,11 +102,19 @@ def _agent_interactive(
     profile: str = "default",
     cwd: Path = Path("."),
     auto_approve: bool = False,
-    max_iterations: int = 10,
+    max_iterations: int | None = None,
 ) -> None:
     """REPL agéntico tipo Codex/Claude CLI: das tareas y Rinari trabaja con
     tools, manteniendo el contexto del repo entre turnos."""
     from rinari.agent.loop import run_agent
+
+    # Presupuesto: caller > perfil (config.toml) > default 25
+    if max_iterations is None:
+        cfg0 = load_config()
+        try:
+            max_iterations = int(cfg0.get_profile(profile).extra.get("max_iterations", 25))
+        except Exception:  # noqa: BLE001
+            max_iterations = 25
 
     cfg = load_config()
     try:
@@ -210,45 +218,55 @@ def _agent_interactive(
             console.print(f"[red]Comando desconocido: /{cmd}[/red]")
             continue
 
-        # Tarea → loop agéntico (encadena el contexto)
+        # Tarea → loop agéntico con continuación automática (presupuesto extra)
         try:
             client = build_client(current_profile)
         except ConfigError as e:
             console.print(f"[red]{e}[/red]")
             continue
 
-        console.print("[dim]⏳ Rinari está trabajando…[/dim]")
-        result = run_agent(
-            task=line.strip(),
-            client=client,
-            cwd=str(workdir),
-            auto_approve=approve,
-            max_iterations=max_iterations,
-            render_callback=_agent_on_step,
-            messages=messages,
-            mcp_servers=_load_mcp_servers(),
-            verify_changes=True,
-            persist=True,
-        )
-        messages = result.get("messages", messages)
+        task_line = line.strip()
+        while True:
+            console.print("[dim]⏳ Rinari está trabajando…[/dim]")
+            result = run_agent(
+                task=task_line,
+                client=client,
+                cwd=str(workdir),
+                auto_approve=approve,
+                max_iterations=max_iterations,
+                render_callback=_agent_on_step,
+                messages=messages,
+                mcp_servers=_load_mcp_servers(),
+                verify_changes=True,
+                persist=True,
+            )
+            messages = result.get("messages", messages)
 
-        if result["status"] == "done" and result.get("final"):
-            console.print(Markdown(result["final"]))
-        elif result["status"] == "max_iterations":
-            last_step = result["steps"][-1] if result["steps"] else {}
-            last_desc = last_step.get("name") or last_step.get("type", "")
-            console.print(
-                f"[yellow]⚠️ Presupuesto agotado: {result['iterations']} iteraciones, "
-                f"{result.get('tool_count', 0)} tools ejecutadas.[/yellow]"
-            )
-            if last_desc:
-                console.print(f"[dim]Último paso: {last_desc}[/dim]")
-            console.print(
-                "[dim]Sigue con otra tarea para continuar, o usa "
-                "[bold]--max-iterations 25[/bold] para tareas grandes.[/dim]"
-            )
-        else:
+            if result["status"] == "done" and result.get("final"):
+                console.print(Markdown(result["final"]))
+                break
+            if result["status"] == "max_iterations":
+                last_step = result["steps"][-1] if result["steps"] else {}
+                last_desc = last_step.get("name") or last_step.get("type", "")
+                console.print(
+                    f"[yellow]⚠️ Presupuesto agotado: {result['iterations']} iteraciones, "
+                    f"{result.get('tool_count', 0)} tools ejecutadas.[/yellow]"
+                )
+                if last_desc:
+                    console.print(f"[dim]Último paso: {last_desc}[/dim]")
+                # Continuación: el contexto se conserva en messages
+                try:
+                    answer = console.input(
+                        f"[bold]¿Continuar con {max_iterations} iteraciones más? [y/N]: [/bold]"
+                    ).strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    answer = ""
+                if answer in ("y", "yes", "s", "si", "sí"):
+                    continue
+                console.print("[dim]Tarea pausada — sigue con otra o retómala luego.[/dim]")
+                break
             console.print("[red]❌ El agente falló en esta tarea.[/red]")
+            break
 
 
 @app.command()
@@ -1075,7 +1093,7 @@ def agent(
     profile: str = typer.Option("default", "--profile", "-p", help="Perfil de configuración"),
     cwd: Path = typer.Option(".", "--cwd", help="Directorio de trabajo (repo)"),
     auto_approve: bool = typer.Option(False, "--auto-approve", "-y", help="Aprobar comandos automáticamente"),
-    max_iterations: int = typer.Option(10, "--max-iterations", help="Máximo de iteraciones del loop"),
+    max_iterations: int | None = typer.Option(None, "--max-iterations", help="Máximo de iteraciones del loop (default: 25, o max_iterations del perfil)"),
     plan: bool = typer.Option(False, "--plan", help="Presenta un plan y pide aprobación antes de ejecutar"),
     no_verify: bool = typer.Option(False, "--no-verify", help="Desactiva la verificación automática de tests tras editar"),
     no_persist: bool = typer.Option(False, "--no-persist", help="No guardar la sesión en el historial"),
@@ -1083,6 +1101,16 @@ def agent(
 ):
     """Modo agente de código: ejecuta la tarea con tool calling (o modo interactivo)."""
     from rinari.agent.loop import run_agent
+
+    # Resolver presupuesto: flag > perfil (config.toml) > default 25
+    if max_iterations is None:
+        from rinari.config import load_config
+
+        cfg = load_config()
+        try:
+            max_iterations = int(cfg.get_profile(profile).extra.get("max_iterations", 25))
+        except Exception:  # noqa: BLE001
+            max_iterations = 25
 
     if task is None:
         _agent_interactive(
@@ -1165,7 +1193,6 @@ def main_default(
             profile=profile,
             cwd=cwd,
             auto_approve=auto_approve,
-            max_iterations=10,
         )
 
 
