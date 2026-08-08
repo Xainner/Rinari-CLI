@@ -103,6 +103,7 @@ def _agent_interactive(
     cwd: Path = Path("."),
     auto_approve: bool = False,
     max_iterations: int | None = None,
+    sandbox: str = "workspace-write",
 ) -> None:
     """REPL agéntico tipo Codex/Claude CLI: das tareas y Rinari trabaja con
     tools, manteniendo el contexto del repo entre turnos."""
@@ -174,7 +175,10 @@ def _agent_interactive(
 
     while True:
         try:
-            line = console.input(f"[bold magenta]rinari@{repo_name}[/bold magenta] > ")
+            sandbox_tag = {"read-only": "[cyan]🔒[/cyan]", "danger-full-access": "[red]⚠️[/red]"}.get(sandbox, "")
+            line = console.input(
+                f"[bold magenta]rinari@{repo_name}[/bold magenta]{sandbox_tag} > "
+            )
         except (EOFError, KeyboardInterrupt):
             console.print("\n[dim]Adiós[/dim]")
             break
@@ -234,6 +238,7 @@ def _agent_interactive(
                 cwd=str(workdir),
                 auto_approve=approve,
                 max_iterations=max_iterations,
+                sandbox=sandbox,
                 render_callback=_agent_on_step,
                 messages=messages,
                 mcp_servers=_load_mcp_servers(),
@@ -1093,6 +1098,7 @@ def agent(
     profile: str = typer.Option("default", "--profile", "-p", help="Perfil de configuración"),
     cwd: Path = typer.Option(".", "--cwd", help="Directorio de trabajo (repo)"),
     auto_approve: bool = typer.Option(False, "--auto-approve", "-y", help="Aprobar comandos automáticamente"),
+    sandbox: str = typer.Option("workspace-write", "--sandbox", help="Nivel de permisos: read-only | workspace-write | danger-full-access"),
     max_iterations: int | None = typer.Option(None, "--max-iterations", help="Máximo de iteraciones del loop (default: 25, o max_iterations del perfil)"),
     plan: bool = typer.Option(False, "--plan", help="Presenta un plan y pide aprobación antes de ejecutar"),
     no_verify: bool = typer.Option(False, "--no-verify", help="Desactiva la verificación automática de tests tras editar"),
@@ -1118,6 +1124,7 @@ def agent(
             cwd=cwd,
             auto_approve=auto_approve,
             max_iterations=max_iterations,
+            sandbox=sandbox,
         )
         return
 
@@ -1138,6 +1145,7 @@ def agent(
         cwd=str(_normalize_cwd(cwd)),
         auto_approve=auto_approve,
         max_iterations=max_iterations,
+        sandbox=sandbox,
         render_callback=None if output == "json" else _agent_on_step,
         mcp_servers=_load_mcp_servers(),
         plan_first=plan,

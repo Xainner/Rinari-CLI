@@ -21,6 +21,19 @@ from rinari.agent.tools import ToolRegistry, is_dangerous
 from rinari.client import LLMError
 from rinari.history import History
 
+# Tools de solo lectura: las únicas permitidas en sandbox "read-only"
+READ_ONLY_TOOLS = {
+    "read_file",
+    "search_files",
+    "list_dir",
+    "git_status",
+    "git_diff",
+    "git_log",
+    "git_branch",
+    "web_search",
+    "github_list_prs",
+}
+
 
 class AgentError(Exception):
     pass
@@ -93,6 +106,7 @@ def run_agent(
     plan_approver: Callable[[str, str], bool] | None = None,
     history=None,
     hooks: dict | None = None,
+    sandbox: str = "workspace-write",
 ) -> dict:
     """Ejecuta la tarea con el loop agéntico. Devuelve {status, final, steps, iterations, messages}.
 
@@ -107,6 +121,12 @@ def run_agent(
     verify_changes: tras cada edit_file/write_file, ejecuta run_tests.
     plan_first: la primera respuesta se trata como plan y requiere aprobación
                 antes de continuar (plan_approver recibe (task, plan)).
+    sandbox: nivel de permisos (estilo Codex):
+        - "read-only": solo lectura (read_file, search, list_dir, git log/status/
+          diff/branch, web_search, list PRs). write/edit/command se deniegan.
+        - "workspace-write" (default): edita el repo; comandos peligrosos y
+          push/pull/PRs piden aprobación (approver o auto_approve).
+        - "danger-full-access": todo sin pedir aprobación.
     """
     registry = registry or ToolRegistry(delegate=True)
     approver = approver or _default_approver
@@ -333,10 +353,31 @@ def run_agent(
                 render_callback({"type": "tool_call", "name": name, "arguments": args})
 
             allowed = auto_approve
-            if not allowed and name == "run_command" and is_dangerous(args.get("command", "")):
-                allowed = approver(name, args, cwd)
-            elif not allowed:
-                allowed = True  # read/write/search son seguros
+            if sandbox == "danger-full-access":
+                allowed = True
+            elif sandbox == "read-only":
+                allowed = name in READ_ONLY_TOOLS
+                if not allowed:
+                    result = {"ok": False, "error": "Sandbox read-only: la tool necesita permisos de escritura"}
+                    steps.append({"type": "tool_denied", "name": name, "arguments": args})
+                    if render_callback:
+                        render_callback({"type": "tool_denied", "name": name, "arguments": args})
+                    tool_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.get("id", ""),
+                            "content": json.dumps(result, ensure_ascii=False),
+                        }
+                    )
+                    continue
+            elif name == "run_command" and is_dangerous(args.get("command", "")):
+                allowed = allowed or approver(name, args, cwd)
+            elif name in ("git_push", "git_pull", "git_checkout", "git_stash", "github_create_pr"):
+                # cambian el estado del remoto/repo de forma sensible
+                allowed = allowed or approver(name, args, cwd)
+            else:
+                # workspace-write: edición normal del repo sin aprobación
+                allowed = True
 
             if not allowed:
                 result = {"ok": False, "error": "Comando denegado por el usuario"}
