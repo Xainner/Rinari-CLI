@@ -1,17 +1,17 @@
 <div align="center">
 
-<img src="readme-img.png" alt="Rinari — tu waifu de la terminal" width="420"/>
+<img src="readme-img.png" alt="Rinari — tu maid de la terminal" width="420"/>
 
-# Rinari CLI (✿◠‿◠)
+# Rinari CLI
 
-### Tu asistente personal de IA en la terminal — tsundere por defecto, competente por necesidad.
+### Tu asistente personal de IA en la terminal — atenta, cariñosa y demoledoramente eficiente.
 
-**REPL de chat · Agente de código autónomo · Multi-provider · Tools de git · Búsqueda web · MCP**
+**REPL de chat · Agente de código autónomo · Multi-provider · Control de git completo · MCP · Búsqueda web**
 
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![uv](https://img.shields.io/badge/uv-0.12-8B5CF6?style=for-the-badge&logo=python&logoColor=white)](https://docs.astral.sh/uv/)
 [![License](https://img.shields.io/badge/License-MIT-22c55e?style=for-the-badge&logo=opensourceinitiative&logoColor=white)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-199%20passed-22c55e?style=for-the-badge&logo=pytest&logoColor=white)](tests/)
+[![Tests](https://img.shields.io/badge/Tests-259%20passed-22c55e?style=for-the-badge&logo=pytest&logoColor=white)](tests/)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-ec4899?style=for-the-badge&logo=github&logoColor=white)](https://github.com/Xainner/Rinari-CLI/pulls)
 
 </div>
@@ -22,13 +22,13 @@
 
 **Rinari** es una CLI con LLM que se conecta a **tu modelo favorito** — local (llama.cpp, Ollama, vLLM) o en la nube (OpenAI, Anthropic, OpenRouter, DeepSeek, Gemini, OpenCode Zen y cualquier endpoint OpenAI-compatible) — y te da:
 
-- 💬 **Chat interactivo** con streaming, historial y personalidad
-- 🤖 **Modo agente** tipo Codex/Claude CLI: das tareas y Rinari explora, edita, ejecuta tests y commitea
-- 🛠️ **10+ herramientas nativas**: git (status/diff/commit), edición quirúrgica de archivos, búsqueda de código, ejecución de tests, búsqueda web
+- 💬 **Chat interactivo** con streaming en vivo, sesiones reanudables (estilo Hermes) y personalidad
+- 🤖 **Modo agente** tipo Codex/Claude CLI: das tareas y Rinari explora, edita, ejecuta tests, commitea y pushea
+- 🛠️ **18+ herramientas nativas**: control de git completo (status, diff, log, branch, stash, checkout, pull, push), edición quirúrgica de archivos, búsqueda de código, ejecución de tests, búsqueda web
 - 🔌 **Soporte MCP** (Model Context Protocol): conecta servidores externos como tools dinámicas
 - 🔒 **Privacidad**: con modelos locales, tus prompts nunca salen de tu red
 
-> *"¡No es por ti! ¡Solo... construí esto porque quería."* — Rinari, probablemente
+> *"Tu código no se va a arreglar solo… bueno, técnicamente ahora sí, pero con cariño."* — Rinari, tu maid de la terminal
 
 ## 🚀 Instalación
 
@@ -45,45 +45,52 @@ uv tool install .
 
 ## ⚙️ Primeros pasos (setup wizard)
 
-El comando `rinari setup` te guía paso a paso: eliges el proveedor, te pide (o autocompleta) el endpoint, lee la API key desde la variable de entorno del proveedor si existe, conecta y lista los **modelos reales** de tu endpoint, y crea el perfil:
+`rinari setup` te guía paso a paso **empezando por tu nombre** — así Rinari te llama por tu nombre en todas partes (el nombre se guarda en `~/.rinari/config.toml`):
 
 ```bash
 rinari setup --name mi-perfil
 ```
 
 ```
+¿Cómo te llamas?: Xainner
+Guardado: te llamarás Xainner para Rinari.
+
+Nombre del perfil [default: mi-perfil]:
 ¿Qué proveedor usas?
   0 → openai — OpenAI API oficial
   1 → anthropic — Anthropic Claude (API nativa)
   2 → openrouter — OpenRouter (multi-modelo)
   3 → opencode — OpenCode Zen (openai-compatible)
-  4 → deepseek — DeepSeek
-  5 → gemini — Google Gemini (compat OpenAI)
-  6 → local — Local (llama.cpp / Ollama / vLLM, sin key)
-  7 → custom — Endpoint OpenAI-compatible propio
+  4 → opencode-go — OpenCode Zen Go (openai-compatible)
+  5 → deepseek — DeepSeek
+  6 → gemini — Google Gemini (compat OpenAI)
+  7 → local — Local (llama.cpp / Ollama / vLLM, sin key)
+  8 → custom — Endpoint OpenAI-compatible propio
 
 Elige el número del provider: 1
 Endpoint [default: https://api.anthropic.com/v1]:
-...
 ✓ Perfil 'mi-perfil' listo: anthropic → https://api.anthropic.com/v1 → claude-sonnet-4
   Pruébalo con: rinari run "hola" --profile mi-perfil
 ```
 
-Cada proveedor conoce su endpoint por defecto y su variable de entorno de API key (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `OPENCODE_API_KEY`, `DEEPSEEK_API_KEY`, `GEMINI_API_KEY`, …). Los providers `openai`, `openrouter`, `opencode`, `deepseek`, `gemini`, `local` y `custom` hablan OpenAI-compatible; `anthropic` usa la API nativa de Anthropic (`/v1/messages`), y Rinari traduce todo internamente.
+Cada proveedor conoce su endpoint por defecto y su variable de entorno de API key (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `OPENCODE_API_KEY`, `DEEPSEEK_API_KEY`, `GEMINI_API_KEY`, …). Los providers `openai`, `openrouter`, `opencode`, `opencode-go`, `deepseek`, `gemini`, `local` y `custom` hablan OpenAI-compatible; `anthropic` usa la API nativa de Anthropic (`/v1/messages`), y Rinari traduce todo internamente.
 
 ## ⚙️ Configuración manual
 
 Los perfiles viven en `~/.rinari/config.toml` — cada uno apunta a un endpoint:
 
 ```toml
+[user]
+name = "Xainner"                          # Rinari te llama por tu nombre
+
 [default]
-base_url = "http://localhost:8080/v1"   # endpoint local OpenAI-compatible
+base_url = "http://localhost:8080/v1"     # endpoint local OpenAI-compatible
 model = "mi-modelo-local"
 temperature = 0.7
 
 [profile.nube]
 base_url = "https://api.openai.com/v1"
-api_key = "${OPENAI_API_KEY}"            # expande variables de entorno
+api_key = "${OPENAI_API_KEY}"             # expande variables de entorno
 model = "gpt-4o"
 provider = "openai"
 
@@ -106,6 +113,24 @@ args = ["/path/al/server.py"]
 
 ## 🎮 Uso
 
+### Chat interactivo — sesiones estilo Hermes
+
+```bash
+rinari chat                    # si hay sesiones previas, te deja elegir
+rinari chat --new              # fuerza sesión nueva
+rinari chat --resume 3         # continúa la sesión 3 directo
+```
+
+```
+Sesiones recientes:
+  1 · 2026-08-07 23:46:33 · 4 msgs — di hola
+  [Enter] = sesión nueva
+
+¿Continuar sesión? (número o Enter):
+```
+
+Streaming **token a token en vivo**, historial completo, comandos `/new`, `/model`, `/exit`, `/help`.
+
 ### Modo agente interactivo (como codex/claude)
 
 ```bash
@@ -121,12 +146,15 @@ rinari@mi-proyecto > /exit
 ```
 
 Comandos: `/new` (nuevo contexto), `/model <perfil>`, `/approve` (toggle aprobación), `/exit`, `/help`.
+El agente **verifica automáticamente** los tests tras cada edición y **persiste cada sesión** en el historial.
 
-### Chat interactivo
+### Agente one-shot
 
 ```bash
-rinari chat --profile nube
-rinari chat --resume 3          # continúa la sesión 3
+rinari agent "refactoriza el módulo auth" --cwd ~/mi-proyecto
+rinari agent "arregla el test que falla" -y --max-iterations 15
+rinari agent "crea el endpoint de login" --plan     # pide aprobación del plan antes de tocar nada
+rinari agent "task" --no-verify                     # sin tests automáticos
 ```
 
 ### One-shot para scripts
@@ -136,17 +164,11 @@ rinari run "traduce esto al inglés"
 echo "hola" | rinari run "resume esto"
 ```
 
-### Agente one-shot
-
-```bash
-rinari agent "refactoriza el módulo auth" --cwd ~/mi-proyecto
-rinari agent "arregla el test que falla" -y --max-iterations 15
-```
-
 ### Gestión de modelos y diagnóstico
 
 ```bash
 rinari models              # modelos del endpoint + modelo activo del perfil
+rinari model               # selector interactivo (estilo hermes model)
 rinari model set gpt-4o    # cambia el modelo del perfil activo
 rinari doctor              # diagnostica TODOS los perfiles (env rotas, endpoints caídos, modelos)
 ```
@@ -161,12 +183,23 @@ $ rinari doctor
 ✗ Hay perfiles con problemas. Revisa arriba o usa `rinari setup` para corregir.
 ```
 
+### Historial de conversaciones
+
+```bash
+rinari history                     # lista sesiones con preview
+rinari history show 3              # conversación completa en markdown
+rinari history rm 3                # borra (pide confirmación)
+rinari history export 3            # guarda conversacion-3.md
+rinari history export 3 -o notas.md
+```
+
 ### Mantenimiento
 
 ```bash
-rinari identity    # quién soy (✿◠‿◠)
-rinari update      # git pull del repo
-rinari sync        # uv sync (reinstala deps)
+rinari identity    # quién soy
+rinari version     # versión instalada
+rinari update      # git pull + uv sync del repo
+rinari sync        # reinstala paquete y dependencias
 ```
 
 ## 🛠️ Herramientas del agente
@@ -179,37 +212,46 @@ rinari sync        # uv sync (reinstala deps)
 | `edit_file` | Edición quirúrgica old→new con detección de ambigüedad |
 | `search_files` | Regex en el proyecto (ignora .git/node_modules/.venv) |
 | `list_dir` | Lista directorios |
-| `git_status` | Estado del repo: rama, limpio, cambios |
-| `git_diff` | Diff de cambios (incluye untracked) |
+| `git_status` | Rama, ahead/behind, staged/unstaged/untracked separados con conteos |
+| `git_diff` | Diff por secciones (staged/unstaged/untracked), sin mutar el index, filtro por archivo |
+| `git_log` | Historial reciente: hash, mensaje, autor, fecha |
+| `git_branch` | Ramas locales con la actual marcada |
+| `git_stash` | push (incluye untracked) / list / pop |
+| `git_checkout` | Cambia de rama o la crea con `-b` |
+| `git_pull` / `git_push` | Sincroniza con el remoto (requieren aprobación) |
 | `git_commit` | `git add -A` + commit (requiere aprobación) |
 | `run_tests` | Detecta y ejecuta pytest/npm test (usa `uv run` en proyectos uv) |
 | `web_search` | Búsqueda web vía DuckDuckGo Lite (sin API key) |
 | `MCP tools` | Cualquier tool expuesta por tus servidores MCP |
 
-**Seguridad:** comandos peligrosos (`rm -rf`, `sudo`, `git push`, `curl|sh`, …) piden aprobación salvo `-y`. Los paths no escapan del `--cwd`.
+**Seguridad:** comandos peligrosos (`rm -rf`, `sudo`, `git push`/`pull`, `git checkout`, `stash push/pop`, `curl|sh`, …) piden aprobación salvo `-y`. Los paths no escapan del `--cwd`.
+
+**Loop agéntico avanzado:** reintenta errores transitorios de la LLM, verifica tests tras cada edición, soporta plan + aprobación previa, y persiste las sesiones.
 
 ## 🏗️ Arquitectura
 
 ```
 src/rinari/
-├── cli.py        # typer entrypoints (chat, run, agent, models, model set, setup, doctor, …)
+├── cli.py        # typer entrypoints (chat, run, agent, models, model, setup, doctor, history, …)
 ├── config.py     # perfiles TOML + ${ENV} expansion + tabla de providers
 ├── client.py     # cliente multi-provider (OpenAI-compatible + Anthropic nativo, streaming SSE)
-├── history.py    # conversaciones SQLite
-├── render.py     # rich: markdown, syntax highlight
+├── history.py    # conversaciones SQLite (sesiones, export)
+├── render.py     # rich: markdown, streaming en vivo, syntax highlight
 ├── ui.py         # dashboard de bienvenida (logo, health check, estado git)
 ├── repl.py       # lógica del REPL (ChatSession, comandos /)
+├── identity.py   # personalidad: SOUL.md canónico + prompts de chat/agente
+├── assets/soul.md# la voz de Rinari (editable, se aplica sin reinstalar)
 ├── mcp.py        # cliente MCP (stdio) para servidores externos
 └── agent/
-    ├── loop.py   # loop agéntico: model → tools → observe (con bridge MCP)
+    ├── loop.py   # loop agéntico: model → tools → observe (retry, verify, plan, persist)
     ├── tools.py  # tool registry + detección de comandos peligrosos
-    └── prompt.py # system prompt de Rinari (modo profesional)
+    └── prompt.py # compone el prompt del agente desde identity
 ```
 
 ## 🧪 Tests
 
 ```bash
-uv run pytest    # 199 tests, sin red (httpx MockTransport)
+uv run pytest    # 259 tests, sin red (httpx MockTransport)
 ```
 
 ## 🌿 Ramas de feature
@@ -219,9 +261,11 @@ uv run pytest    # 199 tests, sin red (httpx MockTransport)
 | `feature-tools` | ✅ mergeada — tools de git, edit_file, run_tests |
 | `feature-mcp` | ✅ mergeada — web_search, servidores MCP dinámicos |
 | `feature-ui` | ✅ mergeada — dashboard, streaming en vivo |
-| `feature-agent` | 🌿 activa — planning explícito, retry, persistencia |
-| `feature-history` | 🌿 activa — sesiones, export |
-| `feature-config` | 🌿 activa — setup wizard multi-provider, `rinari doctor`, gestión de modelos |
+| `feature-config` | ✅ mergeada — setup wizard multi-provider, `rinari doctor`, gestión de modelos |
+| `feature-personality` | ✅ mergeada — Rinari maid moderna, SOUL.md, setup pregunta el nombre |
+| `feature-history` | ✅ mergeada — `rinari history`, selector de sesiones en chat |
+| `feature-git` | ✅ mergeada — control de git completo del agente |
+| `feature-agent` | ✅ mergeada — loop avanzado: retry, verify, plan, persist |
 
 Ver [BRANCHING.md](BRANCHING.md) para la estrategia completa.
 
@@ -233,6 +277,6 @@ MIT — ver [LICENSE](LICENSE).
 
 <div align="center">
 
-**Hecho con 💜 y mucho "¡No es por ti! ¡Solo...!"**
+**Hecho con 💜 y muchas tazas de té servidas por una maid muy eficiente.**
 
 </div>
