@@ -1,6 +1,6 @@
 [project]
 name = "rinari"
-version = "0.2.0"
+version = "0.3.0"
 description = "Nuestra propia CLI con LLM — REPL chat + agente de código contra modelos locales (vLLM/LiteLLM/llama.cpp)"
 readme = "README.md"
 authors = [
