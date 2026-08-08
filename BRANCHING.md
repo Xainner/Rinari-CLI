@@ -11,7 +11,7 @@ verificable.
 | `feature-tools` | Ampliar el tool registry del agente | ✅ **MERGEADA a main** (git status/diff/commit, edit_file, run_tests con detección uv) |
 | `feature-ui` | Interfaz y rendering | ✅ **MERGEADA a main** (logo ASCII de Rinari, dashboard con latencia/tools, streaming en vivo del agente) |
 | `feature-agent` | Loop agéntico avanzado | 🌿 activa (planificación explícita, verificación automática, retry, persistencia de contexto) |
-| `feature-history` | Historial y sesiones | listar/borrar sesiones, resume del agente, exportar conversaciones |
+| `feature-history` | Historial y sesiones | ✅ **MERGEADA a main** (`rinari history` listar/ver/borrar/exportar sesiones) |
 | `feature-config` | Configuración | ✅ **MERGEADA a main** (wizard `rinari setup` multi-provider, `rinari doctor`, gestión de modelos, README genérico) |
 | `feature-personality` | Personalidad | ✅ **MERGEADA a main** (Rinari reconstruida: maid moderna con humor seco, SOUL.md canónico, setup pregunta el nombre, emojis sí / kaomoji no) |
 | `feature-mcp` | Integración MCP + búsqueda web | ✅ **MERGEADA a main** (web_search DuckDuckGo, servidores MCP como tools dinámicas) |
