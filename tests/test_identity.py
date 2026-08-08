@@ -55,12 +55,13 @@ def test_agent_prompt_keeps_personality():
 
 
 def test_no_kaomoji_anywhere():
-    """El SOUL prohíbe explícitamente emoticones y kaomoji."""
+    """El SOUL prohíbe kaomoji pero permite emojis normales."""
     chat = build_chat_prompt()
     assert "kaomoji" in chat.lower()
-    assert "emoticones" in chat.lower()
-    # la regla es negativa: cero adornos visuales
-    assert "sin símbolos" in chat or "cero" in chat.lower()
+    assert "emojis" in chat.lower()
+    # la regla distingue: emojis normales sí, kaomoji japoneses no
+    assert "kaomoji" in chat.lower()
+    assert "nunca kaomoji" in chat.lower() or "nada de kaomoji" in chat.lower()
 
 
 def test_prompt_composable_identically():
