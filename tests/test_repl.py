@@ -2,7 +2,8 @@
 
 import pytest
 
-from rinari.repl import SYSTEM_PROMPT, ChatSession, parse_command, run_command
+from rinari.identity import build_chat_prompt
+from rinari.repl import ChatSession, parse_command, run_command
 
 
 def test_parse_command_new():
@@ -38,7 +39,7 @@ def test_run_new_resets_session(tmp_path):
     session = ChatSession(history=None, profile="casa")
     session.messages = [{"role": "user", "content": "viejo"}]
     run_command("new", "", session)
-    assert session.messages == [{"role": "system", "content": SYSTEM_PROMPT}]
+    assert session.messages == [{"role": "system", "content": build_chat_prompt()}]
 
 
 def test_run_model_switches_profile():

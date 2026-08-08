@@ -138,11 +138,12 @@ def test_sync_runs_uv_sync(monkeypatch):
 
 
 def test_system_prompt_has_rinari_identity():
-    from rinari.repl import SYSTEM_PROMPT
+    from rinari.identity import build_chat_prompt
 
-    assert "Rinari" in SYSTEM_PROMPT
-    assert "tsundere" in SYSTEM_PROMPT.lower()
-    assert "NUNCA digas" in SYSTEM_PROMPT
+    prompt = build_chat_prompt()
+    assert "Rinari" in prompt
+    assert "maid" in prompt.lower()
+    assert "NUNCA digas" in prompt or "nunca digas" in prompt.lower()
 
 
 def test_agent_command_runs_loop(monkeypatch, tmp_path):

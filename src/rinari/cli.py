@@ -431,9 +431,14 @@ def run(
     temperature: float | None = typer.Option(None, "--temperature", help="Override de temperatura"),
 ):
     """One-shot: envía un prompt y escribe la respuesta a stdout (para pipes)."""
+    from rinari.identity import build_chat_prompt
+
     client, profile_obj = _build_client(profile)
     temp = temperature if temperature is not None else profile_obj.temperature
-    messages = [{"role": "user", "content": prompt}]
+    messages = [
+        {"role": "system", "content": build_chat_prompt()},
+        {"role": "user", "content": prompt},
+    ]
     try:
         if stream:
             for event in client.chat_stream(messages, temperature=temp):
