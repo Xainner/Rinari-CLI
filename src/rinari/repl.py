@@ -36,6 +36,7 @@ class ChatSession:
         self.messages: list[dict] = []
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
+        self.tool_calls = 0
         self._init_messages()
 
     @property
@@ -78,12 +79,14 @@ def run_command(
     session: ChatSession,
     config_dir=None,
     compact_client=None,
+    cwd: str | None = None,
 ) -> str | None:
     """Ejecuta un comando de barra. Devuelve mensaje de respuesta (o None).
 
     config_dir: directorio del config.toml (para /model <modelo>); si es
     None, /model solo cambia de perfil (compat hacia atrás).
     compact_client: cliente LLM con .chat() para /compact (resumir contexto).
+    cwd: directorio de trabajo (para /init).
     """
     cmd = cmd.lower()
     if cmd == "new":
@@ -137,13 +140,140 @@ def run_command(
             f"[bold]{session.total_completion_tokens}[/bold] completion "
             f"= [bold]{session.total_tokens}[/bold] tokens totales"
         )
+    if cmd == "rewind":
+        return _cmd_rewind(session, args)
+    if cmd == "status":
+        from rinari.config import load_config
+
+        model = "?"
+        try:
+            cfg = load_config(config_dir)
+            cur = cfg.get_profile(session.profile)
+            model = cur.model
+        except Exception:  # noqa: BLE001
+            pass
+        return (
+            f"📊 Sesión: perfil [bold]{session.profile}[/bold] · modelo [bold]{model}[/bold]\n"
+            f"   Mensajes: {len(session.messages)} · tools: {getattr(session, 'tool_calls', 0)}\n"
+            f"   Tokens: {session.total_prompt_tokens} prompt + "
+            f"{session.total_completion_tokens} completion "
+            f"= {session.total_tokens} totales"
+        )
+    if cmd == "init":
+        from pathlib import Path
+
+        return _cmd_init(str(Path(cwd) if cwd else Path.cwd()))
     if cmd == "help":
         return (
             "Comandos: /new (nueva conversación), /model <perfil o modelo>, "
-            "/compact (resumir contexto), /todos (tareas), /save, /exit. "
+            "/compact (resumir contexto), /todos (tareas), /cost (tokens), "
+            "/rewind [N] (volver N pasos atrás), /undo (deshacer edición), "
+            "/status (dashboard de sesión), /init (generar RINARI.md), /save, /exit. "
             "Escribe tu mensaje para chatear."
         )
     raise ValueError(f"Comando desconocido: /{cmd}")
+
+
+def _cmd_init(cwd: str) -> str:
+    """Genera RINARI.md analizando el repo (estilo codex /init).
+
+    Detecta el stack (pyproject.toml / package.json / Cargo.toml / go.mod),
+    el framework de tests, y el propósito desde el README. No sobrescribe
+    un RINARI.md existente (usa /init --force para regenerarlo).
+    """
+    from pathlib import Path
+
+    root = Path(cwd)
+    target = root / "RINARI.md"
+    if target.exists():
+        return "ℹ️ Ya existe RINARI.md — no se sobrescribe (usa /init --force)."
+
+    name = root.name
+    sections: list[str] = ["# RINARI", ""]
+    sections.append(f"Proyecto: {name}")
+
+    # Stack de Python
+    pyproject = root / "pyproject.toml"
+    if pyproject.exists():
+        import tomllib
+
+        try:
+            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+            proj = data.get("project", {})
+            proj_name = proj.get("name") or name
+            deps = proj.get("dependencies", [])
+            sections.append("")
+            sections.append("## Stack")
+            sections.append(f"- Python (proyecto: {proj_name})")
+            if deps:
+                sections.append(f"- Dependencias: {', '.join(d[:40] for d in deps[:8])}")
+            if (root / "tests").exists() or any(root.glob("test_*.py")):
+                sections.append("- Tests: pytest")
+        except Exception:  # noqa: BLE001
+            sections.append("")
+            sections.append("## Stack")
+            sections.append("- Python")
+
+    # Stack de Node
+    pkg = root / "package.json"
+    if pkg.exists():
+        import json
+
+        try:
+            data = json.loads(pkg.read_text(encoding="utf-8"))
+            sections.append("")
+            sections.append("## Stack")
+            sections.append(f"- Node/JavaScript (proyecto: {data.get('name') or name})")
+            test_script = (data.get("scripts") or {}).get("test", "")
+            if test_script:
+                sections.append(f"- Tests: {test_script}")
+        except Exception:  # noqa: BLE001
+            sections.append("")
+            sections.append("## Stack")
+            sections.append("- Node/JavaScript")
+
+    # Propósito desde el README
+    for readme in ("README.md", "README.rst", "README"):
+        rp = root / readme
+        if rp.exists():
+            first_lines = [l for l in rp.read_text(encoding="utf-8", errors="replace").splitlines() if l.strip()][:6]
+            if first_lines:
+                sections.append("")
+                sections.append("## Propósito")
+                sections.extend(f"- {l.strip()[:100]}" for l in first_lines[:4])
+            break
+
+    sections.append("")
+    sections.append("## Convenciones")
+    sections.append("- _Documenta aquí las reglas del proyecto (tests, estilo, comandos).")
+    sections.append("")
+
+    target.write_text("\n".join(sections), encoding="utf-8")
+    return f"✨ RINARI.md generado: {target.name} — edítalo con las convenciones del proyecto."
+
+
+def _cmd_rewind(session: ChatSession, args: str) -> str:
+    """Vuelve la conversación a un checkpoint anterior (estilo codex /rewind).
+
+    Antes de cada mensaje del usuario se guarda un checkpoint; /rewind [N]
+    restaura el estado N turnos atrás (default 1).
+    """
+    checkpoints = getattr(session, "checkpoints", None)
+    if not checkpoints:
+        raise ValueError("Nada que rebobinar — sin checkpoints de conversación.")
+    try:
+        steps = int(args.strip() or "1")
+    except ValueError:
+        raise ValueError("Uso: /rewind [N] — N = cuántos pasos atrás (default 1)")
+    if steps < 1:
+        raise ValueError("N debe ser >= 1.")
+    if steps > len(checkpoints):
+        raise ValueError(
+            f"Solo hay {len(checkpoints)} checkpoint(s) — no se puede rebobinar {steps}."
+        )
+    for _ in range(steps):
+        session.messages = checkpoints.pop()
+    return f"↩️ Rebobinado {steps} paso(s): la conversación volvió a un punto anterior."
 
 
 def _cmd_compact(session: ChatSession, compact_client) -> str:

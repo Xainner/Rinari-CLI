@@ -471,7 +471,7 @@ def chat(
                 compact_client = None
                 if cmd == "compact":
                     compact_client = _make_client(current)
-                msg = run_command(cmd, args, session, config_dir=cfg.path.parent, compact_client=compact_client)
+                msg = run_command(cmd, args, session, config_dir=cfg.path.parent, compact_client=compact_client, cwd=str(Path.cwd()))
                 if msg:
                     console.print(msg)
                 if cmd == "model":
@@ -502,6 +502,10 @@ def chat(
                 continue
 
         # Mensaje normal → chat
+        # checkpoint para /rewind: estado antes del turno del usuario
+        if not hasattr(session, "checkpoints"):
+            session.checkpoints = []
+        session.checkpoints.append(list(session.messages))
         session.add_user_message(line.strip())
         if session.session_id is None and history is not None:
             session.session_id = history.create_session(profile=session.profile)

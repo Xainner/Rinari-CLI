@@ -27,6 +27,55 @@ class ToolError(ValueError):
     pass
 
 
+# Patrones de archivos sensibles: nunca se leen ni escriben (tokens, keys, certs)
+_SECRET_PATTERNS = (
+    ".env",
+    ".env.*",
+    "*.pem",
+    "*.key",
+    "*.p12",
+    "*.pfx",
+    "id_rsa",
+    "id_ed25519",
+    "id_dsa",
+    "credentials.json",
+    "credentials.toml",
+    "service_account*.json",
+    "*.secret",
+    "*.token",
+    "secrets.yml",
+    "secrets.yaml",
+    "vault.yml",
+    "vault.yaml",
+)
+_SECRET_DIRS = (".ssh", ".gnupg", "secrets", "keys")
+
+
+def is_secret_path(path: Path) -> bool:
+    """¿Es un archivo sensible (env, keys, certs, credenciales)?"""
+    import fnmatch
+
+    name = path.name
+    low = name.lower()
+    for pattern in _SECRET_PATTERNS:
+        if fnmatch.fnmatch(low, pattern.lower()):
+            return True
+    # directorio sensible en cualquier nivel del path
+    parts = {p.lower() for p in path.parts}
+    if parts & set(_SECRET_DIRS):
+        return True
+    return False
+
+
+def _guard_secret(path: Path) -> None:
+    """Lanza ToolError si el path es un archivo sensible."""
+    if is_secret_path(path):
+        raise ToolError(
+            f"Acceso bloqueado: '{path.name}' es un archivo sensible "
+            "(env/keys/certs). Rinari nunca lee ni escribe secrets."
+        )
+
+
 def _shell_for_platform() -> str:
     """Devuelve el shell correcto para ejecutar comandos.
 
@@ -121,6 +170,10 @@ def run_command(args: dict, cwd: str) -> dict:
 
 def read_file(args: dict, cwd: str) -> dict:
     path = _resolve(cwd, args.get("path", ""))
+    try:
+        _guard_secret(path)
+    except ToolError as e:
+        return {"ok": False, "error": str(e)}
     max_lines = int(args.get("max_lines", 500))
     if not path.is_file():
         return {"exists": False, "error": f"Archivo no existe: {args.get('path')}"}
@@ -138,6 +191,10 @@ def read_file(args: dict, cwd: str) -> dict:
 
 def write_file(args: dict, cwd: str) -> dict:
     path = _resolve(cwd, args.get("path", ""))
+    try:
+        _guard_secret(path)
+    except ToolError as e:
+        return {"ok": False, "error": str(e)}
     content = args.get("content", "")
     backup = None
     if path.is_file():
@@ -214,6 +271,10 @@ def edit_file(args: dict, cwd: str) -> dict:
     - Devuelve la línea donde se aplicó el cambio
     """
     path = _resolve(cwd, args.get("path", ""))
+    try:
+        _guard_secret(path)
+    except ToolError as e:
+        return {"ok": False, "error": str(e)}
     old = args.get("old", "")
     new = args.get("new", "")
     count = int(args.get("count", 1))
