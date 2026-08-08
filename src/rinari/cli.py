@@ -226,6 +226,8 @@ def _agent_interactive(
             render_callback=_agent_on_step,
             messages=messages,
             mcp_servers=_load_mcp_servers(),
+            verify_changes=True,
+            persist=True,
         )
         messages = result.get("messages", messages)
 
@@ -991,6 +993,9 @@ def agent(
     cwd: Path = typer.Option(".", "--cwd", help="Directorio de trabajo (repo)"),
     auto_approve: bool = typer.Option(False, "--auto-approve", "-y", help="Aprobar comandos automáticamente"),
     max_iterations: int = typer.Option(10, "--max-iterations", help="Máximo de iteraciones del loop"),
+    plan: bool = typer.Option(False, "--plan", help="Presenta un plan y pide aprobación antes de ejecutar"),
+    no_verify: bool = typer.Option(False, "--no-verify", help="Desactiva la verificación automática de tests tras editar"),
+    no_persist: bool = typer.Option(False, "--no-persist", help="No guardar la sesión en el historial"),
 ):
     """Modo agente de código: ejecuta la tarea con tool calling (o modo interactivo)."""
     from rinari.agent.loop import run_agent
@@ -1022,6 +1027,9 @@ def agent(
         max_iterations=max_iterations,
         render_callback=_agent_on_step,
         mcp_servers=_load_mcp_servers(),
+        plan_first=plan,
+        verify_changes=not no_verify,
+        persist=not no_persist,
     )
 
     if result["status"] == "done":
