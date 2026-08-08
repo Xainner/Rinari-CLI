@@ -113,9 +113,15 @@ def read_file(args: dict, cwd: str) -> dict:
 def write_file(args: dict, cwd: str) -> dict:
     path = _resolve(cwd, args.get("path", ""))
     content = args.get("content", "")
+    backup = None
+    if path.is_file():
+        backup = _backup_file(cwd, path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
-    return {"ok": True, "path": str(path.relative_to(Path(cwd).resolve()))}
+    result = {"ok": True, "path": str(path.relative_to(Path(cwd).resolve()))}
+    if backup:
+        result["backup"] = backup
+    return result
 
 
 def search_files(args: dict, cwd: str) -> dict:
@@ -209,12 +215,54 @@ def edit_file(args: dict, cwd: str) -> dict:
         }
 
     new_content = content.replace(old, new, count)
+    backup = None
+    if path.is_file():
+        backup = _backup_file(cwd, path)
     path.write_text(new_content, encoding="utf-8")
 
     # Línea del primer cambio (1-indexed): posición del texto nuevo insertado
     idx = new_content.find(new)
     line = new_content[:idx].count("\n") + 1 if idx >= 0 else 1
-    return {"ok": True, "path": str(path.relative_to(Path(cwd).resolve())), "line": line, "count": count}
+    result = {"ok": True, "path": str(path.relative_to(Path(cwd).resolve())), "line": line, "count": count}
+    if backup:
+        result["backup"] = backup
+    return result
+
+
+def _backup_file(cwd: str, path: Path) -> str:
+    """Copia un archivo a .rinari-undo/ antes de modificarlo. Devuelve la ruta del backup."""
+    import shutil
+    import time
+
+    undo_dir = Path(cwd).resolve() / ".rinari-undo"
+    undo_dir.mkdir(exist_ok=True)
+    # ruta relativa al cwd, con separadores codificados para el nombre
+    rel = path.resolve().relative_to(Path(cwd).resolve())
+    rel_enc = str(rel).replace("\\", "__").replace("/", "__")
+    name = f"{int(time.time() * 1000)}__{rel_enc}"
+    dest = undo_dir / name
+    shutil.copy2(path, dest)
+    return str(dest)
+
+
+def undo_edit(args: dict, cwd: str) -> dict:
+    """Restaura el último backup de .rinari-undo/ del directorio de trabajo."""
+    import shutil
+
+    undo_dir = Path(cwd).resolve() / ".rinari-undo"
+    if not undo_dir.is_dir():
+        return {"ok": False, "error": "No hay ediciones para deshacer (sin backups)"}
+    backups = sorted(undo_dir.iterdir(), key=lambda p: p.name)
+    if not backups:
+        return {"ok": False, "error": "No hay ediciones para deshacer (sin backups)"}
+    latest = backups[-1]
+    rel_enc = latest.name.split("__", 1)[1]
+    rel = rel_enc.replace("__", "/")
+    target = Path(cwd).resolve() / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(latest, target)
+    latest.unlink()  # consumido
+    return {"ok": True, "path": str(target.relative_to(Path(cwd).resolve()))}
 
 
 def run_tests(args: dict, cwd: str) -> dict:

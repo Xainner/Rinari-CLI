@@ -34,7 +34,18 @@ class ChatSession:
         self.profile = profile
         self.session_id = session_id
         self.messages: list[dict] = []
+        self.total_prompt_tokens = 0
+        self.total_completion_tokens = 0
         self._init_messages()
+
+    @property
+    def total_tokens(self) -> int:
+        return self.total_prompt_tokens + self.total_completion_tokens
+
+    def add_usage(self, prompt_tokens: int, completion_tokens: int) -> None:
+        """Acumula tokens usados por una llamada al modelo."""
+        self.total_prompt_tokens += max(0, int(prompt_tokens))
+        self.total_completion_tokens += max(0, int(completion_tokens))
 
     def _init_messages(self) -> None:
         if self.session_id is not None and self.history is not None:
@@ -120,6 +131,12 @@ def run_command(
         return _cmd_compact(session, compact_client)
     if cmd == "todos":
         return _cmd_todos(session, args)
+    if cmd == "cost":
+        return (
+            f"💰 Uso de la sesión: [bold]{session.total_prompt_tokens}[/bold] prompt + "
+            f"[bold]{session.total_completion_tokens}[/bold] completion "
+            f"= [bold]{session.total_tokens}[/bold] tokens totales"
+        )
     if cmd == "help":
         return (
             "Comandos: /new (nueva conversación), /model <perfil o modelo>, "
@@ -199,3 +216,24 @@ def _cmd_todos(session: ChatSession, args: str) -> str:
         mark = "[x]" if t["done"] else "[ ]"
         lines.append(f"  {i}. {mark} {t['text']}")
     return "\n".join(lines)
+
+
+def load_skill(name: str, config_dir=None) -> str | None:
+    """Carga un prompt de ~/.rinari/commands/<name>.md (skills custom).
+
+    Busca primero en config_dir/commands/, luego en ~/.rinari/commands/.
+    Devuelve el contenido del archivo o None si no existe.
+    """
+    from pathlib import Path
+
+    candidates: list[Path] = []
+    if config_dir is not None:
+        candidates.append(Path(config_dir) / "commands" / f"{name}.md")
+    candidates.append(Path.home() / ".rinari" / "commands" / f"{name}.md")
+    for p in candidates:
+        if p.is_file():
+            try:
+                return p.read_text(encoding="utf-8").strip()
+            except OSError:
+                return None
+    return None

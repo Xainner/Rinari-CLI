@@ -449,6 +449,21 @@ def chat(
             except SystemExit:
                 break
             except ValueError as e:
+                # ¿es un skill custom? (~/.rinari/commands/<name>.md)
+                from rinari.repl import load_skill
+
+                skill = load_skill(cmd, config_dir=cfg.path.parent)
+                if skill:
+                    session.add_user_message(skill)
+                    if session.session_id is None and history is not None:
+                        session.session_id = history.create_session(profile=session.profile)
+                        history.append_message(session.session_id, {"role": "system", "content": session.messages[0]["content"]})
+                        history.append_message(session.session_id, session.messages[-1])
+                    console.print(f"[dim]⚡ Skill '{cmd}' cargado: {skill[:60]}…[/dim]")
+                    # cae al flujo de chat normal (envía el prompt del skill)
+                    line = skill
+                    cmd = None
+                    continue
                 console.print(f"[red]{e}[/red]")
                 continue
 
@@ -470,6 +485,8 @@ def chat(
             if acc.text:
                 session.add_assistant_message(acc.text)
                 session.persist()
+                prompt_chars = sum(len(m.get("content") or "") for m in session.messages)
+                session.add_usage(prompt_chars // 4, len(acc.text) // 4)
             else:
                 console.print("[yellow]⚠️ Respuesta vacía del modelo.[/yellow]")
         except LLMError as e:
