@@ -1,5 +1,7 @@
 """Tests de las tools de GitHub del agente (PRs vía API)."""
 
+import sys
+
 import pytest
 
 from rinari.agent.tools import (
@@ -51,6 +53,49 @@ def test_gh_headers_with_token(monkeypatch):
     headers = _gh_headers()
     assert headers["Authorization"] == "Bearer secret-token"
     assert headers["Accept"] == "application/vnd.github+json"
+
+
+def test_shell_for_platform_windows_prefers_git_bash(monkeypatch):
+    """En Windows, usa el bash de Git por ruta (nunca el WSL del PATH)."""
+    import rinari.agent.tools as tools_mod
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.delenv("SHELL", raising=False)
+    shell = tools_mod._shell_for_platform()
+    assert "Git" in shell  # C:\Program Files\Git\bin\bash.exe
+
+
+def test_shell_for_platform_unix_uses_sh(monkeypatch):
+    import rinari.agent.tools as tools_mod
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert tools_mod._shell_for_platform() == "sh"
+
+
+def test_run_command_uses_git_bash_not_path_bash(monkeypatch):
+    """run_command ejecuta con el shell de Git, no con 'bash' del PATH."""
+    import rinari.agent.tools as tools_mod
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.delenv("SHELL", raising=False)
+    captured = {}
+
+    class FakePopen:
+        def __init__(self, cmd, **kwargs):
+            captured["cmd"] = cmd
+            self.returncode = 0
+            self.stdout = None
+            self.stderr = None
+
+        def communicate(self, timeout=None):
+            return ("ok", "")
+
+    monkeypatch.setattr(tools_mod.subprocess, "Popen", FakePopen)
+    result = tools_mod.run_command({"command": "echo hi"}, cwd=".")
+    assert result["exit_code"] == 0
+    shell = captured["cmd"][0]
+    assert "Git" in shell  # nunca System32\bash.exe (WSL)
+    assert "bash.exe" not in shell.lower().replace("git", "") or "git" in shell.lower()
 
 
 def test_create_pr_requires_token(git_repo, monkeypatch):

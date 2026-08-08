@@ -27,6 +27,32 @@ class ToolError(ValueError):
     pass
 
 
+def _shell_for_platform() -> str:
+    """Devuelve el shell correcto para ejecutar comandos.
+
+    Windows: busca el bash de Git (MSYS) POR RUTA — nunca confía en 'bash'
+    del PATH, porque Windows resuelve 'bash' a System32\\bash.exe (WSL),
+    que falla si WSL2 no está habilitado (o es lentísimo).
+    Unix: usa sh.
+    """
+    if sys.platform != "win32":
+        return "sh"
+    candidates = [
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files\Git\usr\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\usr\bin\bash.exe",
+    ]
+    for c in candidates:
+        if Path(c).is_file():
+            return c
+    # fallback: SHELL si es MSYS, o 'bash' (podría ser WSL — mejor que nada)
+    env_shell = os.environ.get("SHELL", "")
+    if env_shell and "git" in env_shell.lower():
+        return env_shell
+    return "bash"
+
+
 def _resolve(cwd: str | Path, path: str) -> Path:
     """Resuelve un path relativo al cwd y valida que no se escape."""
     base = Path(cwd).resolve()
@@ -45,7 +71,7 @@ def run_command(args: dict, cwd: str) -> dict:
     """
     command = args.get("command", "")
     timeout = float(args.get("timeout", 30))
-    shell = os.environ.get("SHELL", "bash" if sys.platform == "win32" else "sh")
+    shell = _shell_for_platform()
     creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
     try:
         proc = subprocess.Popen(
@@ -311,7 +337,7 @@ def run_tests(args: dict, cwd: str) -> dict:
             "error": "No se encontró un framework de tests (pytest/npm). Pasa --command para usar uno custom.",
         }
 
-    shell = os.environ.get("SHELL", "bash" if sys.platform == "win32" else "sh")
+    shell = _shell_for_platform()
     try:
         proc = subprocess.run(
             [shell, "-c", command],
