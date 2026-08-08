@@ -7,6 +7,7 @@ strip_ansi limpia códigos ANSI (útil para salida de comandos).
 from __future__ import annotations
 
 import re
+import sys
 
 from rich.panel import Panel
 
@@ -60,13 +61,17 @@ class DeltaAccumulator:
         events: iterable de str o dicts (los dicts con tool_calls se ignoran).
         """
         console = console or self.console
-        is_tty = console.is_terminal
+        is_tty = console.is_terminal or sys.stdout.isatty()
         if not is_tty:
+            # sin TTY confiable: escribir directo con flush para que cada
+            # delta aparezca en vivo (rich bufferiza sin newline)
             for event in events:
                 if isinstance(event, str):
                     self.add(event)
-                    console.print(event, end="", highlight=False)
-            console.print()
+                    sys.stdout.write(event)
+                    sys.stdout.flush()
+            sys.stdout.write("\n")
+            sys.stdout.flush()
             return
         from rich.live import Live
         from rich.markdown import Markdown
