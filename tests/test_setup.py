@@ -182,7 +182,7 @@ def test_model_picker_lists_and_saves(fake_home, monkeypatch):
                             {"id": "modelo-b"},
                         ])
 
-    result = runner.invoke(app, ["model"], input="1\n")  # elige modelo-b
+    result = runner.invoke(app, ["model"], input="n\n1\n")  # no cambiar provider, elige modelo-b
     assert result.exit_code == 0
     assert "modelo-a" in result.output
     assert "modelo-b" in result.output
@@ -199,7 +199,7 @@ def test_model_picker_custom_name(fake_home, monkeypatch):
     monkeypatch.setattr(cli, "_model_list_models",
                         lambda base_url, api_key, provider="openai": [])
 
-    result = runner.invoke(app, ["model"], input="mi-modelo\n")
+    result = runner.invoke(app, ["model"], input="n\nmi-modelo\n")
     assert result.exit_code == 0
     cfg = load_config(fake_home / ".rinari")
     assert cfg.get_profile("default").model == "mi-modelo"
@@ -216,7 +216,7 @@ def test_model_picker_profile_flag(fake_home, monkeypatch):
                             {"id": "modelo-x"},
                         ])
 
-    result = runner.invoke(app, ["model", "--profile", "casa"], input="0\n")
+    result = runner.invoke(app, ["model", "--profile", "casa"], input="n\n0\n")
     assert result.exit_code == 0
     cfg = load_config(fake_home / ".rinari")
     assert cfg.get_profile("casa").model == "modelo-x"

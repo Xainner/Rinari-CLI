@@ -609,7 +609,50 @@ def _model_picker(
     console.print(f"[bold magenta]Modelos en '{profile}'[/bold magenta]\n")
     console.print(f"  Activo: [bold]{current.model}[/bold]\n")
 
-    models = _model_list_models(current.base_url, current.api_key, current.provider)
+    from rinari.config import PROVIDERS, set_profile_model
+
+    # 0. ¿cambiar de provider? (estilo hermes model)
+    switch = ""
+    try:
+        switch = input("¿Cambiar de provider? [N]: ").strip().lower()
+    except EOFError:
+        switch = ""
+    provider = current.provider or "openai"
+    base_url = current.base_url
+    api_key = current.api_key
+    if switch in ("s", "si", "sí", "y", "yes"):
+        console.print("[bold]¿Qué proveedor usas?[/bold]")
+        console.print(format_providers() + "\n")
+        try:
+            choice = input("Elige el número del provider: ").strip()
+        except EOFError:
+            choice = ""
+        if not choice:
+            console.print("[red]Sin provider elegido. Abortando.[/red]")
+            raise typer.Exit(1)
+        try:
+            provider = pick_provider(choice)
+        except ConfigError as e:
+            console.print(f"[red]{e}[/red]")
+            raise typer.Exit(1)
+        spec = PROVIDERS[provider]
+        default_url = spec["base_url"] or ""
+        try:
+            prompt = f"Endpoint [default: {default_url}]: " if default_url else "Endpoint: "
+            url_in = input(prompt).strip()
+        except EOFError:
+            url_in = ""
+        base_url = url_in or default_url
+        import os
+
+        api_key = os.environ.get(spec["env_var"]) if spec["env_var"] else None
+        if not api_key:
+            try:
+                api_key = input("API key (vacío si no requiere): ").strip() or None
+            except EOFError:
+                api_key = None
+
+    models = _model_list_models(base_url, api_key, provider)
     if models:
         console.print(format_model_list(models))
         try:
@@ -630,7 +673,7 @@ def _model_picker(
             console.print("[red]Sin modelo, no hay nada que hacer. Abortando.[/red]")
             raise typer.Exit(1)
 
-    set_profile_model(cfg.path.parent, profile, model_id)
+    set_profile_model(cfg.path.parent, profile, model_id, base_url=base_url, api_key=api_key, provider=provider)
     console.print(
         f"[green]✓ Modelo de '{profile}' actualizado:[/green] "
         f"[bold]{current.model}[/bold] → [bold]{model_id}[/bold]"
