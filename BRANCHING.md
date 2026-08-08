@@ -10,7 +10,7 @@ verificable.
 |---|---|---|
 | `feature-tools` | Ampliar el tool registry del agente | ✅ **MERGEADA a main** (git status/diff/commit, edit_file, run_tests con detección uv) |
 | `feature-ui` | Interfaz y rendering | ✅ **MERGEADA a main** (logo ASCII de Rinari, dashboard con latencia/tools, streaming en vivo del agente) |
-| `feature-agent` | Loop agéntico avanzado | 🌿 activa (planificación explícita, verificación automática, retry, persistencia de contexto) |
+| `feature-agent` | Loop agéntico avanzado | ✅ **MERGEADA a main** (retry ante errores transitorios, verificación automática de tests, plan + aprobación, persistencia de sesiones) |
 | `feature-history` | Historial y sesiones | ✅ **MERGEADA a main** (`rinari history` listar/ver/borrar/exportar sesiones) |
 | `feature-git` | Control de git | ✅ **MERGEADA a main** (status rico, diff sin hacks, log, branch, stash, checkout, pull/push) |
 | `feature-config` | Configuración | ✅ **MERGEADA a main** (wizard `rinari setup` multi-provider, `rinari doctor`, gestión de modelos, README genérico) |
