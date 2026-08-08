@@ -7,6 +7,7 @@ strip_ansi limpia códigos ANSI (útil para salida de comandos).
 from __future__ import annotations
 
 import re
+import sys
 
 from rich.panel import Panel
 
@@ -49,6 +50,23 @@ class DeltaAccumulator:
             self.console.print(Markdown(text))
         except Exception:
             self.console.print(text)
+
+    def stream_live(self, events, console: Console | None = None) -> None:
+        """Renderiza eventos de streaming EN VIVO (token a token).
+
+        Escribe cada delta directamente a stdout con flush — funciona en
+        cualquier terminal (incluidas consolas Windows/PowerShell donde
+        rich Live no refresca de forma confiable). Al final, nueva línea.
+        events: iterable de str o dicts (los dicts con tool_calls se ignoran).
+        """
+        console = console or self.console
+        for event in events:
+            if isinstance(event, str):
+                self.add(event)
+                sys.stdout.write(event)
+                sys.stdout.flush()
+        sys.stdout.write("\n")
+        sys.stdout.flush()
 
 
 def render_code_block(code: str, language: str = "python", title: str = "Código") -> None:

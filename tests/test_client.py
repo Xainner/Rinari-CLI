@@ -8,7 +8,7 @@ import pytest
 from rinari.client import LLMError, LLMClient
 
 BASE = "http://test.local/v1"
-MODEL = "qwen3.6-27b"
+MODEL = "test-model"
 
 
 def sse_chunk(delta_content: str | None = None, finish: bool = False,
@@ -153,9 +153,9 @@ def test_stream_with_tool_calls_parses_delta():
 
 def test_list_models():
     def handler(request: httpx.Request) -> httpx.Response:
-        body = {"data": [{"id": "qwen3.6-27b"}, {"id": "otro"}]}
+        body = {"data": [{"id": "test-model"}, {"id": "otro"}]}
         return httpx.Response(200, json=body)
 
     client = make_client(mock_transport(handler))
     models = client.list_models()
-    assert models == ["qwen3.6-27b", "otro"]
+    assert models == ["test-model", "otro"]

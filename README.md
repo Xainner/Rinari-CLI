@@ -6,12 +6,12 @@
 
 ### Tu asistente personal de IA en la terminal — tsundere por defecto, competente por necesidad.
 
-**REPL de chat · Agente de código autónomo · Tools de git · Búsqueda web · MCP · 100% local**
+**REPL de chat · Agente de código autónomo · Multi-provider · Tools de git · Búsqueda web · MCP**
 
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![uv](https://img.shields.io/badge/uv-0.12-8B5CF6?style=for-the-badge&logo=python&logoColor=white)](https://docs.astral.sh/uv/)
 [![License](https://img.shields.io/badge/License-MIT-22c55e?style=for-the-badge&logo=opensourceinitiative&logoColor=white)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-133%20passed-22c55e?style=for-the-badge&logo=pytest&logoColor=white)](tests/)
+[![Tests](https://img.shields.io/badge/Tests-199%20passed-22c55e?style=for-the-badge&logo=pytest&logoColor=white)](tests/)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-ec4899?style=for-the-badge&logo=github&logoColor=white)](https://github.com/Xainner/Rinari-CLI/pulls)
 
 </div>
@@ -20,13 +20,13 @@
 
 ## ✨ ¿Qué es Rinari?
 
-**Rinari** es una CLI con LLM que se conecta a **tus propios modelos locales** (vLLM, LiteLLM, llama.cpp — cualquier endpoint OpenAI-compatible) y te da:
+**Rinari** es una CLI con LLM que se conecta a **tu modelo favorito** — local (llama.cpp, Ollama, vLLM) o en la nube (OpenAI, Anthropic, OpenRouter, DeepSeek, Gemini, OpenCode Zen y cualquier endpoint OpenAI-compatible) — y te da:
 
 - 💬 **Chat interactivo** con streaming, historial y personalidad
 - 🤖 **Modo agente** tipo Codex/Claude CLI: das tareas y Rinari explora, edita, ejecuta tests y commitea
 - 🛠️ **10+ herramientas nativas**: git (status/diff/commit), edición quirúrgica de archivos, búsqueda de código, ejecución de tests, búsqueda web
 - 🔌 **Soporte MCP** (Model Context Protocol): conecta servidores externos como tools dinámicas
-- 🔒 **Privacidad**: tus prompts nunca salen de tu red
+- 🔒 **Privacidad**: con modelos locales, tus prompts nunca salen de tu red
 
 > *"¡No es por ti! ¡Solo... construí esto porque quería."* — Rinari, probablemente
 
@@ -43,27 +43,58 @@ uv sync
 uv tool install .
 ```
 
-## ⚙️ Configuración
+## ⚙️ Primeros pasos (setup wizard)
 
-Los perfiles viven en `~/.rinari/config.toml` — cada uno apunta a un endpoint OpenAI-compatible:
+El comando `rinari setup` te guía paso a paso: eliges el proveedor, te pide (o autocompleta) el endpoint, lee la API key desde la variable de entorno del proveedor si existe, conecta y lista los **modelos reales** de tu endpoint, y crea el perfil:
+
+```bash
+rinari setup --name mi-perfil
+```
+
+```
+¿Qué proveedor usas?
+  0 → openai — OpenAI API oficial
+  1 → anthropic — Anthropic Claude (API nativa)
+  2 → openrouter — OpenRouter (multi-modelo)
+  3 → opencode — OpenCode Zen (openai-compatible)
+  4 → deepseek — DeepSeek
+  5 → gemini — Google Gemini (compat OpenAI)
+  6 → local — Local (llama.cpp / Ollama / vLLM, sin key)
+  7 → custom — Endpoint OpenAI-compatible propio
+
+Elige el número del provider: 1
+Endpoint [default: https://api.anthropic.com/v1]:
+...
+✓ Perfil 'mi-perfil' listo: anthropic → https://api.anthropic.com/v1 → claude-sonnet-4
+  Pruébalo con: rinari run "hola" --profile mi-perfil
+```
+
+Cada proveedor conoce su endpoint por defecto y su variable de entorno de API key (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `OPENCODE_API_KEY`, `DEEPSEEK_API_KEY`, `GEMINI_API_KEY`, …). Los providers `openai`, `openrouter`, `opencode`, `deepseek`, `gemini`, `local` y `custom` hablan OpenAI-compatible; `anthropic` usa la API nativa de Anthropic (`/v1/messages`), y Rinari traduce todo internamente.
+
+## ⚙️ Configuración manual
+
+Los perfiles viven en `~/.rinari/config.toml` — cada uno apunta a un endpoint:
 
 ```toml
 [default]
-base_url = "http://192.168.0.3:8020/v1"   # llama.cpp local
-model = "qwen3.6-27b"
+base_url = "http://localhost:8080/v1"   # endpoint local OpenAI-compatible
+model = "mi-modelo-local"
 temperature = 0.7
 
-[profile.casa]
-base_url = "http://192.168.0.3:8020/v1"
+[profile.nube]
+base_url = "https://api.openai.com/v1"
+api_key = "${OPENAI_API_KEY}"            # expande variables de entorno
+model = "gpt-4o"
+provider = "openai"
 
-[profile.sat]
-base_url = "https://api.xainner.com/v1"    # vLLM FP8
-api_key = "${SAT_KEY}"                      # expande variables de entorno
-model = "qwen3.6-27b"
-temperature = 0.3
+[profile.claude]
+base_url = "https://api.anthropic.com/v1"
+api_key = "${ANTHROPIC_API_KEY}"
+model = "claude-sonnet-4"
+provider = "anthropic"
 ```
 
-Los perfiles heredan de `[default]`. La `api_key` admite `${ENV_VAR}`.
+Los perfiles heredan de `[default]`. La `api_key` admite `${ENV_VAR}`. Sin `provider` explícito, se asume OpenAI-compatible.
 
 ### Servidores MCP
 
@@ -80,7 +111,7 @@ args = ["/path/al/server.py"]
 ```bash
 rinari                          # entra directo al modo agente
 rinari --cwd ~/mi-proyecto      # en un repo específico
-rinari -p sat                   # con otro perfil
+rinari -p nube                  # con otro perfil
 ```
 
 ```
@@ -94,7 +125,7 @@ Comandos: `/new` (nuevo contexto), `/model <perfil>`, `/approve` (toggle aprobac
 ### Chat interactivo
 
 ```bash
-rinari chat --profile casa
+rinari chat --profile nube
 rinari chat --resume 3          # continúa la sesión 3
 ```
 
@@ -112,13 +143,30 @@ rinari agent "refactoriza el módulo auth" --cwd ~/mi-proyecto
 rinari agent "arregla el test que falla" -y --max-iterations 15
 ```
 
+### Gestión de modelos y diagnóstico
+
+```bash
+rinari models              # modelos del endpoint + modelo activo del perfil
+rinari model set gpt-4o    # cambia el modelo del perfil activo
+rinari doctor              # diagnostica TODOS los perfiles (env rotas, endpoints caídos, modelos)
+```
+
+```
+$ rinari doctor
+  ✓ casa: 3 modelo(s), activo: mi-modelo-local
+  ✓ nube: ⚠ 1 modelo(s) listado: 'otro-alias' — el activo 'gpt-4o' es un alias (funciona igual)
+  ✗ sat: env rota: Variable de entorno MI_KEY no está definida (usada en config.toml)
+  ✗ roto: endpoint caído: Error HTTP 500: internal error
+
+✗ Hay perfiles con problemas. Revisa arriba o usa `rinari setup` para corregir.
+```
+
 ### Mantenimiento
 
 ```bash
 rinari identity    # quién soy (✿◠‿◠)
 rinari update      # git pull del repo
 rinari sync        # uv sync (reinstala deps)
-rinari models      # modelos del endpoint
 ```
 
 ## 🛠️ Herramientas del agente
@@ -144,9 +192,9 @@ rinari models      # modelos del endpoint
 
 ```
 src/rinari/
-├── cli.py        # typer entrypoints (chat, run, agent, models, identity, update, sync)
-├── config.py     # perfiles TOML + ${ENV} expansion
-├── client.py     # cliente OpenAI-compatible (streaming SSE, tools)
+├── cli.py        # typer entrypoints (chat, run, agent, models, model set, setup, doctor, …)
+├── config.py     # perfiles TOML + ${ENV} expansion + tabla de providers
+├── client.py     # cliente multi-provider (OpenAI-compatible + Anthropic nativo, streaming SSE)
 ├── history.py    # conversaciones SQLite
 ├── render.py     # rich: markdown, syntax highlight
 ├── ui.py         # dashboard de bienvenida (logo, health check, estado git)
@@ -161,7 +209,7 @@ src/rinari/
 ## 🧪 Tests
 
 ```bash
-uv run pytest    # 133 tests, sin red (httpx MockTransport)
+uv run pytest    # 199 tests, sin red (httpx MockTransport)
 ```
 
 ## 🌿 Ramas de feature
@@ -170,10 +218,10 @@ uv run pytest    # 133 tests, sin red (httpx MockTransport)
 |---|---|
 | `feature-tools` | ✅ mergeada — tools de git, edit_file, run_tests |
 | `feature-mcp` | ✅ mergeada — web_search, servidores MCP dinámicos |
-| `feature-ui` | 🌿 activa — dashboard, streaming en vivo |
-| `feature-agent` | 🌿 planning explícito, retry, persistencia |
-| `feature-history` | 🌿 sesiones, export |
-| `feature-config` | 🌿 setup wizard, `rinari doctor` |
+| `feature-ui` | ✅ mergeada — dashboard, streaming en vivo |
+| `feature-agent` | 🌿 activa — planning explícito, retry, persistencia |
+| `feature-history` | 🌿 activa — sesiones, export |
+| `feature-config` | 🌿 activa — setup wizard multi-provider, `rinari doctor`, gestión de modelos |
 
 Ver [BRANCHING.md](BRANCHING.md) para la estrategia completa.
 

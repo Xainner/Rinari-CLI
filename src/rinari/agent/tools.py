@@ -352,47 +352,194 @@ def _git(cwd: str, *args: str) -> subprocess.CompletedProcess:
 
 
 def git_status(args: dict, cwd: str) -> dict:
-    """Estado del repo: rama, limpio?, cambios (modificados/nuevos/borrados)."""
-    proc = _git(cwd, "status", "--porcelain=v1")
+    """Estado del repo: rama, ahead/behind, staged/unstaged/untracked separados."""
+    proc = _git(cwd, "status", "--porcelain=v1", "--branch")
     if proc.returncode != 0:
         return {"ok": False, "error": (proc.stderr or "no es un repo git").strip()[:300]}
     branch = _git(cwd, "branch", "--show-current").stdout.strip() or "detached"
-    changes = []
+    ahead = behind = 0
     for line in proc.stdout.splitlines():
+        if line.startswith("## "):
+            # "## main...origin/main [ahead 2, behind 1]"
+            import re
+
+            m = re.search(r"\[ahead (\d+)", line)
+            if m:
+                ahead = int(m.group(1))
+            m = re.search(r"behind (\d+)", line)
+            if m:
+                behind = int(m.group(1))
+    staged, unstaged, untracked = [], [], []
+    for line in proc.stdout.splitlines():
+        if line.startswith("## "):
+            continue
         if len(line) < 4:
             continue
-        status, path = line[:2].strip(), line[3:].strip()
-        changes.append({"status": status or "?", "path": path})
+        xy, path = line[:2], line[3:].strip()
+        entry = {"status": xy.strip() or "?", "path": path}
+        if xy[0] != " " and xy[0] != "?":
+            staged.append(entry)
+        if xy[1] != " ":
+            unstaged.append(entry)
+        if xy[0] == "?":
+            untracked.append(entry)
     return {
         "ok": True,
         "branch": branch,
-        "clean": len(changes) == 0,
-        "changes": changes,
+        "ahead": ahead,
+        "behind": behind,
+        "clean": not (staged or unstaged or untracked),
+        "staged": staged,
+        "unstaged": unstaged,
+        "untracked": untracked,
+        "counts": {"staged": len(staged), "unstaged": len(unstaged), "untracked": len(untracked)},
+        "changes": staged + unstaged + untracked,  # compat con callers viejos
     }
 
 
 def git_diff(args: dict, cwd: str) -> dict:
-    """Diff de los cambios sin commitear (working tree + staged + untracked)."""
+    """Diff separado: staged, unstaged y untracked. NO muta el index."""
     max_lines = int(args.get("max_lines", 200))
-    # Marca untracked como intent-to-add para que aparezcan en el diff
-    _git(cwd, "add", "-N", ".")
-    proc = _git(cwd, "diff", "HEAD")
-    if proc.returncode != 0:
-        # Repo sin commits: diff del working tree
-        proc = _git(cwd, "diff")
-        if proc.returncode != 0:
-            return {"ok": False, "error": (proc.stderr or "no es un repo git").strip()[:300]}
-    # Limpia el index (no toca el working tree)
-    _git(cwd, "reset", "-q")
-    diff = proc.stdout
-    lines = diff.splitlines()
+    path = args.get("path") or ""
+    path_args = ["--", path] if path else []
+
+    # staged: index vs HEAD
+    staged_proc = _git(cwd, "diff", "--cached", *path_args)
+    # unstaged: working vs index
+    unstaged_proc = _git(cwd, "diff", *path_args)
+    # untracked: contenido de archivos sin trackear
+    untracked_proc = _git(cwd, "ls-files", "--others", "--exclude-standard")
+    untracked_files = [f for f in untracked_proc.stdout.splitlines() if f.strip()]
+    if path:
+        untracked_files = [f for f in untracked_files if f == path]
+
+    untracked_content = ""
+    for f in untracked_files:
+        try:
+            content = (Path(cwd) / f).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        untracked_content += f"--- {f}\n+++ {f} (untracked)\n"
+        untracked_content += "".join(f"+{ln}\n" for ln in content.splitlines())
+        untracked_content += "\n"
+
+    sections = {
+        "staged": staged_proc.stdout,
+        "unstaged": unstaged_proc.stdout,
+        "untracked": untracked_content,
+    }
+    combined = "\n".join(v for v in sections.values() if v.strip())
+    lines = combined.splitlines()
     truncated = len(lines) > max_lines
     return {
         "ok": True,
         "diff": "\n".join(lines[:max_lines]),
         "truncated": truncated,
         "total_lines": len(lines),
+        "staged": sections["staged"],
+        "unstaged": sections["unstaged"],
+        "untracked": sections["untracked"],
     }
+
+
+def git_log(args: dict, cwd: str) -> dict:
+    """Historial de commits recientes (hash corto, mensaje, autor, fecha)."""
+    limit = int(args.get("limit", 10))
+    proc = _git(
+        cwd, "log", f"-{limit}",
+        "--pretty=format:%h%x1f%s%x1f%an%x1f%ad", "--date=short",
+    )
+    if proc.returncode != 0:
+        return {"ok": False, "error": (proc.stderr or "sin commits aún").strip()[:300]}
+    commits = []
+    for line in proc.stdout.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\x1f")
+        if len(parts) >= 4:
+            commits.append({
+                "hash": parts[0],
+                "message": parts[1],
+                "author": parts[2],
+                "date": parts[3],
+            })
+    return {"ok": True, "commits": commits}
+
+
+def git_branch(args: dict, cwd: str) -> dict:
+    """Ramas locales: nombre, cuál es la actual, si está mergeada a HEAD."""
+    proc = _git(cwd, "branch", "-v", "--no-color")
+    if proc.returncode != 0:
+        return {"ok": False, "error": (proc.stderr or "no es un repo git").strip()[:300]}
+    current = _git(cwd, "branch", "--show-current").stdout.strip() or "detached"
+    branches = []
+    for line in proc.stdout.splitlines():
+        if len(line) < 4:
+            continue
+        marker, rest = line[0], line[1:].strip()
+        parts = rest.split()
+        if not parts:
+            continue
+        name = parts[0]
+        branches.append({
+            "name": name,
+            "current": marker == "*",
+            "hash": parts[1] if len(parts) > 1 else "",
+        })
+    return {"ok": True, "current": current, "branches": branches}
+
+
+def git_stash(args: dict, cwd: str) -> dict:
+    """Stash: push (guarda cambios) / list / pop (restaura el último)."""
+    action = args.get("action", "list")
+    if action == "push":
+        proc = _git(cwd, "stash", "push", "-u")
+    elif action == "pop":
+        proc = _git(cwd, "stash", "pop")
+    elif action == "list":
+        proc = _git(cwd, "stash", "list")
+    else:
+        return {"ok": False, "error": f"Acción inválida: {action}. Usa push|list|pop"}
+    if proc.returncode != 0:
+        return {"ok": False, "error": (proc.stderr or "stash falló").strip()[:300]}
+    if action == "list":
+        stashes = []
+        for line in proc.stdout.splitlines():
+            if not line.strip():
+                continue
+            parts = line.split(":", 2)
+            stashes.append({"ref": parts[0].strip(), "desc": parts[-1].strip() if len(parts) > 1 else ""})
+        return {"ok": True, "stashes": stashes}
+    return {"ok": True, "output": (proc.stdout or "").strip()}
+
+
+def git_checkout(args: dict, cwd: str) -> dict:
+    """Cambia de rama (o crea con -b)."""
+    branch = args.get("branch", "").strip()
+    if not branch:
+        return {"ok": False, "error": "Se requiere el nombre de la rama"}
+    create = bool(args.get("create", False))
+    cmd = ["checkout", "-b", branch] if create else ["checkout", branch]
+    proc = _git(cwd, *cmd)
+    if proc.returncode != 0:
+        return {"ok": False, "error": (proc.stderr or "checkout falló").strip()[:300]}
+    return {"ok": True, "branch": branch}
+
+
+def git_pull(args: dict, cwd: str) -> dict:
+    """git pull del upstream (peligrosa: requiere aprobación)."""
+    proc = _git(cwd, "pull")
+    if proc.returncode != 0:
+        return {"ok": False, "error": (proc.stderr or "pull falló").strip()[:300]}
+    return {"ok": True, "output": (proc.stdout or "").strip()}
+
+
+def git_push(args: dict, cwd: str) -> dict:
+    """git push del upstream (peligrosa: requiere aprobación)."""
+    proc = _git(cwd, "push")
+    if proc.returncode != 0:
+        return {"ok": False, "error": (proc.stderr or "push falló").strip()[:300]}
+    return {"ok": True, "output": (proc.stdout or "").strip()}
 
 
 def git_commit(args: dict, cwd: str) -> dict:
@@ -512,8 +659,9 @@ TOOL_DEFS: list[dict] = [
         "function": {
             "name": "git_status",
             "description": (
-                "Estado del repositorio git: rama actual, si está limpio, y la "
-                "lista de cambios (modificados, nuevos, borrados)."
+                "Estado del repositorio git: rama actual, ahead/behind del "
+                "upstream, y cambios separados por staged/unstaged/untracked "
+                "con conteos."
             ),
             "parameters": {
                 "type": "object",
@@ -527,14 +675,111 @@ TOOL_DEFS: list[dict] = [
         "function": {
             "name": "git_diff",
             "description": (
-                "Diff de los cambios sin commitear (working tree + staged). "
-                "Usa max_lines para limitar la salida."
+                "Diff de los cambios sin commitear, separado en staged, "
+                "unstaged y untracked. NO modifica el index. Usa path para "
+                "un archivo puntual y max_lines para limitar la salida."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "path": {"type": "string", "description": "Archivo específico a diffear (opcional)"},
                     "max_lines": {"type": "number", "description": "Máximo de líneas del diff (default 200)"},
                 },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_log",
+            "description": (
+                "Historial de commits recientes: hash corto, mensaje, autor "
+                "y fecha. Usa limit para cuántos traer (default 10)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "number", "description": "Número de commits (default 10)"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_branch",
+            "description": (
+                "Lista las ramas locales: nombre, hash y cuál es la actual."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_stash",
+            "description": (
+                "Maneja el stash: push guarda los cambios (incluye untracked), "
+                "list los enumera, pop restaura el último. MODIFICA EL ESTADO "
+                "DEL REPO con push/pop — requiere aprobación."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "description": "push | list | pop", "enum": ["push", "list", "pop"]},
+                },
+                "required": ["action"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_checkout",
+            "description": (
+                "Cambia a otra rama (o la crea con create=true). Fallará si "
+                "hay cambios sin commitear que choquen."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "branch": {"type": "string", "description": "Nombre de la rama"},
+                    "create": {"type": "boolean", "description": "Crear la rama con -b (default false)"},
+                },
+                "required": ["branch"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_pull",
+            "description": (
+                "git pull del upstream. TRAE CAMBIOS REMOTOS — requiere aprobación."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_push",
+            "description": (
+                "git push del upstream. SUBE CAMBIOS AL REMOTO — requiere aprobación."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
                 "required": [],
             },
         },
@@ -600,9 +845,13 @@ DANGEROUS_PATTERNS = [
     r"\bmkfs\b",
     r"\bdd\s+if=",
     r"\bgit\s+push\b",
+    r"\bgit\s+pull\b",
+    r"\bgit\s+stash\s+(push|pop|apply|drop)\b",
     r"\bgit\s+reset\s+--hard\b",
     r"\bgit\s+commit\b",
-    r"\bgit\s+checkout\s+--\b",
+    r"\bgit\s+checkout\b",
+    r"\bgit\s+clean\b",
+    r"\bgit\s+rebase\b",
     r"\bcurl\b.*\|\s*(ba|z)?sh\b",
     r"\bsudo\b",
     r"\bshutdown\b|\breboot\b",
@@ -630,6 +879,12 @@ class ToolRegistry:
         "git_status": git_status,
         "git_diff": git_diff,
         "git_commit": git_commit,
+        "git_log": git_log,
+        "git_branch": git_branch,
+        "git_stash": git_stash,
+        "git_checkout": git_checkout,
+        "git_pull": git_pull,
+        "git_push": git_push,
         "run_tests": run_tests,
         "web_search": web_search,
         }

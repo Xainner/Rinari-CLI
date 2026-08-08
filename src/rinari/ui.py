@@ -182,7 +182,7 @@ def build_welcome(
     """Construye el texto del dashboard de bienvenida (sin el logo; el logo
     se renderiza a la derecha en render_welcome como columna compacta)."""
     lines = [
-        f"[bold magenta]Rinari CLI[/bold magenta] [dim]v{version}[/dim] (✿◠‿◠)",
+        f"[bold magenta]Rinari CLI[/bold magenta] [dim]v{version}[/dim]",
         "",
         f"  Perfil : [yellow]{profile}[/yellow]",
         f"  Modelo : [bold]{model}[/bold]",
