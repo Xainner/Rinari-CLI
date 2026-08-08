@@ -54,35 +54,19 @@ class DeltaAccumulator:
     def stream_live(self, events, console: Console | None = None) -> None:
         """Renderiza eventos de streaming EN VIVO (token a token).
 
-        Muestra el texto acumulado mientras llega y, al terminar,
-        re-renderiza el bloque completo como markdown.
-        En terminales reales usa rich Live (frames que se reemplazan);
-        en pipes/no-TTY escribe los deltas en secuencia (sin borrado).
+        Escribe cada delta directamente a stdout con flush — funciona en
+        cualquier terminal (incluidas consolas Windows/PowerShell donde
+        rich Live no refresca de forma confiable). Al final, nueva línea.
         events: iterable de str o dicts (los dicts con tool_calls se ignoran).
         """
         console = console or self.console
-        is_tty = console.is_terminal or sys.stdout.isatty()
-        if not is_tty:
-            # sin TTY confiable: escribir directo con flush para que cada
-            # delta aparezca en vivo (rich bufferiza sin newline)
-            for event in events:
-                if isinstance(event, str):
-                    self.add(event)
-                    sys.stdout.write(event)
-                    sys.stdout.flush()
-            sys.stdout.write("\n")
-            sys.stdout.flush()
-            return
-        from rich.live import Live
-        from rich.markdown import Markdown
-        from rich.text import Text
-
-        with Live(Text(), console=console, refresh_per_second=15) as live:
-            for event in events:
-                if isinstance(event, str):
-                    self.add(event)
-                    live.update(Text(self.text))
-            live.update(Markdown(self.text) if self.text.strip() else Text(""))
+        for event in events:
+            if isinstance(event, str):
+                self.add(event)
+                sys.stdout.write(event)
+                sys.stdout.flush()
+        sys.stdout.write("\n")
+        sys.stdout.flush()
 
 
 def render_code_block(code: str, language: str = "python", title: str = "Código") -> None:
