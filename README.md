@@ -11,7 +11,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![uv](https://img.shields.io/badge/uv-0.12-8B5CF6?style=for-the-badge&logo=python&logoColor=white)](https://docs.astral.sh/uv/)
 [![License](https://img.shields.io/badge/License-MIT-22c55e?style=for-the-badge&logo=opensourceinitiative&logoColor=white)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-329%20passed-22c55e?style=for-the-badge&logo=pytest&logoColor=white)](tests/)
+[![Tests](https://img.shields.io/badge/Tests-357%20passed-22c55e?style=for-the-badge&logo=pytest&logoColor=white)](tests/)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-ec4899?style=for-the-badge&logo=github&logoColor=white)](https://github.com/Xainner/Rinari-CLI/pulls)
 
 </div>
@@ -26,6 +26,7 @@
 - 🤖 **Modo agente** tipo Codex/Claude CLI: das tareas y Rinari explora, edita, ejecuta tests, commitea, pushea y abre PRs
 - 🧠 **Memoria por repositorio** (`RINARI.md`): el agente respeta las convenciones de cada proyecto
 - 🔁 **Presupuesto con continuación**: al agotarse las iteraciones, pregunta *¿continuar?* y sigue con el contexto intacto
+- 🛡️ **Bloqueo de secrets**: `.env`, claves, certs y `.ssh/` nunca se leen ni escriben
 - 🛠️ **22 herramientas nativas**: control de git completo (status, diff, log, branch, stash, checkout, pull, push), edición quirúrgica, búsqueda de código, tests, búsqueda web, PRs de GitHub
 - 👥 **Subagentes** (`delegate_task`): delega subtareas a un subagente de un nivel
 - 🪝 **Hooks pre/post tool**: scripts que corren antes y después de cada herramienta
@@ -149,8 +150,14 @@ rinari@mi-proyecto > refactoriza el módulo auth
 rinari@mi-proyecto > /exit
 ```
 
-Comandos: `/new` (nuevo contexto), `/model <perfil>`, `/approve` (toggle aprobación), `/compact` (resume la conversación), `/todos` (gestión de tareas), `/cost` (uso de tokens de la sesión), `/undo` (deshace la última edición del agente), `/exit`, `/help`. Cualquier `/comando` desconocido busca un skill en `~/.rinari/commands/<nombre>.md` y lo envía como prompt.
+Comandos: `/new` (nuevo contexto), `/model <perfil>`, `/approve` (toggle aprobación), `/compact` (resume la conversación), `/todos` (gestión de tareas), `/cost` (uso de tokens de la sesión), `/undo` (deshace la última edición del agente), `/rewind [N]` (rebobina la conversación N turnos), `/status` (dashboard de la sesión: perfil, modelo, mensajes, tools, tokens), `/init` (genera `RINARI.md` analizando el repo), `/exit`, `/help`. Cualquier `/comando` desconocido busca un skill en `~/.rinari/commands/<nombre>.md` y lo envía como prompt.
 El agente **verifica automáticamente** los tests tras cada edición y **persiste cada sesión** en el historial.
+
+### Seguridad del harness
+
+- **Sandbox por niveles**: `--sandbox read-only` (solo lectura), `workspace-write` (default), `danger-full-access` — el prompt muestra 🔒/⚠️ según el nivel
+- **Bloqueo de secrets**: las tools de archivo **nunca** leen ni escriben `.env`, `*.pem`, `*.key`, `id_rsa`, `credentials.json`, `.ssh/`, etc. — el modelo recibe el motivo del bloqueo y cambia de estrategia
+- **Aprobación**: comandos peligrosos (`rm -rf`, `sudo`, `curl|sh`), push/pull/checkout/stash y creación de PRs piden confirmación salvo `-y`
 
 **Presupuesto de iteraciones:** por defecto 25 por tanda (configurable con `max_iterations = 30` en el perfil o `--max-iterations`). Al agotarse, Rinari te avisa y pregunta *"¿Continuar con N iteraciones más?"* — el contexto se conserva entre tandas, así que las tareas largas no se cortan a mitad.
 
@@ -287,7 +294,7 @@ src/rinari/
 ## 🧪 Tests
 
 ```bash
-uv run pytest    # 329 tests, sin red (httpx MockTransport)
+uv run pytest    # 357 tests, sin red (httpx MockTransport)
 ```
 
 ## 🌿 Ramas de feature
