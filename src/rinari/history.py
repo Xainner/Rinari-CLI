@@ -109,5 +109,27 @@ class History:
             self._conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
             self._conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
 
+    def export_session(self, session_id: int) -> str:
+        """Exporta una sesión a markdown legible (para guardar/compartir)."""
+        row = self._conn.execute(
+            "SELECT id, profile, created_at FROM sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        if not row:
+            raise HistoryError(f"La sesión {session_id} no existe")
+        messages = self.get_messages(session_id)
+        lines = [
+            f"# Conversación {session_id} — perfil '{row['profile']}'",
+            f"_Creada: {row['created_at']}_",
+            "",
+        ]
+        for m in messages:
+            role = m.get("role", "user")
+            label = "Usuario" if role == "user" else "Rinari"
+            content = m.get("content", "")
+            lines.append(f"**{label}:**")
+            lines.append(content)
+            lines.append("")
+        return "\n".join(lines).strip()
+
     def close(self) -> None:
         self._conn.close()
