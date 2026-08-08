@@ -11,7 +11,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![uv](https://img.shields.io/badge/uv-0.12-8B5CF6?style=for-the-badge&logo=python&logoColor=white)](https://docs.astral.sh/uv/)
 [![License](https://img.shields.io/badge/License-MIT-22c55e?style=for-the-badge&logo=opensourceinitiative&logoColor=white)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-357%20passed-22c55e?style=for-the-badge&logo=pytest&logoColor=white)](tests/)
+[![Tests](https://img.shields.io/badge/Tests-372%20passed-22c55e?style=for-the-badge&logo=pytest&logoColor=white)](tests/)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-ec4899?style=for-the-badge&logo=github&logoColor=white)](https://github.com/Xainner/Rinari-CLI/pulls)
 
 </div>
@@ -27,7 +27,9 @@
 - 🧠 **Memoria por repositorio** (`RINARI.md`): el agente respeta las convenciones de cada proyecto
 - 🔁 **Presupuesto con continuación**: al agotarse las iteraciones, pregunta *¿continuar?* y sigue con el contexto intacto
 - 🛡️ **Bloqueo de secrets**: `.env`, claves, certs y `.ssh/` nunca se leen ni escriben
-- 🛠️ **22 herramientas nativas**: control de git completo (status, diff, log, branch, stash, checkout, pull, push), edición quirúrgica, búsqueda de código, tests, búsqueda web, PRs de GitHub
+- 🛠️ **23 herramientas nativas**: control de git completo (status, diff, log, branch, stash, checkout, pull, push), edición quirúrgica + `apply_patch`, búsqueda de código, tests, búsqueda web, PRs de GitHub
+- ⚡ **Parallel tool calls**: varias tools del mismo turno se ejecutan en paralelo
+- 🔄 **Auto-compact**: el contexto se resume solo al acercarse al límite
 - 👥 **Subagentes** (`delegate_task`): delega subtareas a un subagente de un nivel
 - 🪝 **Hooks pre/post tool**: scripts que corren antes y después de cada herramienta
 - 🔌 **Soporte MCP** (Model Context Protocol): conecta servidores externos como tools dinámicas
@@ -237,6 +239,7 @@ rinari sync        # reinstala paquete y dependencias
 | `read_file` | Lee archivos con límite de líneas |
 | `write_file` | Crea/sobrescribe archivos |
 | `edit_file` | Edición quirúrgica old→new con detección de ambigüedad |
+| `apply_patch` | Edición por diff unificado (estilo Codex): Update/Add/Delete File, multi-hunk |
 | `search_files` | Regex en el proyecto (ignora .git/node_modules/.venv) |
 | `list_dir` | Lista directorios |
 | `git_status` | Rama, ahead/behind, staged/unstaged/untracked separados con conteos |
@@ -269,7 +272,7 @@ edit_file = "python scripts/lint.py"   # solo antes de editar
 
 Un hook que falla nunca rompe el loop (se registra como paso y el agente sigue). Los subagentes heredan los hooks del padre.
 
-**Loop agéntico avanzado:** reintenta errores transitorios de la LLM, verifica tests tras cada edición, soporta plan + aprobación previa, inyecta *reminders* al modelo cuando el presupuesto está por agotarse (estilo Codex), persiste las sesiones, y sanea el contenido de los tool results para evitar que el modelo imite formatos raros.
+**Loop agéntico avanzado:** reintenta errores transitorios de la LLM, verifica tests tras cada edición, soporta plan + aprobación previa, inyecta *reminders* al modelo cuando el presupuesto está por agotarse (estilo Codex), **auto-compacta** el contexto al acercarse al límite, ejecuta **tool calls en paralelo** cuando el modelo pide varias, persiste las sesiones, y sanea el contenido de los tool results para evitar que el modelo imite formatos raros.
 
 ## 🏗️ Arquitectura
 
@@ -294,7 +297,7 @@ src/rinari/
 ## 🧪 Tests
 
 ```bash
-uv run pytest    # 357 tests, sin red (httpx MockTransport)
+uv run pytest    # 372 tests, sin red (httpx MockTransport)
 ```
 
 ## 🌿 Ramas de feature
