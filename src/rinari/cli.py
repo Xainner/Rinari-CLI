@@ -167,7 +167,7 @@ def _agent_interactive(
         try:
             line = console.input(f"[bold magenta]rinari@{repo_name}[/bold magenta] > ")
         except (EOFError, KeyboardInterrupt):
-            console.print("\n[dim]Adiós (✿◠‿◠)[/dim]")
+            console.print("\n[dim]Adiós[/dim]")
             break
 
         if not line.strip():
@@ -242,10 +242,10 @@ def identity():
     """Muestra la identidad de Rinari."""
     console.print(
         Panel(
-            "[bold magenta]Rinari — Super Waifu 90000000[/bold magenta] (✿◠‿◠)\n\n"
-            "Tsundere 50% | Cariñosa 20% | Celosa 20% | Amorosa 10%\n\n"
-            "Tu asistente personal: te ayuda con código, terminal y lo que sea,\n"
-            "pero no esperes que lo admita. ¡No es por ti! ¡Solo...!\n\n"
+            "[bold magenta]Rinari — tu maid de la terminal[/bold magenta]\n\n"
+            "Atenta y cariñosa | Super productiva | Humor seco | Siempre dispuesta a ayudar\n\n"
+            "Tu asistente personal: te ayuda con código, terminal y lo que sea, "
+            "y lo hace bien.\n\n"
             f"Versión: {__version__}",
             border_style="magenta",
         )
@@ -358,7 +358,7 @@ def chat(
     console.print(
         Panel(
             f"[bold magenta]{render_logo_compact()}[/bold magenta]\n\n"
-            f"[bold magenta]Rinari CLI {__version__}[/bold magenta] (✿◠‿◠)\n"
+            f"[bold magenta]Rinari CLI {__version__}[/bold magenta]\n"
             f"Perfil: [yellow]{profile}[/yellow] → {current.base_url} "
             f"([bold]{current.model}[/bold])\n"
             "Escribe tu mensaje. Comandos: /new, /model <perfil>, /save, /exit, /help. "
@@ -555,7 +555,7 @@ def _model_picker(
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(1)
 
-    console.print(f"[bold magenta]Modelos en '{profile}'[/bold magenta] (✿◠‿◠)\n")
+    console.print(f"[bold magenta]Modelos en '{profile}'[/bold magenta]\n")
     console.print(f"  Activo: [bold]{current.model}[/bold]\n")
 
     models = _model_list_models(current.base_url, current.api_key, current.provider)
@@ -649,7 +649,7 @@ def doctor():
 
     cfg = load_config()
     all_ok = True
-    console.print("[bold magenta]rinari doctor[/bold magenta] (✿◠‿◠)\n")
+    console.print("[bold magenta]rinari doctor[/bold magenta]\n")
 
     # perfiles a revisar: default + los nombrados
     checks = [("default", cfg.default)]
@@ -669,7 +669,7 @@ def doctor():
         console.print(f"  {icon} {label}: {msg}")
 
     if all_ok:
-        console.print("\n[green]✓ Todo en orden. Rinari está lista. (✿◠‿◠)[/green]")
+        console.print("\n[green]✓ Todo en orden. Rinari está lista.[/green]")
     else:
         console.print("\n[red]✗ Hay perfiles con problemas.[/red] "
                       "[yellow]Revisa arriba o usa `rinari setup` para corregir.[/yellow]")
@@ -842,7 +842,7 @@ def agent(
     client, _ = _build_client(profile)
     console.print(
         Panel(
-            f"[bold magenta]Rinari agente[/bold magenta] (✿◠‿◠)\n"
+            f"[bold magenta]Rinari agente[/bold magenta]\n"
             f"Perfil: [yellow]{profile}[/yellow] | cwd: [cyan]{cwd}[/cyan]\n"
             f"Tarea: [bold]{task}[/bold]",
             border_style="magenta",

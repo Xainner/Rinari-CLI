@@ -95,7 +95,7 @@ def test_identity_shows_rinari():
     result = runner.invoke(app, ["identity"])
     assert result.exit_code == 0
     assert "Rinari" in result.stdout
-    assert "Tsundere" in result.stdout
+    assert "maid" in result.stdout
 
 
 def test_version_shows_version():
