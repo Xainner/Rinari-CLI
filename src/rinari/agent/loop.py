@@ -35,6 +35,21 @@ READ_ONLY_TOOLS = {
 }
 
 
+def estimate_tokens(messages: list[dict]) -> int:
+    """Estimación de tokens del contexto (chars/4 + overhead por mensaje).
+
+    No depende del endpoint: los tokens reales los reporta la API, pero
+    para decidir cuándo compactar esta aproximación basta.
+    """
+    total = 0
+    for m in messages:
+        content = m.get("content") or ""
+        if isinstance(content, list):
+            content = " ".join(str(c.get("text", "")) for c in content if isinstance(c, dict))
+        total += len(str(content)) // 4 + 8  # overhead por mensaje
+    return total
+
+
 class AgentError(Exception):
     pass
 
@@ -107,6 +122,9 @@ def run_agent(
     history=None,
     hooks: dict | None = None,
     sandbox: str = "workspace-write",
+    auto_compact: bool = False,
+    compact_threshold: int = 60000,
+    parallel_tools: bool = False,
 ) -> dict:
     """Ejecuta la tarea con el loop agéntico. Devuelve {status, final, steps, iterations, messages}.
 
@@ -267,6 +285,58 @@ def run_agent(
                         render_callback({"type": "retry", "attempt": attempt + 1, "error": str(e)})
         raise last_error
 
+    def _maybe_compact() -> bool:
+        """Si el contexto supera el umbral, lo compacta con el modelo.
+
+        Reemplaza la conversación por un resumen (estilo Claude Code):
+        conserva el system prompt + la tarea + el resumen. Devuelve True
+        si compactó (el caller debe continuar el loop).
+        """
+        nonlocal messages
+        if not auto_compact or estimate_tokens(messages) <= compact_threshold:
+            return False
+        steps.append({"type": "compact", "tokens": estimate_tokens(messages)})
+        if render_callback:
+            render_callback({"type": "compact", "tokens": estimate_tokens(messages)})
+        try:
+            if hasattr(client, "chat_message"):
+                summary = client.chat_message(
+                    [
+                        {"role": "system", "content": (
+                            "Resume la conversación siguiente en un párrafo conciso, "
+                            "conservando decisiones, datos, archivos tocados y acuerdos "
+                            "importantes. Responde SOLO con el resumen."
+                        )},
+                        {"role": "user", "content": json.dumps(messages, ensure_ascii=False)},
+                    ]
+                )
+            else:
+                summary = client.chat(
+                    [
+                        {"role": "system", "content": (
+                            "Resume la conversación siguiente en un párrafo conciso, "
+                            "conservando decisiones, datos, archivos tocados y acuerdos "
+                            "importantes. Responde SOLO con el resumen."
+                        )},
+                        {"role": "user", "content": json.dumps(messages, ensure_ascii=False)},
+                    ]
+                )
+        except Exception as e:  # noqa: BLE001
+            steps.append({"type": "compact_failed", "error": str(e)})
+            return False
+        if isinstance(summary, dict):
+            summary = summary.get("content") or summary.get("final") or ""
+        summary = str(summary).strip()
+        if not summary:
+            steps.append({"type": "compact_failed", "error": "resumen vacío"})
+            return False
+        system_content = messages[0]["content"] if messages and messages[0].get("role") == "system" else build_agent_messages(task, cwd=cwd)[0]["content"]
+        messages = [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": f"Tarea: {task}\n\n[Contexto compactado]\n{summary}"},
+        ]
+        return True
+
     def _finalize(status: str, final: str | None) -> dict:
         """Arma el resultado final y opcionalmente persiste la sesión."""
         tool_count = sum(1 for s in steps if s.get("type") == "tool_result")
@@ -318,6 +388,8 @@ def run_agent(
 
     while iterations < max_iterations:
         iterations += 1
+        # Auto-compact: si el contexto creció mucho, resumir antes de llamar
+        _maybe_compact()
         try:
             response, _ = _llm_call()
         except LLMError as e:
@@ -352,24 +424,19 @@ def run_agent(
             if render_callback:
                 render_callback({"type": "tool_call", "name": name, "arguments": args})
 
+        # Fase 1 — aprobación (siempre secuencial: puede pedir input del usuario)
+        decisions: list[tuple[dict, bool, str | None]] = []
+        for tc in parsed["tool_calls"]:
+            name = tc.get("name", "")
+            args = tc.get("arguments", {})
             allowed = auto_approve
+            deny_reason = None
             if sandbox == "danger-full-access":
                 allowed = True
             elif sandbox == "read-only":
                 allowed = name in READ_ONLY_TOOLS
                 if not allowed:
-                    result = {"ok": False, "error": "Sandbox read-only: la tool necesita permisos de escritura"}
-                    steps.append({"type": "tool_denied", "name": name, "arguments": args})
-                    if render_callback:
-                        render_callback({"type": "tool_denied", "name": name, "arguments": args})
-                    tool_messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc.get("id", ""),
-                            "content": json.dumps(result, ensure_ascii=False),
-                        }
-                    )
-                    continue
+                    deny_reason = "Sandbox read-only: la tool necesita permisos de escritura"
             elif name == "run_command" and is_dangerous(args.get("command", "")):
                 allowed = allowed or approver(name, args, cwd)
             elif name in ("git_push", "git_pull", "git_checkout", "git_stash", "github_create_pr"):
@@ -378,29 +445,33 @@ def run_agent(
             else:
                 # workspace-write: edición normal del repo sin aprobación
                 allowed = True
+            decisions.append((tc, allowed, deny_reason))
 
+        # Fase 2 — ejecución (paralela si está activada)
+        def _run_one(item: tuple[dict, bool, str | None]) -> tuple[dict, dict]:
+            tc, allowed, deny_reason = item
+            name = tc.get("name", "")
+            args = tc.get("arguments", {})
             if not allowed:
-                result = {"ok": False, "error": "Comando denegado por el usuario"}
-                steps.append({"type": "tool_denied", "name": name, "arguments": args})
-                if render_callback:
-                    render_callback({"type": "tool_denied", "name": name, "arguments": args})
-            else:
-                try:
-                    result = _execute_tool(name, args)
-                except Exception as e:  # noqa: BLE001
-                    result = {"ok": False, "error": str(e)}
+                return tc, {"ok": False, "error": deny_reason or "Comando denegado por el usuario"}
+            try:
+                return tc, _execute_tool(name, args)
+            except Exception as e:  # noqa: BLE001
+                return tc, {"ok": False, "error": str(e)}
 
+        def _emit_tool_result(name: str, args: dict, tc: dict, result: dict) -> None:
             # Verificación automática: tras editar, correr los tests
             if verify_changes and result.get("ok") and name in ("edit_file", "write_file"):
                 test_result = registry.execute("run_tests", {}, cwd)
                 steps.append({"type": "verify", "name": "run_tests", "result": test_result})
                 if render_callback:
                     render_callback({"type": "verify", "name": "run_tests", "result": test_result})
-
-            steps.append({"type": "tool_result", "name": name, "result": result})
+            if not result.get("ok") and result.get("error", "").startswith("Sandbox"):
+                steps.append({"type": "tool_denied", "name": name, "arguments": args})
+            else:
+                steps.append({"type": "tool_result", "name": name, "result": result})
             if render_callback:
                 render_callback({"type": "tool_result", "name": name, "result": result})
-
             tool_messages.append(
                 {
                     "role": "tool",
@@ -408,6 +479,31 @@ def run_agent(
                     "content": json.dumps(result, ensure_ascii=False),
                 }
             )
+
+        if parallel_tools and len(decisions) > 1:
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(len(decisions), 8)
+            ) as pool:
+                futures = [pool.submit(_run_one, item) for item in decisions]
+                results: dict[str, tuple[dict, dict]] = {}
+                for fut in concurrent.futures.as_completed(futures):
+                    tc, result = fut.result()
+                    results[tc.get("id", "")] = (tc, result)
+            # emitir en el orden original de las tool calls
+            for tc, _allowed, _reason in decisions:
+                _tc, result = results[tc.get("id", "")]
+                name = _tc.get("name", "")
+                args = _tc.get("arguments", {})
+                _emit_tool_result(name, args, _tc, result)
+        else:
+            for item in decisions:
+                tc, _allowed, _reason = item
+                name = tc.get("name", "")
+                args = tc.get("arguments", {})
+                _tc, result = _run_one(item)
+                _emit_tool_result(name, args, _tc, result)
 
         # Sanear el contenido: evitar que el modelo imite formatos raros
         # (@url:`...` de docs de PowerShell) vistos en tool results previos

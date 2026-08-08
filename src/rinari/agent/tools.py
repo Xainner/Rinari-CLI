@@ -263,6 +263,135 @@ def list_dir(args: dict, cwd: str) -> dict:
     return {"entries": entries}
 
 
+def apply_patch(args: dict, cwd: str) -> dict:
+    """Aplica un diff en formato Codex/Claude (*** Begin Patch / *** End Patch).
+
+    Soporta:
+      *** Update File: <path>   — hunks con contexto y líneas -/+
+      *** Add File: <path>      — crea el archivo con líneas +
+      *** Delete File: <path>   — borra el archivo
+    Aplica múltiples hunks por archivo y múltiples archivos por patch.
+    """
+    patch_text = args.get("patch", "")
+    if "*** Begin Patch" not in patch_text or "*** End Patch" not in patch_text:
+        return {"ok": False, "error": "Formato inválido: falta '*** Begin Patch'/'*** End Patch'."}
+
+    # Partir el patch en secciones por archivo
+    sections = _split_patch_sections(patch_text)
+    applied: list[str] = []
+    for action, filename, lines in sections:
+        path = _resolve(cwd, filename)
+        try:
+            _guard_secret(path)
+        except ToolError as e:
+            return {"ok": False, "error": str(e)}
+        if action == "Add":
+            if path.exists():
+                return {"ok": False, "error": f"El archivo '{filename}' ya existe (usa Update)."}
+            backup = None
+            path.parent.mkdir(parents=True, exist_ok=True)
+            content = "".join(l for l in lines if l.startswith("+"))
+            path.write_text(content, encoding="utf-8")
+            applied.append(f"+ {filename}")
+            continue
+        if action == "Delete":
+            if not path.exists():
+                return {"ok": False, "error": f"El archivo '{filename}' no existe."}
+            _backup_file(cwd, path)
+            path.unlink()
+            applied.append(f"- {filename}")
+            continue
+        # Update
+        if not path.exists():
+            return {"ok": False, "error": f"El archivo '{filename}' no existe."}
+        original = path.read_text(encoding="utf-8").splitlines()
+        patched = _apply_hunks(original, lines)
+        if patched is None:
+            return {"ok": False, "error": f"No se pudo aplicar el hunk en '{filename}' (contexto no coincide)."}
+        _backup_file(cwd, path)
+        path.write_text("\n".join(patched) + ("\n" if original and original[-1] == "" else ""), encoding="utf-8")
+        applied.append(f"~ {filename}")
+    return {"ok": True, "applied": applied}
+
+
+def _split_patch_sections(patch_text: str) -> list[tuple[str, str, list[str]]]:
+    """Divide el patch en (acción, filename, líneas)."""
+    sections: list[tuple[str, str, list[str]]] = []
+    current_action = None
+    current_file = None
+    current_lines: list[str] = []
+    for raw in patch_text.splitlines():
+        line = raw.rstrip()
+        if line.startswith("*** Begin Patch") or line.startswith("*** End Patch"):
+            continue
+        if line.startswith("*** Update File:"):
+            if current_file:
+                sections.append((current_action, current_file, current_lines))
+            current_action, current_file, current_lines = "Update", line.split(":", 1)[1].strip(), []
+        elif line.startswith("*** Add File:"):
+            if current_file:
+                sections.append((current_action, current_file, current_lines))
+            current_action, current_file, current_lines = "Add", line.split(":", 1)[1].strip(), []
+        elif line.startswith("*** Delete File:"):
+            if current_file:
+                sections.append((current_action, current_file, current_lines))
+            current_action, current_file, current_lines = "Delete", line.split(":", 1)[1].strip(), []
+        elif current_file is not None:
+            current_lines.append(line)
+    if current_file:
+        sections.append((current_action, current_file, current_lines))
+    return sections
+
+
+def _apply_hunks(original: list[str], lines: list[str]) -> list[str] | None:
+    """Aplica los hunks de un archivo. Devuelve None si algún contexto falla."""
+    result = list(original)
+    idx = 0
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line == "@@":
+            # buscar fin de hunk
+            j = i + 1
+            hunk = []
+            while j < len(lines) and lines[j] != "@@":
+                hunk.append(lines[j])
+                j += 1
+            i = j
+            if not _apply_one_hunk(result, hunk, idx):
+                return None
+            idx += 1
+            continue
+        # líneas sueltas fuera de hunk: contexto global (se ignoran)
+        i += 1
+    return result
+
+
+def _apply_one_hunk(result: list[str], hunk: list[str], start: int) -> bool:
+    """Aplica un hunk (contexto + -/+). Busca el contexto desde `start`."""
+    # construir el bloque esperado: contexto y -líneas
+    expected: list[str] = []
+    for line in hunk:
+        if line.startswith(" "):
+            expected.append(line[1:])
+        elif line.startswith("-"):
+            expected.append(line[1:])
+    if not expected:
+        return True
+    for pos in range(start, len(result) - len(expected) + 1):
+        if result[pos : pos + len(expected)] == expected:
+            # reemplazo: contexto se conserva, - se quita, + se añade
+            final_replace: list[str] = []
+            for line in hunk:
+                if line.startswith(" "):
+                    final_replace.append(line[1:])
+                elif line.startswith("+"):
+                    final_replace.append(line[1:])
+            result[pos : pos + len(expected)] = final_replace
+            return True
+    return False
+
+
 def edit_file(args: dict, cwd: str) -> dict:
     """Edita un archivo reemplazando un bloque (old → new).
 
@@ -874,6 +1003,27 @@ TOOL_DEFS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "apply_patch",
+            "description": (
+                "Aplica un diff en formato *** Begin Patch / *** End Patch (estilo Codex/Claude). "
+                "Soporta *** Update File: (hunks con contexto y líneas -/+), *** Add File: (crea "
+                "archivo con líneas +) y *** Delete File:. Aplica múltiples hunks y archivos por patch."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "patch": {
+                        "type": "string",
+                        "description": "El diff completo con marcadores *** Begin Patch ... *** End Patch",
+                    },
+                },
+                "required": ["patch"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "search_files",
             "description": "Busca una regex dentro de archivos del proyecto. Devuelve file, línea y contenido.",
             "parameters": {
@@ -1158,6 +1308,7 @@ class ToolRegistry:
         "read_file": read_file,
         "write_file": write_file,
         "edit_file": edit_file,
+        "apply_patch": apply_patch,
         "search_files": search_files,
         "list_dir": list_dir,
         "git_status": git_status,
