@@ -21,7 +21,7 @@ from rich.text import Text
 from rinari import __version__
 from rinari.client import LLMClient, LLMError
 from rinari.config import ConfigError, load_config
-from rinari.history import History
+from rinari.history import History, HistoryError
 from rinari.render import DeltaAccumulator
 from rinari.repl import ChatSession, parse_command, run_command
 
@@ -608,6 +608,122 @@ def _model_set_cmd(
 
 
 app.add_typer(model_app, name="model")
+
+
+def _open_history() -> History:
+    """Abre el historial de sesiones (helper inyectable en tests)."""
+    return History()
+
+
+def _session_preview(hist: History, session_id: int, limit: int = 3) -> str:
+    """Primeros mensajes de la sesión como preview de una línea."""
+    try:
+        messages = hist.get_messages(session_id)
+    except HistoryError:
+        return ""
+    preview = ""
+    for m in messages:
+        content = (m.get("content") or "").strip().replace("\n", " ")
+        if content and m.get("role") != "system":
+            preview = content[:60]
+            break
+    return preview
+
+
+history_app = typer.Typer(help="Historial de conversaciones: listar, ver, borrar, exportar")
+
+
+@history_app.callback(invoke_without_command=True)
+def _history_list(
+    ctx: typer.Context,
+    limit: int = typer.Option(10, "--limit", "-l", help="Máximo de sesiones a listar"),
+):
+    """Sin subcomando: lista las sesiones guardadas."""
+    if ctx.invoked_subcommand:
+        return
+    hist = _open_history()
+    try:
+        sessions = hist.list_sessions(limit=limit)
+        if not sessions:
+            console.print("[yellow]Sin sesiones guardadas todavía.[/yellow]")
+            console.print("  Chatea con `rinari chat` y se guardarán solas. (o usa /save)")
+            return
+        lines = []
+        for s in sessions:
+            preview = _session_preview(hist, s["id"])
+            extra = f" — {preview}" if preview else ""
+            lines.append(
+                f"  [bold]{s['id']}[/bold] · [cyan]{s['profile']}[/cyan] · "
+                f"[dim]{s['created_at'][:19].replace('T', ' ')}[/dim] · "
+                f"{s['message_count']} msgs{extra}"
+            )
+    finally:
+        hist.close()
+    console.print("[bold magenta]Sesiones guardadas:[/bold magenta]")
+    console.print("\n".join(lines))
+    console.print("\n[dim]Usa `rinari history show <id>`, `history rm <id>` o "
+                  "`history export <id>`.[/dim]")
+
+
+@history_app.command("show")
+def _history_show(session_id: int = typer.Argument(..., help="ID de la sesión")):
+    """Muestra la conversación completa de una sesión."""
+    hist = _open_history()
+    try:
+        md = hist.export_session(session_id)
+    except HistoryError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+    finally:
+        hist.close()
+    console.print(Markdown(md))
+
+
+@history_app.command("rm")
+def _history_rm(
+    session_id: int = typer.Argument(..., help="ID de la sesión"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="No pedir confirmación"),
+):
+    """Borra una sesión (pide confirmación salvo -y)."""
+    hist = _open_history()
+    try:
+        hist.get_messages(session_id)  # valida que exista
+    except HistoryError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+    if not yes:
+        try:
+            confirm = input(f"¿Borrar la sesión {session_id}? [s/N]: ").strip().lower()
+        except EOFError:
+            confirm = ""
+        if confirm not in ("s", "si", "y", "yes"):
+            console.print("[dim]Cancelado.[/dim]")
+            return
+    hist.delete_session(session_id)
+    hist.close()
+    console.print(f"[green]✓ Sesión {session_id} borrada.[/green]")
+
+
+@history_app.command("export")
+def _history_export(
+    session_id: int = typer.Argument(..., help="ID de la sesión"),
+    output: Path = typer.Option(None, "--output", "-o", help="Archivo de salida (default: conversacion-<id>.md)"),
+):
+    """Exporta una sesión a markdown."""
+    hist = _open_history()
+    try:
+        md = hist.export_session(session_id)
+    except HistoryError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+    finally:
+        hist.close()
+    out = output or Path(f"conversacion-{session_id}.md")
+    out.write_text(md, encoding="utf-8")
+    console.print(f"[green]✓ Exportada a [bold]{out}[/bold][/green]")
+
+
+app.add_typer(history_app, name="history")
 
 
 def diagnose_profile(name: str, prof: dict, make_client=None) -> tuple[bool, str]:
