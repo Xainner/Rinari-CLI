@@ -590,6 +590,116 @@ def git_push(args: dict, cwd: str) -> dict:
     return {"ok": True, "output": (proc.stdout or "").strip()}
 
 
+def _gh_remote_info(cwd: str) -> tuple[str, str] | None:
+    """Extrae (owner, repo) del remote origin (https o ssh)."""
+    proc = _git(cwd, "remote", "get-url", "origin")
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    url = proc.stdout.strip()
+    # https://github.com/owner/repo.git | git@github.com:owner/repo.git
+    url = url.removesuffix(".git")
+    if "github.com/" in url:
+        parts = url.split("github.com/", 1)[1].split("/")
+    elif "github.com:" in url:
+        parts = url.split("github.com:", 1)[1].split("/")
+    else:
+        return None
+    if len(parts) < 2:
+        return None
+    return parts[0], parts[1]
+
+
+def _gh_headers() -> dict:
+    """Headers de la API de GitHub con el token de GITHUB_TOKEN si existe."""
+    import os
+
+    headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def github_create_pr(args: dict, cwd: str) -> dict:
+    """Crea un PR en GitHub desde la rama actual (requiere GITHUB_TOKEN)."""
+    import os
+
+    title = (args.get("title") or "").strip()
+    if not title:
+        return {"ok": False, "error": "Se requiere 'title' para el PR"}
+    token = os.environ.get("GITHUB_TOKEN")
+    if not token:
+        return {"ok": False, "error": "GITHUB_TOKEN no está definido (export GITHUB_TOKEN=...)"}
+    remote = _gh_remote_info(cwd)
+    if remote is None:
+        return {"ok": False, "error": "No se pudo determinar owner/repo del remote origin"}
+    owner, repo = remote
+    branch = _git(cwd, "branch", "--show-current").stdout.strip()
+    if not branch:
+        return {"ok": False, "error": "No hay rama actual (detached HEAD)"}
+    base = args.get("base") or "main"
+    payload = {
+        "title": title,
+        "head": branch,
+        "base": base,
+    }
+    body = args.get("body")
+    if body:
+        payload["body"] = body
+    try:
+        resp = httpx.post(
+            f"https://api.github.com/repos/{owner}/{repo}/pulls",
+            headers=_gh_headers(),
+            json=payload,
+            timeout=30,
+        )
+    except httpx.HTTPError as e:
+        return {"ok": False, "error": f"No se pudo conectar a GitHub: {e}"}
+    if resp.status_code not in (200, 201):
+        return {"ok": False, "error": f"GitHub respondió {resp.status_code}: {resp.text[:300]}"}
+    data = resp.json()
+    return {
+        "ok": True,
+        "number": data.get("number"),
+        "url": data.get("html_url"),
+        "title": data.get("title"),
+    }
+
+
+def github_list_prs(args: dict, cwd: str) -> dict:
+    """Lista los PRs del repo (state: open|closed|all)."""
+    import os
+
+    remote = _gh_remote_info(cwd)
+    if remote is None:
+        return {"ok": False, "error": "No se pudo determinar owner/repo del remote origin"}
+    token = os.environ.get("GITHUB_TOKEN")
+    if not token:
+        return {"ok": False, "error": "GITHUB_TOKEN no está definido (export GITHUB_TOKEN=...)"}
+    owner, repo = remote
+    state = args.get("state") or "open"
+    try:
+        resp = httpx.get(
+            f"https://api.github.com/repos/{owner}/{repo}/pulls",
+            headers=_gh_headers(),
+            params={"state": state, "per_page": args.get("limit", 10)},
+            timeout=30,
+        )
+    except httpx.HTTPError as e:
+        return {"ok": False, "error": f"No se pudo conectar a GitHub: {e}"}
+    if resp.status_code != 200:
+        return {"ok": False, "error": f"GitHub respondió {resp.status_code}: {resp.text[:300]}"}
+    pulls = []
+    for p in resp.json():
+        pulls.append({
+            "number": p.get("number"),
+            "title": p.get("title"),
+            "state": p.get("state"),
+            "url": p.get("html_url"),
+        })
+    return {"ok": True, "pulls": pulls}
+
+
 def git_commit(args: dict, cwd: str) -> dict:
     """Hace git add -A + commit con el mensaje dado."""
     message = args.get("message", "").strip()
@@ -835,6 +945,44 @@ TOOL_DEFS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "github_create_pr",
+            "description": (
+                "Crea un Pull Request en GitHub desde la rama actual hacia "
+                "base (default main). Requiere GITHUB_TOKEN en el entorno. "
+                "SUBE DATOS AL REMOTO — requiere aprobación."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Título del PR"},
+                    "body": {"type": "string", "description": "Descripción del PR (opcional)"},
+                    "base": {"type": "string", "description": "Rama base (default: main)"},
+                },
+                "required": ["title"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "github_list_prs",
+            "description": (
+                "Lista los Pull Requests del repo (state: open|closed|all). "
+                "Requiere GITHUB_TOKEN en el entorno."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "state": {"type": "string", "description": "open | closed | all (default open)"},
+                    "limit": {"type": "number", "description": "Máximo de PRs (default 10)"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "git_commit",
             "description": (
                 "Hace git add -A y commit de todos los cambios con el mensaje dado. "
@@ -894,6 +1042,7 @@ DANGEROUS_PATTERNS = [
     r"\bdd\s+if=",
     r"\bgit\s+push\b",
     r"\bgit\s+pull\b",
+    r"github_create_pr",
     r"\bgit\s+stash\s+(push|pop|apply|drop)\b",
     r"\bgit\s+reset\s+--hard\b",
     r"\bgit\s+commit\b",
@@ -935,6 +1084,8 @@ class ToolRegistry:
         "git_push": git_push,
         "run_tests": run_tests,
         "web_search": web_search,
+        "github_create_pr": github_create_pr,
+        "github_list_prs": github_list_prs,
         }
 
     _DELEGATE_DEF = {
