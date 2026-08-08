@@ -113,7 +113,7 @@ def run_agent(
     plan_approver = plan_approver or _default_plan_approver
     hooks = hooks if hooks is not None else load_hooks()
     if messages is None:
-        messages = build_agent_messages(task)
+        messages = build_agent_messages(task, cwd=cwd)
     else:
         messages = list(messages) + [{"role": "user", "content": f"Tarea: {task}"}]
     steps: list[dict] = []
