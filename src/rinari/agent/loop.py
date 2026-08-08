@@ -13,6 +13,7 @@ Dependencias inyectadas (client, registry, approver) para testear sin red.
 from __future__ import annotations
 
 import json
+import subprocess
 from typing import Callable
 
 from rinari.agent.prompt import build_agent_messages
@@ -47,6 +48,32 @@ def _default_plan_approver(task: str, plan: str) -> bool:
     return answer in ("y", "yes", "s", "si", "sí")
 
 
+def load_hooks(config_dir=None) -> dict:
+    """Carga los hooks de ~/.rinari/hooks.toml (estilo Claude Code).
+
+    Formato:
+        [pre_tool]
+        edit_file = "python lint.py"   # por tool
+        "*" = "echo hola"              # para todas
+        [post_tool]
+        edit_file = "python format.py"
+
+    Devuelve {"pre_tool": {tool: cmd}, "post_tool": {tool: cmd}}.
+    """
+    import tomllib
+    from pathlib import Path
+
+    path = Path(config_dir) / "hooks.toml" if config_dir else Path.home() / ".rinari" / "hooks.toml"
+    if not path.is_file():
+        return {}
+    try:
+        with open(path, "rb") as fh:
+            data = tomllib.load(fh)
+        return {k: v for k, v in data.items() if k in ("pre_tool", "post_tool")}
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+
+
 def run_agent(
     task: str,
     client,
@@ -64,6 +91,7 @@ def run_agent(
     plan_first: bool = False,
     plan_approver: Callable[[str, str], bool] | None = None,
     history=None,
+    hooks: dict | None = None,
 ) -> dict:
     """Ejecuta la tarea con el loop agéntico. Devuelve {status, final, steps, iterations, messages}.
 
@@ -82,6 +110,7 @@ def run_agent(
     registry = registry or ToolRegistry(delegate=True)
     approver = approver or _default_approver
     plan_approver = plan_approver or _default_plan_approver
+    hooks = hooks if hooks is not None else load_hooks()
     if messages is None:
         messages = build_agent_messages(task)
     else:
@@ -97,13 +126,47 @@ def run_agent(
     def _all_schemas() -> list[dict]:
         return registry.openai_schemas() + mcp_schemas
 
+    def _run_hooks(event: str, tool_name: str) -> list[dict]:
+        """Ejecuta los hooks pre/post para una tool. Nunca bloquea el loop."""
+        entries = (hooks or {}).get(event, {})
+        cmds = [cmd for key, cmd in entries.items() if key == "*" or key == tool_name]
+        results = []
+        for cmd in cmds:
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    shell=True,
+                    cwd=cwd,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                results.append({
+                    "type": "hook",
+                    "event": event,
+                    "tool": tool_name,
+                    "ok": proc.returncode == 0,
+                    "output": (proc.stdout or proc.stderr).strip()[:300],
+                })
+            except Exception as e:  # noqa: BLE001
+                results.append({"type": "hook", "event": event, "tool": tool_name, "ok": False, "output": str(e)})
+        for r in results:
+            steps.append(r)
+            if render_callback:
+                render_callback(r)
+        return results
+
     def _execute_tool(name: str, args: dict) -> dict:
         """Ejecuta tool nativa o MCP según el nombre."""
         if name == "delegate_task":
             return _run_delegate(args)
+        _run_hooks("pre_tool", name)
         if mcp_bridge and mcp_bridge.has_tool(name):
-            return mcp_bridge.call(name, args)
-        return registry.execute(name, args, cwd)
+            result = mcp_bridge.call(name, args)
+        else:
+            result = registry.execute(name, args, cwd)
+        _run_hooks("post_tool", name)
+        return result
 
     def _run_delegate(args: dict) -> dict:
         """Ejecuta una subtarea en un subagente (un nivel, sin recursión)."""
@@ -128,6 +191,7 @@ def run_agent(
             mcp_servers=mcp_servers,
             persist=False,
             verify_changes=False,
+            hooks=hooks,
         )
         return {
             "ok": sub["status"] == "done",
