@@ -11,7 +11,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![uv](https://img.shields.io/badge/uv-0.12-8B5CF6?style=for-the-badge&logo=python&logoColor=white)](https://docs.astral.sh/uv/)
 [![License](https://img.shields.io/badge/License-MIT-22c55e?style=for-the-badge&logo=opensourceinitiative&logoColor=white)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-259%20passed-22c55e?style=for-the-badge&logo=pytest&logoColor=white)](tests/)
+[![Tests](https://img.shields.io/badge/Tests-329%20passed-22c55e?style=for-the-badge&logo=pytest&logoColor=white)](tests/)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-ec4899?style=for-the-badge&logo=github&logoColor=white)](https://github.com/Xainner/Rinari-CLI/pulls)
 
 </div>
@@ -23,8 +23,12 @@
 **Rinari** es una CLI con LLM que se conecta a **tu modelo favorito** — local (llama.cpp, Ollama, vLLM) o en la nube (OpenAI, Anthropic, OpenRouter, DeepSeek, Gemini, OpenCode Zen y cualquier endpoint OpenAI-compatible) — y te da:
 
 - 💬 **Chat interactivo** con streaming en vivo, sesiones reanudables (estilo Hermes) y personalidad
-- 🤖 **Modo agente** tipo Codex/Claude CLI: das tareas y Rinari explora, edita, ejecuta tests, commitea y pushea
-- 🛠️ **18+ herramientas nativas**: control de git completo (status, diff, log, branch, stash, checkout, pull, push), edición quirúrgica de archivos, búsqueda de código, ejecución de tests, búsqueda web
+- 🤖 **Modo agente** tipo Codex/Claude CLI: das tareas y Rinari explora, edita, ejecuta tests, commitea, pushea y abre PRs
+- 🧠 **Memoria por repositorio** (`RINARI.md`): el agente respeta las convenciones de cada proyecto
+- 🔁 **Presupuesto con continuación**: al agotarse las iteraciones, pregunta *¿continuar?* y sigue con el contexto intacto
+- 🛠️ **22 herramientas nativas**: control de git completo (status, diff, log, branch, stash, checkout, pull, push), edición quirúrgica, búsqueda de código, tests, búsqueda web, PRs de GitHub
+- 👥 **Subagentes** (`delegate_task`): delega subtareas a un subagente de un nivel
+- 🪝 **Hooks pre/post tool**: scripts que corren antes y después de cada herramienta
 - 🔌 **Soporte MCP** (Model Context Protocol): conecta servidores externos como tools dinámicas
 - 🔒 **Privacidad**: con modelos locales, tus prompts nunca salen de tu red
 
@@ -145,8 +149,24 @@ rinari@mi-proyecto > refactoriza el módulo auth
 rinari@mi-proyecto > /exit
 ```
 
-Comandos: `/new` (nuevo contexto), `/model <perfil>`, `/approve` (toggle aprobación), `/exit`, `/help`.
+Comandos: `/new` (nuevo contexto), `/model <perfil>`, `/approve` (toggle aprobación), `/compact` (resume la conversación), `/todos` (gestión de tareas), `/cost` (uso de tokens de la sesión), `/undo` (deshace la última edición del agente), `/exit`, `/help`. Cualquier `/comando` desconocido busca un skill en `~/.rinari/commands/<nombre>.md` y lo envía como prompt.
 El agente **verifica automáticamente** los tests tras cada edición y **persiste cada sesión** en el historial.
+
+**Presupuesto de iteraciones:** por defecto 25 por tanda (configurable con `max_iterations = 30` en el perfil o `--max-iterations`). Al agotarse, Rinari te avisa y pregunta *"¿Continuar con N iteraciones más?"* — el contexto se conserva entre tandas, así que las tareas largas no se cortan a mitad.
+
+### Memoria por repositorio (`RINARI.md`)
+
+Crea un `RINARI.md` en la raíz de tu proyecto (o `.rinari.md` para no versionarlo):
+
+```markdown
+# RINARI
+
+- Usa `uv run pytest` para los tests
+- Nunca edites soul.md directamente
+- Convenciones del proyecto…
+```
+
+El agente lo encuentra en el cwd o en los ancestros y lo inyecta en su prompt como reglas del repo — sin que tengas que repetirle las convenciones en cada sesión.
 
 ### Agente one-shot
 
@@ -222,11 +242,27 @@ rinari sync        # reinstala paquete y dependencias
 | `git_commit` | `git add -A` + commit (requiere aprobación) |
 | `run_tests` | Detecta y ejecuta pytest/npm test (usa `uv run` en proyectos uv) |
 | `web_search` | Búsqueda web vía DuckDuckGo Lite (sin API key) |
+| `delegate_task` | Delega una subtarea a un subagente (un nivel, sin recursión) |
+| `github_create_pr` | Crea un PR desde la rama actual (requiere `GITHUB_TOKEN` y aprobación) |
+| `github_list_prs` | Lista los PRs del repo (estado open/closed/all) |
 | `MCP tools` | Cualquier tool expuesta por tus servidores MCP |
 
-**Seguridad:** comandos peligrosos (`rm -rf`, `sudo`, `git push`/`pull`, `git checkout`, `stash push/pop`, `curl|sh`, …) piden aprobación salvo `-y`. Los paths no escapan del `--cwd`.
+**Seguridad:** comandos peligrosos (`rm -rf`, `sudo`, `git push`/`pull`, `git checkout`, `stash push/pop`, `curl|sh`, `github_create_pr`, …) piden aprobación salvo `-y`. Los paths no escapan del `--cwd`.
 
-**Loop agéntico avanzado:** reintenta errores transitorios de la LLM, verifica tests tras cada edición, soporta plan + aprobación previa, y persiste las sesiones.
+**Hooks pre/post tool:** en `~/.rinari/hooks.toml` defines scripts que corren antes/después de cada herramienta — por tool específica o con comodín `*`:
+
+```toml
+[pre_tool]
+edit_file = "python scripts/lint.py"   # solo antes de editar
+"*" = "echo trabajando..."              # antes de TODAS las tools
+
+[post_tool]
+"*" = "python scripts/format.py"        # después de todas
+```
+
+Un hook que falla nunca rompe el loop (se registra como paso y el agente sigue). Los subagentes heredan los hooks del padre.
+
+**Loop agéntico avanzado:** reintenta errores transitorios de la LLM, verifica tests tras cada edición, soporta plan + aprobación previa, inyecta *reminders* al modelo cuando el presupuesto está por agotarse (estilo Codex), persiste las sesiones, y sanea el contenido de los tool results para evitar que el modelo imite formatos raros.
 
 ## 🏗️ Arquitectura
 
@@ -243,15 +279,15 @@ src/rinari/
 ├── assets/soul.md# la voz de Rinari (editable, se aplica sin reinstalar)
 ├── mcp.py        # cliente MCP (stdio) para servidores externos
 └── agent/
-    ├── loop.py   # loop agéntico: model → tools → observe (retry, verify, plan, persist)
-    ├── tools.py  # tool registry + detección de comandos peligrosos
-    └── prompt.py # compone el prompt del agente desde identity
+    ├── loop.py   # loop agéntico: model → tools → observe (retry, verify, plan, persist, budget+continue)
+    ├── tools.py  # tool registry + detección de comandos peligrosos + shell seguro por plataforma
+    └── prompt.py # compone el prompt del agente desde identity + memoria RINARI.md
 ```
 
 ## 🧪 Tests
 
 ```bash
-uv run pytest    # 259 tests, sin red (httpx MockTransport)
+uv run pytest    # 329 tests, sin red (httpx MockTransport)
 ```
 
 ## 🌿 Ramas de feature
