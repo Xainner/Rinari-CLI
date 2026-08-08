@@ -368,6 +368,11 @@ def run_agent(
                 }
             )
 
+        # Sanear el contenido: evitar que el modelo imite formatos raros
+        # (@url:`...` de docs de PowerShell) vistos en tool results previos
+        for tm in tool_messages:
+            tm["content"] = _sanitize_tool_content(tm["content"])
+
         messages.append(
             {
                 "role": "assistant",
@@ -489,6 +494,22 @@ class MCPToolBridge:
             return {"ok": True, "result": result}
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "error": f"MCP '{mcp_name}': {e}"}
+
+
+def _sanitize_tool_content(content: str) -> str:
+    """Limpia formatos raros de tool results antes de volver al modelo.
+
+    Convierte '@url:`https://x`' (sintaxis de docs de PowerShell) en la URL
+    desnuda — el modelo tiende a imitar ese formato en comandos posteriores
+    (curl "@url:`...`"), lo que rompe la ejecución.
+    """
+    import re
+
+    # @url:`https://example.com` → https://example.com
+    content = re.sub(r"@url:`([^`]+)`", r"\1", content)
+    # @url:https://example.com → https://example.com
+    content = re.sub(r"@url:([a-zA-Z][a-zA-Z0-9+.-]*://[^\s`\"'\)\]]+)", r"\1", content)
+    return content
 
 
 def _parse_response(response) -> dict:
