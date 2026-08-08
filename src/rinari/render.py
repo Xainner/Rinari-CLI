@@ -50,6 +50,35 @@ class DeltaAccumulator:
         except Exception:
             self.console.print(text)
 
+    def stream_live(self, events, console: Console | None = None) -> None:
+        """Renderiza eventos de streaming EN VIVO (token a token).
+
+        Muestra el texto acumulado mientras llega y, al terminar,
+        re-renderiza el bloque completo como markdown.
+        En terminales reales usa rich Live (frames que se reemplazan);
+        en pipes/no-TTY escribe los deltas en secuencia (sin borrado).
+        events: iterable de str o dicts (los dicts con tool_calls se ignoran).
+        """
+        console = console or self.console
+        is_tty = console.is_terminal
+        if not is_tty:
+            for event in events:
+                if isinstance(event, str):
+                    self.add(event)
+                    console.print(event, end="", highlight=False)
+            console.print()
+            return
+        from rich.live import Live
+        from rich.markdown import Markdown
+        from rich.text import Text
+
+        with Live(Text(), console=console, refresh_per_second=15) as live:
+            for event in events:
+                if isinstance(event, str):
+                    self.add(event)
+                    live.update(Text(self.text))
+            live.update(Markdown(self.text) if self.text.strip() else Text(""))
+
 
 def render_code_block(code: str, language: str = "python", title: str = "Código") -> None:
     """Renderiza un bloque de código con syntax highlighting."""

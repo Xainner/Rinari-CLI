@@ -458,14 +458,12 @@ def chat(
             client = _make_client(current)
             console.print("[dim]⏳ pensando…[/dim]", end="\r")
             acc = DeltaAccumulator()
-            for event in client.chat_stream(session.messages, temperature=current.temperature):
-                if isinstance(event, str):
-                    acc.add(event)
-            console.print(" " * 20, end="\r")
+            acc.stream_live(
+                client.chat_stream(session.messages, temperature=current.temperature)
+            )
             if acc.text:
                 session.add_assistant_message(acc.text)
                 session.persist()
-                acc.render_markdown()
             else:
                 console.print("[yellow]⚠️ Respuesta vacía del modelo.[/yellow]")
         except LLMError as e:

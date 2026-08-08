@@ -67,3 +67,46 @@ def test_render_tool_result_stdout_no_crash():
 def test_render_tool_result_empty_no_crash():
     """Resultado sin stdout no imprime nada (no rompe)."""
     render_tool_result({"ok": True, "stdout": "", "exit_code": 0})
+
+
+def test_stream_live_accumulates_and_renders():
+    """stream_live acumula todos los deltas y termina con el texto completo."""
+    from io import StringIO
+
+    from rich.console import Console
+
+    from rinari.render import DeltaAccumulator
+
+    acc = DeltaAccumulator()
+    console = Console(file=StringIO(), width=80, force_terminal=True)
+    events = ["ho", "la ", "mundo", {"tool_calls": []}]
+    acc.stream_live(iter(events), console=console)
+    assert acc.text == "hola mundo"
+
+
+def test_stream_live_ignores_tool_call_events():
+    """Los eventos dict (tool_calls) no aportan texto."""
+    from io import StringIO
+
+    from rich.console import Console
+
+    from rinari.render import DeltaAccumulator
+
+    acc = DeltaAccumulator()
+    console = Console(file=StringIO(), width=80, force_terminal=True)
+    acc.stream_live(iter([{"tool_calls": []}, "solo texto"]), console=console)
+    assert acc.text == "solo texto"
+
+
+def test_stream_live_empty_events_no_crash():
+    """Sin eventos no rompe y no acumula nada."""
+    from io import StringIO
+
+    from rich.console import Console
+
+    from rinari.render import DeltaAccumulator
+
+    acc = DeltaAccumulator()
+    console = Console(file=StringIO(), width=80, force_terminal=True)
+    acc.stream_live(iter([]), console=console)
+    assert acc.text == ""
