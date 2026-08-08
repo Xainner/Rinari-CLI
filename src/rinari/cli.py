@@ -9,6 +9,7 @@ Subcomandos:
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -414,7 +415,7 @@ def chat(
             f"[bold magenta]Rinari CLI {__version__}[/bold magenta]\n"
             f"Perfil: [yellow]{profile}[/yellow] → {current.base_url} "
             f"([bold]{current.model}[/bold])\n"
-            "Escribe tu mensaje. Comandos: /new, /model <perfil>, /save, /exit, /help. "
+            "Escribe tu mensaje. Comandos: /new, /model <perfil>, /compact, /todos, /save, /exit, /help. "
             "Ctrl+C para detener la generación.",
             border_style="magenta",
         )
@@ -433,7 +434,10 @@ def chat(
         cmd, args = parse_command(line)
         if cmd is not None:
             try:
-                msg = run_command(cmd, args, session, config_dir=cfg.path.parent)
+                compact_client = None
+                if cmd == "compact":
+                    compact_client = _make_client(current)
+                msg = run_command(cmd, args, session, config_dir=cfg.path.parent, compact_client=compact_client)
                 if msg:
                     console.print(msg)
                 if cmd == "model":
@@ -480,6 +484,7 @@ def run(
     profile: str = typer.Option("default", "--profile", "-p", help="Perfil de configuración"),
     stream: bool = typer.Option(True, "--stream/--no-stream", help="Streaming a stdout"),
     temperature: float | None = typer.Option(None, "--temperature", help="Override de temperatura"),
+    output: str = typer.Option("text", "--output", "-o", help="Formato de salida: text | json"),
 ):
     """One-shot: envía un prompt y escribe la respuesta a stdout (para pipes)."""
     from rinari.identity import build_chat_prompt
@@ -491,6 +496,10 @@ def run(
         {"role": "user", "content": prompt},
     ]
     try:
+        if output == "json":
+            result = client.chat(messages, temperature=temp)
+            sys.stdout.write(json.dumps({"ok": True, "response": result}, ensure_ascii=False) + "\n")
+            return
         if stream:
             for event in client.chat_stream(messages, temperature=temp):
                 if isinstance(event, str):
@@ -501,6 +510,9 @@ def run(
             result = client.chat(messages, temperature=temp)
             sys.stdout.write(result + "\n")
     except LLMError as e:
+        if output == "json":
+            sys.stdout.write(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False) + "\n")
+            raise typer.Exit(1)
         console.print(f"[red]Error: {e}[/red]", file=sys.stderr)
         raise typer.Exit(1)
 
@@ -1039,6 +1051,7 @@ def agent(
     plan: bool = typer.Option(False, "--plan", help="Presenta un plan y pide aprobación antes de ejecutar"),
     no_verify: bool = typer.Option(False, "--no-verify", help="Desactiva la verificación automática de tests tras editar"),
     no_persist: bool = typer.Option(False, "--no-persist", help="No guardar la sesión en el historial"),
+    output: str = typer.Option("text", "--output", "-o", help="Formato de salida: text | json"),
 ):
     """Modo agente de código: ejecuta la tarea con tool calling (o modo interactivo)."""
     from rinari.agent.loop import run_agent
@@ -1053,14 +1066,15 @@ def agent(
         return
 
     client, _ = _build_client(profile)
-    console.print(
-        Panel(
-            f"[bold magenta]Rinari agente[/bold magenta]\n"
-            f"Perfil: [yellow]{profile}[/yellow] | cwd: [cyan]{cwd}[/cyan]\n"
-            f"Tarea: [bold]{task}[/bold]",
-            border_style="magenta",
+    if output != "json":
+        console.print(
+            Panel(
+                f"[bold magenta]Rinari agente[/bold magenta]\n"
+                f"Perfil: [yellow]{profile}[/yellow] | cwd: [cyan]{cwd}[/cyan]\n"
+                f"Tarea: [bold]{task}[/bold]",
+                border_style="magenta",
+            )
         )
-    )
 
     result = run_agent(
         task=task,
@@ -1068,12 +1082,33 @@ def agent(
         cwd=str(_normalize_cwd(cwd)),
         auto_approve=auto_approve,
         max_iterations=max_iterations,
-        render_callback=_agent_on_step,
+        render_callback=None if output == "json" else _agent_on_step,
         mcp_servers=_load_mcp_servers(),
         plan_first=plan,
         verify_changes=not no_verify,
         persist=not no_persist,
     )
+
+    if output == "json":
+        json.dump(
+            {
+                "ok": result["status"] in ("done", "plan_denied"),
+                "status": result["status"],
+                "final": result.get("final"),
+                "iterations": result.get("iterations"),
+                "plan": result.get("plan"),
+                "steps": [
+                    {"type": s.get("type"), "name": s.get("name"), "content": s.get("content")}
+                    for s in result.get("steps", [])
+                ],
+                "saved": result.get("saved"),
+            },
+            sys.stdout,
+            ensure_ascii=False,
+            indent=2,
+        )
+        sys.stdout.write("\n")
+        return
 
     if result["status"] == "done":
         console.print("\n[bold green]✓ Tarea completada.[/bold green]")
