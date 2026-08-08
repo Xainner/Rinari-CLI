@@ -48,10 +48,19 @@ def test_build_agent_prompt_includes_rules():
 
 
 def test_agent_prompt_keeps_personality():
-    """El agente conserva la voz (humor, kaomoji) + reglas técnicas."""
+    """El agente conserva la voz (humor) + reglas técnicas."""
     prompt = build_agent_prompt()
     assert "tests" in prompt.lower()
     assert "humor" in prompt.lower() or "bromas" in prompt.lower()
+
+
+def test_no_kaomoji_anywhere():
+    """El SOUL prohíbe explícitamente emoticones y kaomoji."""
+    chat = build_chat_prompt()
+    assert "kaomoji" in chat.lower()
+    assert "emoticones" in chat.lower()
+    # la regla es negativa: cero adornos visuales
+    assert "sin símbolos" in chat or "cero" in chat.lower()
 
 
 def test_prompt_composable_identically():

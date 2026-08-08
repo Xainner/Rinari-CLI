@@ -102,7 +102,7 @@ def test_setup_wizard_asks_provider(fake_home, monkeypatch):
 
     result = runner.invoke(
         app, ["setup", "--name", "ant"],
-        input="1\n\n\n0\n",  # provider=anthropic, url default, sin key, modelo 0
+        input="Xainner\n1\n\n\n0\n",  # nombre, provider=anthropic, url default, sin key, modelo 0
     )
     assert result.exit_code == 0
     cfg = load_config(fake_home / ".rinari")
@@ -125,7 +125,7 @@ def test_setup_wizard_local_provider(fake_home, monkeypatch):
 
     result = runner.invoke(
         app, ["setup", "--name", "casita"],
-        input="7\n\n\n0\n",  # provider=local (índice 7), url default, sin key, modelo 0
+        input="Xainner\n7\n\n\n0\n",  # nombre, provider=local (índice 7), url default, sin key, modelo 0
     )
     assert result.exit_code == 0
     cfg = load_config(fake_home / ".rinari")

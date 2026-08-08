@@ -119,10 +119,11 @@ class Profile:
 
 
 class Config:
-    def __init__(self, profiles: dict[str, Profile], default: Profile, path: Path):
+    def __init__(self, profiles: dict[str, Profile], default: Profile, path: Path, user_name: str | None = None):
         self.profiles = profiles
         self.default = default
         self.path = path
+        self.user_name = user_name
 
     def get_profile(self, name: str) -> Profile:
         if name in self.profiles:
@@ -189,7 +190,39 @@ def load_config(config_dir: Path | str | None = None) -> Config:
         temperature=float(defaults.get("temperature", 0.7)),
         provider=defaults.get("provider") or "openai",
     )
-    return Config(profiles=profiles, default=default_profile, path=path)
+    user_name = None
+    if isinstance(data.get("user"), dict):
+        user_name = data["user"].get("name") or None
+    return Config(profiles=profiles, default=default_profile, path=path, user_name=user_name)
+
+
+def set_user_name(config_dir: Path | str, name: str) -> Path:
+    """Guarda el nombre del usuario en [user] del config.toml."""
+    config_dir = Path(config_dir)
+    config_dir.mkdir(parents=True, exist_ok=True)
+    path = config_dir / "config.toml"
+    cfg = load_config(config_dir)
+    lines = [f'[user]\nname = "{name}"\n']
+    lines.append("[default]")
+    d = cfg.default
+    lines.append(f'base_url = "{d.base_url}"')
+    lines.append(f'model = "{d.model}"')
+    if d.api_key:
+        lines.append(f'api_key = "{d.api_key}"')
+    if d.provider and d.provider != "openai":
+        lines.append(f'provider = "{d.provider}"')
+    lines.append(f"temperature = {d.temperature}")
+    for pname, p in sorted(cfg.profiles.items()):
+        lines.append(f"\n[profile.{pname}]")
+        lines.append(f'base_url = "{p.base_url}"')
+        lines.append(f'model = "{p.model}"')
+        if p.api_key:
+            lines.append(f'api_key = "{p.api_key}"')
+        if p.provider and p.provider != "openai":
+            lines.append(f'provider = "{p.provider}"')
+        lines.append(f"temperature = {p.temperature}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
 
 
 def save_config(config_dir: Path | str, profiles: dict[str, Profile]) -> Path:
@@ -262,8 +295,10 @@ def set_profile_model(
             )
         d = cfg.default
 
-    # reconstruir el archivo completo: default + perfiles
+    # reconstruir el archivo completo: [user] + default + perfiles
     lines = ['# rinari config — perfiles de endpoints OpenAI-compatibles\n']
+    if cfg.user_name:
+        lines.append(f'[user]\nname = "{cfg.user_name}"\n')
     lines.append('[default]')
     lines.append(f'base_url = "{d.base_url}"')
     lines.append(f'model = "{d.model}"')
