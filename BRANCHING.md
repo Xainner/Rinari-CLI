@@ -13,6 +13,7 @@ verificable.
 | `feature-agent` | Loop agéntico avanzado | 🌿 activa (planificación explícita, verificación automática, retry, persistencia de contexto) |
 | `feature-history` | Historial y sesiones | listar/borrar sesiones, resume del agente, exportar conversaciones |
 | `feature-config` | Configuración | ✅ **MERGEADA a main** (wizard `rinari setup` multi-provider, `rinari doctor`, gestión de modelos, README genérico) |
+| `feature-personality` | Personalidad | ✅ **MERGEADA a main** (Rinari reconstruida: maid moderna con humor seco, SOUL.md canónico, setup pregunta el nombre, emojis sí / kaomoji no) |
 | `feature-mcp` | Integración MCP + búsqueda web | ✅ **MERGEADA a main** (web_search DuckDuckGo, servidores MCP como tools dinámicas) |
 
 ## Flujo de trabajo
