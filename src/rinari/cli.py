@@ -431,9 +431,14 @@ def run(
     temperature: float | None = typer.Option(None, "--temperature", help="Override de temperatura"),
 ):
     """One-shot: envía un prompt y escribe la respuesta a stdout (para pipes)."""
+    from rinari.identity import build_chat_prompt
+
     client, profile_obj = _build_client(profile)
     temp = temperature if temperature is not None else profile_obj.temperature
-    messages = [{"role": "user", "content": prompt}]
+    messages = [
+        {"role": "system", "content": build_chat_prompt()},
+        {"role": "user", "content": prompt},
+    ]
     try:
         if stream:
             for event in client.chat_stream(messages, temperature=temp):
@@ -686,19 +691,40 @@ def setup(
     api_key: str = typer.Option(None, "--api-key", help="API key (o deja vacío)"),
     provider: str = typer.Option(None, "--provider", help="Proveedor (openai, anthropic, local…)"),
 ):
-    """Wizard interactivo: elige provider, conecta, lista modelos y crea el perfil."""
+    """Wizard interactivo: nombre, proveedor, endpoint, modelo — crea el perfil."""
     import os
 
-    from rinari.config import PROVIDERS, set_profile_model
+    from rinari.config import PROVIDERS, set_profile_model, set_user_name
     from rinari.ui import render_logo_compact
 
-    name = profile or "default"
     console.print(render_logo_compact())
-    console.print("\n[bold magenta]Setup de Rinari[/bold magenta] (✿◠‿◠)\n")
+    console.print("\n[bold magenta]Setup de Rinari[/bold magenta]\n")
 
     cfg = load_config()
 
-    # 0. elegir provider (salta si viene --provider)
+    # 0. nombre del usuario (se guarda en [user] y Rinari lo usa)
+    existing_name = cfg.user_name
+    try:
+        name_input = input(
+            f"¿Cómo te llamas? [default: {existing_name}]: " if existing_name else "¿Cómo te llamas?: "
+        ).strip()
+    except EOFError:
+        name_input = ""
+    user_name = name_input or existing_name or "Xainner"
+    if user_name != existing_name:
+        set_user_name(cfg.path.parent, user_name)
+        console.print(f"[dim]Guardado: te llamarás {user_name} para Rinari.[/dim]\n")
+
+    # 0b. nombre del perfil (pregunta salvo que venga --name)
+    if profile is None:
+        try:
+            name = input("Nombre del perfil [default: default]: ").strip() or "default"
+        except EOFError:
+            name = "default"
+    else:
+        name = profile
+
+    # 1. elegir provider (salta si viene --provider)
     if provider is None:
         console.print("[bold]¿Qué proveedor usas?[/bold]")
         console.print(format_providers() + "\n")
