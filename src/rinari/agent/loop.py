@@ -79,7 +79,7 @@ def run_agent(
     plan_first: la primera respuesta se trata como plan y requiere aprobación
                 antes de continuar (plan_approver recibe (task, plan)).
     """
-    registry = registry or ToolRegistry()
+    registry = registry or ToolRegistry(delegate=True)
     approver = approver or _default_approver
     plan_approver = plan_approver or _default_plan_approver
     if messages is None:
@@ -99,9 +99,42 @@ def run_agent(
 
     def _execute_tool(name: str, args: dict) -> dict:
         """Ejecuta tool nativa o MCP según el nombre."""
+        if name == "delegate_task":
+            return _run_delegate(args)
         if mcp_bridge and mcp_bridge.has_tool(name):
             return mcp_bridge.call(name, args)
         return registry.execute(name, args, cwd)
+
+    def _run_delegate(args: dict) -> dict:
+        """Ejecuta una subtarea en un subagente (un nivel, sin recursión)."""
+        task = (args.get("task") or "").strip()
+        if not task:
+            return {"ok": False, "error": "delegate_task requiere 'task'"}
+        context = (args.get("context") or "").strip()
+        sub_messages = None
+        if context:
+            sub_messages = [{"role": "system", "content": f"Contexto del agente padre:\n{context}"}]
+        sub_registry = ToolRegistry(delegate=False)  # el subagente NO delega
+        sub = run_agent(
+            task,
+            client,
+            cwd,
+            registry=sub_registry,
+            auto_approve=auto_approve,
+            approver=approver,
+            max_iterations=max(3, min(max_iterations // 2, 8)),
+            render_callback=render_callback,
+            messages=sub_messages,
+            mcp_servers=mcp_servers,
+            persist=False,
+            verify_changes=False,
+        )
+        return {
+            "ok": sub["status"] == "done",
+            "status": sub["status"],
+            "final": sub.get("final"),
+            "iterations": sub.get("iterations"),
+        }
 
     def _llm_call() -> tuple[dict | str, int]:
         """Llama al modelo con reintentos ante errores transitorios."""

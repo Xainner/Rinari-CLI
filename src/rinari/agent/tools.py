@@ -889,10 +889,40 @@ class ToolRegistry:
         "web_search": web_search,
         }
 
+    _DELEGATE_DEF = {
+        "type": "function",
+        "function": {
+            "name": "delegate_task",
+            "description": (
+                "Delega una subtarea a un subagente: resúmenes, análisis de "
+                "archivos, investigaciones puntuales. El subagente tiene sus "
+                "propias tools (lee/escribe/git) pero NO puede delegar a su vez "
+                "ni ejecutar comandos sin aprobación. Devuelve el resultado final."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string", "description": "La subtarea a resolver (instrucción autocontenida)"},
+                    "context": {"type": "string", "description": "Contexto adicional para el subagente (opcional)"},
+                },
+                "required": ["task"],
+            },
+        },
+    }
+
+    def __init__(self, delegate: bool = False):
+        self._delegate = delegate
+
     def openai_schemas(self) -> list[dict]:
+        if self._delegate:
+            return TOOL_DEFS + [self._DELEGATE_DEF]
         return TOOL_DEFS
 
     def execute(self, name: str, args: dict, cwd: str) -> dict:
+        if name == "delegate_task":
+            if not self._delegate:
+                raise ToolError("delegate_task no está disponible en este contexto")
+            raise ToolError("delegate_task debe ejecutarse vía el agent loop")
         fn = self._TOOLS.get(name)
         if fn is None:
             raise ToolError(f"Herramienta desconocida: {name}")
