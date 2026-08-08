@@ -104,6 +104,30 @@ class History:
             for r in rows
         ]
 
+    def last_session(self, profile: str) -> dict | None:
+        """La sesión más reciente del perfil (o None si no hay)."""
+        rows = self._conn.execute(
+            """
+            SELECT s.id, s.profile, s.created_at, COUNT(m.id) as message_count
+            FROM sessions s
+            LEFT JOIN messages m ON m.session_id = s.id
+            WHERE s.profile = ?
+            GROUP BY s.id
+            ORDER BY s.created_at DESC
+            LIMIT 1
+            """,
+            (profile,),
+        ).fetchall()
+        if not rows:
+            return None
+        r = rows[0]
+        return {
+            "id": r["id"],
+            "profile": r["profile"],
+            "created_at": r["created_at"],
+            "message_count": r["message_count"],
+        }
+
     def delete_session(self, session_id: int) -> None:
         with self._conn:
             self._conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))

@@ -337,12 +337,62 @@ def _build_client(profile_name: str) -> tuple[LLMClient, object]:
     return _make_client(profile), profile
 
 
+def _resolve_resume(
+    profile: str,
+    resume: int | None,
+    force_new: bool = False,
+    home: Path | None = None,
+) -> int | None:
+    """Resuelve qué sesión continuar al arrancar el chat.
+
+    - force_new → None (sesión nueva, sin preguntar)
+    - resume con id → ese id
+    - resume sin id (None) → selector: lista recientes, Enter = nueva,
+      número = continuar; si no hay sesiones → None
+    - home: directorio base para el historial (inyectable en tests)
+    """
+    if force_new or resume is not None:
+        return resume
+    hist = History(home / ".rinari" / "history.sqlite" if home else None)
+    try:
+        sessions = hist.list_sessions(limit=8)
+        # filtrar por perfil para el selector
+        mine = [s for s in sessions if s["profile"] == profile]
+        if not mine:
+            return None
+        console.print("\n[bold magenta]Sesiones recientes:[/bold magenta]")
+        for s in mine:
+            preview = _session_preview(hist, s["id"])
+            extra = f" — {preview}" if preview else ""
+            console.print(
+                f"  [bold]{s['id']}[/bold] · [dim]{s['created_at'][:19].replace('T', ' ')}[/dim]"
+                f" · {s['message_count']} msgs{extra}"
+            )
+        console.print("  [dim][Enter] = sesión nueva[/dim]\n")
+        try:
+            choice = input("¿Continuar sesión? (número o Enter): ").strip()
+        except EOFError:
+            choice = ""
+        if not choice:
+            return None
+        try:
+            sid = int(choice)
+        except ValueError:
+            return None
+        if any(s["id"] == sid for s in mine):
+            return sid
+        return None
+    finally:
+        hist.close()
+
+
 @app.command()
 def chat(
     profile: str = typer.Option("default", "--profile", "-p", help="Perfil de configuración"),
-    resume: int | None = typer.Option(None, "--resume", help="Sesión a continuar (id)"),
+    resume: int | None = typer.Option(None, "--resume", help="Sesión a continuar (id; sin valor = la última)"),
+    new: bool = typer.Option(False, "--new", help="Fuerza una sesión nueva sin preguntar"),
 ):
-    """REPL interactivo de chat con streaming."""
+    """REPL interactivo de chat con streaming y sesiones."""
     cfg = load_config()
     try:
         current = cfg.get_profile(profile)
@@ -351,7 +401,8 @@ def chat(
         raise typer.Exit(1)
 
     history = History()
-    session = ChatSession(history=history, profile=profile, session_id=resume)
+    session_id = _resolve_resume(profile, resume, force_new=new)
+    session = ChatSession(history=history, profile=profile, session_id=session_id)
 
     from rinari.ui import render_logo_compact
 
