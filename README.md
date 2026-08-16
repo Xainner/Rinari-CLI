@@ -39,7 +39,11 @@ Todas estas preguntas viven en la
 
 - [TODO.md](TODO.md) — roadmap por fases, con la definición actual
 - [AGENTS.md](AGENTS.md) — reglas de trabajo para agentes de IA (y humanos)
-- [docs/tools.md](docs/tools.md) — tools del agente: catálogo candidato y
-  decisiones pendientes (borrador)
-- [docs/skills.md](docs/skills.md) — skills: formato, catálogo candidato y
+- [docs/tools.md](docs/tools.md) — catálogo maestro de tools (agente
+  generalista): 64 dominios, contrato de tool, resultado estándar,
+  estrategia de carga
+- [docs/skills.md](docs/skills.md) — catálogo maestro de skills (agente
+  generalista): 104 capacidades, capas de carga, contrato de skill,
+  skills vs tools
+- [docs/soul.md](docs/soul.md) — la voz de Rinari: texto candidato (v1) y
   decisiones pendientes (borrador)

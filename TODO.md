@@ -19,11 +19,11 @@ modo que la fase 1 pueda construirse sin adivinar nada.
       con streaming; REPL de chat mínimo). Decisión final: _pendiente_.
 - [ ] **Herencia de v1** — decidir por item: se hereda / se reconstruye más
       tarde / se descarta.
-      Items: personalidad (SOUL.md) · perfiles multi-provider · historial de
+      Items: personalidad (soul) · perfiles multi-provider · historial de
       sesiones · RINARI.md (memoria por repo) · modo agente · tools · skills ·
       MCP · web_search · hooks · subagentes · setup wizard / doctor.
-      Catálogos y decisiones por tema: [docs/tools.md](docs/tools.md) y
-      [docs/skills.md](docs/skills.md).
+      Catálogos maestros por tema: [docs/tools.md](docs/tools.md),
+      [docs/skills.md](docs/skills.md) y [docs/soul.md](docs/soul.md).
 - [ ] **Arquitectura** — mapa de módulos de `src/rinari/` y estructura de
       directorios (partir de mínimo, no de la v1).
 - [ ] **Superficie CLI** — nombre del comando (`rinari`) y subcomandos de la
@@ -65,3 +65,4 @@ README), y marcar el checkbox de arriba._
 |---|---|
 | 2026-08-16 | Stack: Python 3.11+ / uv / src layout. Fase 0 antes que código. Sin herencia de v1 por ahora. Repo nuevo, `main` como rama estable. |
 | 2026-08-16 | docs/tools.md y docs/skills.md creados como borradores de definición (catálogos candidatos de v1 + decisiones pendientes). |
+| 2026-08-16 | docs/soul.md creado como borrador de definición (soul de v1 como texto candidato + decisiones pendientes). |
