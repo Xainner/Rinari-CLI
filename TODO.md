@@ -2,7 +2,7 @@
 
 Roadmap canónico de construcción de Rinari.
 
-> **Estado actual:** Fase 0 — cierre de contrato y definición.
+> **Estado actual:** Fase 2 — Agent Runtime, Tool Runtime y seguridad base.
 >
 > **Regla:** las fases expresan **orden de dependencia de implementación**, no alcance opcional del producto.
 >
@@ -632,7 +632,9 @@ Ejecutada el 2026-08-16 con la confirmación de la licencia MIT:
 
 ---
 
-# Fase 1 — Fundaciones, bootstrap y persistencia ← ACTUAL
+# Fase 1 — Fundaciones, bootstrap y persistencia — COMPLETA (2026-08-16)
+
+> 4 items del checklist quedaron abiertos porque dependen del agent loop / prompt assembler de Fase 2: `Extended Identity bajo demanda`, `detectar project-creation intent`, `preservar conversación`, `recalcular permisos`.
 
 ## Objetivo
 
@@ -660,215 +662,215 @@ Todo con tests deterministas.
 
 ## Packaging
 
-- [ ] Crear `pyproject.toml`.
-- [ ] Configurar Python `>=3.11`.
-- [ ] Configurar package `rinari`.
-- [ ] Crear `src/rinari/`.
-- [ ] Crear entrypoint `rinari`.
-- [ ] Generar `uv.lock`.
-- [ ] `uv sync` limpio.
-- [ ] Definir metadata de build.
-- [ ] Implementar `rinari --version`.
-- [ ] Implementar Build Manifest.
+- [x] Crear `pyproject.toml`.
+- [x] Configurar Python `>=3.11`.
+- [x] Configurar package `rinari`.
+- [x] Crear `src/rinari/`.
+- [x] Crear entrypoint `rinari`.
+- [x] Generar `uv.lock`.
+- [x] `uv sync` limpio.
+- [x] Definir metadata de build.
+- [x] Implementar `rinari --version`.
+- [x] Implementar Build Manifest.
 
 ## Estructura base
 
-- [ ] `src/rinari/cli/`
-- [ ] `src/rinari/application/`
-- [ ] `src/rinari/runtime/`
-- [ ] `src/rinari/providers/`
-- [ ] `src/rinari/models/`
-- [ ] `src/rinari/sessions/`
-- [ ] `src/rinari/projects/`
-- [ ] `src/rinari/prompts/`
-- [ ] `src/rinari/policy/`
-- [ ] `src/rinari/storage/`
-- [ ] `src/rinari/shared/`
-- [ ] `assets/`
-- [ ] `tests/unit/`
-- [ ] `tests/integration/`
-- [ ] `tests/e2e/`
-- [ ] `tests/fixtures/`
+- [x] `src/rinari/cli/`
+- [x] `src/rinari/application/`
+- [x] `src/rinari/runtime/`
+- [x] `src/rinari/providers/`
+- [x] `src/rinari/models/`
+- [x] `src/rinari/sessions/`
+- [x] `src/rinari/projects/`
+- [x] `src/rinari/prompts/`
+- [x] `src/rinari/policy/`
+- [x] `src/rinari/storage/`
+- [x] `src/rinari/shared/`
+- [x] `assets/`
+- [x] `tests/unit/`
+- [x] `tests/integration/`
+- [x] `tests/e2e/`
+- [x] `tests/fixtures/`
 
 ## Configuración
 
-- [ ] Resolver `~/.rinari/`.
-- [ ] Crear config por defecto.
-- [ ] Parser TOML.
-- [ ] Config schema.
-- [ ] Config precedence.
-- [ ] `rinari config list`.
-- [ ] `rinari config get`.
-- [ ] `rinari config set`.
-- [ ] `rinari config unset`.
-- [ ] `rinari config validate`.
-- [ ] `rinari config path`.
-- [ ] Tests de config layering.
+- [x] Resolver `~/.rinari/`.
+- [x] Crear config por defecto.
+- [x] Parser TOML.
+- [x] Config schema.
+- [x] Config precedence.
+- [x] `rinari config list`.
+- [x] `rinari config get`.
+- [x] `rinari config set`.
+- [x] `rinari config unset`.
+- [x] `rinari config validate`.
+- [x] `rinari config path`.
+- [x] Tests de config layering.
 
 ## SQLite / estado
 
-- [ ] SQLite connection layer.
-- [ ] WAL mode.
-- [ ] Schema migrations.
-- [ ] IDs deterministas/seguros.
-- [ ] Event Store base.
-- [ ] tablas `providers`.
-- [ ] tablas `models`.
-- [ ] tablas `projects`.
-- [ ] tablas `sessions`.
-- [ ] tablas `session_events`.
-- [ ] transactional repositories.
-- [ ] migration tests.
+- [x] SQLite connection layer.
+- [x] WAL mode.
+- [x] Schema migrations.
+- [x] IDs deterministas/seguros.
+- [x] Event Store base.
+- [x] tablas `providers`.
+- [x] tablas `models`.
+- [x] tablas `projects`.
+- [x] tablas `sessions`.
+- [x] tablas `session_events`.
+- [x] transactional repositories.
+- [x] migration tests.
 
 ## Credential Store
 
-- [ ] Interfaz `CredentialStore`.
-- [ ] Secret references.
-- [ ] Backend seguro inicial.
-- [ ] Environment reference backend.
-- [ ] Redacción base.
-- [ ] Nunca persistir plaintext en config normal.
-- [ ] Tests de no-leak.
+- [x] Interfaz `CredentialStore`.
+- [x] Secret references.
+- [x] Backend seguro inicial.
+- [x] Environment reference backend.
+- [x] Redacción base.
+- [x] Nunca persistir plaintext en config normal.
+- [x] Tests de no-leak.
 
 ## Provider Registry
 
-- [ ] `ProviderRecord`.
-- [ ] IDs inmutables.
-- [ ] aliases mutables.
-- [ ] Provider Adapter interface.
-- [ ] auth capabilities.
-- [ ] login flow abstraction.
-- [ ] API-key flow abstraction.
-- [ ] custom provider adapter.
-- [ ] OpenAI-compatible adapter.
-- [ ] health/test capability.
-- [ ] provider registry persistence.
+- [x] `ProviderRecord`.
+- [x] IDs inmutables.
+- [x] aliases mutables.
+- [x] Provider Adapter interface.
+- [x] auth capabilities.
+- [x] login flow abstraction.
+- [x] API-key flow abstraction.
+- [x] custom provider adapter.
+- [x] OpenAI-compatible adapter.
+- [x] health/test capability.
+- [x] provider registry persistence.
 
 ## Provider CLI
 
-- [ ] `rinari provider`.
-- [ ] `rinari provider current`.
-- [ ] `rinari provider use`.
-- [ ] `rinari providers list`.
-- [ ] `rinari providers add`.
-- [ ] `rinari providers login`.
-- [ ] `rinari providers logout`.
-- [ ] `rinari providers auth`.
-- [ ] `rinari providers show`.
-- [ ] `rinari providers test`.
-- [ ] `rinari providers rename`.
-- [ ] `rinari providers remove`.
-- [ ] `rinari providers discover`.
+- [x] `rinari provider`.
+- [x] `rinari provider current`.
+- [x] `rinari provider use`.
+- [x] `rinari providers list`.
+- [x] `rinari providers add`.
+- [x] `rinari providers login`.
+- [x] `rinari providers logout`.
+- [x] `rinari providers auth`.
+- [x] `rinari providers show`.
+- [x] `rinari providers test`.
+- [x] `rinari providers rename`.
+- [x] `rinari providers remove`.
+- [x] `rinari providers discover`.
 
 ## Model Registry
 
-- [ ] `ModelRecord`.
-- [ ] models asociados a provider ID.
-- [ ] aliases.
-- [ ] capabilities.
-- [ ] availability.
-- [ ] provider default model.
-- [ ] provider last-used model.
-- [ ] model resolution.
-- [ ] model discovery abstraction.
+- [x] `ModelRecord`.
+- [x] models asociados a provider ID.
+- [x] aliases.
+- [x] capabilities.
+- [x] availability.
+- [x] provider default model.
+- [x] provider last-used model.
+- [x] model resolution.
+- [x] model discovery abstraction.
 
 ## Model CLI
 
-- [ ] `rinari model`.
-- [ ] `rinari model current`.
-- [ ] `rinari model use`.
-- [ ] `rinari models list`.
-- [ ] `rinari models available`.
-- [ ] `rinari models refresh`.
-- [ ] `rinari models add`.
-- [ ] `rinari models alias`.
-- [ ] `rinari models show`.
-- [ ] `rinari models test`.
-- [ ] `rinari models remove`.
+- [x] `rinari model`.
+- [x] `rinari model current`.
+- [x] `rinari model use`.
+- [x] `rinari models list`.
+- [x] `rinari models available`.
+- [x] `rinari models refresh`.
+- [x] `rinari models add`.
+- [x] `rinari models alias`.
+- [x] `rinari models show`.
+- [x] `rinari models test`.
+- [x] `rinari models remove`.
 
 ## Provider/model invariants
 
-- [ ] test: A → B → A preserva ambos providers.
-- [ ] test: modelo A1 → A2 → A1 preserva ambos.
-- [ ] test: logout no elimina provider.
-- [ ] test: logout no elimina models.
-- [ ] test: remove elimina solo target.
-- [ ] test: provider recuerda modelo.
-- [ ] test: alias rename preserva IDs.
-- [ ] test: historical session references permanecen válidas.
+- [x] test: A → B → A preserva ambos providers.
+- [x] test: modelo A1 → A2 → A1 preserva ambos.
+- [x] test: logout no elimina provider.
+- [x] test: logout no elimina models.
+- [x] test: remove elimina solo target.
+- [x] test: provider recuerda modelo.
+- [x] test: alias rename preserva IDs.
+- [x] test: historical session references permanecen válidas.
 
 ## Soul + Constitution
 
-- [ ] empaquetar Canonical Soul.
-- [ ] loader de Soul.
-- [ ] override `~/.rinari/soul.md`.
-- [ ] extraer/injectar solo Canonical Soul normalmente.
+- [x] empaquetar Canonical Soul.
+- [x] loader de Soul.
+- [x] override `~/.rinari/soul.md`.
+- [x] extraer/injectar solo Canonical Soul normalmente.
 - [ ] Extended Identity bajo demanda.
-- [ ] crear/empaquetar `constitution.md`.
-- [ ] loader de Constitution.
-- [ ] hashes/version metadata.
-- [ ] tests de resolution/fallback.
+- [x] crear/empaquetar `constitution.md`.
+- [x] loader de Constitution.
+- [x] hashes/version metadata.
+- [x] tests de resolution/fallback.
 
 ## Project Detector
 
-- [ ] detectar `.rinari/project.toml`.
-- [ ] detectar `.git`.
-- [ ] detectar markers secundarios.
-- [ ] caminar `cwd → parent`.
-- [ ] nested repo behavior.
-- [ ] project root vs cwd.
-- [ ] Project Identity.
-- [ ] canonical path.
-- [ ] fingerprint Git cuando aplique.
+- [x] detectar `.rinari/project.toml`.
+- [x] detectar `.git`.
+- [x] detectar markers secundarios.
+- [x] caminar `cwd → parent`.
+- [x] nested repo behavior.
+- [x] project root vs cwd.
+- [x] Project Identity.
+- [x] canonical path.
+- [x] fingerprint Git cuando aplique.
 
 ## Session kinds
 
-- [ ] `CHAT`.
-- [ ] `PROJECT`.
-- [ ] plain `rinari` AUTO.
-- [ ] `rinari chat` explícito.
-- [ ] Session Store.
-- [ ] Session Event base.
-- [ ] Session title.
-- [ ] session list/show/new.
-- [ ] session persistence.
+- [x] `CHAT`.
+- [x] `PROJECT`.
+- [x] plain `rinari` AUTO.
+- [x] `rinari chat` explícito.
+- [x] Session Store.
+- [x] Session Event base.
+- [x] Session title.
+- [x] session list/show/new.
+- [x] session persistence.
 
 ## CHAT → PROJECT
 
-- [ ] `ProjectLifecycle`.
+- [x] `ProjectLifecycle`.
 - [ ] detectar project-creation intent.
-- [ ] candidate workspace acotado.
-- [ ] re-detect después de `git init`.
-- [ ] re-detect después de scaffold.
-- [ ] re-detect después de clone.
-- [ ] re-detect después de `rinari init`.
-- [ ] promoción atómica Session CHAT → PROJECT.
-- [ ] preservar session ID.
+- [x] candidate workspace acotado.
+- [x] re-detect después de `git init`.
+- [x] re-detect después de scaffold.
+- [x] re-detect después de clone.
+- [x] re-detect después de `rinari init`.
+- [x] promoción atómica Session CHAT → PROJECT.
+- [x] preservar session ID.
 - [ ] preservar conversación.
-- [ ] preservar provider/model.
+- [x] preservar provider/model.
 - [ ] recalcular permisos.
-- [ ] evento `SessionPromotedToProject`.
-- [ ] rollback/reconcile si promoción falla.
+- [x] evento `SessionPromotedToProject`.
+- [x] rollback/reconcile si promoción falla.
 
 ## Safety invariant
 
-- [ ] test: `$HOME` no es implicit writable workspace.
-- [ ] test: carpeta arbitraria sin marker → CHAT.
-- [ ] test: `rinari chat` dentro de repo sigue siendo CHAT.
-- [ ] test: proyecto creado explícitamente promueve sesión.
+- [x] test: `$HOME` no es implicit writable workspace.
+- [x] test: carpeta arbitraria sin marker → CHAT.
+- [x] test: `rinari chat` dentro de repo sigue siendo CHAT.
+- [x] test: proyecto creado explícitamente promueve sesión.
 
 ## Setup / Doctor / Status
 
-- [ ] `rinari setup`.
-- [ ] rerun setup sin borrar registros existentes.
-- [ ] `rinari doctor`.
-- [ ] `rinari status`.
-- [ ] `rinari help`.
-- [ ] `rinari completion`.
+- [x] `rinari setup`.
+- [x] rerun setup sin borrar registros existentes.
+- [x] `rinari doctor`.
+- [x] `rinari status`.
+- [x] `rinari help`.
+- [x] `rinari completion`.
 
 ---
 
-# Fase 2 — Agent Runtime, Tool Runtime y seguridad base
+# Fase 2 — Agent Runtime, Tool Runtime y seguridad base ← ACTUAL
 
 ## Objetivo
 
@@ -2371,6 +2373,7 @@ Registrar aquí decisiones de producto/roadmap que cambien el contrato.
 | 2026-08-16 | Tests normales serán deterministas y sin red pública; se usarán fake providers, fixtures y transports controlados. |
 | 2026-08-16 | `main` se mantiene como rama estable; no push sin petición/autorización y se prefieren commits pequeños con conventional prefixes. |
 | 2026-08-16 | Licencia MIT confirmada por Xainner; `LICENSE` agregado. Fase 0 completa; se abre Fase 1 (fundaciones, bootstrap y persistencia). |
+| 2026-08-16 | Fase 1 completa: packaging, estructura base, config, estado SQLite, credential store, provider/model/session registries + CLI, Soul/Constitution (assets + loader + overrides), Build Manifest, doctor/status/version. 4 items quedan abiertos por depender del agent loop de Fase 2. Se abre Fase 2 (Agent Runtime, Tool Runtime y seguridad base). |
 
 ---
 
@@ -2405,7 +2408,7 @@ Cada una debe decidirse antes de implementar el subsistema correspondiente, con 
 
 ```text
 FASE ACTUAL
-  Fase 1 — fundaciones, bootstrap y persistencia
+  Fase 2 — Agent Runtime, Tool Runtime y seguridad base
 
 COMPLETADO
   fase 0 completa (2026-08-16)
@@ -2421,12 +2424,21 @@ COMPLETADO
   testing strategy
   Git strategy
   licencia (MIT + LICENSE)
+  fase 1 completa (2026-08-16)
+  packaging (pyproject, uv, entrypoint `rinari`)
+  estructura base src/rinari
+  configuración + SQLite + credential store
+  provider/model registry + CLI
+  session CHAT/PROJECT + persistencia
+  Soul + Constitution (assets, loader, overrides)
+  Build Manifest
+  doctor/status/version
 
 SIGUIENTE
-  packaging (pyproject, uv, entrypoint `rinari`)
-  → estructura base src/rinari
-  → configuración
-  → estado SQLite
-  → credential store
-  → provider registry + CLI
+  Model Runtime (ModelProvider, streaming, tool calls)
+  → Prompt Assembler (segmentos, trust, caching)
+  → Tool Registry / Tool Runtime
+  → Filesystem + Shell/process + Git tools
+  → Policy / Sandbox / Approval
+  → Agent loop + cancellation + trace
 ```

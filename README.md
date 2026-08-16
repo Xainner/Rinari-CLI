@@ -2,10 +2,11 @@
 
 **Tu asistente personal de IA en la terminal.**
 
-> **Estado: fase 1 — fundaciones, bootstrap y persistencia.**
-> Fase 0 (contrato del producto) completa: todo el producto está definido y
-> el repositorio está licenciado bajo MIT. Ver [TODO.md](TODO.md) por el
-> roadmap y el estado de decisiones.
+> **Estado: fase 2 — agent runtime, tool runtime y seguridad base.**
+> Fases 0 (contrato del producto) y 1 (fundaciones, bootstrap y persistencia)
+> completas: el CLI real funciona — setup, config, providers/models,
+> sesiones CHAT/PROJECT, Soul/Constitution, doctor/status/version. Ver
+> [TODO.md](TODO.md) por el roadmap y el estado de decisiones.
 
 Segunda construcción de Rinari. La
 [v1](https://github.com/Xainner/Rinari-CLI) (chat REPL, agente con 23 tools,
@@ -27,13 +28,43 @@ resuelto item por item en la sección "Herencia de Rinari v1" de
 | Tools / Skills | Catálogos maestros con contrato y estrategia de carga lazy | 2026-08-16 |
 | Sesiones | `rinari chat` fuerza CHAT; `rinari` = AUTO (proyecto → PROJECT); promoción CHAT → PROJECT sin reiniciar | 2026-08-16 |
 | Providers / models | Registries persistentes; cambiar selección nunca elimina configuraciones previas | 2026-08-16 |
+| Soul / Constitution | Assets canónicos empaquetados + loader con override `~/.rinari/` y metadatos de versión/hash | 2026-08-16 |
 | Licencia | MIT | 2026-08-16 |
+
+## Qué funciona hoy
+
+```bash
+uv sync
+uv run rinari setup --provider openai --api-key-env OPENAI_API_KEY \
+  --model gpt-4o --model-name gpt-main
+uv run rinari providers add anthropic --name anthropic-work \
+  --api-key-env ANTHROPIC_API_KEY
+uv run rinari provider use anthropic-work
+uv run rinari chat
+uv run rinari status
+uv run rinari doctor
+uv run rinari version
+```
+
+- Config TOML con layering (defaults → usuario → perfil → proyecto) y CLI
+  `rinari config ...`.
+- Providers y models en SQLite (`~/.rinari/state.db`); cambiar selección nunca
+  elimina configuraciones previas y cada provider recuerda su modelo.
+- Sesiones CHAT/PROJECT persistentes con promoción atómica CHAT → PROJECT que
+  preserva el session ID; `$HOME` nunca es workspace implícito.
+- Soul y Constitution empaquetados con loader (override en `~/.rinari/`,
+  versión + sha256 visibles en `rinari version` / `doctor`).
+- El agent loop (invocaciones de model, tools, policy) llega en Fase 2: hoy
+  las sesiones persisten estado pero no llaman a ningún model.
 
 ## Pendiente
 
-- Fase 1 en curso (fundaciones): packaging, estructura base, configuración,
-  estado SQLite, credential store, provider/model registries y CLI — checklist
-  completo en [TODO.md](TODO.md).
+- Fase 2 en curso (agent runtime): Model Runtime, Prompt Assembler, Tool
+  Registry/Runtime, tools filesystem/shell/git, Policy/Sandbox/Approval, agent
+  loop, cancellation y trace. Checklist completo en [TODO.md](TODO.md).
+- 4 items de Fase 1 siguen abiertos porque dependen del agent loop de Fase 2:
+  `Extended Identity bajo demanda`, `detectar project-creation intent`,
+  `preservar conversación`, `recalcular permisos`.
 - Decisiones no bloqueantes (engine de browser, backend del credential store,
   SQLite/ORM, LSPs iniciales, etc.): sección "Decisiones pendientes" de
   [TODO.md](TODO.md). Se resuelve cada una antes de implementar su
