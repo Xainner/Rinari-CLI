@@ -1,0 +1,40 @@
+# Rinari built-in defaults.
+# User values in ~/.rinari/config.toml override these.
+
+user_name = ""
+language = ""
+model = ""
+profile = "workspace"
+
+[agent]
+max_turns = 200
+max_tool_calls = 500
+max_runtime_minutes = 120
+
+[context]
+compact_at_percent = 80
+artifact_output_threshold_kb = 64
+
+[agents]
+enabled = true
+max_concurrent = 4
+max_depth = 2
+max_total = 12
+
+[permissions]
+profile = "workspace"
+approval_policy = "on-request"
+
+[network]
+mode = "ask"
+
+[workspace]
+project_root_markers = [".git", "package.json", "pyproject.toml", "go.mod"]
+
+[instructions]
+global_file = "~/.rinari/RINARI.md"
+project_names = ["RINARI.override.md", "RINARI.md"]
+
+[telemetry]
+local_traces = true
+redact_secrets = true
