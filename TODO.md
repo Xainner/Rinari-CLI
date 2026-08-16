@@ -264,7 +264,7 @@ El Completion Gate debe impedir false-success.
 
 ---
 
-# Fase 0 — Contrato del producto ← ACTUAL
+# Fase 0 — Contrato del producto — COMPLETA (2026-08-16)
 
 ## Objetivo
 
@@ -275,11 +275,13 @@ Cerrar decisiones suficientes para empezar implementación sin que los agentes t
 La fase termina cuando:
 
 ```text
-[ ] no queda ninguna decisión de producto obligatoria pendiente
-[ ] docs canónicos están coherentes entre sí
-[ ] AGENTS.md y TODO.md apuntan al mismo modelo operativo
-[ ] Fase 1 puede comenzar sin decisiones fundamentales bloqueantes
+[x] no queda ninguna decisión de producto obligatoria pendiente
+[x] docs canónicos están coherentes entre sí
+[x] AGENTS.md y TODO.md apuntan al mismo modelo operativo
+[x] Fase 1 puede comenzar sin decisiones fundamentales bloqueantes
 ```
+
+Cumplido el 2026-08-16 con la confirmación de la licencia MIT.
 
 ## Estado de decisiones
 
@@ -609,35 +611,28 @@ La fase termina cuando:
 - [x] `docs/harness.md`
 - [x] `AGENTS.md` alineado con arquitectura actual.
 - [x] `TODO.md` alineado con arquitectura actual.
+- [x] `LICENSE` (MIT).
 
 ### Pendiente real
 
-- [ ] **Licencia**
-      Elegir licencia del repositorio.
-
-      Candidata previa:
-
-      ```text
-      MIT
-      ```
-
-      No marcar como decidida hasta que Xainner lo confirme.
+- [x] **Licencia**
+      MIT — confirmada por Xainner el 2026-08-16. `LICENSE` agregado.
 
 ## Salida de Fase 0
 
-Cuando la licencia quede decidida:
+Ejecutada el 2026-08-16 con la confirmación de la licencia MIT:
 
 ```text
-1. registrar decisión
-2. añadir/actualizar LICENSE
-3. marcar Fase 0 completa
-4. mover fase actual a Fase 1
-5. permitir implementación
+[x] registrar decisión
+[x] añadir/actualizar LICENSE
+[x] marcar Fase 0 completa
+[x] mover fase actual a Fase 1
+[x] permitir implementación
 ```
 
 ---
 
-# Fase 1 — Fundaciones, bootstrap y persistencia
+# Fase 1 — Fundaciones, bootstrap y persistencia ← ACTUAL
 
 ## Objetivo
 
@@ -2375,6 +2370,7 @@ Registrar aquí decisiones de producto/roadmap que cambien el contrato.
 | 2026-08-16 | AGENTS.md deja de hardcodear Fase 0; TODO.md es la fuente de verdad de la fase actual. |
 | 2026-08-16 | Tests normales serán deterministas y sin red pública; se usarán fake providers, fixtures y transports controlados. |
 | 2026-08-16 | `main` se mantiene como rama estable; no push sin petición/autorización y se prefieren commits pequeños con conventional prefixes. |
+| 2026-08-16 | Licencia MIT confirmada por Xainner; `LICENSE` agregado. Fase 0 completa; se abre Fase 1 (fundaciones, bootstrap y persistencia). |
 
 ---
 
@@ -2382,19 +2378,10 @@ Registrar aquí decisiones de producto/roadmap que cambien el contrato.
 
 ## Bloqueante de Fase 0
 
-- [ ] **Licencia del proyecto**
+- [x] **Licencia del proyecto**
 
-      Candidata registrada:
-
-      ```text
-      MIT
-      ```
-
-      Estado:
-
-      ```text
-      pendiente de confirmación
-      ```
+      Resuelta: MIT (confirmada por Xainner, 2026-08-16).
+      Ya no quedan bloqueantes de Fase 0.
 
 ## No bloqueantes hasta su fase
 
@@ -2418,9 +2405,10 @@ Cada una debe decidirse antes de implementar el subsistema correspondiente, con 
 
 ```text
 FASE ACTUAL
-  Fase 0 — contrato del producto
+  Fase 1 — fundaciones, bootstrap y persistencia
 
 COMPLETADO
+  fase 0 completa (2026-08-16)
   identidad
   arquitectura
   CLI contract
@@ -2432,12 +2420,13 @@ COMPLETADO
   visual CLI contract
   testing strategy
   Git strategy
-
-BLOQUEANTE
-  licencia
+  licencia (MIT + LICENSE)
 
 SIGUIENTE
-  cerrar licencia
-  → abrir Fase 1
-  → comenzar implementación de fundaciones
+  packaging (pyproject, uv, entrypoint `rinari`)
+  → estructura base src/rinari
+  → configuración
+  → estado SQLite
+  → credential store
+  → provider registry + CLI
 ```

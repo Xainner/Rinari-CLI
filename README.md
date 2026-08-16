@@ -2,10 +2,10 @@
 
 **Tu asistente personal de IA en la terminal.**
 
-> **Estado: fase 0 — contrato del producto, por cerrar.**
-> Queda un solo bloqueante: la **licencia**. Todo lo demás del producto
-> está definido. Ver [TODO.md](TODO.md) por el roadmap y el estado de
-> decisiones.
+> **Estado: fase 1 — fundaciones, bootstrap y persistencia.**
+> Fase 0 (contrato del producto) completa: todo el producto está definido y
+> el repositorio está licenciado bajo MIT. Ver [TODO.md](TODO.md) por el
+> roadmap y el estado de decisiones.
 
 Segunda construcción de Rinari. La
 [v1](https://github.com/Xainner/Rinari-CLI) (chat REPL, agente con 23 tools,
@@ -27,12 +27,13 @@ resuelto item por item en la sección "Herencia de Rinari v1" de
 | Tools / Skills | Catálogos maestros con contrato y estrategia de carga lazy | 2026-08-16 |
 | Sesiones | `rinari chat` fuerza CHAT; `rinari` = AUTO (proyecto → PROJECT); promoción CHAT → PROJECT sin reiniciar | 2026-08-16 |
 | Providers / models | Registries persistentes; cambiar selección nunca elimina configuraciones previas | 2026-08-16 |
+| Licencia | MIT | 2026-08-16 |
 
 ## Pendiente
 
-- **Licencia** (candidata: MIT) — el único bloqueante de la fase 0. Su cierre
-  abre la fase 1 (ver "Salida de Fase 0" en
-  [TODO.md](TODO.md)).
+- Fase 1 en curso (fundaciones): packaging, estructura base, configuración,
+  estado SQLite, credential store, provider/model registries y CLI — checklist
+  completo en [TODO.md](TODO.md).
 - Decisiones no bloqueantes (engine de browser, backend del credential store,
   SQLite/ORM, LSPs iniciales, etc.): sección "Decisiones pendientes" de
   [TODO.md](TODO.md). Se resuelve cada una antes de implementar su
