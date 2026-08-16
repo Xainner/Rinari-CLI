@@ -4,8 +4,10 @@ import typer
 
 from rinari.application.config import writer
 from rinari.application.config.schema import key_type, leaf_keys
-from rinari.cli.deps import app_context, with_error_handling
+from rinari.cli.deps import app_context, is_json, with_error_handling
 from rinari.shared.errors import InvalidUsageError, NotFoundError
+
+from ..output import emit_json, success_envelope
 
 app = typer.Typer(help="Manage Rinari configuration.", no_args_is_help=True)
 
@@ -16,15 +18,19 @@ def _fail_unless_known_key(key: str) -> None:
 
 
 @app.command("path")
-@with_error_handling
+@with_error_handling("config.path")
 def config_path(ctx: typer.Context) -> None:
     """Print the user config file path."""
     with app_context(ctx) as c:
-        typer.echo(str(c.layout.config_file))
+        path = str(c.layout.config_file)
+        if is_json(ctx):
+            emit_json(success_envelope("config.path", {"path": path}))
+        else:
+            typer.echo(path)
 
 
 @app.command("list")
-@with_error_handling
+@with_error_handling("config.list")
 def config_list(
     ctx: typer.Context,
     show_layers: bool = typer.Option(
@@ -33,6 +39,15 @@ def config_list(
 ) -> None:
     """List effective configuration values."""
     with app_context(ctx) as c:
+        entries = []
+        for key in leaf_keys():
+            entry = {"key": key, "value": _jsonable(c.config.value(key))}
+            if show_layers:
+                entry["sources"] = [name for name, _ in c.config.sources_for(key)]
+            entries.append(entry)
+        if is_json(ctx):
+            emit_json(success_envelope("config.list", entries))
+            return
         for key in leaf_keys():
             value = c.config.value(key)
             line = f"{key} = {_fmt(value)}"
@@ -43,7 +58,7 @@ def config_list(
 
 
 @app.command("get")
-@with_error_handling
+@with_error_handling("config.get")
 def config_get(
     ctx: typer.Context,
     key: str = typer.Argument(...),
@@ -53,14 +68,25 @@ def config_get(
     _fail_unless_known_key(key)
     with app_context(ctx) as c:
         if explain:
+            layers = [
+                {"source": name, "value": _jsonable(value)}
+                for name, value in c.config.sources_for(key) or [("-", None)]
+            ]
+            if is_json(ctx):
+                emit_json(success_envelope("config.get", {"key": key, "sources": layers}))
+                return
             for name, value in c.config.sources_for(key) or [("-", None)]:
                 typer.echo(f"{name}: {_fmt(value)}")
             return
-        typer.echo(_fmt(c.config.value(key)))
+        value = c.config.value(key)
+        if is_json(ctx):
+            emit_json(success_envelope("config.get", {"key": key, "value": _jsonable(value)}))
+        else:
+            typer.echo(_fmt(value))
 
 
 @app.command("set")
-@with_error_handling
+@with_error_handling("config.set")
 def config_set(
     ctx: typer.Context,
     key: str = typer.Argument(...),
@@ -76,11 +102,18 @@ def config_set(
         user = writer.read_user_data(c.layout)
         updated = writer.set_dotted(user, key, parsed)
         write_path = writer.write_user_data(c.layout, updated)
-        typer.echo(f"Set {key} = {_fmt(parsed)} ({write_path})")
+        if is_json(ctx):
+            emit_json(
+                success_envelope(
+                    "config.set", {"key": key, "value": _jsonable(parsed), "path": str(write_path)}
+                )
+            )
+        else:
+            typer.echo(f"Set {key} = {_fmt(parsed)} ({write_path})")
 
 
 @app.command("unset")
-@with_error_handling
+@with_error_handling("config.unset")
 def config_unset(
     ctx: typer.Context,
     key: str = typer.Argument(...),
@@ -93,16 +126,32 @@ def config_unset(
         if not existed:
             raise NotFoundError(f"{key} is not set in the user config")
         write_path = writer.write_user_data(c.layout, updated)
-        typer.echo(f"Unset {key} ({write_path})")
+        if is_json(ctx):
+            emit_json(success_envelope("config.unset", {"key": key, "path": str(write_path)}))
+        else:
+            typer.echo(f"Unset {key} ({write_path})")
 
 
 @app.command("validate")
-@with_error_handling
+@with_error_handling("config.validate")
 def config_validate(ctx: typer.Context) -> None:
     """Validate the effective configuration (defaults + user + profile + project)."""
     with app_context(ctx) as c:  # loading the context already validates the merge
-        sources = ", ".join(layer.name for layer in c.config.layers)
-        typer.echo(f"Config OK ({len(leaf_keys())} keys; layers: {sources})")
+        layers = [layer.name for layer in c.config.layers]
+        if is_json(ctx):
+            emit_json(
+                success_envelope("config.validate", {"keys": len(leaf_keys()), "layers": layers})
+            )
+        else:
+            typer.echo(f"Config OK ({len(leaf_keys())} keys; layers: {', '.join(layers)})")
+
+
+def _jsonable(value: object) -> object:
+    if isinstance(value, list):
+        return [_jsonable(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _jsonable(v) for k, v in value.items()}
+    return value
 
 
 def _fmt(value: object) -> str:

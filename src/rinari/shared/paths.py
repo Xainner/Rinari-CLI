@@ -36,6 +36,14 @@ class HomeLayout:
         return self.root / "config.toml"
 
     @property
+    def soul_file(self) -> Path:
+        return self.root / "soul.md"
+
+    @property
+    def constitution_file(self) -> Path:
+        return self.root / "constitution.md"
+
+    @property
     def state_db(self) -> Path:
         return self.root / "state.db"
 

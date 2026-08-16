@@ -1,0 +1,421 @@
+"""System commands: version, status, doctor, setup, init, completion, help."""
+
+from __future__ import annotations
+
+import shutil
+import sys
+from pathlib import Path
+
+import typer
+
+from rinari import __version__
+from rinari.build_manifest import get_manifest
+from rinari.cli.deps import is_json, services, with_error_handling
+from rinari.cli.output import emit_json, success_envelope
+from rinari.cli.serializers import provider_dict
+from rinari.providers.registry import PROVIDER_TYPES
+from rinari.runtime.identity import IdentityAsset, load_constitution, load_soul
+from rinari.shared.errors import InvalidUsageError, RinariError
+
+system_app = typer.Typer(help="System commands (registered on the root app).")
+
+UNSUPPORTED_SHELLS_ERR = "Shell {shell!r} not supported. Use bash, zsh, fish, powershell, or pwsh."
+
+
+# -- version ---------------------------------------------------------------
+
+
+@system_app.command("version")
+@with_error_handling("version")
+def version_cmd(ctx: typer.Context) -> None:
+    """Show the Build Manifest (commands.md section 8)."""
+    with services(ctx) as s:
+        manifest = get_manifest(s.ctx)
+    data = manifest.to_dict()
+    data["python"] = sys.version.split()[0]
+    data["home"] = str(s.ctx.home)
+    if is_json(ctx):
+        emit_json(success_envelope("version", data))
+        return
+    typer.echo(f"Rinari CLI      {manifest.cli}")
+    typer.echo(f"Harness         {manifest.harness}")
+    typer.echo(f"Python          {data['python']}")
+    db_schema = manifest.db_schema_version
+    typer.echo(f"DB schema       {db_schema if db_schema is not None else '-'}")
+    typer.echo(f"Config schema   {manifest.config_schema_version}")
+    typer.echo(f"Tool protocol   {manifest.tool_protocol}")
+    typer.echo(f"Session export  {manifest.session_export}")
+    typer.echo(f"Plugin API      {manifest.plugin_api}")
+    typer.echo(f"Skill API       {manifest.skill_api}")
+    typer.echo(_asset_line("Soul", manifest.soul))
+    typer.echo(_asset_line("Constitution", manifest.constitution))
+    typer.echo(f"Home            {data['home']}")
+
+
+def _asset_line(label: str, asset: IdentityAsset) -> str:
+    return f"{label:<16} {asset.version} sha256:{asset.sha256[:12]} ({asset.source})"
+
+
+# -- status ------------------------------------------------------------------
+
+
+@system_app.command("status")
+@with_error_handling("status")
+def status_cmd(ctx: typer.Context, compact: bool = typer.Option(False, "--compact")) -> None:
+    """Fast operational overview of the current context."""
+    with services(ctx) as s:
+        cwd = Path.cwd()
+        detection = s.sessions.detect(cwd)
+        selection = s.providers.current()
+        data: dict = {
+            "version": __version__,
+            "kind": "PROJECT" if detection.project_root is not None else "CHAT",
+            "project_root": str(detection.project_root) if detection.project_root else None,
+            "marker": detection.marker,
+            "cwd": str(cwd),
+            "profile": s.ctx.config.active_profile_name(),
+            "provider": (
+                {"alias": selection.provider.alias, "type": selection.provider.type}
+                if selection is not None
+                else None
+            ),
+            "model": (
+                {
+                    "alias": selection.model.alias,
+                    "provider_model_id": selection.model.provider_model_id,
+                }
+                if selection is not None and selection.model is not None
+                else None
+            ),
+            "session": None,
+            "git": None,
+        }
+        if data["kind"] == "PROJECT" and detection.project_root is not None:
+            from rinari.projects.git import git_state
+
+            state = git_state(Path(detection.project_root))
+            if state.available:
+                data["git"] = {"branch": state.branch, "dirty": state.dirty}
+        if selection is not None:
+            data["credential_ref"] = s.providers.credential_ref(selection.provider)
+        if is_json(ctx):
+            emit_json(success_envelope("status", data))
+            return
+        kind_label = "PROJECT" if data["kind"] == "PROJECT" else "CHAT"
+        typer.echo(f"Rinari v{__version__}   {kind_label} / profile {data['profile']}")
+        typer.echo("-" * 44)
+        if data["kind"] == "PROJECT" and data["project_root"]:
+            typer.echo(f"Project   {data['project_root']}  (marker: {data['marker']})")
+            git = data.get("git")
+            if git is not None:
+                typer.echo(f"Git       {git['branch'] or '-'}{' *' if git['dirty'] else ''}")
+        else:
+            typer.echo(f"cwd       {data['cwd']}")
+        provider = data["provider"] or {}
+        model = data["model"] or {}
+        typer.echo(f"Provider  {provider.get('alias') or '-'} ({provider.get('type') or '-'})")
+        if model:
+            typer.echo(
+                f"Model     {model.get('alias') or '-'} ({model.get('provider_model_id') or '-'})"
+            )
+        else:
+            typer.echo("Model     - (configure with `rinari models add`)")
+
+
+# -- doctor --------------------------------------------------------------------
+
+
+def _check(name: str, ok: bool, detail: str = "", level: str = "ok") -> dict:
+    return {"check": name, "status": "fail" if not ok else level, "detail": detail}
+
+
+@system_app.command("doctor")
+@with_error_handling("doctor")
+def doctor_cmd(ctx: typer.Context) -> None:
+    """Run local diagnostics. Never mutates credentials or state."""
+    with services(ctx) as s:
+        checks: list[dict] = []
+        checks.append(
+            _check("config.valid", True, f"{len(list(s.ctx.config.layers))} layers merged")
+        )
+        try:
+            s.ctx.db.query_one("SELECT 1 AS ok")
+            checks.append(_check("session.database", True, "open (WAL)"))
+        except Exception as err:
+            checks.append(_check("session.database", False, str(err)))
+        layout = s.ctx.layout
+        if layout.config_file.is_file():
+            checks.append(_check("config.file", True, str(layout.config_file)))
+        else:
+            checks.append(
+                _check(
+                    "config.file",
+                    True,
+                    f"not created yet (no user overrides): {layout.config_file}",
+                    level="warn",
+                )
+            )
+        try:
+            creds_dir = layout.credentials_dir
+            writable = creds_dir.exists() or Path.mkdir(creds_dir, exist_ok=True)
+            checks.append(_check("secret.store", bool(writable), str(creds_dir)))
+        except OSError as err:
+            checks.append(_check("secret.store", False, str(err)))
+
+        providers = s.providers.list()
+        if not providers:
+            checks.append(_check("providers", True, "none saved", level="warn"))
+        for p in providers:
+            secret = None
+            try:
+                secret = s.providers.resolve_secret(p)
+            except RinariError as err:
+                checks.append(_check(f"provider.{p.alias}", False, err.message))
+                continue
+            if p.auth_method == "none":
+                checks.append(_check(f"provider.{p.alias}", True, "no auth required"))
+            elif secret:
+                checks.append(
+                    _check(f"provider.{p.alias}", True, f"credential resolvable ({p.auth_method})")
+                )
+            else:
+                checks.append(
+                    _check(f"provider.{p.alias}", False, "credential reference not resolvable")
+                )
+
+        selection = s.providers.current()
+        if selection is None:
+            checks.append(_check("active.provider", True, "none selected", level="warn"))
+        else:
+            if selection.model is None:
+                checks.append(
+                    _check(
+                        "active.model",
+                        False,
+                        f"no model for {selection.provider.alias}",
+                        level="warn",
+                    )
+                )
+            else:
+                checks.append(
+                    _check(
+                        "active.model",
+                        True,
+                        f"{selection.model.alias} on {selection.provider.alias}",
+                    )
+                )
+
+        checks.append(
+            _check(
+                "git",
+                shutil.which("git") is not None,
+                "available" if shutil.which("git") else "git not found",
+            )
+        )
+
+        for loader in (load_soul, load_constitution):
+            try:
+                asset = loader(layout.root)
+                checks.append(
+                    _check(
+                        f"identity.{asset.name}",
+                        True,
+                        f"v{asset.version} {asset.source} sha256:{asset.sha256[:12]}",
+                    )
+                )
+            except RinariError as err:
+                checks.append(_check("identity", False, err.message))
+
+        failed = [c for c in checks if c["status"] == "fail"]
+        if is_json(ctx):
+            emit_json(success_envelope("doctor", {"checks": checks, "failed": len(failed)}))
+            return
+        width = max(len(c["check"]) for c in checks)
+        for c in checks:
+            icon = {"ok": "ok  ", "warn": "warn", "fail": "FAIL"}[c["status"]]
+            typer.echo(f"{c['check']:<{width}}  {icon}  {c['detail']}")
+        typer.echo(f"\n{len(failed)} failed" if failed else "\nall checks passed")
+        if failed:
+            raise typer.Exit(1)
+
+
+# -- setup ---------------------------------------------------------------------
+
+
+@system_app.command("setup")
+@with_error_handling("setup")
+def setup_cmd(
+    ctx: typer.Context,
+    provider: str = typer.Option(
+        None, "--provider", help="Provider type: openai, anthropic, custom."
+    ),
+    name: str = typer.Option(None, "--name", help="Provider alias."),
+    endpoint: str = typer.Option(None, "--endpoint", help="Base URL (custom only)."),
+    api_key: str = typer.Option(None, "--api-key", help="API key value."),
+    api_key_env: str = typer.Option(
+        None, "--api-key-env", help="Environment variable with the API key."
+    ),
+    no_auth: bool = typer.Option(False, "--no-auth", help="No credential required."),
+    model: str = typer.Option(None, "--model", help="Model ID to save and activate."),
+    model_name: str = typer.Option(None, "--model-name", help="Alias for the model."),
+    non_interactive: bool = typer.Option(
+        False, "--non-interactive", help="Fail instead of prompting."
+    ),
+) -> None:
+    """First-run onboarding. Re-running never erases existing records."""
+    with services(ctx) as s:
+        existing = s.providers.list()
+        if existing and provider is None:
+            if is_json(ctx):
+                emit_json(
+                    success_envelope(
+                        "setup",
+                        None,
+                        warnings=["existing configuration detected; no changes made"],
+                    )
+                )
+                return
+            typer.echo("Existing Rinari configuration found - nothing was changed.")
+            typer.echo(f"Saved providers: {', '.join(p.alias for p in existing)}")
+            typer.echo("Adjust with: rinari providers|models|model use.")
+            return
+        if provider is None:
+            raise InvalidUsageError(
+                "Onboarding flags are required (interactive wizard arrives in a later phase).",
+                hint=(
+                    "rinari setup --provider openai --api-key-env OPENAI_API_KEY "
+                    "--model <id> --model-name <alias>"
+                ),
+            )
+        if provider not in PROVIDER_TYPES:
+            raise InvalidUsageError(
+                f"unknown provider type {provider!r}",
+                hint=f"Expected one of: {', '.join(sorted(PROVIDER_TYPES))}",
+            )
+        from rinari.application.provider_service import AddProviderInput
+
+        record = s.providers.add(
+            AddProviderInput(
+                alias=name or provider,
+                provider_type=provider,
+                auth_method="none" if no_auth else "api-key",
+                endpoint=endpoint,
+                secret=api_key,
+                secret_env=api_key_env,
+            )
+        )
+        model_saved = None
+        if model:
+            model_saved = s.models.add(record.alias, model, model_name or model)
+            s.models.use(model_saved.id, record.alias)
+        data = {
+            "provider": provider_dict(record, credential_ref=s.providers.credential_ref(record)),
+            "model": model_saved.alias if model_saved else None,
+            "active": True,
+        }
+        if is_json(ctx):
+            emit_json(success_envelope("setup", data))
+            return
+        typer.echo(f"Provider {record.alias!r} saved and active.")
+        if model_saved:
+            typer.echo(f"Model {model_saved.alias!r} saved and active.")
+        typer.echo("Setup complete. Run `rinari` to start a session.")
+
+
+# -- init ------------------------------------------------------------------------
+
+
+@system_app.command("init")
+@with_error_handling("init")
+def init_cmd(
+    ctx: typer.Context,
+    path: str = typer.Argument(".", help="Project directory to initialize."),
+    force: bool = typer.Option(False, "--force", help="Re-init over existing project files."),
+) -> None:
+    """Initialize project integration (.rinari/, RINARI.md, project record)."""
+    with services(ctx) as s:
+        root = Path(path).expanduser().resolve()
+        record, created = s.projects.init(root, user_home=Path.home(), force=force)
+        promoted = None
+        chat_session = s.sessions.find_promotable_chat_session(root)
+        if chat_session is not None:
+            promoted = s.sessions.promote(chat_session.id, root)
+        data = {
+            "project_id": record.id,
+            "root": str(root),
+            "created_files": created,
+            "promoted_session": promoted.id if promoted is not None else None,
+        }
+        if is_json(ctx):
+            emit_json(success_envelope("init", data))
+            return
+        for f in created:
+            typer.echo(f"created  {f}")
+        if promoted is not None:
+            typer.echo(
+                f"Promoted session {promoted.id} to PROJECT (preserving conversation state)."
+            )
+        typer.echo(f"Project ready: {root}")
+
+
+# -- completion ---------------------------------------------------------------------
+
+
+@system_app.command("completion")
+@with_error_handling("completion")
+def completion_cmd(
+    ctx: typer.Context,
+    shell: str = typer.Option(None, "--shell", "-s", help="bash, zsh, fish, powershell, or pwsh."),
+) -> None:
+    """Print (or install later) the shell completion script."""
+    from typer._completion_classes import completion_init
+    from typer.completion import get_completion_script
+
+    completion_init()
+    if shell is None:
+        if is_json(ctx):
+            emit_json(
+                success_envelope(
+                    "completion",
+                    {"shell": None, "hint": "pass --shell bash|zsh|fish|powershell|pwsh"},
+                )
+            )
+            return
+        typer.echo("Usage: rinari completion --shell <bash|zsh|fish|powershell|pwsh>")
+        typer.echo("Then source/save the printed script per your shell's docs.")
+        raise typer.Exit(2)
+    try:
+        script = get_completion_script(
+            prog_name="rinari", complete_var="_RINARI_COMPLETE", shell=shell
+        )
+    except Exception:
+        raise InvalidUsageError(UNSUPPORTED_SHELLS_ERR.format(shell=shell)) from None
+    typer.echo(script)
+
+
+# -- help -----------------------------------------------------------------------------
+
+
+@system_app.command("help")
+@with_error_handling("help")
+def help_cmd(
+    ctx: typer.Context,
+    topic: list[str] = typer.Argument(None, help="Command to show help for, e.g. 'providers add'."),
+) -> None:
+    """Show help for a command (defaults to the root help)."""
+    import typer.main as _typer_main
+    from typer._click.core import Context as _ClickContext
+
+    from rinari.cli.main import app as root_app  # local import: module is loaded by then
+
+    target = _typer_main.get_command(root_app)
+    parts = list(topic or ())
+    for i, part in enumerate(parts):
+        if not hasattr(target, "commands"):
+            raise InvalidUsageError(f"{' '.join(parts[:i]) or 'root'} has no subcommands")
+        nxt = target.get_command(_ClickContext(target, info_name=part), part)
+        if nxt is None:
+            known = ", ".join(target.commands)
+            raise InvalidUsageError(f"Unknown command: {part}", hint=f"Available: {known}")
+        target = nxt
+    typer.echo(target.get_help(_ClickContext(target, info_name=target.name or "rinari")))

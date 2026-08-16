@@ -1,0 +1,323 @@
+"""Session service: CHAT/PROJECT resolution, open/resume/promote (phase 1).
+
+Phase-1 scope: detection, persistence, resume reconciliation (provider/model
+availability), and the atomic CHAT -> PROJECT promotion. Conversational
+state (turns, tool calls) joins in phase 2 without changing this contract.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+from rinari.application.context import AppContext
+from rinari.application.project_service import ProjectService
+from rinari.application.provider_service import ProviderService
+from rinari.projects.detector import ProjectDetection, detect_project
+from rinari.shared.clock import now_iso
+from rinari.shared.errors import (
+    AuthenticationRequiredError,
+    ConflictError,
+    InvalidUsageError,
+    NotFoundError,
+    PermissionDeniedError,
+)
+from rinari.storage.records import SessionEventRecord, SessionRecord
+
+EVENT_SESSION_STARTED = "SessionStarted"
+EVENT_SESSION_PROMOTED = "SessionPromotedToProject"
+EVENT_USER_PROMPT = "UserPrompt"
+
+SESSION_KIND_CHAT = "CHAT"
+SESSION_KIND_PROJECT = "PROJECT"
+SESSION_STATE_ACTIVE = "active"
+
+
+@dataclass(frozen=True, slots=True)
+class StartedSession:
+    session: SessionRecord
+    created: bool
+    warnings: tuple[str, ...] = ()
+
+
+class SessionService:
+    def __init__(
+        self,
+        ctx: AppContext,
+        providers: ProviderService,
+        projects: ProjectService,
+        user_home: Path | None = None,
+    ) -> None:
+        self._ctx = ctx
+        self._providers = providers
+        self._projects = projects
+        self._user_home = user_home
+
+    def _now(self) -> str:
+        return now_iso(self._ctx.clock)
+
+    def _home(self) -> Path:
+        return self._user_home if self._user_home is not None else Path.home()
+
+    # -- detection --------------------------------------------------------
+
+    def detect(self, cwd: Path) -> ProjectDetection:
+        return detect_project(Path(cwd), self._home())
+
+    # -- start / resume ----------------------------------------------------
+
+    def start(
+        self, cwd: Path, forced_chat: bool = False, prompt: str | None = None
+    ) -> StartedSession:
+        cwd = Path(cwd).expanduser().resolve()
+        detection = self.detect(cwd)
+        project_root = None if forced_chat else detection.project_root
+        kind = SESSION_KIND_PROJECT if project_root is not None else SESSION_KIND_CHAT
+
+        selection = self._providers.current()
+        if selection is None:
+            raise AuthenticationRequiredError(
+                "CONFIG_REQUIRED: Rinari is not configured yet.",
+                hint="Run: rinari setup",
+            )
+        if selection.model is None:
+            raise AuthenticationRequiredError(
+                f"No usable model for provider {selection.provider.alias!r}.",
+                hint=(
+                    "Add a model with `rinari models add --provider "
+                    f"{selection.provider.alias} --model <id> --name <alias>`."
+                ),
+            )
+
+        now = self._now()
+        warnings: list[str] = []
+        if project_root is not None:
+            root_str = str(project_root.resolve())
+            match = next(
+                (
+                    s
+                    for s in self._ctx.session_repo.list(kind=SESSION_KIND_PROJECT, limit=100)
+                    if s.project_root_snapshot == root_str and s.state == SESSION_STATE_ACTIVE
+                ),
+                None,
+            )
+        else:
+            match = next(
+                (
+                    s
+                    for s in self._ctx.session_repo.list(kind=SESSION_KIND_CHAT, limit=100)
+                    if s.state == SESSION_STATE_ACTIVE
+                ),
+                None,
+            )
+
+        if match is not None:
+            record = match
+            for warning in self._reconcile(record):
+                warnings.append(warning)
+            record.current_cwd = str(cwd)
+            record.last_active_at = now
+            record.updated_at = now
+            self._ctx.session_repo.update(record)
+            created = False
+        else:
+            project_id = None
+            project_root_snapshot = None
+            if kind == SESSION_KIND_PROJECT and project_root is not None:
+                project = self._projects.upsert(project_root)
+                project_id = project.id
+                project_root_snapshot = str(project_root.resolve())
+            record = SessionRecord(
+                id=self._ctx.ids.new("ses"),
+                kind=kind,
+                title=self._default_title(cwd, kind),
+                project_id=project_id,
+                project_root_snapshot=project_root_snapshot,
+                created_cwd=str(cwd),
+                current_cwd=str(cwd),
+                provider_id=selection.provider.id,
+                model_id=selection.model.id,
+                profile_id=self._ctx.config.active_profile_name(),
+                mode="ask",
+                state=SESSION_STATE_ACTIVE,
+                compact_state=None,
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+            with self._ctx.db.transaction():
+                self._ctx.session_repo.insert(record)
+                self._append_event(
+                    record.id,
+                    EVENT_SESSION_STARTED,
+                    {"kind": kind, "project_id": project_id, "marker": detection.marker},
+                )
+            created = True
+
+        if prompt:
+            self._append_event(record.id, EVENT_USER_PROMPT, {"prompt": prompt})
+        return StartedSession(session=record, created=created, warnings=tuple(warnings))
+
+    def resume(self, ref: str | None = None, cwd: Path | None = None) -> StartedSession:
+        record: SessionRecord | None = None
+        if ref is not None:
+            record = self._resolve(ref)
+            if record.state != SESSION_STATE_ACTIVE:
+                record.state = SESSION_STATE_ACTIVE
+        else:
+            return self.start(cwd or Path.cwd())
+
+        warnings: list[str] = []
+        for warning in self._reconcile(record):
+            warnings.append(warning)
+        if cwd is not None:
+            record.current_cwd = str(Path(cwd).expanduser().resolve())
+        now = self._now()
+        record.updated_at = now
+        record.last_active_at = now
+        self._ctx.session_repo.update(record)
+        return StartedSession(session=record, created=False, warnings=tuple(warnings))
+
+    def new(self, cwd: Path, title: str | None = None, forced_chat: bool = False) -> SessionRecord:
+        cwd = Path(cwd).expanduser().resolve()
+        detection = self.detect(cwd)
+        project_root = None if forced_chat else detection.project_root
+        kind = SESSION_KIND_PROJECT if project_root is not None else SESSION_KIND_CHAT
+        selection = self._providers.current()
+        if selection is None or selection.model is None:
+            raise AuthenticationRequiredError(
+                "CONFIG_REQUIRED: configure a provider and model first.",
+                hint="Run: rinari setup",
+            )
+        now = self._now()
+        project_id = None
+        project_root_snapshot = None
+        if project_root is not None:
+            project = self._projects.upsert(project_root)
+            project_id = project.id
+            project_root_snapshot = str(project_root.resolve())
+        record = SessionRecord(
+            id=self._ctx.ids.new("ses"),
+            kind=kind,
+            title=title or self._default_title(cwd, kind),
+            project_id=project_id,
+            project_root_snapshot=project_root_snapshot,
+            created_cwd=str(cwd),
+            current_cwd=str(cwd),
+            provider_id=selection.provider.id,
+            model_id=selection.model.id,
+            profile_id=self._ctx.config.active_profile_name(),
+            mode="ask",
+            state=SESSION_STATE_ACTIVE,
+            compact_state=None,
+            created_at=now,
+            updated_at=now,
+            last_active_at=now,
+        )
+        with self._ctx.db.transaction():
+            self._ctx.session_repo.insert(record)
+            self._append_event(
+                record.id,
+                EVENT_SESSION_STARTED,
+                {"kind": kind, "project_id": project_id, "marker": detection.marker},
+            )
+        return record
+
+    # -- promotion ----------------------------------------------------------
+
+    def promote(self, session_ref: str, project_root: Path) -> SessionRecord:
+        root = Path(project_root).expanduser().resolve()
+        if root == self._home():
+            raise PermissionDeniedError(
+                "$HOME is never an implicit project workspace",
+                hint="Promote into a project subdirectory instead.",
+            )
+        record = self._resolve(session_ref)
+        now = self._now()
+        with self._ctx.db.transaction():
+            if record.kind != SESSION_KIND_CHAT:
+                raise ConflictError(f"Session {record.id} is already a {record.kind} session")
+            project = self._projects.upsert(root)
+            record.kind = SESSION_KIND_PROJECT
+            record.project_id = project.id
+            record.project_root_snapshot = str(root)
+            record.updated_at = now
+            record.last_active_at = now
+            self._ctx.session_repo.update(record)
+            self._append_event(
+                record.id,
+                EVENT_SESSION_PROMOTED,
+                {
+                    "session_id": record.id,
+                    "previous_kind": SESSION_KIND_CHAT,
+                    "project_id": project.id,
+                    "project_root": str(root),
+                },
+            )
+        return record
+
+    def find_promotable_chat_session(self, candidate_root: Path) -> SessionRecord | None:
+        """Most recent active CHAT session whose cwd lives under candidate_root."""
+        root = Path(candidate_root).expanduser().resolve()
+        for session in self._ctx.session_repo.list(kind=SESSION_KIND_CHAT, limit=100):
+            if session.state != SESSION_STATE_ACTIVE:
+                continue
+            cwd = Path(session.created_cwd)
+            if cwd == root or root in cwd.parents:
+                return session
+        return None
+
+    # -- queries --------------------------------------------------------------
+
+    def list(self, kind: str | None = None, limit: int = 50) -> list[SessionRecord]:
+        return self._ctx.session_repo.list(kind=kind, limit=limit)
+
+    def show(self, ref: str) -> SessionRecord:
+        return self._resolve(ref)
+
+    def _resolve(self, ref: str) -> SessionRecord:
+        record = self._ctx.session_repo.get(ref)
+        if record is not None:
+            return record
+        prefixes = [s for s in self._ctx.session_repo.list(limit=500) if s.id.startswith(ref)]
+        if len(prefixes) == 1:
+            return prefixes[0]
+        if len(prefixes) > 1:
+            known = ", ".join(s.id for s in prefixes[:5])
+            raise InvalidUsageError(
+                f"Ambiguous session reference {ref!r}", hint=f"Matches: {known}"
+            )
+        raise NotFoundError(f"Session not found: {ref}", hint="Use `rinari session list`.")
+
+    # -- helpers -----------------------------------------------------------------
+
+    def _reconcile(self, record: SessionRecord) -> list[str]:
+        warnings: list[str] = []
+        if self._ctx.provider_repo.get(record.provider_id) is None:
+            warnings.append(f"provider for session no longer exists (id {record.provider_id})")
+        if self._ctx.model_repo.get(record.model_id) is None:
+            warnings.append(f"model for session no longer exists (id {record.model_id})")
+        if (
+            record.kind == SESSION_KIND_PROJECT
+            and record.project_root_snapshot
+            and not Path(record.project_root_snapshot).exists()
+        ):
+            warnings.append(f"project root no longer exists: {record.project_root_snapshot}")
+        return warnings
+
+    def _append_event(self, session_id: str, event_type: str, payload: dict) -> None:
+        self._ctx.event_repo.insert(
+            SessionEventRecord(
+                id=self._ctx.ids.new("evt"),
+                session_id=session_id,
+                seq=self._ctx.event_repo.next_seq(session_id),
+                type=event_type,
+                payload=payload,
+                created_at=self._now(),
+            )
+        )
+
+    @staticmethod
+    def _default_title(cwd: Path, kind: str) -> str:
+        name = cwd.name or "root"
+        return f"{kind.lower()} in {name}"

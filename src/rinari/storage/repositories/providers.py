@@ -102,6 +102,13 @@ class ProviderRepository:
             updated_at=row["updated_at"],
         )
 
+    def delete_credential(self, provider_id: str) -> bool:
+        cursor = self._db.execute(
+            "DELETE FROM provider_credentials_metadata WHERE provider_id = ?",
+            (provider_id,),
+        )
+        return cursor.rowcount > 0
+
 
 def _dumps(value: dict) -> str:
     return json.dumps(value, sort_keys=True)
