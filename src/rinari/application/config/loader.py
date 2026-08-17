@@ -85,14 +85,24 @@ def load_effective_config(
 
     base = {**load_defaults(), **user}
     profile_name = base.get("profile", "workspace")
+    if isinstance(profile_name, dict):
+        # Legacy layout: [profile.<name>] tables inline in config.toml.
+        legacy = [name for name in profile_name if isinstance(profile_name[name], dict)]
+        targets = ", ".join(f"~/.rinari/profiles/{n}.toml" for n in legacy) or "(none found)"
+        raise ConfigurationError(
+            "The 'profile' key in config.toml must be a string profile name "
+            f"(found a table with inline profile sections: {', '.join(legacy) or 'empty'}).",
+            hint=(
+                f"Legacy inline profiles: move each [profile.<name>] table to {targets}; "
+                "then select one with `profile = \"<name>\"` or "
+                "`rinari config set profile <name>`."
+            ),
+        )
     if not isinstance(profile_name, str) or not profile_name:
         raise ConfigurationError(
             "The 'profile' key in config.toml must be a string profile name "
             f"(found {type(profile_name).__name__}).",
-            hint=(
-                'Use `profile = "<name>"`. Per-profile endpoint tables belong in '
-                "~/.rinari/profiles/<name>.toml, not under a [profile] section."
-            ),
+            hint='Use `profile = "<name>"` in config.toml.',
         )
     profile_data = load_profile(profile_name, layout.dir("profiles"))
     if profile_data:

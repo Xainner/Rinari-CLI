@@ -144,6 +144,9 @@ class ToolContext:
     # WorktreeGuard (projects.worktree) with the session's dirty-tree
     # baseline; None for CHAT sessions or repos without dirty state.
     worktree: Any = None
+    # Session-scoped LspManager (rinari.lsp); None for CHAT sessions or when
+    # no language server is registered/available.
+    lsp: Any = None
 
 
 @dataclass(frozen=True, slots=True)

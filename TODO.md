@@ -1195,14 +1195,25 @@ mejora extracción Python vía AST manteniendo fallback regex. 8 tests
 
 ## LSP
 
-- [ ] definition.
-- [ ] references.
-- [ ] symbols.
-- [ ] diagnostics.
-- [ ] hover/type info.
-- [ ] signatures.
-- [ ] rename capability when safe.
-- [ ] lifecycle management.
+- [x] definition. (`lsp.definition`, 1-based → LSP 0-based, resultados normalizados file/line/column)
+- [x] references. (`lsp.references`, incl. definición desde el server)
+- [x] symbols. (`lsp.symbols`, tree documentSymbol aplanada con `qualified_name`)
+- [x] diagnostics. (`lsp.diagnostics`, últimos `publishDiagnostics` publicados por uri)
+- [x] hover/type info. (`lsp.hover`)
+- [x] signatures. (`lsp.signature`, signatureHelp normalizado)
+- [x] rename capability when safe. (`lsp.rename` solo planea el WorkspaceEdit y lo devuelve; aplicar es un paso fs explícito)
+- [x] lifecycle management. (spawn lazy por lenguaje, manager por sesión en ToolContext, `shutdown_all` en atexit, crash detectado y no re-spawn, spawn failure recordado por sesión)
+
+Implementation (phase 3): `src/rinari/lsp/` — `client.py` (framing
+Content-Length, JSON-RPC sobre stdio, handshake initialize/initialized,
+sincronización de documentos full-sync, correlación de requests con thread
+de lectura, `LspRequestTimeout`/`LspServerCrashed` estructurados) y
+`manager.py` (gating por capabilities anunciados en `initialize`, specs por
+lenguaje). Sin LSPs embebidos por default: `default_specs()` detecta
+`pyright-langserver` / `typescript-language-server` en PATH; sin server, los
+tools devuelven `DEPENDENCY_ERROR` con hint a `search.*` (grep fallback
+universal, stack.md 69). 21 tests contra fake LSP server stdio
+(`tests/fixtures/fake_lsp_server.py`, deterministicos, sin red).
 
 ## Repository Index
 

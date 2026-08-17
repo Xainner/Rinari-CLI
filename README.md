@@ -91,6 +91,11 @@ reemplaza a RINARI.md en su level; el level más profundo gana conflictos.
   tree-sitter para Python (symbols con calificación `Class.method`, imports,
   call sites) y fallback regex para py/js/ts/rs/go. `search.symbols` ya
   consume la capa AST cuando hay grammar disponible.
+- LSP (Fase 3): client JSON-RPC sobre stdio con capability gating y tools
+  `lsp.definition|references|symbols|diagnostics|hover|signature|rename`
+  (rename solo planea el WorkspaceEdit, nunca lo aplica). Los servers se
+  detectan en PATH (`pyright-langserver`, `typescript-language-server`);
+  sin server, los tools indican el fallback a `search.*`.
 
 ## Pendiente
 

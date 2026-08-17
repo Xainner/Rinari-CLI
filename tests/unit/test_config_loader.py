@@ -66,6 +66,22 @@ def test_profile_layer_sits_above_user(layout):
     assert effective.config.user_name == ""
 
 
+def test_legacy_inline_profiles_rejected_with_repair_hint(layout):
+    (layout.config_file).write_text(
+        "[profile.casa]\nbase_url = \"http://192.168.0.3:8020/v1\"\n"
+        "model = \"qwen3.6-27b\"\n"
+        "[profile.net]\nbase_url = \"https://api.example.net/v1\"\n"
+        "model = \"qwen3.6-27b\"\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigurationError, match="must be a string profile name") as excinfo:
+        load_effective_config(layout)
+    hint = excinfo.value.hint or ""
+    assert "casa" in hint
+    assert "~/.rinari/profiles/casa.toml" in hint
+    assert "~/.rinari/profiles/net.toml" in hint
+
+
 def test_unknown_profile_raises(layout, tmp_path):
     (layout.config_file).write_text('profile = "nope"\n', encoding="utf-8")
     with pytest.raises(ConfigurationError, match="Unknown profile"):

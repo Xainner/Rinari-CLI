@@ -213,6 +213,20 @@ def _persist_event(
     )
 
 
+def _build_lsp_manager(root: Path | None):
+    # LSP is only meaningful for a real PROJECT workspace. Spec discovery is
+    # PATH-based (lazy): no server installed -> no tools do anything, and the
+    # model is guided to search.* fallbacks.
+    if root is None or not root.is_dir():
+        return None
+    try:
+        from rinari.lsp import LspManager
+
+        return LspManager(root)
+    except Exception:
+        return None
+
+
 def build_agent_session(
     services: ServiceContainer,
     record: SessionRecord,
@@ -241,6 +255,7 @@ def build_agent_session(
         output_sink=_live_output_sink(interactive),
         processes=ProcessRegistry(),
         worktree=_ensure_worktree_baseline(services, record),
+        lsp=_build_lsp_manager(root),
     )
     caller = _caller_for(services, record)
     loop = AgentLoop(
@@ -526,6 +541,7 @@ def _apply_promotion(session: AgentSession, record: SessionRecord, marker: str) 
         project_root=root,
         sandbox=_sandbox_for(record, home),
         worktree=_ensure_worktree_baseline(services, record),
+        lsp=_build_lsp_manager(root),
     )
     session.context.assembler_base = build_assembler_context(services, record)
     _persist_event(
