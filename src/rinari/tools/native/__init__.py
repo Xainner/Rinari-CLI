@@ -6,6 +6,7 @@ from rinari.tools.definition import ToolDefinition
 from rinari.tools.native.context import context_tools
 from rinari.tools.native.fs import filesystem_tools
 from rinari.tools.native.git import git_tools
+from rinari.tools.native.http import http_tools
 from rinari.tools.native.lsp import lsp_tools
 from rinari.tools.native.memory import memory_tools
 from rinari.tools.native.process import process_tools
@@ -31,4 +32,5 @@ def all_native_tools() -> list[ToolDefinition]:
         *context_tools(),
         *pty_tools(),
         *web_tools(),
+        *http_tools(),
     ]

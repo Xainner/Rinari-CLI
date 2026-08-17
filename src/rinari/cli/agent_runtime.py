@@ -339,6 +339,7 @@ def build_agent_session(
         context_retrieval=services.retrieval,
         project_trusted=_project_trusted(services, root),
         network=NetworkGuard(network_policy),
+        credentials=services.credentials,
     )
     caller = _caller_for(services, record)
     loop = AgentLoop(

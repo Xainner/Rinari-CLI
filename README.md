@@ -2,7 +2,7 @@
 
 **Tu asistente personal de IA en la terminal.**
 
-> **Estado: fases 0-4 completas (2026-08-17); fase 5 en curso (Web done).**
+> **Estado: fases 0-4 completas (2026-08-17); fase 5 en curso (Web + HTTP done).**
 > Producto: CLI funcional (setup, config, providers/models, sesiones
 > CHAT/PROJECT, Soul/Constitution, doctor/status/version), agent + tool
 > runtime con seguridad base (fase 2), trust/index/validation/checkpoints
@@ -143,6 +143,18 @@ reemplaza a RINARI.md en su level; el level más profundo gana conflictos.
 
 ## Pendiente
 
+- HTTP (Fase 5): tools `http.request` (GET/POST/PUT/PATCH/DELETE/HEAD/
+  OPTIONS, headers/query/body, auth por secret-ref `env://`/`file://` vía el
+  `CredentialStore` de la sesión — bearer/basic/header/query) y `http.sse`
+  (consume `text/event-stream` con semántica WHATWG acotada). Retry solo para
+  métodos idempotentes (429/5xx y errores de transporte) con backoff
+  exponencial o `Retry-After` (delta-seconds/HTTP-date); timeout acotado
+  1..120 s; 4xx/5xx reportados como dato, no como fallo del tool. Redacción de
+  secretos en la frontera del transport: headers sensibles `***` en la
+  respuesta y valores de query secret borrados de `final_url`; el secreto
+  inyectado nunca aparece en el resultado. Respuestas binarias o por encima
+  del preview (8 KiB) se escriben como artifact en el artifact dir de la
+  sesión (`save_as` opcional). 42 tests (`test_http_tools.py`) sin sockets.
 - Web (Fase 5): tools `web.search|fetch|open|links|find|extract_text|
   extract_markdown|extract_metadata|download|cite|sources` bajo el mismo Tool
   Runtime: estado sin sesiones de página, transport httpx acotado (2 MiB,

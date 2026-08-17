@@ -2,7 +2,7 @@
 
 Roadmap canónico de construcción de Rinari.
 
-> **Estado actual:** Fases 0-4 completas (2026-08-17). Fase 5 en curso: Web terminada; HTTP, browser, plugins, MCP, OpenAPI, unified search y hooks pendientes.
+> **Estado actual:** Fases 0-4 completas (2026-08-17). Fase 5 en curso: Web y HTTP terminadas; browser, plugins, MCP, OpenAPI, unified search y hooks pendientes.
 >
 > **Regla:** las fases expresan **orden de dependencia de implementación**, no alcance opcional del producto.
 >
@@ -1681,14 +1681,49 @@ camino end-to-end por `ToolRuntime` real con policy deny/allow.
 
 ## HTTP
 
-- [ ] generic request.
-- [ ] streaming.
-- [ ] SSE.
-- [ ] auth injection.
-- [ ] timeout.
-- [ ] retry policy.
-- [ ] rate-limit errors.
-- [ ] artifact response handling.
+- [x] generic request.
+- [x] streaming.
+- [x] SSE.
+- [x] auth injection.
+- [x] timeout.
+- [x] retry policy.
+- [x] rate-limit errors.
+- [x] artifact response handling.
+
+Implementation (http): extensión del transporte web con métodos arbitrarios,
+bodies, retry con backoff, `Retry-After` y SSE. En `src/rinari/http/client.py`
+`request()` soporta GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS, `body`/`body_json`,
+`query`, `headers`, `follow_redirects`, `timeout_s` (clamp 1..120) y
+`max_bytes` (clamp 4 KiB..32 MiB). Retry: solo métodos idempotentes ante
+429/5xx y ante errores de transporte (timeout/connect); backoff exponencial
+`BASE_BACKOFF_S * 2^attempt` acotado a 30 s, o bien el valor de `Retry-After`
+(delta-seconds o HTTP-date vía `parse_retry_after`). Una interacción
+completada 4xx/5xx es *dato* (el tool hace la petición y reporta la respuesta);
+solo fallos de transporte levantan `ToolError` codes. `sse_lines()` emite las
+líneas crudas de un `text/event-stream` (validando content-type) y
+`src/rinari/http/sse.py::parse_sse_events` implementa la semántica WHATWG SSE
+(data multi-línea unida con newlines, event/id/retry, comentarios ignorados),
+acotada a `max_events`.
+
+Auth y redacción en `src/rinari/http/auth.py`: `apply_auth` inyecta credenciales
+solo vía *secret references* (`env://VAR`, `file://key`) resueltas por el
+`CredentialStore` de la sesión (`ToolContext.credentials`), nunca como plaintext
+en los argumentos; soporta bearer, basic, header y query. `redact_headers`
+reemplaza por `***` todo header sensible (Authorization, X-Api-Key,
+proxy-authorization, cookie, token, ...) en la respuesta y `redact_url` borra el
+valor de query params secretos en `final_url`. La redacción ocurre en el
+transporte, así que los secretos nunca llegan al modelo ni a traces.
+
+Tools nativos en `src/rinari/tools/native/http.py`: `http.request` (petición
+genérica; `save_as` para guardar el body en el artifact dir, o auto-artifact para
+bodys binarios/por encima del preview; `retry_after_s` en 429; `attempts`) y
+`http.sse` (consume un endpoint SSE con `event_filter`, `max_events` y timeout).
+Ambos con `capabilities=("network.outbound",)` y `namespace="http"` (el gate del
+Tool Runtime + `NetworkGuard` aplican igual que en web). 42 tests
+(`test_http_tools.py`) sin sockets: `httpx.MockTransport` vía el seam
+`ToolContext.web`, `sleep` fake para el backoff y `CredentialStore` fake para el
+auth; incluye caminend-to-end por `ToolRuntime` real con policy deny/allow y
+verificación de que el secreto inyectado nunca aparece en el resultado.
 
 ## Browser Runtime
 
@@ -2702,7 +2737,7 @@ Cada una debe decidirse antes de implementar el subsistema correspondiente, con 
 ```text
 FASE ACTUAL
   Fase 5 — Web, browser y capability ecosystem
-  (Web terminada; HTTP, browser, plugins, MCP, OpenAPI, unified search y
+  (Web y HTTP terminadas; browser, plugins, MCP, OpenAPI, unified search y
   hooks pendientes)
 
 COMPLETADO
@@ -2736,4 +2771,8 @@ EN FASE 5 (hasta el momento)
     Web (src/rinari/web + tools web.*): fetch/extract/links/find/cite/sources
     search keyless (DDG HTML) + download a artifact, transport acotado con
     mapeo de errores, guard network.outbound en código; 25 tests
+    HTTP (src/rinari/http + tools http.request/http.sse): request genérico
+    (7 métodos, body/query/auth secret-ref), retry idempotente + backoff +
+    Retry-After, SSE WHATWG acotado, redacción de secretos en respuesta/URL,
+    artifact de respuesta; 42 tests (test_http_tools.py)
 ```

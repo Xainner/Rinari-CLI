@@ -62,7 +62,7 @@ class Fetched:
         return hashlib.sha256(self.body).hexdigest()
 
 
-def _default_client_factory(timeout_s: float) -> httpx.Client:
+def default_client_factory(timeout_s: float) -> httpx.Client:
     return httpx.Client(
         timeout=httpx.Timeout(timeout_s),
         follow_redirects=True,
@@ -70,7 +70,7 @@ def _default_client_factory(timeout_s: float) -> httpx.Client:
     )
 
 
-def _map_status(status: int) -> WebRequestError | None:
+def map_status(status: int) -> WebRequestError | None:
     if status < 400:
         return None
     if status == 404:
@@ -97,7 +97,7 @@ def fetch(
     timeout_s: float = DEFAULT_TIMEOUT_S,
 ) -> Fetched:
     """GET `url` with a bounded body; redirect-following is transport-level."""
-    client = client_factory() if client_factory is not None else _default_client_factory(timeout_s)
+    client = client_factory() if client_factory is not None else default_client_factory(timeout_s)
     started = time.monotonic()
     try:
         response, body, truncated = _read_bounded(client, url)
@@ -145,7 +145,7 @@ def _read_bounded(client: httpx.Client, url: str) -> tuple[httpx.Response, bytes
     """
     error: WebRequestError | None
     with client.stream("GET", url) as response:
-        error = _map_status(response.status_code)
+        error = map_status(response.status_code)
         if error is not None:
             raise error
         body = bytearray()
@@ -237,7 +237,7 @@ def search(
 ) -> list[dict]:
     """Keyless DuckDuckGo HTML search; returns bounded {title,url,snippet}."""
     max_results = max(1, min(int(max_results), SEARCH_MAX_RESULTS_LIMIT))
-    client = client_factory() if client_factory is not None else _default_client_factory(timeout_s)
+    client = client_factory() if client_factory is not None else default_client_factory(timeout_s)
     try:
         response = client.get(SEARCH_ENDPOINT, params={"q": query})
     except httpx.TimeoutException as exc:
@@ -254,7 +254,7 @@ def search(
         ) from exc
     finally:
         client.close()
-    error = _map_status(response.status_code)
+    error = map_status(response.status_code)
     if error is not None:
         raise error
     parser = _SearchParser()
@@ -279,6 +279,8 @@ __all__ = [
     "SEARCH_ENDPOINT",
     "Fetched",
     "WebRequestError",
+    "default_client_factory",
     "fetch",
+    "map_status",
     "search",
 ]
