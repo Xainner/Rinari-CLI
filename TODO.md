@@ -1384,31 +1384,51 @@ estricto). CLI `rinari artifacts list|show|open|search|export|remove|gc`.
 
 ## Context Engine
 
-- [ ] context budget.
-- [ ] retrieval.
-- [ ] ranking.
-- [ ] pins.
-- [ ] dedup.
-- [ ] artifact references.
-- [ ] history selection.
-- [ ] project retrieval.
-- [ ] user-memory retrieval.
-- [ ] token accounting integration.
+- [x] context budget.
+- [ ] retrieval. (con Context retrieval: se implementa con las memorias, abajo)
+- [ ] ranking. (idem)
+- [ ] pins. (idem)
+- [ ] dedup. (idem)
+- [x] artifact references.
+- [x] history selection.
+- [ ] project retrieval. (con Project Memory)
+- [ ] user-memory retrieval. (con User Memory)
+- [x] token accounting integration.
 
 ## Compaction
 
-- [ ] pressure thresholds.
-- [ ] preserve goal.
-- [ ] preserve constraints.
-- [ ] preserve decisions.
-- [ ] preserve task graph.
-- [ ] preserve changed files.
-- [ ] preserve validation.
-- [ ] preserve approvals.
-- [ ] preserve blockers.
-- [ ] preserve artifacts.
-- [ ] provider-independent compact state.
-- [ ] long-horizon tests.
+- [x] pressure thresholds.
+- [x] preserve goal.
+- [x] preserve constraints.
+- [x] preserve decisions.
+- [x] preserve task graph.
+- [x] preserve changed files.
+- [x] preserve validation.
+- [x] preserve approvals.
+- [x] preserve blockers.
+- [x] preserve artifacts.
+- [x] provider-independent compact state.
+- [x] long-horizon tests.
+
+Implementation (phase 4): `src/rinari/context/` — `tokens.py` (estimator
+determinista chars/4, presión con umbrales harness 70/80/85, window desde
+capabilities del provider con fallback `DEFAULT_CONTEXT_WINDOW`),
+`compact_state.py` (`CompactState` in dependiente de provider: goal,
+constraints, decisions, task graph, changed files, validations, approvals,
+blockers, artifacts, project/provider-model; extracción rule-based
+conservadora de la conversación + merge de evidencia persistida;
+serialización a `sessions.compact_state_json`), `engine.py` (selección del
+suffix seguro del historial: nunca huérfanos tool results, min_keep),
+`service.py` (`ContextService.maybe_compact` recableada por hook
+`on_pressure` del AgentLoop: recorta el historial in-memory _in place_,
+persiste estado + evento `ContextCompacted`; `restore_compact_state` para
+resume). El prompt segment `compact-state` (harness, TRUSTED, SESSION)
+inyecta la verdad compactada en el system prompt. `run_turn` mapea el flag a
+`TurnResult.compacted` (visible en REPL/JSON) y el persist de mensajes es
+roble ante el recorte in-place (contabilidad `dropped_total`). La
+conversación persistida (`session_messages`) NUNCA se recorta: resume
+restaura el todo y re-aplica la selección de cola. 11 tests
+(`test_context.py`) incluyendo loop end-to-end con provider fake.
 
 ## User Memory
 

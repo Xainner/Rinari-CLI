@@ -143,6 +143,13 @@ def run_repl(session: AgentSession, initial_prompt: str | None = None) -> None:
                 typer.echo("(output stopped at the model's max tokens)", err=True)
         typer.echo()
 
+        if result.compacted:
+            console.print(
+                Text(
+                    "context: compacted (history summarized, task state preserved)",
+                    style="dim",
+                )
+            )
         if result.completion:
             outcome = result.completion.get("outcome")
             if outcome:

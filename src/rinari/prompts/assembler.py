@@ -54,6 +54,8 @@ class AssemblerContext:
     project_instructions: tuple[ProjectInstruction, ...] = ()
     skills: tuple[ActiveSkill, ...] = ()
     task_state: str | None = None
+    # Preserved task truth after context compaction (harness.md 67-68).
+    compact_state: str | None = None
     environment: dict[str, Any] | None = None
     evidence: tuple[EvidenceItem, ...] = ()
     history: tuple[ChatMessage, ...] = ()
@@ -182,6 +184,16 @@ class PromptAssembler:
                     content=context.task_state,
                     trust=SegmentTrust.TRUSTED,
                     cache_policy=CachePolicy.TURN,
+                )
+            )
+        if context.compact_state:
+            segments.append(
+                PromptSegment(
+                    id="compact-state",
+                    kind=SegmentKind.COMPACT_STATE,
+                    content=context.compact_state,
+                    trust=SegmentTrust.TRUSTED,
+                    cache_policy=CachePolicy.SESSION,
                 )
             )
         if context.environment:

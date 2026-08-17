@@ -93,7 +93,14 @@ def _turn_dict(result: TurnResult) -> dict:
             else None
         ),
         "completion": result.completion,
+        "compacted": result.compacted,
     }
+
+
+def _compacted_line(result: TurnResult) -> str | None:
+    if not result.compacted:
+        return None
+    return "context: compacted (history summarized, task state preserved)"
 
 
 def _completion_line(result: TurnResult) -> str | None:
@@ -142,6 +149,9 @@ def start_flow(ctx: typer.Context, prompt: str | None, forced_chat: bool, comman
             typer.echo(result.content)
             if result.kind not in ("answer", "truncated", "cancelled"):
                 typer.echo(f"[{result.kind}]")
+            compacted = _compacted_line(result)
+            if compacted:
+                typer.echo(compacted)
             completion = _completion_line(result)
             if completion:
                 typer.echo(completion)

@@ -310,6 +310,9 @@ def build_agent_session(
         tools,
         PromptAssembler(),
         event_sink=lambda sid, t, p: _persist_event(services, sid, t, p),
+        on_pressure=lambda ctx, p, used, window: context_service_pressure(
+            services, record.id, ctx, used, window
+        ),
     )
     context = AgentContext(
         session_id=record.id,
@@ -318,6 +321,7 @@ def build_agent_session(
         assembler_base=build_assembler_context(services, record),
         history=_restore_history(services, record),
     )
+    services.context.restore_compact_state(context)
     if record.kind == "PROJECT" and root is not None and root.is_dir():
         _persist_event(
             services,
@@ -622,6 +626,23 @@ def _maybe_promote(session: AgentSession) -> Path | None:
     return session.promoted_root
 
 
+def context_service_pressure(
+    services: ServiceContainer,
+    session_id: str,
+    agent_ctx: AgentContext,
+    used: int,
+    window: int,
+) -> None:
+    """Agent-loop pressure hook: storage-aware compaction (phase 4)."""
+    with contextlib.suppress(Exception):
+        services.context.maybe_compact(
+            agent_ctx,
+            session_id=session_id,
+            window_tokens=window,
+            used_input_tokens=used,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Turn execution
 # ---------------------------------------------------------------------------
@@ -657,6 +678,7 @@ def run_turn(session: AgentSession, message: str, *, on_delta=None, on_tool=None
     if base.include_extended_identity is not include_identity:
         session.context.assembler_base = replace(base, include_extended_identity=include_identity)
     before = len(session.context.history)
+    dropped_before = session.context.dropped_total
     try:
         result = session.loop.turn(
             session.context,
@@ -667,14 +689,33 @@ def run_turn(session: AgentSession, message: str, *, on_delta=None, on_tool=None
         )
     except CancelledError:
         _set_session_state(services, session.record, STATE_INTERRUPTED)
-        _persist_new_messages(services, session.record, session.context.history[before:])
+        new_msgs = _new_history(session.context, before, dropped_before)
+        _persist_new_messages(services, session.record, new_msgs)
         return TurnResult(kind="cancelled", content="Turn cancelled.", tool_calls=0, usage=None)
-    _persist_new_messages(services, session.record, session.context.history[before:])
+    new_msgs = _new_history(session.context, before, dropped_before)
+    _persist_new_messages(services, session.record, new_msgs)
     if result.kind != "cancelled" and session.record.kind == "CHAT":
         _maybe_promote(session)
     if result.kind in ("answer", "truncated", "budget") and result.tool_calls > 0:
         result = _finalize_turn(session, result)
+    if session.context.compacted:
+        session.context.compacted = False
+        result = replace(result, compacted=True)
     return result
+
+
+def _new_history(context: AgentContext, before: int, dropped_before: int) -> list[ChatMessage]:
+    """Messages to persist this turn, robust against in-place compaction.
+
+    Compaction trims the in-memory head of `context.history`; those messages
+    were already persisted in earlier turns, so the persist slice is
+    re-derived from the drop accounting instead of a raw index.
+    """
+    dropped_delta = context.dropped_total - dropped_before
+    new_count = len(context.history) - before + dropped_delta
+    if new_count <= 0:
+        return []
+    return context.history[-min(new_count, len(context.history)) :]
 
 
 def _finalize_turn(session: AgentSession, result: TurnResult) -> TurnResult:

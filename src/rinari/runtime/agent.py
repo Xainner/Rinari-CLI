@@ -23,6 +23,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from rinari.context.tokens import (
+    DEFAULT_CONTEXT_WINDOW,
+    PRESSURE_COMPACT,
+    estimate_tokens,
+    pressure,
+)
 from rinari.models.types import ChatMessage, ModelRequest, StopReason, Usage
 from rinari.prompts.assembler import AssemblerContext, PromptAssembler
 from rinari.runtime.cancellation import CancellationToken
@@ -50,6 +56,9 @@ class TurnResult:
     # decided by the harness from persisted validation evidence (or None when
     # no gate was evaluated, e.g. CHAT sessions or turns without tool calls).
     completion: dict | None = None
+    # Context compaction (phase 4): True when this turn triggered a
+    # provider-independent compaction of the in-memory context.
+    compacted: bool = False
 
 
 # `model_provider` exposes: capabilities() -> ProviderCapabilities,
@@ -57,6 +66,9 @@ class TurnResult:
 ModelProvider = Any
 DeltaFn = Callable[[str], None]
 ToolHook = Callable[[str, str, object], None]  # (phase, name, detail)
+# (agent_ctx, pressure, used_input_tokens, window_tokens); storage-aware
+# compaction lives outside the loop and mutates AgentContext in place.
+PressureHook = Callable[[object, float, int, int], None]
 
 
 @dataclass(slots=True)
@@ -68,6 +80,14 @@ class AgentContext:
     tool_ctx: Any  # tools.definition.ToolContext
     assembler_base: AssemblerContext  # stable segments; history injected per turn
     history: list[ChatMessage] = field(default_factory=list)
+    # Context compaction (phase 4): preserved task truth rendered for the
+    # system prompt; `dropped_total` counts history messages trimmed in
+    # memory since the last persistence (the persisted conversation itself
+    # is never truncated); `compacted` signals a fresh compaction to the
+    # session host for user/JSON notification.
+    compact_state_text: str | None = None
+    dropped_total: int = 0
+    compacted: bool = False
 
 
 class AgentLoop:
@@ -80,6 +100,7 @@ class AgentLoop:
         max_model_calls: int = DEFAULT_MAX_MODEL_CALLS,
         max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS,
         event_sink: Callable[[str, str, dict], None] | None = None,
+        on_pressure: PressureHook | None = None,
     ) -> None:
         self._provider = model_provider
         self._tools = tool_runtime
@@ -87,6 +108,7 @@ class AgentLoop:
         self._max_model_calls = max_model_calls
         self._max_tool_calls = max_tool_calls
         self._event_sink = event_sink
+        self._on_pressure = on_pressure
 
     # -- public API ---------------------------------------------------------
 
@@ -119,6 +141,7 @@ class AgentLoop:
                     "usage": _usage_dict(response.usage),
                 },
             )
+            self._check_pressure(ctx, response)
 
             if not response.has_tool_calls:
                 ctx.history.append(ChatMessage.assistant(response.content or ""))
@@ -184,7 +207,11 @@ class AgentLoop:
     # -- internals ------------------------------------------------------------
 
     def _build_request(self, ctx: AgentContext) -> ModelRequest:
-        context = replace(ctx.assembler_base, history=tuple(ctx.history))
+        context = replace(
+            ctx.assembler_base,
+            history=tuple(ctx.history),
+            compact_state=ctx.compact_state_text,
+        )
         bundle = self._assembler.build(context)
         messages: list[ChatMessage] = []
         if bundle.system_prompt:
@@ -195,6 +222,23 @@ class AgentLoop:
             messages=tuple(messages),
             tools=self._tools.registry.for_model(),
         )
+
+    def _check_pressure(self, ctx: AgentContext, response: Any) -> None:
+        """Context-pressure hook (phase 4): never takes the turn down."""
+        if self._on_pressure is None:
+            return
+        try:
+            window = (
+                getattr(self._provider.capabilities(), "max_context_tokens", None)
+                or DEFAULT_CONTEXT_WINDOW
+            )
+            used = response.usage.input_tokens or estimate_tokens(history=ctx.history)
+            pressure_value = pressure(used, window)
+            if pressure_value is not None and pressure_value >= PRESSURE_COMPACT:
+                ctx.compacted = False
+                self._on_pressure(ctx, pressure_value, used, window)
+        except Exception:
+            pass
 
     def _invoke(self, ctx: AgentContext, request: ModelRequest, on_delta: DeltaFn | None) -> Any:
         capabilities = self._provider.capabilities()

@@ -121,11 +121,30 @@ reemplaza a RINARI.md en su level; el level más profundo gana conflictos.
   dirty clasificado por ownership (agent/user/mixed contra el baseline de
   sesión): el restore **solo reescribe paths agent**, nunca toca paths del
   usuario, y `mixed` exige `--allow-mixed`.
+- Artifact Store (Fase 4): `rinari artifacts list|show|open|search|export|remove|gc`.
+  Outputs grandes/duraderos viven en `<home>/artifacts` con URI estable
+  `artifact://<session>/<namespace>/<name>`, sha256 + content type +
+  provenance + retention (`session|project|permanent`) en SQLite; search
+  por metadata + contenido acotado, slicing, export y GC de sesiones sin
+  referencia (solo retention `session`).
+- Context Engine + Compaction (Fase 4): presupuesto de contexto con presión
+  (umbrales 70/80/85) y compaction provider-independent (`CompactState`:
+  goal, constraints, decisions, task graph, changed files, validations,
+  approvals, blockers, artifacts) cuando la presión cruza el umbral de
+  compaction. La cola del historial se recorta in-memory en cortes seguros
+  (nunca huérfanos tool-result) y la verdad compactada se inyecta como
+  segmento `compact-state` del system prompt; el estado persiste en
+  `sessions.compact_state_json` (sobrevive a resume, re-aplicado
+  determinísticamente) y la conversación persistida nunca se recorta. El
+  outcome aparece en el REPL/JSON (`context: compacted`).
 
 ## Pendiente
 
-- En Fase 4: network policy + network hook del sandbox, y reconciliation de
-  resume. Checklist completo en [TODO.md](TODO.md).
+- En Fase 4 (resto): retrieval/ranking/pins/dedup del Context Engine
+  (junto con las memorias), User/Project/Episodic/Pattern Memory, resume
+  + reconciliation (identity/branch/dirty-tree/trust/auth/model/skill/
+  policy), session fork, budgets y loop detection, y network policy + hook
+  del sandbox. Checklist completo en [TODO.md](TODO.md).
 - Los 4 items de Fase 1 que dependían del agent loop (Extended Identity bajo
   demanda, project-creation intent, preservar conversación, recalcular
   permisos) quedaron resueltos al cerrar Fase 2.

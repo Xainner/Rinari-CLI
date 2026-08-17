@@ -18,6 +18,7 @@ SEGMENT_ORDER: tuple[str, ...] = (
     "project-instruction",
     "skill",
     "task-state",
+    "compact-state",
     "environment",
     "memory",
     "history",
@@ -33,6 +34,7 @@ class SegmentKind(StrEnum):
     PROJECT_INSTRUCTION = "project-instruction"
     SKILL = "skill"
     TASK_STATE = "task-state"
+    COMPACT_STATE = "compact-state"
     ENVIRONMENT = "environment"
     MEMORY = "memory"
     HISTORY = "history"
@@ -62,6 +64,7 @@ DEFAULT_AUTHORITY: dict[SegmentKind, int] = {
     SegmentKind.PROJECT_INSTRUCTION: 6,
     SegmentKind.SKILL: 5,
     SegmentKind.TASK_STATE: 4,
+    SegmentKind.COMPACT_STATE: 4,
     SegmentKind.ENVIRONMENT: 3,
     SegmentKind.MEMORY: 2,
     SegmentKind.HISTORY: 2,
