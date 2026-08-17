@@ -1313,14 +1313,26 @@ outcome en `TurnResult.completion` (visible en REPL/JSON). 22 tests
 
 ## Checkpoints / Undo
 
-- [ ] checkpoint create.
-- [ ] checkpoint list.
-- [ ] checkpoint restore.
-- [ ] checkpoint remove.
-- [ ] agent-owned change tracking.
-- [ ] mixed ownership detection.
-- [ ] `rinari undo`.
-- [ ] undo preview.
+- [x] checkpoint create.
+- [x] checkpoint list.
+- [x] checkpoint restore.
+- [x] checkpoint remove.
+- [x] agent-owned change tracking.
+- [x] mixed ownership detection.
+- [x] `rinari undo`.
+- [x] undo preview.
+
+Implementation (phase 3): migración 0008 `checkpoints` + `checkpoint_files`
+(snapshot de bytes por path; 16MB cap). `src/rinari/checkpoints/core.py`
+clasifica el tree dirty contra el baseline de sesión (`agent`/`user`/`mixed`
+via `projects.worktree`), `plan_restore` decide restore/delete/skip y
+`apply_restore` reescribe contenido snapshot. `service.py` resuelve sesión
+(auto-detect latest PROJECT del proyecto, fallback error con hint),
+`checkpoint_repo` en storage. CLI `rinari undo create|list|preview|restore|remove`
+y bare `rinari undo` = restore del checkpoint más reciente. Restore es
+**conservador**: solo paths `agent`; `user` nunca se toca; `mixed` se salta
+salvo `--allow-mixed` (mixed ownership detection). 6 tests
+(`test_checkpoints.py`) con git repo real aislado.
 
 ---
 

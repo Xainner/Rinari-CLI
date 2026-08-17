@@ -116,12 +116,16 @@ reemplaza a RINARI.md en su level; el level más profundo gana conflictos.
 - PTY (Fase 3): tools `pty.start|read|write|resize|terminate` sobre un pty
   real para procesos TTY-aware (POSIX); en Windows `DEPENDENCY_ERROR` con
   hint a `process.*`.
+- Checkpoints/Undo (Fase 3): `rinari undo create|list|preview|restore|remove`
+  y bare `rinari undo` = restore del último checkpoint. Snapshot del tree
+  dirty clasificado por ownership (agent/user/mixed contra el baseline de
+  sesión): el restore **solo reescribe paths agent**, nunca toca paths del
+  usuario, y `mixed` exige `--allow-mixed`.
 
 ## Pendiente
 
-- Queda en Fase 3: checkpoints/undo (`rinari undo`). En Fase 4: network
-  policy + network hook del sandbox, y reconciliation de resume.
-  Checklist completo en [TODO.md](TODO.md).
+- En Fase 4: network policy + network hook del sandbox, y reconciliation de
+  resume. Checklist completo en [TODO.md](TODO.md).
 - Los 4 items de Fase 1 que dependían del agent loop (Extended Identity bajo
   demanda, project-creation intent, preservar conversación, recalcular
   permisos) quedaron resueltos al cerrar Fase 2.

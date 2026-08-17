@@ -1953,18 +1953,41 @@ Restore must preview affected scope.
 
 ---
 
-# 36. `undo`
+# 36. `undo` (phase 3: implemented)
 
-```bash
-rinari undo
-rinari undo --preview
-rinari undo --session ses_123
-rinari undo --to-checkpoint chk_123
+```text
+rinari undo                    restore latest checkpoint (agent-owned paths)
+rinari undo create --project P --session S --label L
+rinari undo list --project P
+rinari undo preview --checkpoint ID [--allow-mixed]
+rinari undo restore --checkpoint ID [--allow-mixed]
+rinari undo remove ID
 ```
 
-Undo operates only on known reversible agent-owned changes.
+A checkpoint snapshots the working tree dirty state at create time (content
+bytes per path, relative paths, 16MB cap per file). Each dirty path is
+classified against the session's worktree baseline (captured at session
+start):
 
-Never imply remote/external side effects are universally undoable.
+```text
+agent   dirty now, absent from baseline (the agent did it)
+user    dirty before the session, unchanged since (the user's own work)
+mixed   dirty before the session AND changed since (both owners)
+```
+
+Restore semantics are deliberately conservative:
+
+- only `agent` paths are rewritten to their checkpoint content;
+- `user` paths are never touched;
+- `mixed` paths are reported and skipped unless `--allow-mixed` is passed
+  (mixed ownership detection);
+- a bare `rinari undo` (no subcommand) restores the latest checkpoint for
+  the project; `--session` selects a different session (default: latest
+  PROJECT session for the project root).
+
+Undo operates only on local reversible agent-owned file changes. It does not
+revert git commits, process side effects, or network calls, and it never
+implies remote/external side effects are undoable.
 
 ---
 

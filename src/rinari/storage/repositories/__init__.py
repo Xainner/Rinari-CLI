@@ -1,3 +1,4 @@
+from rinari.storage.repositories.checkpoints import CheckpointRepository
 from rinari.storage.repositories.config_values import ConfigValueRepository
 from rinari.storage.repositories.index import IndexRepository
 from rinari.storage.repositories.models import ModelRepository
@@ -14,6 +15,7 @@ from rinari.storage.repositories.trust import TrustEntryRepository
 from rinari.storage.repositories.validation import ValidationRecordRepository
 
 __all__ = [
+    "CheckpointRepository",
     "ConfigValueRepository",
     "IndexRepository",
     "ModelRepository",

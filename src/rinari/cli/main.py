@@ -15,6 +15,7 @@ from rinari.cli.commands import sessions as sessions_cmd
 from rinari.cli.commands import system as system_cmd
 from rinari.cli.commands import tasks as tasks_cmd
 from rinari.cli.commands import trust as trust_cmd
+from rinari.cli.commands import undo as undo_cmd
 from rinari.cli.deps import CliParams, fail, set_params
 from rinari.cli.session_flow import start_flow
 from rinari.shared.errors import RinariError
@@ -34,6 +35,7 @@ app.add_typer(sessions_cmd.session_app, name="session")
 app.add_typer(trust_cmd.app, name="trust")
 app.add_typer(index_cmd.app, name="index")
 app.add_typer(tasks_cmd.app, name="tasks")
+app.add_typer(undo_cmd.app, name="undo")
 app.add_typer(system_cmd.system_app, name=None)
 
 app.command("chat")(sessions_cmd.chat_cmd)

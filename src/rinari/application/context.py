@@ -18,6 +18,7 @@ from rinari.shared.paths import HomeLayout, ensure_layout, resolve_home
 from rinari.storage.db import Database
 from rinari.storage.migrations import MigrationRunner
 from rinari.storage.repositories import (
+    CheckpointRepository,
     ConfigValueRepository,
     IndexRepository,
     ModelRepository,
@@ -52,6 +53,7 @@ class AppContext:
     index_repo: IndexRepository
     task_repo: TaskRepository
     validation_repo: ValidationRecordRepository
+    checkpoint_repo: CheckpointRepository
     config_repo: ConfigValueRepository
 
     def close(self) -> None:
@@ -96,6 +98,7 @@ def build_app_context(
         index_repo=IndexRepository(db),
         task_repo=TaskRepository(db),
         validation_repo=ValidationRecordRepository(db),
+        checkpoint_repo=CheckpointRepository(db),
         config_repo=ConfigValueRepository(db),
     )
 
