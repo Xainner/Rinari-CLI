@@ -13,6 +13,7 @@ from rinari.tools.native.ptytools import pty_tools
 from rinari.tools.native.search import search_tools
 from rinari.tools.native.shell import shell_tools
 from rinari.tools.native.verify import verify_tools
+from rinari.tools.native.web import web_tools
 
 __all__ = ["all_native_tools"]
 
@@ -29,4 +30,5 @@ def all_native_tools() -> list[ToolDefinition]:
         *memory_tools(),
         *context_tools(),
         *pty_tools(),
+        *web_tools(),
     ]

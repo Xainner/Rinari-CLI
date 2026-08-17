@@ -165,6 +165,9 @@ class ToolContext:
     # NetworkGuard (policy.network): network-capable tools must pass every
     # connection target through guard.assert_reachable before dialing.
     network: Any = None
+    # Zero-arg factory returning an httpx-compatible client for web.* tools
+    # (test seam: httpx.MockTransport); None -> fresh real client per request.
+    web: Any = None
 
 
 @dataclass(frozen=True, slots=True)

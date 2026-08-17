@@ -2,7 +2,7 @@
 
 Roadmap canónico de construcción de Rinari.
 
-> **Estado actual:** Fases 0-4 completas (2026-08-17). Fase 5 (Web, browser y capability ecosystem) no iniciada.
+> **Estado actual:** Fases 0-4 completas (2026-08-17). Fase 5 en curso: Web terminada; HTTP, browser, plugins, MCP, OpenAPI, unified search y hooks pendientes.
 >
 > **Regla:** las fases expresan **orden de dependencia de implementación**, no alcance opcional del producto.
 >
@@ -1632,7 +1632,7 @@ incluyendo integración real del loop con modelo scripted).
 
 ---
 
-# Fase 5 — Web, browser y capability ecosystem
+# Fase 5 — Web, browser y capability ecosystem ← ACTUAL
 
 ## Objetivo
 
@@ -1644,15 +1644,40 @@ Web, browser, plugins, MCP y OpenAPI deben funcionar como capacidades normalizad
 
 ## Web
 
-- [ ] search.
-- [ ] fetch.
-- [ ] open.
-- [ ] find.
-- [ ] links.
-- [ ] download.
-- [ ] content extraction.
-- [ ] provenance.
-- [ ] citations/evidence.
+- [x] search.
+- [x] fetch.
+- [x] open.
+- [x] find.
+- [x] links.
+- [x] download.
+- [x] content extraction.
+- [x] provenance.
+- [x] citations/evidence.
+
+Implementation (web): estado real de acceso externo bajo el mismo Tool
+Runtime. Transporte acotado en `src/rinari/web/client.py`: `fetch` con
+`MAX_RESPONSE_BYTES` (2 MiB), redirect-following, UA estable y mapeo de
+fallos httpx -> `ToolError` codes (404 NOT_FOUND, 401/403
+PERMISSION_DENIED, 429 RATE_LIMITED, 5xx/conn NETWORK_ERROR retryable,
+timeout TIMEOUT); `search` keyless sobre el endpoint HTML de DuckDuckGo
+(sin API key ni dependencia extra). Extracción de contenido con stdlib solo
+en `src/rinari/web/html.py`: `parse_page` produce `Page` (title, meta,
+language, charset, links absolutos dedup, tables acotadas, y token stream
+para `text()`/`markdown()`). Sin parser de terceros; el HTML remoto se trata
+como dato desconfiado (nunca se ejecuta).
+
+Tools nativos (tools.md section 5) en `src/rinari/tools/native/web.py`:
+`web.search`, `web.fetch`, `web.open`, `web.links`, `web.find` (búsqueda
+literal en el texto extraído), `web.extract_text`, `web.extract_markdown`,
+`web.extract_metadata`, `web.download` (al artifact dir de la sesión, 2 MiB),
+`web.cite` y `web.sources` (citations/evidence: hash sha256,
+fetched_at vía `now_iso(clock)`, title y snippet). Todos los tools con
+`capabilities=("network.outbound",)` y `namespace="web"`, por lo que el gate
+de `network.outbound` del Tool Runtime los captura y el `NetworkGuard`
+(`ToolContext.network`) bloquea DENY en código antes de dialar. El transport
+se inyecta por `ToolContext.web` (factory de client httpx-compat; en tests
+`httpx.MockTransport`, sin sockets). 25 tests (`test_web.py`), incluyendo un
+camino end-to-end por `ToolRuntime` real con policy deny/allow.
 
 ## HTTP
 
@@ -2676,8 +2701,9 @@ Cada una debe decidirse antes de implementar el subsistema correspondiente, con 
 
 ```text
 FASE ACTUAL
-  Fase 4 completa (2026-08-17); Fase 5 (Web, browser y capability
-  ecosystem) no iniciada
+  Fase 5 — Web, browser y capability ecosystem
+  (Web terminada; HTTP, browser, plugins, MCP, OpenAPI, unified search y
+  hooks pendientes)
 
 COMPLETADO
   fase 0 completa (2026-08-16)
@@ -2703,6 +2729,11 @@ PTY tools
    Artifact Store + Context Engine + compaction, memoria, context
    retrieval + pins, resume durable + reconciliation (9 subsystems,
    incluido skills), session fork, budgets + loop detection por turno,
-   network policy foundation + hooks, skill version reconciliation
-   (migraciones 0009-0015)
+network policy foundation + hooks, skill version reconciliation
+    (migraciones 0009-0015)
+
+EN FASE 5 (hasta el momento)
+    Web (src/rinari/web + tools web.*): fetch/extract/links/find/cite/sources
+    search keyless (DDG HTML) + download a artifact, transport acotado con
+    mapeo de errores, guard network.outbound en código; 25 tests
 ```

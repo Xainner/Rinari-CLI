@@ -2,13 +2,14 @@
 
 **Tu asistente personal de IA en la terminal.**
 
-> **Estado: fases 0-4 completas (2026-08-17).**
+> **Estado: fases 0-4 completas (2026-08-17); fase 5 en curso (Web done).**
 > Producto: CLI funcional (setup, config, providers/models, sesiones
 > CHAT/PROJECT, Soul/Constitution, doctor/status/version), agent + tool
 > runtime con seguridad base (fase 2), trust/index/validation/checkpoints
 > (fase 3) y contexto/artifacts/memoria/resume durable/budgets/network
-> foundation (fase 4). Ver [TODO.md](TODO.md) por el roadmap y el estado de
-> decisiones.
+> foundation (fase 4). Fase 5 arrancó con la capa de Web (tools `web.*` bajo
+> el mismo Tool Runtime y policy de red). Ver [TODO.md](TODO.md) por el
+> roadmap y el estado de decisiones.
 
 Segunda construcción de Rinari. La
 [v1](https://github.com/Xainner/Rinari-CLI) (chat REPL, agente con 23 tools,
@@ -142,6 +143,16 @@ reemplaza a RINARI.md en su level; el level más profundo gana conflictos.
 
 ## Pendiente
 
+- Web (Fase 5): tools `web.search|fetch|open|links|find|extract_text|
+  extract_markdown|extract_metadata|download|cite|sources` bajo el mismo Tool
+  Runtime: estado sin sesiones de página, transport httpx acotado (2 MiB,
+  timeout, mapeo de errores por code), `NetworkGuard` bloquea DENY en código
+  antes de cada dial, y extracción de HTML con stdlib (title/meta/links/texto/
+  markdown/tables; el contenido remoto es dato desconfiado). `web.search` es
+  keyless (endpoint HTML de DuckDuckGo, sin dependencias extra); `web.download`
+  escribe al artifact dir de la sesión; `web.cite`/`web.sources` producen
+  records de evidencia (sha256, fetched_at, title, snippet). 25 tests
+  (`test_web.py`) sin sockets (MockTransport).
 - Skill version reconciliation (Fase 4): las skills activas de una sesión se
   persisten como pares `(name, version)` (`sessions.active_skills_json`,
   migración 0015) y `rinari resume` las reconcilia contra el catálogo
