@@ -1011,7 +1011,7 @@ seguir un agent loop real
 - [x] timeout.
 - [x] cwd.
 - [x] env injection.
-- [ ] PTY. (fase 3)
+- [x] PTY. (fase 3; tools `pty.*` con POSIX pty pair; en Windows `DEPENDENCY_ERROR` → `process.*`)
 - [x] process handles. (registry por sesión + tools `process.wait/output/signal/list`)
 - [x] process wait.
 - [x] process signal. (INT/TERM/KILL en todas las plataformas vía killpg/taskkill;
@@ -1084,8 +1084,8 @@ seguir un agent loop real
 - [x] recovery. (errores de tool vuelven al modelo como tool messages)
 - [x] waiting approval. (approval gate dentro del tool runtime)
 - [x] blocked. (deny → tool error al modelo)
-- [ ] verify transition. (fase 3)
-- [ ] finalize transition. (fase 3)
+- [x] verify transition. (fase 3; segment `task-state` con completion contract + tools `verify.*`)
+- [x] finalize transition. (fase 3; `run_turn` re-evalúa el gate post-turno, evento `CompletionGateEvaluated`, `TurnResult.completion`)
 
 ## Cancellation
 
@@ -1267,36 +1267,49 @@ completa 402 passed / 2 skipped.
 
 ## Validation Records
 
-- [ ] test.
-- [ ] lint.
-- [ ] typecheck.
-- [ ] build.
-- [ ] schema.
-- [ ] manual check.
-- [ ] custom.
-- [ ] persistent evidence.
+- [x] test.
+- [x] lint.
+- [x] typecheck.
+- [x] build.
+- [x] schema.
+- [x] manual check.
+- [x] custom.
+- [x] persistent evidence.
 
 ## Verification Planner
 
-- [ ] changed-file analysis.
-- [ ] targeted test selection.
-- [ ] adjacent tests.
-- [ ] broader suite escalation.
-- [ ] user constraints.
-- [ ] project instructions.
-- [ ] risk input.
+- [x] changed-file analysis.
+- [x] targeted test selection.
+- [x] adjacent tests.
+- [x] broader suite escalation.
+- [x] user constraints.
+- [x] project instructions.
+- [x] risk input.
 
 ## Completion Gate
 
-- [ ] DONE.
-- [ ] IMPLEMENTED_UNVERIFIED.
-- [ ] PARTIAL.
-- [ ] BLOCKED.
-- [ ] FAILED.
-- [ ] reject false test success.
-- [ ] reject false deploy success.
-- [ ] reject “fixed” with no evidence when evidence is required.
-- [ ] unresolved failure detection.
+- [x] DONE.
+- [x] IMPLEMENTED_UNVERIFIED.
+- [x] PARTIAL.
+- [x] BLOCKED.
+- [x] FAILED.
+- [x] reject false test success.
+- [x] reject false deploy success.
+- [x] reject “fixed” with no evidence when evidence is required.
+- [x] unresolved failure detection.
+
+Implementation (phase 3): migración 0007 `validation_records` (evidencia
+persistente por project root, la más reciente por kind gana), core pur en
+`src/rinari/verify/` (`records.py` kinds/resultados, `planner.py` selección
+targeted/adjacent/broader + risk + discovered commands, `gate.py` outcomes con
+rechazo de falso-éxito y "no tests ran"), service en `service.py`, store en
+`storage/repositories/validation.py`, tools `verify.plan|record|evaluate`
+(capabilities `state.read`/`state.write` en la Policy Engine, sin approval).
+**Verify/finalize transitions**: el prompt segment `task-state` de sesiones
+PROJECT lleva el completion contract, y `run_turn` re-evalúa el gate tras cada
+turno con tool activity, persiste `CompletionGateEvaluated` y expone el
+outcome en `TurnResult.completion` (visible en REPL/JSON). 22 tests
+(`test_verify.py`) + suite completa 423 passed / 3 skipped.
 
 ## Checkpoints / Undo
 

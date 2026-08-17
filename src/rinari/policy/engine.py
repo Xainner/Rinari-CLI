@@ -40,6 +40,10 @@ CAPABILITY_FS_WRITE = "fs.write"
 CAPABILITY_SHELL = "shell.exec"
 CAPABILITY_GIT_LOCAL = "git.local"
 CAPABILITY_PROCESS_LOCAL = "process.local"
+# Local harness bookkeeping (validation records, index/task state reads):
+# no filesystem or network side effect, so it never asks for approval.
+CAPABILITY_STATE_READ = "state.read"
+CAPABILITY_STATE_WRITE = "state.write"
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +121,30 @@ class PolicyEngine:
                 action=PolicyAction.ALLOW,
                 capability=capability,
                 reason="managing a process already approved at start in this session",
+                risk=risk,
+                risk_class=risk_class,
+            )
+        if capability == CAPABILITY_STATE_READ:
+            return PolicyDecision(
+                action=PolicyAction.ALLOW,
+                capability=capability,
+                reason="reading local harness state (no filesystem or network effect)",
+                risk=risk,
+                risk_class=risk_class,
+            )
+        if capability == CAPABILITY_STATE_WRITE:
+            if scope.profile is PermissionProfile.READ_ONLY:
+                return PolicyDecision(
+                    action=PolicyAction.DENY,
+                    capability=capability,
+                    reason="read-only profile does not record validation state",
+                    risk=risk,
+                    risk_class=risk_class,
+                )
+            return PolicyDecision(
+                action=PolicyAction.ALLOW,
+                capability=capability,
+                reason="writing local validation evidence (no external side effect)",
                 risk=risk,
                 risk_class=risk_class,
             )

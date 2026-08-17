@@ -92,7 +92,19 @@ def _turn_dict(result: TurnResult) -> dict:
             if result.usage is not None
             else None
         ),
+        "completion": result.completion,
     }
+
+
+def _completion_line(result: TurnResult) -> str | None:
+    if not result.completion:
+        return None
+    outcome = result.completion.get("outcome")
+    if outcome is None:
+        return None
+    reasons = "; ".join(result.completion.get("reasons") or [])
+    text = f"completion: {outcome}"
+    return f"{text} ({reasons})" if reasons else text
 
 
 def _interactive() -> bool:
@@ -130,6 +142,9 @@ def start_flow(ctx: typer.Context, prompt: str | None, forced_chat: bool, comman
             typer.echo(result.content)
             if result.kind not in ("answer", "truncated", "cancelled"):
                 typer.echo(f"[{result.kind}]")
+            completion = _completion_line(result)
+            if completion:
+                typer.echo(completion)
             if session.promoted_root is not None:
                 typer.echo(f"*** session promoted to PROJECT — root: {session.promoted_root} ***")
             return

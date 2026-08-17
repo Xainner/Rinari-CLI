@@ -104,13 +104,24 @@ reemplaza a RINARI.md en su level; el level más profundo gana conflictos.
   graph DAG project-scoped con detección de ciclos, y done-when contract
   (acceptance + validation obligatorios y satisfechos, sin criterios
   unresolved) que `--status done` fuerza antes de permitir completar.
+- Verification (Fase 3): tools `verify.plan` (qué verificar: targeted tests
+  vía test-map del index, adjacent tests, escalada a la suite si cambió
+  config/shared, risk, comandos descubiertos), `verify.record` (evidencia
+  persistente por kind: test|lint|typecheck|build|schema|manual|custom) y
+  `verify.evaluate` (completion gate: `DONE|IMPLEMENTED_UNVERIFIED|PARTIAL|
+  BLOCKED|FAILED`, con rechazo de falso-éxito y "no tests ran"). Tras cada
+  turno con activity el harness re-evalúa el gate
+  (`CompletionGateEvaluated`); el outcome aparece en el REPL/JSON.
+  "Fixed" sin evidencia pasada no es `DONE`.
+- PTY (Fase 3): tools `pty.start|read|write|resize|terminate` sobre un pty
+  real para procesos TTY-aware (POSIX); en Windows `DEPENDENCY_ERROR` con
+  hint a `process.*`.
 
 ## Pendiente
 
-- Fase 2 (agent runtime) mayormente completa. Queda: PTY (Fase 3),
-  network policy y network hook del sandbox (Fase 4), y verify/finalize
-  transitions + reconciliation (Fase 3). Checklist completo
-  en [TODO.md](TODO.md).
+- Queda en Fase 3: checkpoints/undo (`rinari undo`). En Fase 4: network
+  policy + network hook del sandbox, y reconciliation de resume.
+  Checklist completo en [TODO.md](TODO.md).
 - Los 4 items de Fase 1 que dependían del agent loop (Extended Identity bajo
   demanda, project-creation intent, preservar conversación, recalcular
   permisos) quedaron resueltos al cerrar Fase 2.

@@ -143,6 +143,15 @@ def run_repl(session: AgentSession, initial_prompt: str | None = None) -> None:
                 typer.echo("(output stopped at the model's max tokens)", err=True)
         typer.echo()
 
+        if result.completion:
+            outcome = result.completion.get("outcome")
+            if outcome:
+                reasons = "; ".join(result.completion.get("reasons") or [])
+                text = f"completion: {outcome}"
+                if reasons:
+                    text += f" ({reasons})"
+                console.print(Text(text, style="green" if outcome == "DONE" else "yellow"))
+
         if session.promoted_root is not None:
             console.print(
                 Text(

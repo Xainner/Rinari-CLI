@@ -16,6 +16,7 @@ from rinari.application.session_service import SessionService
 from rinari.repo.index_service import IndexService
 from rinari.tasks import TaskService
 from rinari.trust import TrustService
+from rinari.verify.service import VerificationService
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +29,7 @@ class ServiceContainer:
     trust: TrustService
     index: IndexService
     tasks: TaskService
+    verification: VerificationService
     sessions: SessionService
 
 
@@ -43,6 +45,7 @@ def build_services(
     trust = TrustService(ctx)
     index = IndexService(ctx)
     tasks = TaskService(ctx)
+    verification = VerificationService(ctx)
     sessions = SessionService(ctx, providers, projects, trust=trust, user_home=user_home)
     return ServiceContainer(
         ctx=ctx,
@@ -53,5 +56,6 @@ def build_services(
         trust=trust,
         index=index,
         tasks=tasks,
+        verification=verification,
         sessions=sessions,
     )

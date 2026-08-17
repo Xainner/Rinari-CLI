@@ -121,6 +121,14 @@ class IndexRepository:
             [(project_root, row["test_file"], row["target_file"]) for row in rows],
         )
 
+    def test_map(self, project_root: str) -> list[dict]:
+        rows = self._db.query(
+            "SELECT test_file, target_file FROM repo_index_test_map "
+            "WHERE project_root = ? ORDER BY target_file, test_file",
+            (project_root,),
+        )
+        return [dict(row) for row in rows]
+
     def tests_touching(self, project_root: str, files: set[str]) -> list[str]:
         if not files:
             return []

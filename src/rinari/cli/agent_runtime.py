@@ -12,6 +12,8 @@ so switching here can never delete or reorder saved providers/models.
 
 from __future__ import annotations
 
+import contextlib
+import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -135,6 +137,7 @@ def build_assembler_context(services: ServiceContainer, record: SessionRecord) -
     instructions = project_instructions(
         services, root, Path(record.current_cwd), trusted=project_trusted
     )
+    task_state = _task_state_text(services, root) if record.kind == "PROJECT" else None
     return AssemblerContext(
         session_kind=record.kind,
         constitution=constitution,
@@ -142,8 +145,32 @@ def build_assembler_context(services: ServiceContainer, record: SessionRecord) -
         soul=canonical,
         extended_identity=extended,
         project_instructions=instructions,
+        task_state=task_state,
         environment=environment,
     )
+
+
+def _task_state_text(services: ServiceContainer, root: Path) -> str:
+    """Task graph snapshot + completion contract for the task-state segment."""
+    tasks = services.ctx.task_repo.list(str(root))[:10]
+    lines: list[str] = []
+    if tasks:
+        lines.append("Task graph:")
+        for task in tasks:
+            marker = {"done": "x", "in_progress": "~", "blocked": "!"}.get(task.get("status"), " ")
+            status = task.get("status")
+            title = task.get("title") or ""
+            lines.append(f"- [{marker}] {task['id']} {title} ({status})")
+    lines.append(
+        "Completion contract: before declaring work complete, call verify.plan with "
+        "the files you changed, run the planned commands (shell.exec), record each "
+        "run with verify.record (kind, result, output tail as detail), then confirm "
+        "with verify.evaluate. The harness re-evaluates this gate after every turn; "
+        "'DONE' only happens when the latest recorded evidence for the required "
+        "kinds passes, so a claim of 'fixed' without recorded passing evidence is "
+        "reported as IMPLEMENTED_UNVERIFIED or PARTIAL."
+    )
+    return "\n".join(lines)
 
 
 def _policy_summary(kind: str) -> str:
@@ -213,6 +240,23 @@ def _persist_event(
     )
 
 
+def _project_trusted(services: ServiceContainer, root: Path | None) -> bool:
+    if root is None or not root.is_dir():
+        return False
+    status = services.trust.status(root)
+    return status.state == STATE_TRUSTED
+
+
+def _build_pty_registry():
+    import sys
+
+    if sys.platform == "win32" or not hasattr(os, "openpty"):
+        return None
+    from rinari.tools.native.ptyp import PtyRegistry
+
+    return PtyRegistry()
+
+
 def _build_lsp_manager(root: Path | None):
     # LSP is only meaningful for a real PROJECT workspace. Spec discovery is
     # PATH-based (lazy): no server installed -> no tools do anything, and the
@@ -254,8 +298,11 @@ def build_agent_session(
         cancellation=token,
         output_sink=_live_output_sink(interactive),
         processes=ProcessRegistry(),
+        pty=_build_pty_registry(),
         worktree=_ensure_worktree_baseline(services, record),
         lsp=_build_lsp_manager(root),
+        validation=services.verification,
+        project_trusted=_project_trusted(services, root),
     )
     caller = _caller_for(services, record)
     loop = AgentLoop(
@@ -542,6 +589,8 @@ def _apply_promotion(session: AgentSession, record: SessionRecord, marker: str) 
         sandbox=_sandbox_for(record, home),
         worktree=_ensure_worktree_baseline(services, record),
         lsp=_build_lsp_manager(root),
+        validation=services.verification,
+        project_trusted=_project_trusted(services, root),
     )
     session.context.assembler_base = build_assembler_context(services, record)
     _persist_event(
@@ -623,4 +672,31 @@ def run_turn(session: AgentSession, message: str, *, on_delta=None, on_tool=None
     _persist_new_messages(services, session.record, session.context.history[before:])
     if result.kind != "cancelled" and session.record.kind == "CHAT":
         _maybe_promote(session)
+    if result.kind in ("answer", "truncated", "budget") and result.tool_calls > 0:
+        result = _finalize_turn(session, result)
     return result
+
+
+def _finalize_turn(session: AgentSession, result: TurnResult) -> TurnResult:
+    """Finalize transition (phase 3): evaluate the completion gate from
+    persisted validation evidence and make the outcome observable.
+
+    The harness decision (not the model's self-report) is what counts: a turn
+    that claimed "fixed" without passing evidence is recorded as such.
+    """
+    services = session.services
+    record = session.record
+    if record.kind != "PROJECT" or not record.project_root_snapshot:
+        return result
+    root = Path(record.project_root_snapshot)
+    if not root.is_dir():
+        return result
+    try:
+        decision = services.verification.evaluate(root)
+    except RinariError:
+        return result
+    payload = decision.to_dict()
+    payload["turn_kind"] = result.kind
+    with contextlib.suppress(Exception):
+        _persist_event(services, record.id, "CompletionGateEvaluated", payload)
+    return replace(result, completion=payload)

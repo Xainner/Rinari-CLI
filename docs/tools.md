@@ -44,11 +44,15 @@
 - `process.detach`
 
 ### Terminal / PTY
-- `terminal.open`
-- `terminal.write`
-- `terminal.read`
-- `terminal.resize`
-- `terminal.close`
+- `pty.start` — arranca un comando bajo un pseudo-terminal (TTY-aware).
+- `pty.read` — lee la salida (espera hasta `timeout_s`).
+- `pty.write` — escribe keystrokes (añade newline si falta).
+- `pty.resize` — cambia rows/columns.
+- `pty.terminate` — termina el grupo de procesos (TERM→KILL).
+
+Implementación (fase 3): POSIX pty pair (`os.openpty`). En plataformas sin
+PTY (Windows) `pty.start` devuelve `DEPENDENCY_ERROR` señalando `process.*`
+(mismo patrón que el fallback de LSP). Registry por sesión en ToolContext.
 
 ### Shell
 - `shell.exec`
@@ -806,6 +810,25 @@
 ### Parallel Execution
 - `workflow.parallel`
 - `workflow.join`
+
+### Verification (fase 3)
+- `verify.plan` — decide qué verificar para un set de files cambiados
+  (targeted tests vía test-map del repo index o convenciones, adjacent tests,
+  escalada a la suite completa si cambió config/shared, risk level,
+  discovered lint/typecheck/build commands).
+- `verify.record` — persiste una unidad de evidencia de validación
+  (`kind` ∈ test|lint|typecheck|build|schema|manual|custom,
+  `result` ∈ passed|failed|error|skipped + command/summary/detail).
+- `verify.evaluate` — evalúa el completion gate con la evidencia más
+  reciente: `DONE | IMPLEMENTED_UNVERIFIED | PARTIAL | BLOCKED | FAILED`.
+  Rechaza falso-éxito (marca de failure en la salida de un `passed`) y
+  "no tests ran".
+
+Notas: los tools clasifican como `state.read`/`state.write` (persistencia de
+evidencia local, sin efecto externo) y nunca piden approval. El harness
+re-evalúa el gate tras cada turno con activity (evento `CompletionGateEvaluated`);
+un claim de "fixed" sin evidencia pasada queda como `IMPLEMENTED_UNVERIFIED`/
+`PARTIAL`. Sin CLI dedicada: la evidencia queda en el trace de la sesión.
 
 ---
 

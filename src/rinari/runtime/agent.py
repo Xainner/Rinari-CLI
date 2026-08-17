@@ -46,6 +46,10 @@ class TurnResult:
     content: str
     tool_calls: int
     usage: Usage | None
+    # Finalize transition (phase 3): completion-gate outcome for the turn, as
+    # decided by the harness from persisted validation evidence (or None when
+    # no gate was evaluated, e.g. CHAT sessions or turns without tool calls).
+    completion: dict | None = None
 
 
 # `model_provider` exposes: capabilities() -> ProviderCapabilities,

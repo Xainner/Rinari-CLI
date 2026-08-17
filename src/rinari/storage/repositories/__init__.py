@@ -11,6 +11,7 @@ from rinari.storage.repositories.sessions import (
 )
 from rinari.storage.repositories.tasks import TaskRepository
 from rinari.storage.repositories.trust import TrustEntryRepository
+from rinari.storage.repositories.validation import ValidationRecordRepository
 
 __all__ = [
     "ConfigValueRepository",
@@ -23,5 +24,6 @@ __all__ = [
     "SessionRepository",
     "TaskRepository",
     "TrustEntryRepository",
+    "ValidationRecordRepository",
     "WorktreeBaselineRepository",
 ]

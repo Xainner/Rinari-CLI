@@ -141,12 +141,21 @@ class ToolContext:
     output_sink: OutputSink | None = None
     # Mutable session-scoped process registry for process.* tools (None = disabled).
     processes: Any = None
+    # Session-scoped PtyRegistry (tools.native.pty); None on platforms without
+    # a POSIX pty or for CHAT sessions that disable interactive processes.
+    pty: Any = None
     # WorktreeGuard (projects.worktree) with the session's dirty-tree
     # baseline; None for CHAT sessions or repos without dirty state.
     worktree: Any = None
     # Session-scoped LspManager (rinari.lsp); None for CHAT sessions or when
     # no language server is registered/available.
     lsp: Any = None
+    # Application-level VerificationService (rinari.verify); None only when the
+    # session is not wired to the full service container.
+    validation: Any = None
+    # Session trust snapshot for the project (drives which project-supplied
+    # data the agent may consume, e.g. in verification plans).
+    project_trusted: bool = True
 
 
 @dataclass(frozen=True, slots=True)
