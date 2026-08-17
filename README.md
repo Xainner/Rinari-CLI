@@ -55,18 +55,20 @@ uv run rinari version
 - Soul y Constitution empaquetados con loader (override en `~/.rinari/`,
   versión + sha256 visibles en `rinari version` / `doctor`).
 - Agent loop real (Fase 2): `rinari` / `rinari chat` / `rinari resume` ahora
-  conversan con el model. Turnos con streaming, tool calls normalizadas a
-  través del Tool Runtime (policy → approval → sandbox), REPL con
-  `/provider` y `/model` in-session, prompt one-shot no interactivo,
-  y traza de eventos persistida por sesión.
+conversan con el model. Turnos con streaming, tool calls normalizadas a
+través del Tool Runtime (policy → approval → sandbox), streaming vivo de
+stdout/stderr del shell en REPL, processes por sesión
+(`process.start/wait/output/signal/list`), REPL con `/provider` y `/model`
+in-session, session-interruption state, prompt one-shot no interactivo,
+y traza de eventos persistida por sesión.
 
 ## Pendiente
 
-- Fase 2 (agent runtime) mayormente completa; queda para cierre:
-  streaming live de stdout/stderr del shell, PTY/process handles, network
-  policy sandbox, session-interruption state, y verify/finalize transitions
-  (estos dos últimos son de Fase 3). Checklist completo en
-  [TODO.md](TODO.md).
+- Fase 2 (agent runtime) mayormente completa. Queda: PTY (Fase 3),
+  baseline de dirty worktree y preservación explícita de cambios del usuario
+  (Fase 3), network policy y network hook del sandbox (Fase 4), y
+  verify/finalize transitions + reconciliation (Fase 3). Checklist completo
+  en [TODO.md](TODO.md).
 - 4 items de Fase 1 siguen abiertos porque dependen del agent loop de Fase 2:
   `Extended Identity bajo demanda`, `detectar project-creation intent`,
   `preservar conversación`, `recalcular permisos`.

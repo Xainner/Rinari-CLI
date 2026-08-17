@@ -119,6 +119,11 @@ class ClassifiedAction:
         return self.target if self.capability == "shell.exec" else None
 
 
+# Live output sink: (stream_name, text_chunk) as bytes arrive from a process.
+# Provided by the session host (REPL) for live display; None for one-shot/JSON.
+OutputSink = Callable[[str, str], None]
+
+
 @dataclass(frozen=True, slots=True)
 class ToolContext:
     session_id: str
@@ -133,6 +138,9 @@ class ToolContext:
     clock: Clock
     cancellation: Any = None
     environment: dict[str, str] | None = None
+    output_sink: OutputSink | None = None
+    # Mutable session-scoped process registry for process.* tools (None = disabled).
+    processes: Any = None
 
 
 @dataclass(frozen=True, slots=True)

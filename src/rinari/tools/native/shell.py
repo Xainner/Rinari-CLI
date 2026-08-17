@@ -42,13 +42,16 @@ def _fail(
     )
 
 
-def _drain(stream, buffer: _BoundedBuffer) -> None:
+def _drain(stream, buffer: _BoundedBuffer, name: str, sink=None) -> None:
     try:
         while True:
             chunk = stream.read(65536)
             if not chunk:
                 break
             buffer.write(chunk)
+            if sink is not None:
+                with contextlib.suppress(Exception):  # display never breaks the drain
+                    sink(name, chunk.decode("utf-8", errors="replace"))
     except (OSError, ValueError):
         pass
 
@@ -146,11 +149,20 @@ def shell_exec(input: dict, ctx: ToolContext) -> ToolResult:
             ToolErrorCode.DEPENDENCY_ERROR, f"Failed to start process: {exc.__class__.__name__}"
         )
 
+    sink = ctx.output_sink
     readers = []
     if process.stdout is not None:
-        readers.append(threading.Thread(target=_drain, args=(process.stdout, stdout), daemon=True))
+        readers.append(
+            threading.Thread(
+                target=_drain, args=(process.stdout, stdout, "stdout", sink), daemon=True
+            )
+        )
     if process.stderr is not None:
-        readers.append(threading.Thread(target=_drain, args=(process.stderr, stderr), daemon=True))
+        readers.append(
+            threading.Thread(
+                target=_drain, args=(process.stderr, stderr, "stderr", sink), daemon=True
+            )
+        )
     for reader in readers:
         reader.start()
 

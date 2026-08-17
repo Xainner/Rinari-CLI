@@ -33,6 +33,7 @@ from rinari.shared.redaction import Redactor
 from rinari.storage.records import SessionEventRecord, SessionRecord
 from rinari.tools.definition import ToolContext
 from rinari.tools.native import all_native_tools
+from rinari.tools.native.process import ProcessRegistry
 from rinari.tools.registry import ToolRegistry
 from rinari.tools.runtime import ToolRuntime
 
@@ -186,6 +187,8 @@ def build_agent_session(
         artifact_root=home / ".rinari" / "artifacts" / record.id,
         clock=services.ctx.clock,
         cancellation=token,
+        output_sink=_live_output_sink(interactive),
+        processes=ProcessRegistry(),
     )
     caller = _caller_for(services, record)
     loop = AgentLoop(
@@ -314,7 +317,30 @@ def records_get(services: ServiceContainer, session_id: str) -> SessionRecord:
 # ---------------------------------------------------------------------------
 
 
+def _live_output_sink(interactive: bool):
+    if not interactive:
+        return None
+    from rinari.cli import repl_output  # local import avoids a cycle
+
+    return repl_output.emit
+
+
+STATE_ACTIVE = "active"
+STATE_INTERRUPTED = "interrupted"
+
+
+def _set_session_state(services: ServiceContainer, record: SessionRecord, state: str) -> None:
+    if record.state == state:
+        return
+    record.state = state
+    ts = now_iso(services.ctx.clock)
+    record.last_active_at = ts
+    record.updated_at = ts
+    services.ctx.session_repo.update(record)
+
+
 def run_turn(session: AgentSession, message: str, *, on_delta=None, on_tool=None) -> TurnResult:
+    _set_session_state(session.services, session.record, STATE_ACTIVE)
     try:
         return session.loop.turn(
             session.context,
@@ -324,4 +350,5 @@ def run_turn(session: AgentSession, message: str, *, on_delta=None, on_tool=None
             cancel=session.token,
         )
     except CancelledError:
+        _set_session_state(session.services, session.record, STATE_INTERRUPTED)
         return TurnResult(kind="cancelled", content="Turn cancelled.", tool_calls=0, usage=None)

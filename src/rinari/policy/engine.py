@@ -38,6 +38,7 @@ CAPABILITY_FS_READ = "fs.read"
 CAPABILITY_FS_WRITE = "fs.write"
 CAPABILITY_SHELL = "shell.exec"
 CAPABILITY_GIT_LOCAL = "git.local"
+CAPABILITY_PROCESS_LOCAL = "process.local"
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +109,14 @@ class PolicyEngine:
     ) -> PolicyDecision:
         if capability in (CAPABILITY_FS_READ, CAPABILITY_GIT_LOCAL):
             return self._fs_read(scope, path, risk, risk_class, capability)
+        if capability == CAPABILITY_PROCESS_LOCAL:
+            return PolicyDecision(
+                action=PolicyAction.ALLOW,
+                capability=capability,
+                reason="managing a process already approved at start in this session",
+                risk=risk,
+                risk_class=risk_class,
+            )
         if capability == CAPABILITY_FS_WRITE:
             return self._fs_write(scope, path, risk, risk_class)
         if capability == CAPABILITY_SHELL:

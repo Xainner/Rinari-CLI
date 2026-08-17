@@ -980,14 +980,16 @@ seguir un agent loop real
 ## Shell / process
 
 - [x] `shell.exec`.
-- [ ] streaming stdout/stderr. (fase 3; hoy bounded buffer)
+- [x] streaming stdout/stderr vivo al usuario en REPL (sink por chunk; el
+  resultado al modelo sigue siendo el bounded buffer final)
 - [x] timeout.
 - [x] cwd.
 - [x] env injection.
 - [ ] PTY. (fase 3)
-- [ ] process handles. (fase 3)
+- [x] process handles. (registry por sesión + tools `process.wait/output/signal/list`)
 - [x] process wait.
-- [ ] process signal. (kill-tree en timeout/cancel; señal arbitraria fase 3)
+- [x] process signal. (INT/TERM/KILL en todas las plataformas vía killpg/taskkill;
+  HUP/CONT en POSIX; kill-tree en timeout/cancel)
 - [x] cancellation tree. (kill process group: win32 + posix)
 - [x] output limits.
 - [x] artifact spill.
@@ -1059,7 +1061,8 @@ seguir un agent loop real
 - [x] Ctrl+C model stream.
 - [x] Ctrl+C tool.
 - [x] Ctrl+C subprocess.
-- [ ] session interruption state. (estado de sesión en interrupción; hoy queda activo)
+- [x] session interruption state. (`run_turn` marca la sesión `interrupted` al
+  cancelar y `active` al reanudar; visible en `rinari sessions`)
 - [x] second interrupt hard stop.
 - [x] cleanup.
 
