@@ -336,6 +336,9 @@ def init_cmd(
     with services(ctx) as s:
         root = Path(path).expanduser().resolve()
         record, created = s.projects.init(root, user_home=Path.home(), force=force)
+        # Creating a project is an explicit local act: trust the new root so
+        # its instructions load immediately without a second step.
+        s.trust.add(root)
         promoted = None
         chat_session = s.sessions.find_promotable_chat_session(root)
         if chat_session is not None:
@@ -344,6 +347,7 @@ def init_cmd(
             "project_id": record.id,
             "root": str(root),
             "created_files": created,
+            "trusted": True,
             "promoted_session": promoted.id if promoted is not None else None,
         }
         if is_json(ctx):

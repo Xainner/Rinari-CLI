@@ -13,6 +13,7 @@ from rinari.application.model_service import ModelService
 from rinari.application.project_service import ProjectService
 from rinari.application.provider_service import ProviderService
 from rinari.application.session_service import SessionService
+from rinari.trust import TrustService
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +23,7 @@ class ServiceContainer:
     providers: ProviderService
     models: ModelService
     projects: ProjectService
+    trust: TrustService
     sessions: SessionService
 
 
@@ -34,12 +36,14 @@ def build_services(
     providers = ProviderService(ctx, http_client=http_client, credentials=credentials)
     models = ModelService(ctx, providers, http_client=http_client)
     projects = ProjectService(ctx)
-    sessions = SessionService(ctx, providers, projects, user_home=user_home)
+    trust = TrustService(ctx)
+    sessions = SessionService(ctx, providers, projects, trust=trust, user_home=user_home)
     return ServiceContainer(
         ctx=ctx,
         credentials=credentials,
         providers=providers,
         models=models,
         projects=projects,
+        trust=trust,
         sessions=sessions,
     )

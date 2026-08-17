@@ -8,6 +8,7 @@ from rinari.storage.repositories.sessions import (
     SessionRepository,
     WorktreeBaselineRepository,
 )
+from rinari.storage.repositories.trust import TrustEntryRepository
 
 __all__ = [
     "ConfigValueRepository",
@@ -17,5 +18,6 @@ __all__ = [
     "SessionEventRepository",
     "SessionMessageRepository",
     "SessionRepository",
+    "TrustEntryRepository",
     "WorktreeBaselineRepository",
 ]

@@ -23,6 +23,7 @@ from rinari.shared.errors import (
     PermissionDeniedError,
 )
 from rinari.storage.records import SessionEventRecord, SessionRecord
+from rinari.trust import STATE_REVALIDATION, STATE_TRUSTED, TrustService
 
 EVENT_SESSION_STARTED = "SessionStarted"
 EVENT_SESSION_PROMOTED = "SessionPromotedToProject"
@@ -46,11 +47,13 @@ class SessionService:
         ctx: AppContext,
         providers: ProviderService,
         projects: ProjectService,
+        trust: TrustService | None = None,
         user_home: Path | None = None,
     ) -> None:
         self._ctx = ctx
         self._providers = providers
         self._projects = projects
+        self._trust = trust
         self._user_home = user_home
 
     def _now(self) -> str:
@@ -153,6 +156,10 @@ class SessionService:
                     {"kind": kind, "project_id": project_id, "marker": detection.marker},
                 )
             created = True
+            if project_root_snapshot is not None:
+                trust_warning = self._trust_warning(Path(project_root_snapshot))
+                if trust_warning is not None:
+                    warnings.append(trust_warning)
 
         if prompt:
             self._append_event(record.id, EVENT_USER_PROMPT, {"prompt": prompt})
@@ -303,7 +310,28 @@ class SessionService:
             and not Path(record.project_root_snapshot).exists()
         ):
             warnings.append(f"project root no longer exists: {record.project_root_snapshot}")
+        if record.kind == SESSION_KIND_PROJECT and record.project_root_snapshot:
+            warning = self._trust_warning(Path(record.project_root_snapshot))
+            if warning is not None:
+                warnings.append(warning)
         return warnings
+
+    def _trust_warning(self, root: Path) -> str | None:
+        if self._trust is None or not root.exists():
+            return None
+        status = self._trust.status(root)
+        hint = f"`rinari trust add {root}`"
+        if status.state == STATE_REVALIDATION:
+            return (
+                f"project trust needs revalidation (identity changed since the grant) "
+                f"— re-run {hint}"
+            )
+        if status.state != STATE_TRUSTED:
+            return (
+                "project is not trusted: project instructions are withheld until you "
+                f"explicitly trust it — {hint}"
+            )
+        return None
 
     def _append_event(self, session_id: str, event_type: str, payload: dict) -> None:
         self._ctx.event_repo.insert(

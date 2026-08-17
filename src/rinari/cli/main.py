@@ -12,6 +12,7 @@ from rinari.cli.commands import provider as provider_cmd
 from rinari.cli.commands import providers as providers_cmd
 from rinari.cli.commands import sessions as sessions_cmd
 from rinari.cli.commands import system as system_cmd
+from rinari.cli.commands import trust as trust_cmd
 from rinari.cli.deps import CliParams, fail, set_params
 from rinari.cli.session_flow import start_flow
 from rinari.shared.errors import RinariError
@@ -28,6 +29,7 @@ app.add_typer(provider_cmd.app, name="provider")
 app.add_typer(models_cmd.app, name="models")
 app.add_typer(model_cmd.app, name="model")
 app.add_typer(sessions_cmd.session_app, name="session")
+app.add_typer(trust_cmd.app, name="trust")
 app.add_typer(system_cmd.system_app, name=None)
 
 app.command("chat")(sessions_cmd.chat_cmd)

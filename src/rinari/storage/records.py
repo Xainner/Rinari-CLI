@@ -107,6 +107,20 @@ class SessionMessageRecord:
 
 
 @dataclass(slots=True)
+class TrustEntryRecord:
+    """One trust grant for a canonical project path (phase 3).
+
+    `fingerprint` is the project identity digest captured at grant time
+    (see trust.store.fingerprint_for); a mismatch means revalidation.
+    """
+
+    canonical_path: str
+    fingerprint: str | None = None
+    trusted_at: str = ""
+    updated_at: str = ""
+
+
+@dataclass(slots=True)
 class ConfigValue:
     key: str
     value: str

@@ -1131,13 +1131,16 @@ dirty-worktree protection
 
 ## Project Trust
 
-- [ ] Trust Store.
-- [ ] `rinari trust status`.
-- [ ] `rinari trust list`.
-- [ ] `rinari trust add`.
-- [ ] `rinari trust remove`.
-- [ ] untrusted project restrictions.
-- [ ] trust revalidation.
+- [x] Trust Store. (`trust_entries`; grant por path canonical + fingerprint de identidad)
+- [x] `rinari trust status`.
+- [x] `rinari trust list`.
+- [x] `rinari trust add`. (captura fingerprint: git HEAD+remotes, o marker, o path)
+- [x] `rinari trust remove`.
+- [x] untrusted project restrictions. (instrucciones del project retenidas hasta grant
+      explícito; aviso en start/resume; `ProjectTrustChecked` en el trace; `rinari init`
+      auto-confía el root creado)
+- [x] trust revalidation. (fingerprint divergente → `revalidation-required`; re-grant
+      explícito restaura; path desaparecido → `not-found`)
 
 ## RINARI.md
 

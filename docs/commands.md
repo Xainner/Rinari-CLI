@@ -1749,6 +1749,26 @@ plugin declarations
 
 Untrusted repositories may be read as data but must not silently activate executable agent configuration.
 
+Implementation (phase 3):
+
+Grant state, semantics, and revalidation:
+
+```text
+store         trust_entries (canonical_path PK, fingerprint, trusted_at, updated_at)
+fingerprint   git HEAD + sorted remotes (git repos), .rinari/project.toml hash
+              (marker projects), canonical path digest (plain directories)
+states        trusted | not-trusted | revalidation-required | not-found
+add           always captures a fresh fingerprint (re-grant after identity change)
+```
+
+Enforced runtime restrictions for untrusted projects:
+
+- RINARI.md / AGENTS.md instructions are withheld from the prompt (the
+  environment segment flags `project_trust` and the reason).
+- `rinari init` auto-grants trust for the root it creates (explicit local act).
+- Session start/resume warns when a project is untrusted or needs revalidation.
+- Every agent session build persists a `ProjectTrustChecked` trace event.
+
 ---
 
 # 30. `session`

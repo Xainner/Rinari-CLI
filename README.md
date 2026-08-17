@@ -70,6 +70,10 @@ uv run rinari version
   con cambios del usuario pide approval explícita (runtime, no prompt), y
   `git.status` etiqueta la ownership de cada path (`user` /
   `modified-in-session` / `new-in-session`).
+- Project trust (Fase 3): `rinari trust add|remove|status|list`; un project
+  no confiado retiene sus instrucciones (RINARI.md/AGENTS.md) hasta un grant
+  explícito, con fingerprint de identidad (git HEAD+remotes) y revalidation
+  cuando la identidad cambia.
 
 ## Pendiente
 
