@@ -216,6 +216,23 @@ def symbols_for_file(path: Path) -> list[Symbol]:
 # -- symbol search -----------------------------------------------------------------
 
 
+def ast_symbols_for_file(path: Path) -> list[Symbol]:
+    """Symbols via the AST layer (tree-sitter when available, regex fallback).
+
+    Falls back to the plain regex extractor if the AST layer is unavailable
+    or returns nothing (e.g. partial parse with no captures).
+    """
+    from rinari.ast import analyze_file
+
+    try:
+        summary = analyze_file(path)
+    except Exception:
+        summary = None
+    if summary is not None and summary.symbols:
+        return [Symbol(s.name, s.kind, s.line, s.qualified_name) for s in summary.symbols]
+    return symbols_for_file(path)
+
+
 def find_symbols(
     root: Path,
     query: str,
@@ -230,7 +247,7 @@ def find_symbols(
     scanned = 0
     for file in walk_files(root, include, max_files):
         scanned += 1
-        for symbol in symbols_for_file(file):
+        for symbol in ast_symbols_for_file(file):
             if kind is not None and symbol.kind != kind:
                 continue
             name_matches = symbol.name.lower() == wanted

@@ -84,8 +84,13 @@ uv run rinari version
   generados del scan.
 - Instrucciones de project (Fase 3): resolver de RINARI.md con chain
   `~/.rinari/RINARI.md` (global) → root → ... → cwd; `RINARI.override.md`
-  reemplaza a RINARI.md en su level; el level más profundo gana conflictos.
-  README y demás files siguen siendo data, no instrucciones.
+reemplaza a RINARI.md en su level; el level más profundo gana conflictos.
+   README y demás files siguen siendo data, no instrucciones.
+- AST (Fase 3): capa `rinari/ast` con query grammar unificado
+  (`symbols`/`functions`/`classes`/`imports`/`calls:NAME`), adapter
+  tree-sitter para Python (symbols con calificación `Class.method`, imports,
+  call sites) y fallback regex para py/js/ts/rs/go. `search.symbols` ya
+  consume la capa AST cuando hay grammar disponible.
 
 ## Pendiente
 

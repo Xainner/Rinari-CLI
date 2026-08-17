@@ -1180,10 +1180,18 @@ dirty-worktree protection
 
 ## Tree-sitter / AST
 
-- [ ] parser abstraction.
-- [ ] structural queries.
-- [ ] supported language adapters.
-- [ ] safe fallback.
+- [x] parser abstraction. (`rinari/ast/base.py`: `AstSymbol`/`AstImport`/`AstCall`/`AstSummary` + registry `get_parser`/`analyze_file`)
+- [x] structural queries. (grammar unificado: `symbols`, `functions`, `methods`, `classes`, `imports`, `calls`, `calls:NAME`)
+- [x] supported language adapters. (tree-sitter Python — symbols/imports/calls con calificación `Class.method`; regex py/js/ts/rs/go)
+- [x] safe fallback. (sin grammar o parse roto → regex; sin parser → `None`/`unavailable`; `search.symbols` consume la capa AST)
+
+Implementation (phase 3): paquete `src/rinari/ast/` (`base`, `regex_adapter`,
+`tree_sitter_adapter`, `registry`). tree-sitter >= 0.26: la capsule se envuelve
+con `ts.Language(...)`, todos los patterns S-expr van entre paréntesis y
+`QueryCursor.captures(node)` devuelve `dict[str, list[Node]]`. El adapter
+degrade graciosamente si los grammar no son importables. `find_symbols`
+mejora extracción Python vía AST manteniendo fallback regex. 8 tests
+(`test_ast.py`) + suite completa 359 passed / 2 skipped.
 
 ## LSP
 
