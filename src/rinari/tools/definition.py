@@ -141,6 +141,9 @@ class ToolContext:
     output_sink: OutputSink | None = None
     # Mutable session-scoped process registry for process.* tools (None = disabled).
     processes: Any = None
+    # WorktreeGuard (projects.worktree) with the session's dirty-tree
+    # baseline; None for CHAT sessions or repos without dirty state.
+    worktree: Any = None
 
 
 @dataclass(frozen=True, slots=True)

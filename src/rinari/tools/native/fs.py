@@ -65,6 +65,17 @@ def _resolve_write(ctx: ToolContext, path: Any) -> tuple[Path | None, ToolResult
     return resolved, None
 
 
+def _classify_user_work(ctx: ToolContext, resolved: Path) -> str | None:
+    """'user-dirty' | 'modified-in-session' | None via the session baseline."""
+    guard = ctx.worktree
+    if guard is None:
+        return None
+    try:
+        return guard.classify(resolved)
+    except Exception:
+        return None
+
+
 # -- fs.read ------------------------------------------------------------------
 
 
@@ -139,13 +150,21 @@ def fs_write(input: dict, ctx: ToolContext) -> ToolResult:
     if not isinstance(content, str):
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "content must be a string")
     create_parents = bool(input.get("create_parents", False))
+    # Classified before the write: the write itself changes the content hash.
+    pre_existing = _classify_user_work(ctx, resolved)
     try:
         if create_parents:
             resolved.parent.mkdir(parents=True, exist_ok=True)
         resolved.write_text(content, encoding="utf-8")
     except OSError as exc:
         return _fail(ToolErrorCode.PERMISSION_DENIED, f"Write failed: {exc.__class__.__name__}")
-    return _ok({"path": str(resolved), "bytes_written": len(content.encode("utf-8"))})
+    data: dict = {"path": str(resolved), "bytes_written": len(content.encode("utf-8"))}
+    if pre_existing is not None:
+        data["user_pre_existing_changes"] = True
+        data["warning"] = (
+            f"this file had uncommitted user changes from before the session ({pre_existing})"
+        )
+    return _ok(data)
 
 
 # -- fs.patch -----------------------------------------------------------------
@@ -184,16 +203,21 @@ def fs_patch(input: dict, ctx: ToolContext) -> ToolResult:
         if input.get("replace_all", False)
         else original.replace(old, new, 1)
     )
+    pre_existing = _classify_user_work(ctx, resolved)
     try:
         resolved.write_text(updated, encoding="utf-8")
     except OSError as exc:
         return _fail(ToolErrorCode.PERMISSION_DENIED, f"Write failed: {exc.__class__.__name__}")
-    return _ok(
-        {
-            "path": str(resolved),
-            "replacements": count if input.get("replace_all", False) else 1,
-        }
-    )
+    data = {
+        "path": str(resolved),
+        "replacements": count if input.get("replace_all", False) else 1,
+    }
+    if pre_existing is not None:
+        data["user_pre_existing_changes"] = True
+        data["warning"] = (
+            f"this file had uncommitted user changes from before the session ({pre_existing})"
+        )
+    return _ok(data)
 
 
 # -- fs.list --------------------------------------------------------------------

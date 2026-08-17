@@ -111,3 +111,18 @@ class ConfigValue:
     key: str
     value: str
     updated_at: str
+
+
+@dataclass(slots=True)
+class WorktreeBaselineRecord:
+    """One pre-existing worktree entry captured at session start.
+
+    `git_status` is the porcelain 2-char code (M, A, ?, R, ...);
+    `blob_sha` is a sha256 of the file content (None for directories).
+    """
+
+    session_id: str
+    path: str
+    git_status: str
+    blob_sha: str | None = None
+    created_at: str = ""

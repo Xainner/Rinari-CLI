@@ -6,6 +6,7 @@ from rinari.storage.repositories.sessions import (
     SessionEventRepository,
     SessionMessageRepository,
     SessionRepository,
+    WorktreeBaselineRepository,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "SessionEventRepository",
     "SessionMessageRepository",
     "SessionRepository",
+    "WorktreeBaselineRepository",
 ]

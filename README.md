@@ -65,13 +65,17 @@ uv run rinari version
   (`process.start/wait/output/signal/list`), REPL con `/provider` y `/model`
   in-session, session-interruption state, prompt one-shot no interactivo,
   y traza de eventos persistida por sesión.
+- Dirty-worktree protection (ya disponible): al abrir una sesión
+  PROJECT se captura el estado no commiteado previo; sobrescribir un file
+  con cambios del usuario pide approval explícita (runtime, no prompt), y
+  `git.status` etiqueta la ownership de cada path (`user` /
+  `modified-in-session` / `new-in-session`).
 
 ## Pendiente
 
 - Fase 2 (agent runtime) mayormente completa. Queda: PTY (Fase 3),
-  baseline de dirty worktree y preservación explícita de cambios del usuario
-  (Fase 3), network policy y network hook del sandbox (Fase 4), y
-  verify/finalize transitions + reconciliation (Fase 3). Checklist completo
+  network policy y network hook del sandbox (Fase 4), y verify/finalize
+  transitions + reconciliation (Fase 3). Checklist completo
   en [TODO.md](TODO.md).
 - Los 4 items de Fase 1 que dependían del agent loop (Extended Identity bajo
   demanda, project-creation intent, preservar conversación, recalcular

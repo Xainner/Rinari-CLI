@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 
 class PermissionProfile(StrEnum):
@@ -48,6 +49,8 @@ class SessionScope:
     cwd: Path
     profile: PermissionProfile = PermissionProfile.WORKSPACE
     user_home: Path | None = None
+    # Optional WorktreeGuard: dirty-state baseline captured at session start.
+    worktree: Any | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +239,25 @@ class PolicyEngine:
                 risk="high",
                 risk_class="local-destructive",
             )
+        # Dirty-worktree protection: overwriting a file the user already had
+        # uncommitted modifies work that predates the session, so it always
+        # goes through the approval gate even inside the project root.
+        guard = scope.worktree
+        if guard is not None:
+            classification = guard.classify(resolved)
+            if classification is not None:
+                return PolicyDecision(
+                    action=PolicyAction.ASK,
+                    capability=CAPABILITY_FS_WRITE,
+                    reason=(
+                        f"file has uncommitted user changes from before this "
+                        f"session ({classification}); overwriting requires "
+                        "explicit approval"
+                    ),
+                    target=str(resolved),
+                    risk="medium",
+                    risk_class="local-destructive",
+                )
         inside = self._inside_root(resolved, scope.root)
         inside_allow_reason: str | None = None
         if inside and scope.profile is not PermissionProfile.READ_ONLY:

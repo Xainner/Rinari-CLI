@@ -20,6 +20,7 @@ TABLES_AFTER_MIGRATIONS = {
     "sessions",
     "session_events",
     "session_messages",
+    "worktree_baselines",
     "config_values",
 }
 
@@ -40,7 +41,7 @@ def _table_names(db: Database) -> set[str]:
 
 def test_migrate_fresh_database_applies_all(db):
     applied = MigrationRunner(db, FakeClock()).migrate()
-    assert applied == [1, 2]
+    assert applied == [1, 2, 3]
     assert _table_names(db) == TABLES_AFTER_MIGRATIONS
 
 
@@ -48,7 +49,7 @@ def test_migrate_is_idempotent(db):
     runner = MigrationRunner(db, FakeClock())
     runner.migrate()
     assert runner.migrate() == []
-    assert runner.current_version() == 2
+    assert runner.current_version() == 3
 
 
 def test_migrations_are_replayed_from_on_disk(db, tmp_path):

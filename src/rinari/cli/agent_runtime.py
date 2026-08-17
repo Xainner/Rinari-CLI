@@ -24,6 +24,7 @@ from rinari.models.types import ChatMessage, ToolCall
 from rinari.policy.approvals import ApprovalEngine
 from rinari.policy.engine import PermissionProfile, PolicyEngine
 from rinari.policy.sandbox import FilesystemSandbox, ProcessLimits
+from rinari.projects.worktree import WorktreeGuard, snapshot_worktree
 from rinari.prompts.assembler import AssemblerContext, ProjectInstruction, PromptAssembler
 from rinari.prompts.soul_sections import split_soul
 from rinari.runtime.agent import AgentContext, AgentLoop, TurnResult
@@ -33,7 +34,12 @@ from rinari.runtime.model_caller import ModelCaller
 from rinari.shared.clock import now_iso
 from rinari.shared.errors import CancelledError, InvalidUsageError, RinariError
 from rinari.shared.redaction import Redactor
-from rinari.storage.records import SessionEventRecord, SessionMessageRecord, SessionRecord
+from rinari.storage.records import (
+    SessionEventRecord,
+    SessionMessageRecord,
+    SessionRecord,
+    WorktreeBaselineRecord,
+)
 from rinari.tools.definition import ToolContext
 from rinari.tools.native import all_native_tools
 from rinari.tools.native.process import ProcessRegistry
@@ -210,6 +216,7 @@ def build_agent_session(
         cancellation=token,
         output_sink=_live_output_sink(interactive),
         processes=ProcessRegistry(),
+        worktree=_ensure_worktree_baseline(services, record),
     )
     caller = _caller_for(services, record)
     loop = AgentLoop(
@@ -441,6 +448,41 @@ def _has_project_marker(cwd: Path) -> bool:
     return (cwd / ".git").exists() or (cwd / ".rinari" / "project.toml").is_file()
 
 
+def _ensure_worktree_baseline(
+    services: ServiceContainer, record: SessionRecord
+) -> WorktreeGuard | None:
+    """Session dirt-tree baseline: captured once, on first build (or resume).
+
+    Only PROJECT sessions with a git repo have one; an empty worktree yields
+    no rows and the guard is still installed (so later user dirt would be
+    caught on the next invocation, while the agent's first writes are tagged
+    new-in-session).
+    """
+    if record.kind != "PROJECT" or not record.project_root_snapshot:
+        return None
+    root = Path(record.project_root_snapshot)
+    if not (root / ".git").exists():
+        return None
+    rows = services.ctx.worktree_repo.list(record.id)
+    if not rows:
+        entries = snapshot_worktree(root)
+        if entries:
+            ts = now_iso(services.ctx.clock)
+            recs = [
+                WorktreeBaselineRecord(
+                    session_id=record.id,
+                    path=path,
+                    git_status=status,
+                    blob_sha=sha,
+                    created_at=ts,
+                )
+                for path, (status, sha) in sorted(entries.items())
+            ]
+            services.ctx.worktree_repo.insert_many(record.id, recs)
+        rows = services.ctx.worktree_repo.list(record.id)
+    return WorktreeGuard(root, {r.path: (r.git_status, r.blob_sha) for r in rows})
+
+
 def _apply_promotion(session: AgentSession, record: SessionRecord, marker: str) -> None:
     services = session.services
     session.record = records_get(services, record.id)
@@ -452,6 +494,7 @@ def _apply_promotion(session: AgentSession, record: SessionRecord, marker: str) 
         cwd=root,
         project_root=root,
         sandbox=_sandbox_for(record, home),
+        worktree=_ensure_worktree_baseline(services, record),
     )
     session.context.assembler_base = build_assembler_context(services, record)
     _persist_event(

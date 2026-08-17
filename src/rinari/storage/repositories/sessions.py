@@ -5,6 +5,7 @@ from rinari.storage.records import (
     SessionEventRecord,
     SessionMessageRecord,
     SessionRecord,
+    WorktreeBaselineRecord,
 )
 
 
@@ -210,6 +211,47 @@ class SessionMessageRepository:
             (session_id,),
         )
         return [_message_to_record(r) for r in rows]
+
+
+class WorktreeBaselineRepository:
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    def exists(self, session_id: str) -> bool:
+        row = self._db.query_one(
+            "SELECT 1 AS one FROM worktree_baselines WHERE session_id = ? LIMIT 1",
+            (session_id,),
+        )
+        return row is not None
+
+    def insert_many(self, session_id: str, records: list[WorktreeBaselineRecord]) -> None:
+        with self._db.transaction():
+            self._db.execute("DELETE FROM worktree_baselines WHERE session_id = ?", (session_id,))
+            for rec in records:
+                self._db.execute(
+                    """
+                    INSERT INTO worktree_baselines (
+                        session_id, path, git_status, blob_sha, created_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (session_id, rec.path, rec.git_status, rec.blob_sha, rec.created_at),
+                )
+
+    def list(self, session_id: str) -> list[WorktreeBaselineRecord]:
+        rows = self._db.query(
+            "SELECT * FROM worktree_baselines WHERE session_id = ? ORDER BY path",
+            (session_id,),
+        )
+        return [
+            WorktreeBaselineRecord(
+                session_id=row["session_id"],
+                path=row["path"],
+                git_status=row["git_status"],
+                blob_sha=row["blob_sha"],
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]
 
 
 def _message_to_record(row: dict) -> SessionMessageRecord:

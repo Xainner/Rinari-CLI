@@ -8,6 +8,7 @@ remain reachable only through `shell.exec` behind the approval gate
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 from typing import Any
 
 from rinari.policy.sandbox import SandboxViolationError
@@ -86,21 +87,45 @@ def git_status(input: dict, ctx: ToolContext) -> ToolResult:
     if isinstance(result, ToolResult):
         return result
     _, out, _ = result
+    base = ctx.project_root if ctx.project_root is not None else ctx.cwd
     branch: str | None = None
     files: list[dict[str, str]] = []
     for line in out.splitlines():
         if line.startswith("## "):
             branch = line[3:].split(" ")[0]
         elif line:
-            files.append({"status": line[:2].strip(), "path": line[3:]})
+            raw_path = line[3:]
+            if " -> " in raw_path and line[:2].startswith(("R", "C")):
+                raw_path = raw_path.split(" -> ", 1)[1]
+            entry = {"status": line[:2].strip(), "path": raw_path.strip().strip('"')}
+            entry["ownership"] = _ownership_tag(ctx, base, entry["path"])
+            files.append(entry)
     return _ok(
         {
             "branch": branch,
             "dirty": bool(files),
             "files": files[:200],
             "truncated": _truncated(out),
+            "ownership_legend": {
+                "user": "unchanged since before the session (user work)",
+                "modified-in-session": "user change, further modified during the session",
+                "new-in-session": "did not exist before the session",
+            },
         }
     )
+
+
+def _ownership_tag(ctx: ToolContext, base: Path, rel_path: str) -> str:
+    guard = ctx.worktree
+    path = base / rel_path
+    if guard is not None:
+        try:
+            classification = guard.classify(path)
+        except Exception:
+            classification = None
+        if classification is not None:
+            return "modified-in-session" if classification == "modified-in-session" else "user"
+    return "new-in-session"
 
 
 def git_diff(input: dict, ctx: ToolContext) -> ToolResult:

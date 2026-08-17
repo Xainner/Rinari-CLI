@@ -48,6 +48,7 @@ def scope_from_context(ctx: ToolContext) -> SessionScope:
         cwd=ctx.cwd,
         profile=ctx.profile,
         user_home=ctx.user_home,
+        worktree=ctx.worktree,
     )
 
 

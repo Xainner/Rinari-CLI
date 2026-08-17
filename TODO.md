@@ -1027,11 +1027,16 @@ seguir un agent loop real
 - [x] log.
 - [x] show.
 - [x] branch metadata.
-- [ ] dirty-worktree baseline. (fase 3, con verification)
+- [x] dirty-worktree baseline. (migración 0003 `worktree_baselines`; snapshot
+  porcelain+sha256 al abrir la sesión PROJECT, capturado una vez)
 - [x] local Git policy.
 - [x] remote Git classification.
-- [ ] preserve user changes. (comportamiento; test dedicado fase 3)
-- [ ] safe diff ownership metadata. (fase 3)
+- [x] preserve user changes. (runtime: `WorktreeGuard` fuerza approval antes
+  de sobrescribir un file con cambios no commiteados previos a la sesión;
+  test dedicado + E2E con mock: overwrite denegado, archivo intacto)
+- [x] safe diff ownership metadata. (fase 3)  (`git.status` etiqueta cada path:
+  `user` | `modified-in-session` | `new-in-session` + legend; `fs.write`/
+  `fs.patch` devuelven `user_pre_existing_changes` cuando aplican)
 
 ## Policy Engine
 
