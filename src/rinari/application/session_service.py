@@ -13,6 +13,7 @@ from pathlib import Path
 from rinari.application.context import AppContext
 from rinari.application.project_service import ProjectService
 from rinari.application.provider_service import ProviderService
+from rinari.application.reconcile import Finding, ResumeReconciler, trust_warning
 from rinari.projects.detector import ProjectDetection, detect_project
 from rinari.shared.clock import now_iso
 from rinari.shared.errors import (
@@ -23,7 +24,7 @@ from rinari.shared.errors import (
     PermissionDeniedError,
 )
 from rinari.storage.records import SessionEventRecord, SessionRecord
-from rinari.trust import STATE_REVALIDATION, STATE_TRUSTED, TrustService
+from rinari.trust import TrustService
 
 EVENT_SESSION_STARTED = "SessionStarted"
 EVENT_SESSION_PROMOTED = "SessionPromotedToProject"
@@ -39,6 +40,7 @@ class StartedSession:
     session: SessionRecord
     created: bool
     warnings: tuple[str, ...] = ()
+    findings: tuple[Finding, ...] = ()
 
 
 class SessionService:
@@ -114,10 +116,12 @@ class SessionService:
                 None,
             )
 
+        findings: tuple[Finding, ...] = ()
         if match is not None:
-            record = match
-            for warning in self._reconcile(record):
+            record, report = self._reconciler().reconcile(match)
+            for warning in report.warnings:
                 warnings.append(warning)
+            findings = report.findings
             record.current_cwd = str(cwd)
             record.last_active_at = now
             record.updated_at = now
@@ -157,13 +161,17 @@ class SessionService:
                 )
             created = True
             if project_root_snapshot is not None:
-                trust_warning = self._trust_warning(Path(project_root_snapshot))
-                if trust_warning is not None:
-                    warnings.append(trust_warning)
+                warning = (
+                    trust_warning(self._trust, Path(project_root_snapshot)) if self._trust else None
+                )
+                if warning is not None:
+                    warnings.append(warning)
 
         if prompt:
             self._append_event(record.id, EVENT_USER_PROMPT, {"prompt": prompt})
-        return StartedSession(session=record, created=created, warnings=tuple(warnings))
+        return StartedSession(
+            session=record, created=created, warnings=tuple(warnings), findings=findings
+        )
 
     def resume(self, ref: str | None = None, cwd: Path | None = None) -> StartedSession:
         record: SessionRecord | None = None
@@ -174,16 +182,16 @@ class SessionService:
         else:
             return self.start(cwd or Path.cwd())
 
-        warnings: list[str] = []
-        for warning in self._reconcile(record):
-            warnings.append(warning)
+        record, report = self._reconciler().reconcile(record)
         if cwd is not None:
             record.current_cwd = str(Path(cwd).expanduser().resolve())
         now = self._now()
         record.updated_at = now
         record.last_active_at = now
         self._ctx.session_repo.update(record)
-        return StartedSession(session=record, created=False, warnings=tuple(warnings))
+        return StartedSession(
+            session=record, created=False, warnings=report.warnings, findings=report.findings
+        )
 
     def new(self, cwd: Path, title: str | None = None, forced_chat: bool = False) -> SessionRecord:
         cwd = Path(cwd).expanduser().resolve()
@@ -298,40 +306,8 @@ class SessionService:
 
     # -- helpers -----------------------------------------------------------------
 
-    def _reconcile(self, record: SessionRecord) -> list[str]:
-        warnings: list[str] = []
-        if self._ctx.provider_repo.get(record.provider_id) is None:
-            warnings.append(f"provider for session no longer exists (id {record.provider_id})")
-        if self._ctx.model_repo.get(record.model_id) is None:
-            warnings.append(f"model for session no longer exists (id {record.model_id})")
-        if (
-            record.kind == SESSION_KIND_PROJECT
-            and record.project_root_snapshot
-            and not Path(record.project_root_snapshot).exists()
-        ):
-            warnings.append(f"project root no longer exists: {record.project_root_snapshot}")
-        if record.kind == SESSION_KIND_PROJECT and record.project_root_snapshot:
-            warning = self._trust_warning(Path(record.project_root_snapshot))
-            if warning is not None:
-                warnings.append(warning)
-        return warnings
-
-    def _trust_warning(self, root: Path) -> str | None:
-        if self._trust is None or not root.exists():
-            return None
-        status = self._trust.status(root)
-        hint = f"`rinari trust add {root}`"
-        if status.state == STATE_REVALIDATION:
-            return (
-                f"project trust needs revalidation (identity changed since the grant) "
-                f"— re-run {hint}"
-            )
-        if status.state != STATE_TRUSTED:
-            return (
-                "project is not trusted: project instructions are withheld until you "
-                f"explicitly trust it — {hint}"
-            )
-        return None
+    def _reconciler(self) -> ResumeReconciler:
+        return ResumeReconciler(self._ctx, self._projects, self._trust)
 
     def _append_event(self, session_id: str, event_type: str, payload: dict) -> None:
         self._ctx.event_repo.insert(

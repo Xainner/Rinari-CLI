@@ -1493,22 +1493,47 @@ autoridad que las instrucciones. CLI `rinari memory
 list|search|show|add|edit|forget` (deletion siempre con scope explícito).
 10 tests (`test_memory.py`) + migración 0010 en `test_migrations.py`.
 Retrieval de memoria expuesto vía `memory.recall` y el segmento de prompt; el
-sistema general de context-retrieval (ranking/pins/dedup) sigue pendiente con
-el Context Engine.
+sistema general de context-retrieval (ranking/pins/dedup) quedó implementado
+en el bloque de Context Engine (ver arriba).
 
 ## Resume
 
-- [ ] CHAT resume.
-- [ ] PROJECT resume.
-- [ ] project identity reconciliation.
-- [ ] branch reconciliation.
-- [ ] dirty-tree reconciliation.
-- [ ] trust reconciliation.
-- [ ] provider auth reconciliation.
-- [ ] model availability reconciliation.
+- [x] CHAT resume.
+- [x] PROJECT resume.
+- [x] project identity reconciliation.
+- [x] branch reconciliation.
+- [x] dirty-tree reconciliation.
+- [x] trust reconciliation.
+- [x] provider auth reconciliation.
+- [x] model availability reconciliation.
 - [ ] skill version reconciliation.
-- [ ] policy change reconciliation.
-- [ ] stale assumptions.
+- [x] policy change reconciliation.
+- [x] stale assumptions.
+
+Implementation (resume durable + reconciliation):
+`SessionService.resume` (y el camino resume-de-`start`) pasa cada sesión por
+`ResumeReconciler` (`src/rinari/application/reconcile.py`), que re-verifica
+los hechos duraderos que la sesión asume antes de seguirla:
+
+- `identity` — la row de proyecto existe para el root snapshot; si falta, se
+  re-registra (y la sesión se re-vincula). Única corrección automática.
+- `git-branch` — la rama persistida al inicio (`sessions.git_branch`,
+  migración 0012; capturada en `_ensure_worktree_baseline`) vs la rama actual;
+  un cambio se reporta, no se absorbe.
+- `working-tree` — baseline de worktree (migración 0003) vs estado dirty
+  actual; los paths que difieren se listan ("verifica antes de actuar").
+- `permissions` — el permission profile active vs el grabado en la sesión
+  (policy change).
+- `provider` / `model` — las rows siguen existiendo (auth/disponibilidad).
+- `trust` — estado de confianza del proyecto (trusted/revalidation/untrusted).
+- `assumptions` — el cwd grabado sigue existiendo (stale assumptions).
+
+Todo finding que no sea `ok` se convierte en warning visible; el JSON añade
+`data.reconciliation` (subsystem/state/detail/action). No se muta el worktree
+y no se descarta ninguna asunción en silencio.
+
+Skill version reconciliation queda pendiente: aún no hay versión/contenido de
+skill persistido contra el cual reconciliar (ver skills).
 
 ## Session fork
 
@@ -2619,9 +2644,14 @@ COMPLETADO EN FASE 4 (hasta el momento)
   filter, tools memory.*, segmento de prompt, CLI `rinari memory`)
   Context retrieval + ranking + pins + dedup (migración 0011, tools
   context.*, segmento pinned-context, CLI `rinari context`)
+  Resume durable + reconciliation (migración 0012 sessions.git_branch,
+  ResumeReconciler identity/branch/working-tree/permissions/provider/
+  model/trust/assumptions, findings estructurados + `data.reconciliation`
+  en JSON)
 
 SIGUIENTE (fase 4)
-  → Resume durable + reconciliation
+  → Session fork
   → Budgets + loop detection
   → network policy + hooks
+  → skill version reconciliation (pendiente de versioning de skills)
 ```

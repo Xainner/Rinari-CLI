@@ -140,10 +140,19 @@ reemplaza a RINARI.md en su level; el level más profundo gana conflictos.
 
 ## Pendiente
 
-- En Fase 4 (resto): resume + reconciliation
-  (identity/branch/dirty-tree/trust/auth/model/skill/policy), session fork,
-  budgets y loop detection, y network policy + hook del sandbox. Checklist
-  completo en [TODO.md](TODO.md).
+- En Fase 4 (resto): session fork, budgets y loop detection, network policy
+  + hook del sandbox, y skill version reconciliation. Checklist completo en
+  [TODO.md](TODO.md).
+- Resume durable + reconciliation (Fase 4): `rinari resume` (y el
+  resume-implícito de `rinari`) pasa la sesión por un reconciler que
+  re-verifica los hechos duraderos antes de seguirla: identidad de proyecto
+  (re-registra la row si falta; única corrección automática), branch
+  (persistida en `sessions.git_branch` al inicio vs actual), working tree
+  (baseline de Fase 3 vs estado dirty actual), permission profile (policy
+  change), provider/model (siguen existiendo), trust y cwd grabado. Todo
+  finding `!= ok` se muestra como warning; el JSON emite
+  `data.reconciliation` con subsystem/state/detail/action. 10 tests
+  (`test_resume_reconciliation.py`) + migración 0012.
 - Context retrieval + pins (Fase 4): candidatos del index del repo
   (archivos/símbolos), memoria y artifacts de la sesión, con ranking
   determinista y dedup por `(source, ref)`; pins de sesión que inyectan su

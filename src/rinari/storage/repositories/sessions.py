@@ -20,8 +20,8 @@ class SessionRepository:
                 id, kind, title, project_id, project_root_snapshot,
                 created_cwd, current_cwd, provider_id, model_id,
                 profile_id, mode, state, compact_state_json,
-                created_at, updated_at, last_active_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                created_at, updated_at, last_active_at, git_branch
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 rec.id,
@@ -40,6 +40,7 @@ class SessionRepository:
                 rec.created_at,
                 rec.updated_at,
                 rec.last_active_at,
+                rec.git_branch,
             ),
         )
 
@@ -53,7 +54,8 @@ class SessionRepository:
             UPDATE sessions SET
                 kind = ?, title = ?, project_id = ?, project_root_snapshot = ?,
                 current_cwd = ?, provider_id = ?, model_id = ?, profile_id = ?,
-                mode = ?, state = ?, compact_state_json = ?, updated_at = ?, last_active_at = ?
+                mode = ?, state = ?, compact_state_json = ?, updated_at = ?, last_active_at = ?,
+                git_branch = ?
             WHERE id = ?
             """,
             (
@@ -70,6 +72,7 @@ class SessionRepository:
                 json.dumps(rec.compact_state, sort_keys=True) if rec.compact_state else None,
                 rec.updated_at,
                 rec.last_active_at,
+                rec.git_branch,
                 rec.id,
             ),
         )
@@ -114,6 +117,7 @@ def _session_to_record(row: dict) -> SessionRecord:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         last_active_at=row["last_active_at"],
+        git_branch=row["git_branch"],
     )
 
 

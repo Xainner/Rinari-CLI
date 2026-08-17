@@ -27,6 +27,7 @@ from rinari.models.types import ChatMessage, ToolCall
 from rinari.policy.approvals import ApprovalEngine
 from rinari.policy.engine import PermissionProfile, PolicyEngine
 from rinari.policy.sandbox import FilesystemSandbox, ProcessLimits
+from rinari.projects.git import git_state
 from rinari.projects.worktree import WorktreeGuard, snapshot_worktree
 from rinari.prompts.assembler import AssemblerContext, ProjectInstruction, PromptAssembler
 from rinari.prompts.soul_sections import split_soul
@@ -584,6 +585,12 @@ def _ensure_worktree_baseline(
     root = Path(record.project_root_snapshot)
     if not (root / ".git").exists():
         return None
+    if record.git_branch is None:
+        state = git_state(root)
+        if state.branch is not None:
+            record.git_branch = state.branch
+            record.updated_at = now_iso(services.ctx.clock)
+            services.ctx.session_repo.update(record)
     rows = services.ctx.worktree_repo.list(record.id)
     if not rows:
         entries = snapshot_worktree(root)

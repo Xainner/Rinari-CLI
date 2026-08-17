@@ -78,6 +78,14 @@ def _print_header(data: dict, created: bool, warnings: tuple[str, ...]) -> None:
         typer.echo(f"warning   {warning}", err=True)
 
 
+def _reconciliation_dict(findings) -> list[dict]:
+    return [
+        {"subsystem": f.subsystem, "state": f.state, "detail": f.detail, "action": f.action}
+        for f in findings
+        if f.state != "ok"
+    ]
+
+
 def _turn_dict(result: TurnResult) -> dict:
     return {
         "kind": result.kind,
@@ -127,6 +135,7 @@ def start_flow(ctx: typer.Context, prompt: str | None, forced_chat: bool, comman
         data = _snapshot(s, started.session)
         data["created"] = started.created
         data["warnings"] = list(started.warnings)
+        data["reconciliation"] = _reconciliation_dict(started.findings)
         data["prompt_recorded"] = prompt is not None
 
         if is_json(ctx):
@@ -173,6 +182,7 @@ def resume_flow(ctx: typer.Context, ref: str | None, command: str) -> None:
         data = _snapshot(s, started.session)
         data["resumed_from"] = ref
         data["warnings"] = list(started.warnings)
+        data["reconciliation"] = _reconciliation_dict(started.findings)
         if is_json(ctx):
             emit_json(success_envelope(command, data, warnings=started.warnings))
             return

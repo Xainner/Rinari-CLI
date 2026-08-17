@@ -76,6 +76,7 @@ class SessionRecord:
     created_at: str
     updated_at: str
     last_active_at: str
+    git_branch: str | None = None
 
 
 @dataclass(slots=True)
