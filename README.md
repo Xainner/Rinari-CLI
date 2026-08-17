@@ -140,8 +140,19 @@ reemplaza a RINARI.md en su level; el level más profundo gana conflictos.
 
 ## Pendiente
 
-- En Fase 4 (resto): network policy + hook del sandbox, y skill version
-  reconciliation. Checklist completo en [TODO.md](TODO.md).
+- En Fase 4 (resto): skill version reconciliation. Checklist completo en
+  [TODO.md](TODO.md).
+- Network policy + hooks (Fase 4): `rinari network status|test|rules|
+  allow|deny|remove|history`. El modo (`network.mode` = off/ask/allow) +
+  reglas allow/deny persistentes por host (exacto o subdominio) deciden cada
+  target — authoritative sobre requests del modelo; rules deny siempre
+  ganan, `allow` corta el ask, y el target inresoluble se niega. El gate de
+  `network.outbound` corre en el Tool Runtime (con approval cuando `ask`) y
+  audita cada decisión en `network_events` (migración 0014); los tools de red
+  de fase 5 deben pasar cada connection target por `NetworkGuard`
+  (fail-closed: DENYs impuestos en código). Las reglas se leen lazy, así
+  `rinari network allow` aplica a una sesión en ejecución sin restart.
+  18 tests (`test_network_policy.py`).
 - Budgets + loop detection (Fase 4): cada turno corre con un `BudgetMeter`
   (model calls, tool calls, network calls, wall time vía clock inyectado,
   cost estimado desde usage real × pricing declarado — sin pricing el costo

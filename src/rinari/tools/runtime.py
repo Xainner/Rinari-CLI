@@ -8,6 +8,7 @@ persistence -> artifact spill -> bounded result. No tool bypasses it.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import time
 from collections.abc import Callable
@@ -15,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from rinari.policy.approvals import ApprovalEngine, ApprovalRequest
-from rinari.policy.engine import PolicyAction, PolicyEngine, SessionScope
+from rinari.policy.engine import CAPABILITY_NETWORK, PolicyAction, PolicyEngine, SessionScope
 from rinari.policy.sandbox import FilesystemSandbox
 from rinari.shared.clock import Clock, SystemClock, now_iso
 from rinari.shared.errors import (
@@ -39,6 +40,9 @@ from rinari.tools.registry import ToolRegistry
 from rinari.tools.schema import validate_against
 
 EventSink = Callable[[str, dict], None]
+# Network audit hook: (session_id, tool, host, action, reason) per gate
+# decision on a network.outbound action (network_events table, phase 4).
+NetworkEventLog = Callable[[str, str, str, str, str], None]
 
 
 def scope_from_context(ctx: ToolContext) -> SessionScope:
@@ -63,6 +67,7 @@ class ToolRuntime:
         redactor: Redactor | None = None,
         event_sink: EventSink | None = None,
         spill_threshold_bytes: int = 64 * 1024,
+        network_event_log: NetworkEventLog | None = None,
     ) -> None:
         self.registry = registry
         self.policy = policy
@@ -71,6 +76,7 @@ class ToolRuntime:
         self._redactor = redactor or Redactor()
         self._emit = event_sink
         self.spill_threshold_bytes = spill_threshold_bytes
+        self._network_event_log = network_event_log
 
     # ------------------------------------------------------------------
 
@@ -139,6 +145,7 @@ class ToolRuntime:
             scope,
             path=action.fs_path,
             command=action.command,
+            host=action.target if action.capability == CAPABILITY_NETWORK else None,
             risk=tool.risk,
             risk_class=tool.side_effects,
         )
@@ -151,6 +158,15 @@ class ToolRuntime:
                 "reason": decision.reason,
             },
         )
+        if action.capability == CAPABILITY_NETWORK and self._network_event_log is not None:
+            with contextlib.suppress(Exception):  # audit must never sink the tool call
+                self._network_event_log(
+                    ctx.session_id,
+                    tool_name,
+                    decision.target or str(action.target or ""),
+                    decision.action.value,
+                    decision.reason,
+                )
         if decision.action is PolicyAction.DENY:
             return self._error(ctx, ToolErrorCode.POLICY_DENIED, decision.reason)
         if decision.action is PolicyAction.ASK:

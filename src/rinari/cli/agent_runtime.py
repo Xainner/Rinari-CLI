@@ -26,6 +26,7 @@ from rinari.models.router import ModelRouter
 from rinari.models.types import ChatMessage, ToolCall
 from rinari.policy.approvals import ApprovalEngine
 from rinari.policy.engine import PermissionProfile, PolicyEngine
+from rinari.policy.network import NetworkGuard, NetworkPolicy
 from rinari.policy.sandbox import FilesystemSandbox, ProcessLimits
 from rinari.projects.git import git_state
 from rinari.projects.worktree import WorktreeGuard, snapshot_worktree
@@ -308,7 +309,14 @@ def build_agent_session(
     home = user_home if user_home is not None else Path.home()
     sandbox = _sandbox_for(record, home)
     token = CancellationToken()
-    tools = _build_tools(services, record, interactive=interactive, token=token)
+    network_policy = services.network.policy()
+    tools = _build_tools(
+        services,
+        record,
+        interactive=interactive,
+        token=token,
+        network_policy=network_policy,
+    )
     tool_ctx = ToolContext(
         session_id=record.id,
         kind=record.kind,
@@ -330,6 +338,7 @@ def build_agent_session(
         memory=services.memory,
         context_retrieval=services.retrieval,
         project_trusted=_project_trusted(services, root),
+        network=NetworkGuard(network_policy),
     )
     caller = _caller_for(services, record)
     loop = AgentLoop(
@@ -373,6 +382,7 @@ def _build_tools(
     *,
     interactive: bool,
     token: CancellationToken,
+    network_policy: NetworkPolicy | None = None,
 ) -> ToolRuntime:
     registry = ToolRegistry()
     registry.register_all(all_native_tools())
@@ -389,12 +399,15 @@ def _build_tools(
 
     return ToolRuntime(
         registry,
-        PolicyEngine(),
+        PolicyEngine(network=network_policy),
         ApprovalEngine(prompt=ask),
         clock=services.ctx.clock,
         redactor=Redactor(_secrets_for_redaction(services)),
         event_sink=lambda event_type, payload: _persist_event(
             services, record.id, event_type, payload
+        ),
+        network_event_log=lambda session_id, tool, host, action, reason: services.network.log_event(
+            session_id, tool, host, action, reason
         ),
     )
 

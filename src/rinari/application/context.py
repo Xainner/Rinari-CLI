@@ -23,6 +23,7 @@ from rinari.storage.repositories import (
     IndexRepository,
     MemoryRepository,
     ModelRepository,
+    NetworkRepository,
     PinRepository,
     ProjectRepository,
     ProviderRepository,
@@ -59,6 +60,7 @@ class AppContext:
     config_repo: ConfigValueRepository
     memory_repo: MemoryRepository
     pin_repo: PinRepository
+    network_repo: NetworkRepository
 
     def close(self) -> None:
         self.db.close()
@@ -106,6 +108,7 @@ def build_app_context(
         config_repo=ConfigValueRepository(db),
         memory_repo=MemoryRepository(db),
         pin_repo=PinRepository(db),
+        network_repo=NetworkRepository(db),
     )
 
 

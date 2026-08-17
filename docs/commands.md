@@ -2069,10 +2069,18 @@ network test
 network rules
 network allow
 network deny
+network remove
 network history
 ```
 
 Network policy remains authoritative regardless of model request.
+
+Semantics (phase 4): decision per target host — an explicit DENY rule always
+wins; `network.mode=off` denies everything; an ALLOW rule short-circuits
+`ask`; `network.mode=allow` allows the rest; the default `ask` routes targets
+through the approval gate. Rules match exact hosts and subdomains
+(`github.com` covers `api.github.com`). Every runtime gate decision on a
+`network.outbound` tool call is audited into `network history`.
 
 ---
 

@@ -162,6 +162,9 @@ class ToolContext:
     # Session trust snapshot for the project (drives which project-supplied
     # data the agent may consume, e.g. in verification plans).
     project_trusted: bool = True
+    # NetworkGuard (policy.network): network-capable tools must pass every
+    # connection target through guard.assert_reachable before dialing.
+    network: Any = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,8 +196,14 @@ class ToolDefinition:
     def classify_action(self, input: dict[str, Any]) -> ClassifiedAction:
         if self.classify is not None:
             return self.classify(input)
-        read_names = ("fs.list", "fs.glob", "fs.search_text", "fs.stat", "fs.diff", "fs.exists")
-        if self.name.startswith("fs.read") or self.name in read_names:
+        if self.name.startswith("fs.read") or self.name in (
+            "fs.list",
+            "fs.glob",
+            "fs.search_text",
+            "fs.stat",
+            "fs.diff",
+            "fs.exists",
+        ):
             return ClassifiedAction("fs.read", str(input.get("path") or ""))
         if self.name in ("fs.write", "fs.patch"):
             return ClassifiedAction("fs.write", str(input.get("path") or ""))
@@ -202,6 +211,9 @@ class ToolDefinition:
             return ClassifiedAction("shell.exec", str(input.get("command") or ""))
         if self.name.startswith("git."):
             return ClassifiedAction("git.local", self.project_target(input))
+        if "network.outbound" in self.capabilities or self.namespace in ("web", "http", "browser"):
+            target = input.get("url") or input.get("href") or input.get("host") or ""
+            return ClassifiedAction("network.outbound", str(target))
         return ClassifiedAction(self.name)
 
     @staticmethod

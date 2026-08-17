@@ -12,6 +12,7 @@ from rinari.cli.commands import index as index_cmd
 from rinari.cli.commands import memory as memory_cmd
 from rinari.cli.commands import model as model_cmd
 from rinari.cli.commands import models as models_cmd
+from rinari.cli.commands import network as network_cmd
 from rinari.cli.commands import provider as provider_cmd
 from rinari.cli.commands import providers as providers_cmd
 from rinari.cli.commands import sessions as sessions_cmd
@@ -41,6 +42,7 @@ app.add_typer(trust_cmd.app, name="trust")
 app.add_typer(index_cmd.app, name="index")
 app.add_typer(tasks_cmd.app, name="tasks")
 app.add_typer(memory_cmd.app, name="memory")
+app.add_typer(network_cmd.app, name="network")
 app.add_typer(undo_cmd.app, name="undo")
 app.add_typer(system_cmd.system_app, name=None)
 

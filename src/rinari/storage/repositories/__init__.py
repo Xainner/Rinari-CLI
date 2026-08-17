@@ -3,6 +3,7 @@ from rinari.storage.repositories.config_values import ConfigValueRepository
 from rinari.storage.repositories.index import IndexRepository
 from rinari.storage.repositories.memory import MemoryRepository
 from rinari.storage.repositories.models import ModelRepository
+from rinari.storage.repositories.network import NetworkRepository
 from rinari.storage.repositories.pins import PIN_SOURCES, PinRepository
 from rinari.storage.repositories.projects import ProjectRepository
 from rinari.storage.repositories.providers import ProviderRepository
@@ -23,6 +24,7 @@ __all__ = [
     "IndexRepository",
     "MemoryRepository",
     "ModelRepository",
+    "NetworkRepository",
     "PinRepository",
     "ProjectRepository",
     "ProviderRepository",

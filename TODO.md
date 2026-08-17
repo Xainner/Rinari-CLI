@@ -1044,7 +1044,10 @@ seguir un agent loop real
 - [x] filesystem policy.
 - [x] shell policy.
 - [x] Git policy.
-- [ ] network policy foundation. (fase 4, con browser/web)
+- [x] network policy foundation. (fase 4; `policy/network.py`: modo
+      off/ask/allow + reglas allow/deny persistentes por host con matching
+      exacto/subdominio, authoritative sobre requests del modelo; el gate del
+      Tool Runtime lo aplica a `network.outbound` y audita cada decisión)
 - [x] secret policy. (sensitive-file locked rule)
 - [x] action-risk model.
 - [x] policy explanation. (PolicyDecision.reason)
@@ -1057,9 +1060,32 @@ seguir un agent loop real
 - [x] `full-access`.
 - [x] filesystem roots.
 - [x] process limits.
-- [ ] network hooks. (fase 4)
+- [x] network hooks. (fase 4; `NetworkGuard.assert_reachable` en
+      `ToolContext.network`: los tools de red (web/http/browser de fase 5)
+      deben pasar cada target por el guard — los DENYs (modo off, reglas deny,
+      target inresoluble) se imponen en código, fail-closed, sin depender del
+      modelo)
 - [x] secret scopes. (redaction de secrets de providers)
 - [x] tests de escape.
+
+Implementation (network policy foundation + hooks): `NetworkPolicy`
+(`policy/network.py`) decide por target: 1) target inresoluble → deny;
+2) regla DENY → deny (siempre gana sobre el modo); 3) `network.mode=off` →
+deny; 4) regla ALLOW → allow (corta el ask); 5) `network.mode=allow`; 6)
+default `ask`. Matching exacto o subdominio (`github.com` cubre
+`api.github.com`, no a `evilgithub.com`); `normalize_host` reduce URLs/
+host:port/user@host a host canónico. Persistencia: migración 0014
+(`network_rules` con UNIQUE(scope,host,decision), `network_events` audit).
+`NetworkService` (repositorio + `mode()` desde config) expone
+`status/test/rules/add_rule/remove_rule/events/log_event`; las reglas se
+leen lazy por decisión, así `rinari network allow` aplica a una sesión en
+ejecución sin restart. Integridad: `CAPABILITY_NETWORK="network.outbound"`
+en `PolicyEngine` (host por decisión), classify default para namespaces
+`web`/`http`/`browser`, ToolRuntime pasa `host` al policy y audita cada
+decisión en `network_events`; `NetworkGuard` en `ToolContext.network`
+enforcing técnico de DENYs para los tools de red de fase 5. CLI `rinari
+network status|test|rules|allow|deny|remove|history`. 18 tests
+(`test_network_policy.py`) + migración 0014.
 
 ## Approval Engine
 
@@ -2662,10 +2688,6 @@ COMPLETADO
   (0007), checkpoints/undo `rinari undo` (0008, ownership agent/user/mixed),
   PTY tools
 
-DEFERIDO A FASE 4
-  network policy foundation + network hooks (sandbox)
-  reconciliation de resume
-
 COMPLETADO EN FASE 4 (hasta el momento)
   Artifact Store (migración 0009; artifact:// + search + retention + GC)
   Context Engine (presupuesto por segmento, history selection, token
@@ -2689,8 +2711,12 @@ Session fork (migración 0013 sessions.forked_from, `session fork` con
    Loop detection por turno (same tool/args, oscilación A-B, rewrites,
    mismo error, approval denegada, subagent duplicado; nudge → stop
    kind="loop", evento LoopDetected)
+   Network policy foundation + hooks (migración 0014, modo off/ask/allow +
+   reglas allow/deny por host, gate network.outbound en Tool Runtime con
+   audit network_events, NetworkGuard fail-closed en ToolContext,
+   CLI `rinari network`)
 
 SIGUIENTE (fase 4)
-   → network policy + hooks
    → skill version reconciliation (pendiente de versioning de skills)
+   → cierre de fase: checklist de aceptación + suite + push
 ```

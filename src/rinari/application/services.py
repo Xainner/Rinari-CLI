@@ -10,6 +10,7 @@ import httpx
 from rinari.application.context import AppContext
 from rinari.application.credentials import CredentialStore
 from rinari.application.model_service import ModelService
+from rinari.application.network_service import NetworkService
 from rinari.application.project_service import ProjectService
 from rinari.application.provider_service import ProviderService
 from rinari.application.session_service import SessionService
@@ -41,6 +42,7 @@ class ServiceContainer:
     context: ContextService
     memory: MemoryService
     retrieval: ContextRetrievalService
+    network: NetworkService
 
 
 def build_services(
@@ -62,6 +64,7 @@ def build_services(
     context_service = ContextService(ctx, artifacts)
     memory = MemoryService(ctx)
     retrieval = ContextRetrievalService(ctx, artifacts=artifacts, memory=memory)
+    network = NetworkService(ctx)
     return ServiceContainer(
         ctx=ctx,
         credentials=credentials,
@@ -78,4 +81,5 @@ def build_services(
         context=context_service,
         memory=memory,
         retrieval=retrieval,
+        network=network,
     )

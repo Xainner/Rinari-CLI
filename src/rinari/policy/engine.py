@@ -12,7 +12,10 @@ import re
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from rinari.policy.network import NetworkPolicy
 
 
 class PermissionProfile(StrEnum):
@@ -40,6 +43,7 @@ CAPABILITY_FS_WRITE = "fs.write"
 CAPABILITY_SHELL = "shell.exec"
 CAPABILITY_GIT_LOCAL = "git.local"
 CAPABILITY_PROCESS_LOCAL = "process.local"
+CAPABILITY_NETWORK = "network.outbound"
 # Local harness bookkeeping (validation records, index/task state reads):
 # no filesystem or network side effect, so it never asks for approval.
 CAPABILITY_STATE_READ = "state.read"
@@ -104,6 +108,17 @@ def classify_git_remote(command: str) -> str | None:
 
 
 class PolicyEngine:
+    def __init__(self, *, network: NetworkPolicy | None = None) -> None:
+        from rinari.policy.network import NetworkPolicy  # local: avoid import cycle
+
+        # Default is the safe mode ("ask"): a plain PolicyEngine() without a
+        # configured policy still gates network tools behind approval.
+        self._network = network if network is not None else NetworkPolicy()
+
+    @property
+    def network_policy(self) -> NetworkPolicy:
+        return self._network
+
     def decide(
         self,
         capability: str,
@@ -111,9 +126,12 @@ class PolicyEngine:
         *,
         path: str | Path | None = None,
         command: str | None = None,
+        host: str | None = None,
         risk: str = "low",
         risk_class: str = "none",
     ) -> PolicyDecision:
+        if capability == CAPABILITY_NETWORK:
+            return self._network_decision(host, risk, risk_class)
         if capability in (CAPABILITY_FS_READ, CAPABILITY_GIT_LOCAL):
             return self._fs_read(scope, path, risk, risk_class, capability)
         if capability == CAPABILITY_PROCESS_LOCAL:
@@ -158,6 +176,22 @@ class PolicyEngine:
             reason=f"capability {capability!r} is not covered by a built-in rule yet",
             target=None,
             risk=risk,
+            risk_class=risk_class,
+        )
+
+    # -- network -------------------------------------------------------------
+
+    def _network_decision(self, host, risk: str, risk_class: str) -> PolicyDecision:
+        net = self._network.decide(host or "")
+        risk_level = risk
+        if net.action is PolicyAction.DENY and risk_level not in ("high", "critical"):
+            risk_level = "high"
+        return PolicyDecision(
+            action=net.action,
+            capability=CAPABILITY_NETWORK,
+            reason=net.reason,
+            target=net.target or None,
+            risk=risk_level,
             risk_class=risk_class,
         )
 
