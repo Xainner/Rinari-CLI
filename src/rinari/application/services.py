@@ -13,6 +13,7 @@ from rinari.application.model_service import ModelService
 from rinari.application.project_service import ProjectService
 from rinari.application.provider_service import ProviderService
 from rinari.application.session_service import SessionService
+from rinari.artifacts.store import ArtifactStore
 from rinari.checkpoints.service import CheckpointService
 from rinari.repo.index_service import IndexService
 from rinari.tasks import TaskService
@@ -33,6 +34,7 @@ class ServiceContainer:
     verification: VerificationService
     checkpoints: CheckpointService
     sessions: SessionService
+    artifacts: ArtifactStore
 
 
 def build_services(
@@ -50,6 +52,7 @@ def build_services(
     verification = VerificationService(ctx)
     checkpoints = CheckpointService(ctx)
     sessions = SessionService(ctx, providers, projects, trust=trust, user_home=user_home)
+    artifacts = ArtifactStore(ctx)
     return ServiceContainer(
         ctx=ctx,
         credentials=credentials,
@@ -62,4 +65,5 @@ def build_services(
         verification=verification,
         checkpoints=checkpoints,
         sessions=sessions,
+        artifacts=artifacts,
     )

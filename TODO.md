@@ -1360,17 +1360,27 @@ sin inventar estado.
 
 ## Artifact Store
 
-- [ ] artifact URI.
-- [ ] metadata.
-- [ ] hashes.
-- [ ] content type.
-- [ ] file-backed storage.
-- [ ] search.
-- [ ] slicing.
-- [ ] export.
-- [ ] GC.
-- [ ] retention.
-- [ ] provenance.
+- [x] artifact URI.
+- [x] metadata.
+- [x] hashes.
+- [x] content type.
+- [x] file-backed storage.
+- [x] search.
+- [x] slicing.
+- [x] export.
+- [x] GC.
+- [x] retention.
+- [x] provenance.
+
+Implementation (phase 4): migración 0009 `artifacts` (metadata: hash sha256,
+content type, byte count, retention `session|project|permanent`, provenance,
+summary) con bytes en `<home>/artifacts/<session>/<namespace>/<name>`.
+`src/rinari/artifacts/store.py` (ArtifactStore: create/create_text, get,
+read_text, lines, list, search — metadata first, content scan acotado por
+tamaño — export, remove, gc de sesiones desaparecidas solo con retention
+session; URI `artifact://<session>/<namespace>/<name>` con parse/validate
+estricto). CLI `rinari artifacts list|show|open|search|export|remove|gc`.
+7 tests (`test_artifacts.py`).
 
 ## Context Engine
 

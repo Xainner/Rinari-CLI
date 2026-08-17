@@ -5,6 +5,7 @@ from __future__ import annotations
 import typer
 
 from rinari import __version__
+from rinari.cli.commands import artifacts as artifacts_cmd
 from rinari.cli.commands import config as config_cmd
 from rinari.cli.commands import index as index_cmd
 from rinari.cli.commands import model as model_cmd
@@ -26,6 +27,7 @@ app = typer.Typer(
     add_completion=False,
 )
 
+app.add_typer(artifacts_cmd.app, name="artifacts")
 app.add_typer(config_cmd.app, name="config")
 app.add_typer(providers_cmd.app, name="providers")
 app.add_typer(provider_cmd.app, name="provider")
