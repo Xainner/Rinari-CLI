@@ -1,7 +1,11 @@
 import json
 
 from rinari.storage.db import Database
-from rinari.storage.records import SessionEventRecord, SessionRecord
+from rinari.storage.records import (
+    SessionEventRecord,
+    SessionMessageRecord,
+    SessionRecord,
+)
 
 
 class SessionRepository:
@@ -161,5 +165,62 @@ def _event_to_record(row: dict) -> SessionEventRecord:
         seq=row["seq"],
         type=row["type"],
         payload=json.loads(row["payload_json"]) if row["payload_json"] else {},
+        created_at=row["created_at"],
+    )
+
+
+class SessionMessageRepository:
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    def next_seq(self, session_id: str) -> int:
+        row = self._db.query_one(
+            "SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM session_messages WHERE session_id = ?",
+            (session_id,),
+        )
+        return int(row["n"]) if row else 1
+
+    def append_many(self, session_id: str, records: list[SessionMessageRecord]) -> None:
+        start = self.next_seq(session_id)
+        for offset, rec in enumerate(records):
+            rec.seq = start + offset
+            self._db.execute(
+                """
+                INSERT INTO session_messages (
+                    id, session_id, seq, role, content,
+                    tool_calls_json, tool_call_id, name, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    rec.id,
+                    session_id,
+                    rec.seq,
+                    rec.role,
+                    rec.content,
+                    json.dumps(rec.tool_calls, sort_keys=True) if rec.tool_calls else None,
+                    rec.tool_call_id,
+                    rec.name,
+                    rec.created_at,
+                ),
+            )
+
+    def list(self, session_id: str) -> list[SessionMessageRecord]:
+        rows = self._db.query(
+            "SELECT * FROM session_messages WHERE session_id = ? ORDER BY seq ASC",
+            (session_id,),
+        )
+        return [_message_to_record(r) for r in rows]
+
+
+def _message_to_record(row: dict) -> SessionMessageRecord:
+    return SessionMessageRecord(
+        id=row["id"],
+        session_id=row["session_id"],
+        seq=row["seq"],
+        role=row["role"],
+        content=row["content"],
+        tool_calls=json.loads(row["tool_calls_json"]) if row["tool_calls_json"] else None,
+        tool_call_id=row["tool_call_id"],
+        name=row["name"],
         created_at=row["created_at"],
     )

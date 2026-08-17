@@ -89,6 +89,24 @@ class SessionEventRecord:
 
 
 @dataclass(slots=True)
+class SessionMessageRecord:
+    """One persisted conversation message (provider-agnostic ChatMessage).
+
+    `tool_calls` uses the wire shape: list of {id, name, arguments}.
+    """
+
+    id: str
+    session_id: str
+    seq: int
+    role: str
+    content: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
+    tool_call_id: str | None = None
+    name: str | None = None
+    created_at: str = ""
+
+
+@dataclass(slots=True)
 class ConfigValue:
     key: str
     value: str

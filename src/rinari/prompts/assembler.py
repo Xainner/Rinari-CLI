@@ -44,7 +44,12 @@ class AssemblerContext:
     session_kind: str = "CHAT"
     constitution: str = ""
     runtime_policy: str = ""
+    # Canonical Soul only (harness.md 37). The Extended Identity Reference
+    # lives in `extended_identity` and is injected only per-turn when
+    # `include_extended_identity` is set by the session host.
     soul: str = ""
+    extended_identity: str = ""
+    include_extended_identity: bool = False
     preferences: str | None = None
     project_instructions: tuple[ProjectInstruction, ...] = ()
     skills: tuple[ActiveSkill, ...] = ()
@@ -125,6 +130,16 @@ class PromptAssembler:
                     content=context.soul,
                     trust=SegmentTrust.TRUSTED,
                     cache_policy=CachePolicy.STABLE,
+                )
+            )
+        if context.include_extended_identity and context.extended_identity:
+            segments.append(
+                PromptSegment(
+                    id="soul-extended-identity",
+                    kind=SegmentKind.SOUL,
+                    content=context.extended_identity,
+                    trust=SegmentTrust.TRUSTED,
+                    cache_policy=CachePolicy.TURN,
                 )
             )
         if context.preferences:

@@ -143,6 +143,16 @@ def run_repl(session: AgentSession, initial_prompt: str | None = None) -> None:
                 typer.echo("(output stopped at the model's max tokens)", err=True)
         typer.echo()
 
+        if session.promoted_root is not None:
+            console.print(
+                Text(
+                    f"*** session promoted to PROJECT — root: {session.promoted_root} ***",
+                    style="bold green",
+                )
+            )
+            session.promoted_root = None
+            console.print(_banner(session))
+
 
 def _handle_command(session: AgentSession, message: str, console) -> bool:
     _, *rest = message.split(maxsplit=1)

@@ -110,3 +110,54 @@ def test_segment_defaults() -> None:
         provenance="web",
     )
     assert untrusted.effective_content().startswith('<untrusted source="web">')
+
+
+# -- Extended Identity on demand (harness.md 37) --------------------------------
+
+
+def test_split_soul_excludes_extended_and_maintainer() -> None:
+    from pathlib import Path
+
+    from rinari.prompts.soul_sections import split_soul
+
+    # The full soul document (packaged asset is already canonical-only).
+    full = (Path(__file__).resolve().parents[2] / "docs/soul.md").read_text(encoding="utf-8")
+    canonical, extended = split_soul(full)
+    assert extended
+    assert "Extended Identity Reference" not in canonical
+    assert "Maintainer Notes" not in canonical
+    assert "# Extended Identity Reference" in extended
+    assert "Violet" in extended or "violet" in extended
+    assert "Maintainer Notes" not in extended
+    assert canonical.strip()
+
+    # The packaged asset must inject exactly its own content (no extended part).
+    packed = (Path(__file__).resolve().parents[2] / "src/rinari/assets/soul.md").read_text(
+        encoding="utf-8"
+    )
+    packed_canonical, packed_extended = split_soul(packed)
+    assert packed_extended == ""
+    assert packed_canonical == packed.strip()
+
+
+def test_split_soul_plain_text() -> None:
+    from rinari.prompts.soul_sections import split_soul
+
+    canonical, extended = split_soul("just a soul")
+    assert canonical == "just a soul"
+    assert extended == ""
+
+
+def test_extended_identity_not_injected_by_default() -> None:
+    context = AssemblerContext(soul="SOUL", extended_identity="EXTENDED-IDENTITY")
+    system = PromptAssembler().build(context).system_prompt
+    assert "EXTENDED-IDENTITY" not in system
+    assert "SOUL" in system
+
+
+def test_extended_identity_injected_when_flagged() -> None:
+    context = AssemblerContext(
+        soul="SOUL", extended_identity="EXTENDED-IDENTITY", include_extended_identity=True
+    )
+    system = PromptAssembler().build(context).system_prompt
+    assert "EXTENDED-IDENTITY" in system

@@ -2,7 +2,11 @@ from rinari.storage.repositories.config_values import ConfigValueRepository
 from rinari.storage.repositories.models import ModelRepository
 from rinari.storage.repositories.projects import ProjectRepository
 from rinari.storage.repositories.providers import ProviderRepository
-from rinari.storage.repositories.sessions import SessionEventRepository, SessionRepository
+from rinari.storage.repositories.sessions import (
+    SessionEventRepository,
+    SessionMessageRepository,
+    SessionRepository,
+)
 
 __all__ = [
     "ConfigValueRepository",
@@ -10,5 +14,6 @@ __all__ = [
     "ProjectRepository",
     "ProviderRepository",
     "SessionEventRepository",
+    "SessionMessageRepository",
     "SessionRepository",
 ]

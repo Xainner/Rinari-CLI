@@ -237,11 +237,26 @@ class PolicyEngine:
                 risk_class="local-destructive",
             )
         inside = self._inside_root(resolved, scope.root)
-        if inside and scope.profile is not PermissionProfile.READ_ONLY and scope.kind == "PROJECT":
+        inside_allow_reason: str | None = None
+        if inside and scope.profile is not PermissionProfile.READ_ONLY:
+            if scope.kind == "PROJECT":
+                inside_allow_reason = (
+                    "workspace/full-access profile may write inside the project root"
+                )
+            elif not home_root:
+                # CHAT candidate workspace: the directory the user explicitly
+                # opened. Narrow and intentional (harness.md 76); creating a
+                # project marker there promotes the session in place. A
+                # candidate rooted at $HOME keeps the locked behavior.
+                inside_allow_reason = (
+                    "candidate project workspace: the directory explicitly opened "
+                    "for this session ($HOME stays locked)"
+                )
+        if inside_allow_reason is not None:
             return PolicyDecision(
                 action=PolicyAction.ALLOW,
                 capability=CAPABILITY_FS_WRITE,
-                reason="workspace/full-access profile may write inside the project root",
+                reason=inside_allow_reason,
                 target=str(resolved),
                 risk=risk,
                 risk_class=risk_class,

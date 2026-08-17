@@ -656,6 +656,21 @@ No CLI restart is required.
 
 Merely discussing code or reading a directory does not trigger promotion.
 
+Implementation (phase 2):
+
+- The candidate workspace for a CHAT session is the directory the user
+  explicitly opened: file writes inside it are allowed (bounded, and never
+  `$HOME` itself); creating a project still goes through the normal tool
+  policy (approval for shell where applicable).
+- Promotion is detected by a strong project marker (`.git` or
+  `.rinari/project.toml`) appearing at the session's own cwd when a turn
+  completes. Walking up the directory tree is never a promotion trigger, so
+  an explicit `rinari chat` inside a repository is not silently reverted.
+- On promotion the session ID, conversation, provider, and model are
+  preserved; the workspace sandbox and prompt context (project instructions,
+  runtime policy summary) are recalculated in the same session, and
+  `SessionPromotedToProject` + `SessionPromotedInProcess` events are traced.
+
 `rinari chat` therefore means:
 
 ```text

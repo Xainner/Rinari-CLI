@@ -20,17 +20,20 @@ import typer
 from rinari import __version__
 from rinari.application.services import ServiceContainer
 from rinari.models.router import ModelRouter
+from rinari.models.types import ChatMessage, ToolCall
 from rinari.policy.approvals import ApprovalEngine
 from rinari.policy.engine import PermissionProfile, PolicyEngine
 from rinari.policy.sandbox import FilesystemSandbox, ProcessLimits
 from rinari.prompts.assembler import AssemblerContext, ProjectInstruction, PromptAssembler
+from rinari.prompts.soul_sections import split_soul
 from rinari.runtime.agent import AgentContext, AgentLoop, TurnResult
 from rinari.runtime.cancellation import CancellationToken
+from rinari.runtime.identity import load_constitution, load_soul
 from rinari.runtime.model_caller import ModelCaller
 from rinari.shared.clock import now_iso
-from rinari.shared.errors import CancelledError, InvalidUsageError
+from rinari.shared.errors import CancelledError, InvalidUsageError, RinariError
 from rinari.shared.redaction import Redactor
-from rinari.storage.records import SessionEventRecord, SessionRecord
+from rinari.storage.records import SessionEventRecord, SessionMessageRecord, SessionRecord
 from rinari.tools.definition import ToolContext
 from rinari.tools.native import all_native_tools
 from rinari.tools.native.process import ProcessRegistry
@@ -52,6 +55,10 @@ class AgentSession:
     loop: AgentLoop
     context: AgentContext
     token: CancellationToken = field(default_factory=CancellationToken)
+    user_home: Path | None = None
+    # Set after an in-session CHAT -> PROJECT promotion; the host (REPL)
+    # renders the notice once and clears it.
+    promoted_root: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,8 +99,11 @@ def project_instructions(root: Path | None) -> tuple[ProjectInstruction, ...]:
 
 
 def build_assembler_context(services: ServiceContainer, record: SessionRecord) -> AssemblerContext:
-    constitution = _load_text(ASSETS / "constitution.md")
-    soul = _load_text(ASSETS / "soul.md")
+    # Canonical assets through the identity loader (user override supported,
+    # harness.md 37; version/sha256 traced by the build manifest).
+    constitution = load_constitution(services.ctx.home).text
+    soul = load_soul(services.ctx.home).text
+    canonical, extended = split_soul(soul)
     root = Path(record.project_root_snapshot) if record.project_root_snapshot else None
     environment: dict = {"cwd": record.current_cwd, "version": __version__}
     if root is not None:
@@ -102,7 +112,8 @@ def build_assembler_context(services: ServiceContainer, record: SessionRecord) -
         session_kind=record.kind,
         constitution=constitution,
         runtime_policy=_policy_summary(record.kind),
-        soul=soul,
+        soul=canonical,
+        extended_identity=extended,
         project_instructions=project_instructions(root),
         environment=environment,
     )
@@ -142,13 +153,19 @@ def _secrets_for_redaction(services: ServiceContainer) -> list[str]:
     return secrets
 
 
-def _sandbox_for(record: SessionRecord) -> FilesystemSandbox:
+def _sandbox_for(record: SessionRecord, user_home: Path) -> FilesystemSandbox:
     root = Path(record.project_root_snapshot) if record.project_root_snapshot else None
     if record.kind == "PROJECT" and root is not None:
         return FilesystemSandbox(read_root=root, write_roots=(root,))
-    # CHAT (harness.md 76): explicit reads inside the home tree, no implicit
-    # broad write root. $HOME writability stays a locked system rule.
-    return FilesystemSandbox(read_root=Path.home(), write_roots=())
+    # CHAT (harness.md 76): reads inside the home tree; the only writable
+    # scope is the candidate project-creation workspace = the directory the
+    # user explicitly opened, unless that directory is $HOME itself (locked).
+    cwd = Path(record.current_cwd or record.created_cwd).resolve()
+    home = user_home.resolve()
+    # Subdirectories of home are fine candidate workspaces (normal project
+    # locations); only $HOME itself is locked (AGENTS.md 13).
+    write_roots: tuple[Path, ...] = () if cwd == home else (cwd,)
+    return FilesystemSandbox(read_root=user_home, write_roots=write_roots)
 
 
 def _persist_event(
@@ -167,12 +184,16 @@ def _persist_event(
 
 
 def build_agent_session(
-    services: ServiceContainer, record: SessionRecord, *, interactive: bool
+    services: ServiceContainer,
+    record: SessionRecord,
+    *,
+    interactive: bool,
+    user_home: Path | None = None,
 ) -> AgentSession:
     root = Path(record.project_root_snapshot) if record.project_root_snapshot else None
     cwd = Path(record.current_cwd)
-    home = Path.home()
-    sandbox = _sandbox_for(record)
+    home = user_home if user_home is not None else Path.home()
+    sandbox = _sandbox_for(record, home)
     token = CancellationToken()
     tools = _build_tools(services, record, interactive=interactive, token=token)
     tool_ctx = ToolContext(
@@ -202,9 +223,16 @@ def build_agent_session(
         model_ref=record.model_id,
         tool_ctx=tool_ctx,
         assembler_base=build_assembler_context(services, record),
+        history=_restore_history(services, record),
     )
     return AgentSession(
-        services=services, record=record, caller=caller, loop=loop, context=context, token=token
+        services=services,
+        record=record,
+        caller=caller,
+        loop=loop,
+        context=context,
+        token=token,
+        user_home=home,
     )
 
 
@@ -313,6 +341,149 @@ def records_get(services: ServiceContainer, session_id: str) -> SessionRecord:
 
 
 # ---------------------------------------------------------------------------
+# Conversation persistence (provider-agnostic, harness.md 28)
+# ---------------------------------------------------------------------------
+
+
+def _record_to_message(rec: SessionMessageRecord) -> ChatMessage:
+    tool_calls = tuple(
+        ToolCall(id=tc.get("id", ""), name=tc.get("name", ""), arguments=tc.get("arguments") or {})
+        for tc in (rec.tool_calls or ())
+    )
+    return ChatMessage(
+        role=rec.role,
+        content=rec.content,
+        tool_calls=tool_calls,
+        tool_call_id=rec.tool_call_id,
+        name=rec.name,
+    )
+
+
+def _message_to_record(
+    services: ServiceContainer, session_id: str, msg: ChatMessage, ts: str
+) -> SessionMessageRecord:
+    tool_calls = [
+        {"id": tc.id, "name": tc.name, "arguments": tc.arguments} for tc in msg.tool_calls
+    ]
+    return SessionMessageRecord(
+        id=services.ctx.ids.new("msg"),
+        session_id=session_id,
+        seq=0,
+        role=msg.role,
+        content=msg.content,
+        tool_calls=tool_calls or None,
+        tool_call_id=msg.tool_call_id,
+        name=msg.name,
+        created_at=ts,
+    )
+
+
+def _restore_history(services: ServiceContainer, record: SessionRecord) -> list[ChatMessage]:
+    return [_record_to_message(rec) for rec in services.ctx.message_repo.list(record.id)]
+
+
+def _persist_new_messages(
+    services: ServiceContainer, record: SessionRecord, messages: list[ChatMessage]
+) -> None:
+    if not messages:
+        return
+    ts = now_iso(services.ctx.clock)
+    recs = [_message_to_record(services, record.id, m, ts) for m in messages]
+    with services.ctx.db.transaction():
+        services.ctx.message_repo.append_many(record.id, recs)
+
+
+# ---------------------------------------------------------------------------
+# On-demand Extended Identity (harness.md 37)
+# ---------------------------------------------------------------------------
+
+_IDENTITY_KEYWORDS: tuple[str, ...] = (
+    "extended identity",
+    "self-portrait",
+    "self portrait",
+    "self-description",
+    "self description",
+    "describe yourself",
+    "avatar",
+    "appearance",
+    "how do you look",
+    "art of rinari",
+    "image of rinari",
+    "drawing of rinari",
+    "descríbete",
+    "describete",
+    "cómo te ves",
+    "como te ves",
+    "cómo eres",
+    "como eres",
+    "tu apariencia",
+    "tu look",
+    "tu diseño",
+)
+
+
+def _needs_identity(message: str) -> bool:
+    lowered = message.lower()
+    return any(keyword in lowered for keyword in _IDENTITY_KEYWORDS)
+
+
+# ---------------------------------------------------------------------------
+# In-session CHAT -> PROJECT promotion (harness.md section 12 semantics)
+#
+# Triggers only on a strong marker at the session's own cwd (`.git` or
+# `.rinari/project.toml`) created or adopted during the session. Walking up
+# the directory tree is deliberately NOT a trigger: that would undo an
+# explicit `rinari chat` and promote "random directory" sessions.
+# ---------------------------------------------------------------------------
+
+
+def _has_project_marker(cwd: Path) -> bool:
+    return (cwd / ".git").exists() or (cwd / ".rinari" / "project.toml").is_file()
+
+
+def _apply_promotion(session: AgentSession, record: SessionRecord, marker: str) -> None:
+    services = session.services
+    session.record = records_get(services, record.id)
+    home = session.user_home or Path.home()
+    root = Path(record.project_root_snapshot) if record.project_root_snapshot else Path.cwd()
+    session.context.tool_ctx = replace(
+        session.context.tool_ctx,
+        kind=record.kind,
+        cwd=root,
+        project_root=root,
+        sandbox=_sandbox_for(record, home),
+    )
+    session.context.assembler_base = build_assembler_context(services, record)
+    _persist_event(
+        services,
+        record.id,
+        "SessionPromotedInProcess",
+        {
+            "project_root": str(root),
+            "marker": marker,
+            "note": "workspace permissions and project context recalculated in place",
+        },
+    )
+    session.promoted_root = root
+
+
+def _maybe_promote(session: AgentSession) -> Path | None:
+    record = session.record
+    if record.kind != "CHAT":
+        return None
+    cwd = Path(record.current_cwd or record.created_cwd)
+    if not _has_project_marker(cwd):
+        return None
+    try:
+        promoted = session.services.sessions.promote(record.id, cwd)
+    except RinariError:
+        return None
+    marker = ".rinari/project.toml" if (cwd / ".rinari" / "project.toml").is_file() else ".git"
+    _apply_promotion(session, promoted, marker)
+    return session.promoted_root
+
+
+# ---------------------------------------------------------------------------
 # Turn execution
 # ---------------------------------------------------------------------------
 
@@ -340,9 +511,15 @@ def _set_session_state(services: ServiceContainer, record: SessionRecord, state:
 
 
 def run_turn(session: AgentSession, message: str, *, on_delta=None, on_tool=None) -> TurnResult:
-    _set_session_state(session.services, session.record, STATE_ACTIVE)
+    services = session.services
+    _set_session_state(services, session.record, STATE_ACTIVE)
+    base = session.context.assembler_base
+    include_identity = _needs_identity(message)
+    if base.include_extended_identity is not include_identity:
+        session.context.assembler_base = replace(base, include_extended_identity=include_identity)
+    before = len(session.context.history)
     try:
-        return session.loop.turn(
+        result = session.loop.turn(
             session.context,
             message,
             on_delta=on_delta,
@@ -350,5 +527,10 @@ def run_turn(session: AgentSession, message: str, *, on_delta=None, on_tool=None
             cancel=session.token,
         )
     except CancelledError:
-        _set_session_state(session.services, session.record, STATE_INTERRUPTED)
+        _set_session_state(services, session.record, STATE_INTERRUPTED)
+        _persist_new_messages(services, session.record, session.context.history[before:])
         return TurnResult(kind="cancelled", content="Turn cancelled.", tool_calls=0, usage=None)
+    _persist_new_messages(services, session.record, session.context.history[before:])
+    if result.kind != "cancelled" and session.record.kind == "CHAT":
+        _maybe_promote(session)
+    return result

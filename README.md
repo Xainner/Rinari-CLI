@@ -50,17 +50,21 @@ uv run rinari version
   `rinari config ...`.
 - Providers y models en SQLite (`~/.rinari/state.db`); cambiar selección nunca
   elimina configuraciones previas y cada provider recuerda su modelo.
-- Sesiones CHAT/PROJECT persistentes con promoción atómica CHAT → PROJECT que
-  preserva el session ID; `$HOME` nunca es workspace implícito.
+- Sesiones CHAT/PROJECT persistentes con conversación persistida
+  (`session_messages`); promoción CHAT → PROJECT que preserva session ID y
+  conversación (vía `rinari init` o in-session cuando el trabajo crea un
+  marker de proyecto en el cwd); `$HOME` nunca es workspace implícito.
 - Soul y Constitution empaquetados con loader (override en `~/.rinari/`,
-  versión + sha256 visibles en `rinari version` / `doctor`).
+  versión + sha256 visibles en `rinari version` / `doctor`); el prompt siempre
+  inyecta solo el Canonical Soul, y la Extended Identity Reference solo en
+  turnos de identidad.
 - Agent loop real (Fase 2): `rinari` / `rinari chat` / `rinari resume` ahora
-conversan con el model. Turnos con streaming, tool calls normalizadas a
-través del Tool Runtime (policy → approval → sandbox), streaming vivo de
-stdout/stderr del shell en REPL, processes por sesión
-(`process.start/wait/output/signal/list`), REPL con `/provider` y `/model`
-in-session, session-interruption state, prompt one-shot no interactivo,
-y traza de eventos persistida por sesión.
+  conversan con el model. Turnos con streaming, tool calls normalizadas a
+  través del Tool Runtime (policy → approval → sandbox), streaming vivo de
+  stdout/stderr del shell en REPL, processes por sesión
+  (`process.start/wait/output/signal/list`), REPL con `/provider` y `/model`
+  in-session, session-interruption state, prompt one-shot no interactivo,
+  y traza de eventos persistida por sesión.
 
 ## Pendiente
 
@@ -69,9 +73,9 @@ y traza de eventos persistida por sesión.
   (Fase 3), network policy y network hook del sandbox (Fase 4), y
   verify/finalize transitions + reconciliation (Fase 3). Checklist completo
   en [TODO.md](TODO.md).
-- 4 items de Fase 1 siguen abiertos porque dependen del agent loop de Fase 2:
-  `Extended Identity bajo demanda`, `detectar project-creation intent`,
-  `preservar conversación`, `recalcular permisos`.
+- Los 4 items de Fase 1 que dependían del agent loop (Extended Identity bajo
+  demanda, project-creation intent, preservar conversación, recalcular
+  permisos) quedaron resueltos al cerrar Fase 2.
 - Decisiones no bloqueantes (engine de browser, backend del credential store,
   SQLite/ORM, LSPs iniciales, etc.): sección "Decisiones pendientes" de
   [TODO.md](TODO.md). Se resuelve cada una antes de implementar su

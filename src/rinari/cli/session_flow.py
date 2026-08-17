@@ -117,6 +117,8 @@ def start_flow(ctx: typer.Context, prompt: str | None, forced_chat: bool, comman
                     data["turn"] = _turn_dict(agent_runtime.run_turn(session, prompt))
                 except RinariError as err:
                     fail(ctx, command, err)
+                if session.promoted_root is not None:
+                    data["promoted_root"] = str(session.promoted_root)
             emit_json(success_envelope(command, data, warnings=started.warnings))
             return
 
@@ -128,6 +130,8 @@ def start_flow(ctx: typer.Context, prompt: str | None, forced_chat: bool, comman
             typer.echo(result.content)
             if result.kind not in ("answer", "truncated", "cancelled"):
                 typer.echo(f"[{result.kind}]")
+            if session.promoted_root is not None:
+                typer.echo(f"*** session promoted to PROJECT — root: {session.promoted_root} ***")
             return
         try:
             repl.run_repl(session, initial_prompt=prompt)

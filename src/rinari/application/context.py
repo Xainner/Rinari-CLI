@@ -23,6 +23,7 @@ from rinari.storage.repositories import (
     ProjectRepository,
     ProviderRepository,
     SessionEventRepository,
+    SessionMessageRepository,
     SessionRepository,
 )
 
@@ -40,6 +41,7 @@ class AppContext:
     project_repo: ProjectRepository
     session_repo: SessionRepository
     event_repo: SessionEventRepository
+    message_repo: SessionMessageRepository
     config_repo: ConfigValueRepository
 
     def close(self) -> None:
@@ -78,6 +80,7 @@ def build_app_context(
         project_repo=ProjectRepository(db),
         session_repo=SessionRepository(db),
         event_repo=SessionEventRepository(db),
+        message_repo=SessionMessageRepository(db),
         config_repo=ConfigValueRepository(db),
     )
 

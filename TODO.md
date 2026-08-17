@@ -634,7 +634,7 @@ Ejecutada el 2026-08-16 con la confirmación de la licencia MIT:
 
 # Fase 1 — Fundaciones, bootstrap y persistencia — COMPLETA (2026-08-16)
 
-> 4 items del checklist quedaron abiertos porque dependen del agent loop / prompt assembler de Fase 2: `Extended Identity bajo demanda`, `detectar project-creation intent`, `preservar conversación`, `recalcular permisos`.
+> Los 4 items que quedaron abiertos al cerrar Fase 1 (`Extended Identity bajo demanda`, `detectar project-creation intent`, `preservar conversación`, `recalcular permisos`) se implementaron al cerrar Fase 2 (2026-08-17): splitting de Soul (canónico siempre, Extended Identity solo en turnos de identidad), promoción in-session con detección de marker en cwd + candidate workspace acotado, persistencia de conversación en `session_messages` (restaurada en cada invocación y en promoción) y recálculo de sandbox/assembler en la misma sesión tras promover.
 
 ## Objetivo
 
@@ -805,7 +805,8 @@ Todo con tests deterministas.
 - [x] loader de Soul.
 - [x] override `~/.rinari/soul.md`.
 - [x] extraer/injectar solo Canonical Soul normalmente.
-- [ ] Extended Identity bajo demanda.
+- [x] Extended Identity bajo demanda. (Fase 2: `split_soul` — el canonical se inyecta
+  siempre; Extended Identity Reference solo cuando el turno pide identidad)
 - [x] crear/empaquetar `constitution.md`.
 - [x] loader de Constitution.
 - [x] hashes/version metadata.
@@ -838,7 +839,8 @@ Todo con tests deterministas.
 ## CHAT → PROJECT
 
 - [x] `ProjectLifecycle`.
-- [ ] detectar project-creation intent.
+- [x] detectar project-creation intent. (Fase 2: marker fuerte en el cwd de la sesión
+  tras el turno → `promote` in-place; el caminado hacia arriba NO promueve)
 - [x] candidate workspace acotado.
 - [x] re-detect después de `git init`.
 - [x] re-detect después de scaffold.
@@ -846,9 +848,12 @@ Todo con tests deterministas.
 - [x] re-detect después de `rinari init`.
 - [x] promoción atómica Session CHAT → PROJECT.
 - [x] preservar session ID.
-- [ ] preservar conversación.
+- [x] preservar conversación. (Fase 2: `session_messages` persiste cada turno —
+  también cancelados — y se restaura en cada invocación y en la promoción)
 - [x] preservar provider/model.
-- [ ] recalcular permisos.
+- [x] recalcular permisos. (Fase 2: tras promover, el ToolContext (sandbox/cwd/kind)
+  y el assembler context se reconstruyen en la misma sesión; event
+  `SessionPromotedInProcess`)
 - [x] evento `SessionPromotedToProject`.
 - [x] rollback/reconcile si promoción falla.
 
@@ -922,6 +927,27 @@ seguir un agent loop real
 - [x] Task/context slot.
 - [x] evidence/untrusted wrapping.
 - [x] tests de precedence.
+- [x] Soul a través del identity loader (override user + version/sha256).
+- [x] Extended Identity Reference fuera del stable segment (on-demand por turno).
+
+## Promoción CHAT → PROJECT + conversación (cierre de items de Fase 1)
+
+- [x] Soul: solo Canonical Soul inyectado siempre; Extended Identity y
+  Maintainer Notes excluidos (`split_soul`, segment on-demand por keywords).
+- [x] candidate workspace acotado para CHAT: escritura permitida solo en el
+  cwd abierto (nunca $HOME); test de invariante $HOME.
+- [x] detección de project-creation intent: marker fuerte (`.git` o
+  `.rinari/project.toml`) en el cwd de la sesión al terminar el turno →
+  promoción in-place; el caminado hacia arriba no promueve (no revierte un
+  `rinari chat` explícito).
+- [x] promoción in-place reconstruye en la misma sesión: sandbox/cwd/kind del
+  ToolContext + assembler context (proj instructions + policy summary); evento
+  `SessionPromotedInProcess`.
+- [x] `session_messages` (migración 0002): persistencia de la conversación en
+  cada turno (incluidos cancelados), restaurada en cada invocación.
+- [x] preservar sesión/provider/model al promover (misma verificación en test).
+- [x] E2E: CHAT → `rinari init` → PROJECT en la misma sesión con conversación
+  restaurada (mock stateless ecualiza tamaño de conversación 2 → 4 msgs).
 
 ## Tool Registry
 

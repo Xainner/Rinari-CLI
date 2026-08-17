@@ -11,7 +11,7 @@ from rinari.storage.migrations import MigrationRunner
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BUNDLED_0001 = REPO_ROOT / "src/rinari/storage/migrations/0001_initial.sql"
 
-TABLES_AFTER_0001 = {
+TABLES_AFTER_MIGRATIONS = {
     "schema_migrations",
     "providers",
     "provider_credentials_metadata",
@@ -19,6 +19,7 @@ TABLES_AFTER_0001 = {
     "projects",
     "sessions",
     "session_events",
+    "session_messages",
     "config_values",
 }
 
@@ -39,15 +40,15 @@ def _table_names(db: Database) -> set[str]:
 
 def test_migrate_fresh_database_applies_all(db):
     applied = MigrationRunner(db, FakeClock()).migrate()
-    assert applied == [1]
-    assert _table_names(db) == TABLES_AFTER_0001
+    assert applied == [1, 2]
+    assert _table_names(db) == TABLES_AFTER_MIGRATIONS
 
 
 def test_migrate_is_idempotent(db):
     runner = MigrationRunner(db, FakeClock())
     runner.migrate()
     assert runner.migrate() == []
-    assert runner.current_version() == 1
+    assert runner.current_version() == 2
 
 
 def test_migrations_are_replayed_from_on_disk(db, tmp_path):
