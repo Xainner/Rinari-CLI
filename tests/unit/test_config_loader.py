@@ -68,10 +68,10 @@ def test_profile_layer_sits_above_user(layout):
 
 def test_legacy_inline_profiles_rejected_with_repair_hint(layout):
     (layout.config_file).write_text(
-        "[profile.casa]\nbase_url = \"http://192.168.0.3:8020/v1\"\n"
-        "model = \"qwen3.6-27b\"\n"
-        "[profile.net]\nbase_url = \"https://api.example.net/v1\"\n"
-        "model = \"qwen3.6-27b\"\n",
+        '[profile.casa]\nbase_url = "http://192.168.0.3:8020/v1"\n'
+        'model = "qwen3.6-27b"\n'
+        '[profile.net]\nbase_url = "https://api.example.net/v1"\n'
+        'model = "qwen3.6-27b"\n',
         encoding="utf-8",
     )
     with pytest.raises(ConfigurationError, match="must be a string profile name") as excinfo:

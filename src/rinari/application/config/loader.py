@@ -94,7 +94,7 @@ def load_effective_config(
             f"(found a table with inline profile sections: {', '.join(legacy) or 'empty'}).",
             hint=(
                 f"Legacy inline profiles: move each [profile.<name>] table to {targets}; "
-                "then select one with `profile = \"<name>\"` or "
+                'then select one with `profile = "<name>"` or '
                 "`rinari config set profile <name>`."
             ),
         )
