@@ -58,6 +58,8 @@ class AssemblerContext:
     compact_state: str | None = None
     # Durable memory block (user + project records, phase 4).
     memory: str | None = None
+    # Pinned context block (session pins, phase 4): always model-visible.
+    pinned_context: str | None = None
     environment: dict[str, Any] | None = None
     evidence: tuple[EvidenceItem, ...] = ()
     history: tuple[ChatMessage, ...] = ()
@@ -204,6 +206,16 @@ class PromptAssembler:
                     id="memory",
                     kind=SegmentKind.MEMORY,
                     content=context.memory,
+                    trust=SegmentTrust.TRUSTED,
+                    cache_policy=CachePolicy.SESSION,
+                )
+            )
+        if context.pinned_context:
+            segments.append(
+                PromptSegment(
+                    id="pinned-context",
+                    kind=SegmentKind.PINNED_CONTEXT,
+                    content=context.pinned_context,
                     trust=SegmentTrust.TRUSTED,
                     cache_policy=CachePolicy.SESSION,
                 )

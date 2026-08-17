@@ -1385,15 +1385,14 @@ estricto). CLI `rinari artifacts list|show|open|search|export|remove|gc`.
 ## Context Engine
 
 - [x] context budget.
-- [ ] retrieval. (con Context retrieval: se implementa con las memorias, abajo)
-- [ ] ranking. (idem)
-- [ ] pins. (idem)
-- [ ] dedup. (idem)
+- [x] retrieval.
+- [x] ranking.
+- [x] pins.
+- [x] dedup.
 - [x] artifact references.
 - [x] history selection.
 - [x] project retrieval. (con Project Memory)
 - [x] user-memory retrieval. (con User Memory)
-- [ ] retrieval general del Context Engine (ranking/pins/dedup — siguiente bloque de Fase 4).
 - [x] token accounting integration.
 
 ## Compaction
@@ -1430,6 +1429,20 @@ roble ante el recorte in-place (contabilidad `dropped_total`). La
 conversación persistida (`session_messages`) NUNCA se recorta: resume
 restaura el todo y re-aplica la selección de cola. 11 tests
 (`test_context.py`) incluyendo loop end-to-end con provider fake.
+
+Context retrieval / ranking / pins / dedup (Fase 4): `context/retrieval.py`
+(`ContextRetrievalService`). Candidatos: archivos y símbolos del repository
+index (PROJECT), memoria user+project, y artifacts de la sesión. Ranking
+determinista (score por solapamiento de tokens + peso por fuente, pins
+primero, luego score, luego prioridad de fuente) y dedup por `(source,
+ref)`. Pins de sesión (`context_pins`, migración 0011): `file|symbol|
+memory|artifact|term`; un pin inyecta su contenido (acotado) en el segmento
+de prompt `pinned-context` (TRUSTED, SESSION) en cada turno, con el contenido
+de repo envuelto como `<untrusted>` (prompt-injection rule) y un presupuesto
+de caracteres total para el bloque. Tools `context.retrieve|pin|unpin|
+list_pins` (capability `state.read`/`state.write`). CLI `rinari context
+pins|pin|unpin|retrieve`. 8 tests (`test_context_retrieval.py`) + migración
+0011 en `test_migrations.py`.
 
 ## User Memory
 
@@ -2604,9 +2617,10 @@ COMPLETADO EN FASE 4 (hasta el momento)
   segment, restore en resume)
   Memoria user/project/episodic/pattern (migración 0010, sensitivity
   filter, tools memory.*, segmento de prompt, CLI `rinari memory`)
+  Context retrieval + ranking + pins + dedup (migración 0011, tools
+  context.*, segmento pinned-context, CLI `rinari context`)
 
 SIGUIENTE (fase 4)
-  → Retrieval general del Context Engine (ranking/pins/dedup)
   → Resume durable + reconciliation
   → Budgets + loop detection
   → network policy + hooks

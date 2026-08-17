@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from rinari.tools.definition import ToolDefinition
+from rinari.tools.native.context import context_tools
 from rinari.tools.native.fs import filesystem_tools
 from rinari.tools.native.git import git_tools
 from rinari.tools.native.lsp import lsp_tools
@@ -26,5 +27,6 @@ def all_native_tools() -> list[ToolDefinition]:
         *lsp_tools(),
         *verify_tools(),
         *memory_tools(),
+        *context_tools(),
         *pty_tools(),
     ]

@@ -147,6 +147,7 @@ def build_assembler_context(services: ServiceContainer, record: SessionRecord) -
         project_instructions=instructions,
         task_state=task_state,
         memory=_memory_text(services, root),
+        pinned_context=_pinned_context_text(services, record.id, root),
         environment=environment,
     )
 
@@ -158,6 +159,16 @@ def _memory_text(services: ServiceContainer, root: Path | None) -> str | None:
     except Exception:
         # Memory is optional prompt context; a storage hiccup must not break
         # session assembly (the tools still surface the real error).
+        return None
+
+
+def _pinned_context_text(
+    services: ServiceContainer, session_id: str, root: Path | None
+) -> str | None:
+    """Pinned-context block (session pins); None when there are no pins."""
+    try:
+        return services.retrieval.pinned_block(session_id, str(root) if root is not None else None)
+    except Exception:
         return None
 
 
@@ -314,6 +325,7 @@ def build_agent_session(
         lsp=_build_lsp_manager(root),
         validation=services.verification,
         memory=services.memory,
+        context_retrieval=services.retrieval,
         project_trusted=_project_trusted(services, root),
     )
     caller = _caller_for(services, record)
@@ -607,6 +619,7 @@ def _apply_promotion(session: AgentSession, record: SessionRecord, marker: str) 
         lsp=_build_lsp_manager(root),
         validation=services.verification,
         memory=services.memory,
+        context_retrieval=services.retrieval,
         project_trusted=_project_trusted(services, root),
     )
     session.context.assembler_base = build_assembler_context(services, record)

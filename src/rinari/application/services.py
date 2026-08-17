@@ -15,6 +15,7 @@ from rinari.application.provider_service import ProviderService
 from rinari.application.session_service import SessionService
 from rinari.artifacts.store import ArtifactStore
 from rinari.checkpoints.service import CheckpointService
+from rinari.context.retrieval import ContextRetrievalService
 from rinari.context.service import ContextService
 from rinari.memory import MemoryService
 from rinari.repo.index_service import IndexService
@@ -39,6 +40,7 @@ class ServiceContainer:
     artifacts: ArtifactStore
     context: ContextService
     memory: MemoryService
+    retrieval: ContextRetrievalService
 
 
 def build_services(
@@ -59,6 +61,7 @@ def build_services(
     artifacts = ArtifactStore(ctx)
     context_service = ContextService(ctx, artifacts)
     memory = MemoryService(ctx)
+    retrieval = ContextRetrievalService(ctx, artifacts=artifacts, memory=memory)
     return ServiceContainer(
         ctx=ctx,
         credentials=credentials,
@@ -74,4 +77,5 @@ def build_services(
         artifacts=artifacts,
         context=context_service,
         memory=memory,
+        retrieval=retrieval,
     )

@@ -140,11 +140,17 @@ reemplaza a RINARI.md en su level; el level más profundo gana conflictos.
 
 ## Pendiente
 
-- En Fase 4 (resto): retrieval general del Context Engine
-  (ranking/pins/dedup), resume + reconciliation
+- En Fase 4 (resto): resume + reconciliation
   (identity/branch/dirty-tree/trust/auth/model/skill/policy), session fork,
   budgets y loop detection, y network policy + hook del sandbox. Checklist
   completo en [TODO.md](TODO.md).
+- Context retrieval + pins (Fase 4): candidatos del index del repo
+  (archivos/símbolos), memoria y artifacts de la sesión, con ranking
+  determinista y dedup por `(source, ref)`; pins de sesión que inyectan su
+  contenido (acotado, repo como `<untrusted>`) en el segmento de prompt
+  `pinned-context` cada turno. Tools `context.retrieve/pin/unpin/list_pins`
+  y CLI `rinari context pins|pin|unpin|retrieve`. 8 tests
+  (`test_context_retrieval.py`).
 - User/Project/Episodic/Pattern Memory (Fase 4): 4 stores separadas en
   SQLite (migración 0010) con provenance, confidence, conflict/supersede y
   stale handling; filtro de sensibilidad que rechaza secretos en escritura;

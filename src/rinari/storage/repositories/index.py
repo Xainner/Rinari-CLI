@@ -71,6 +71,19 @@ class IndexRepository:
             ],
         )
 
+    def symbols_all(self, project_root: str, *, limit: int = 2000) -> list[dict]:
+        rows = self._db.query(
+            """
+            SELECT name, kind, qualified_name, rel_path, line
+            FROM repo_index_symbols
+            WHERE project_root = ?
+            ORDER BY rel_path, line
+            LIMIT ?
+            """,
+            (project_root, limit),
+        )
+        return [dict(row) for row in rows]
+
     def symbols_by_name(self, project_root: str, name: str, *, limit: int = 50) -> list[dict]:
         rows = self._db.query(
             """

@@ -156,6 +156,9 @@ class ToolContext:
     # Application-level MemoryService (rinari.memory); None only when the
     # session is not wired to the full service container.
     memory: Any = None
+    # Application-level ContextRetrievalService (rinari.context.retrieval);
+    # None only when the session is not wired to the full service container.
+    context_retrieval: Any = None
     # Session trust snapshot for the project (drives which project-supplied
     # data the agent may consume, e.g. in verification plans).
     project_trusted: bool = True

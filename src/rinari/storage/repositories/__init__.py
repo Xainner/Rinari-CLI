@@ -3,6 +3,7 @@ from rinari.storage.repositories.config_values import ConfigValueRepository
 from rinari.storage.repositories.index import IndexRepository
 from rinari.storage.repositories.memory import MemoryRepository
 from rinari.storage.repositories.models import ModelRepository
+from rinari.storage.repositories.pins import PIN_SOURCES, PinRepository
 from rinari.storage.repositories.projects import ProjectRepository
 from rinari.storage.repositories.providers import ProviderRepository
 from rinari.storage.repositories.sessions import (
@@ -16,11 +17,13 @@ from rinari.storage.repositories.trust import TrustEntryRepository
 from rinari.storage.repositories.validation import ValidationRecordRepository
 
 __all__ = [
+    "PIN_SOURCES",
     "CheckpointRepository",
     "ConfigValueRepository",
     "IndexRepository",
     "MemoryRepository",
     "ModelRepository",
+    "PinRepository",
     "ProjectRepository",
     "ProviderRepository",
     "SessionEventRepository",

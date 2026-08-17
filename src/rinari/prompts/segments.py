@@ -21,6 +21,7 @@ SEGMENT_ORDER: tuple[str, ...] = (
     "compact-state",
     "environment",
     "memory",
+    "pinned-context",
     "history",
     "evidence",
 )
@@ -37,6 +38,7 @@ class SegmentKind(StrEnum):
     COMPACT_STATE = "compact-state"
     ENVIRONMENT = "environment"
     MEMORY = "memory"
+    PINNED_CONTEXT = "pinned-context"
     HISTORY = "history"
     EVIDENCE = "evidence"
 
@@ -67,6 +69,7 @@ DEFAULT_AUTHORITY: dict[SegmentKind, int] = {
     SegmentKind.COMPACT_STATE: 4,
     SegmentKind.ENVIRONMENT: 3,
     SegmentKind.MEMORY: 2,
+    SegmentKind.PINNED_CONTEXT: 2,
     SegmentKind.HISTORY: 2,
     SegmentKind.EVIDENCE: 1,
 }

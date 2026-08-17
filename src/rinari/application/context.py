@@ -23,6 +23,7 @@ from rinari.storage.repositories import (
     IndexRepository,
     MemoryRepository,
     ModelRepository,
+    PinRepository,
     ProjectRepository,
     ProviderRepository,
     SessionEventRepository,
@@ -57,6 +58,7 @@ class AppContext:
     checkpoint_repo: CheckpointRepository
     config_repo: ConfigValueRepository
     memory_repo: MemoryRepository
+    pin_repo: PinRepository
 
     def close(self) -> None:
         self.db.close()
@@ -103,6 +105,7 @@ def build_app_context(
         checkpoint_repo=CheckpointRepository(db),
         config_repo=ConfigValueRepository(db),
         memory_repo=MemoryRepository(db),
+        pin_repo=PinRepository(db),
     )
 
 
