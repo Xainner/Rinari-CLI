@@ -2,7 +2,7 @@
 
 Roadmap canónico de construcción de Rinari.
 
-> **Estado actual:** Fase 2 — Agent Runtime, Tool Runtime y seguridad base.
+> **Estado actual:** Fase 4 — Context, artifacts, memoria y resume durable.
 >
 > **Regla:** las fases expresan **orden de dependencia de implementación**, no alcance opcional del producto.
 >
@@ -875,7 +875,7 @@ Todo con tests deterministas.
 
 ---
 
-# Fase 2 — Agent Runtime, Tool Runtime y seguridad base ← ACTUAL
+# Fase 2 — Agent Runtime, Tool Runtime y seguridad base — COMPLETA (2026-08-16)
 
 ## Objetivo
 
@@ -1109,7 +1109,7 @@ seguir un agent loop real
 
 ---
 
-# Fase 3 — Project intelligence, instructions y verification
+# Fase 3 — Project intelligence, instructions y verification — COMPLETA (2026-08-16)
 
 ## Objetivo
 
@@ -1336,7 +1336,7 @@ salvo `--allow-mixed` (mixed ownership detection). 6 tests
 
 ---
 
-# Fase 4 — Context, artifacts, memoria y resume durable
+# Fase 4 — Context, artifacts, memoria y resume durable ← ACTUAL
 
 ## Objetivo
 
@@ -2513,37 +2513,39 @@ Cada una debe decidirse antes de implementar el subsistema correspondiente, con 
 
 ```text
 FASE ACTUAL
-  Fase 2 — Agent Runtime, Tool Runtime y seguridad base
+  Fase 4 — Context, artifacts, memoria y resume durable
 
 COMPLETADO
   fase 0 completa (2026-08-16)
-  identidad
-  arquitectura
-  CLI contract
-  provider/model semantics
-  session semantics
-  CHAT → PROJECT
-  tool/skill catalogs
-  full harness target
-  visual CLI contract
-  testing strategy
-  Git strategy
-  licencia (MIT + LICENSE)
+  identidad, arquitectura, CLI contract, catalogs, harness target,
+  testing/Git strategy, licencia
   fase 1 completa (2026-08-16)
-  packaging (pyproject, uv, entrypoint `rinari`)
-  estructura base src/rinari
-  configuración + SQLite + credential store
-  provider/model registry + CLI
-  session CHAT/PROJECT + persistencia
-  Soul + Constitution (assets, loader, overrides)
-  Build Manifest
-  doctor/status/version
+  packaging (uv, entrypoint `rinari`), configuración + SQLite + credential
+  store, provider/model registry + CLI, session CHAT/PROJECT + persistencia,
+  Soul + Constitution, doctor/status/version
+  fase 2 completa (2026-08-16)
+  Model Runtime (streaming, tool calls, retries), Prompt Assembler,
+  Tool Registry/Runtime (fs/shell/process/git/web/repo), Policy/Sandbox/
+  Approval, Agent loop + cancellation + trace, CHAT→PROJECT promoción
+  in-session, dirty-worktree baseline (preservación de cambios del usuario),
+  LSP/tree-sitter
+  fase 3 completa (2026-08-16)
+  Project Trust + fingerprint, RINARI.md resolver (root→cwd),
+  repository index (migración 0005, incremental), task graph + done-when
+  (0006), validation records + verification planner + completion gate
+  (0007), checkpoints/undo `rinari undo` (0008, ownership agent/user/mixed),
+  PTY tools
 
-SIGUIENTE
-  Model Runtime (ModelProvider, streaming, tool calls)
-  → Prompt Assembler (segmentos, trust, caching)
-  → Tool Registry / Tool Runtime
-  → Filesystem + Shell/process + Git tools
-  → Policy / Sandbox / Approval
-  → Agent loop + cancellation + trace
+DEFERIDO A FASE 4
+  network policy foundation + network hooks (sandbox)
+  reconciliation de resume
+
+SIGUIENTE (fase 4)
+  Artifacts (spill + artifact:// + search)
+  → Context Engine (presupuesto por segmento, retrieval)
+  → Compaction (preserve task truth)
+  → Memoria (user/project/episodic/pattern)
+  → Resume durable + reconciliation
+  → Budgets + loop detection
+  → network policy + hooks
 ```
