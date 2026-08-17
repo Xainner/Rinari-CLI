@@ -1,25 +1,28 @@
 """Shared session start/resume flow for the root command, `chat`, and `resume`.
 
-Phase-1 behavior: detect the context, resolve the active provider + model,
-open or resume the compatible session, persist a prompt event, and print a
-runtime snapshot. The conversational agent loop arrives in phase 2 without
-changing this flow's contract.
+Phase-2 behavior: detect the context, resolve the active provider + model,
+open or resume the compatible session, then hand the conversation to the
+agent runtime. Human output goes to a streaming REPL (or a single non-
+interactive turn when piped with a prompt); `--json` emits the machine
+envelope with the recorded session and, when a prompt was given, the turn
+result.
 """
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import typer
 
 from rinari import __version__
+from rinari.cli import agent_runtime, repl
 from rinari.cli.deps import fail, is_json, services
 from rinari.cli.output import emit_json, success_envelope
 from rinari.cli.serializers import session_dict
 from rinari.projects.git import git_state
+from rinari.runtime.agent import TurnResult
 from rinari.shared.errors import RinariError
-
-NOTES_PHASE_2 = "Agent runtime not available yet (phase 2); the prompt was recorded."
 
 
 def _snapshot(s, session) -> dict:
@@ -53,9 +56,8 @@ def _snapshot(s, session) -> dict:
     return data
 
 
-def _print_human(data: dict, created: bool, warnings: tuple[str, ...], prompt: str | None) -> None:
+def _print_header(data: dict, created: bool, warnings: tuple[str, ...]) -> None:
     typer.echo(f"Rinari v{data['version']}  {data['kind']}")
-    typer.echo("-" * 40)
     if data["kind"] == "PROJECT" and data.get("project_root"):
         typer.echo(f"Project   {data['project_root']}")
         git = data.get("git")
@@ -71,15 +73,30 @@ def _print_human(data: dict, created: bool, warnings: tuple[str, ...], prompt: s
         typer.echo(
             f"Model     {model.get('alias') or '-'} ({model.get('provider_model_id') or '-'})"
         )
-    else:
-        typer.echo("Model     -")
     typer.echo(f"Session   {data['session']['id']} ({'created' if created else 'resumed'})")
     for warning in warnings:
         typer.echo(f"warning   {warning}", err=True)
-    if prompt:
-        typer.echo(f"Prompt    {prompt!r} - {NOTES_PHASE_2}")
-    else:
-        typer.echo(NOTES_PHASE_2)
+
+
+def _turn_dict(result: TurnResult) -> dict:
+    return {
+        "kind": result.kind,
+        "content": result.content,
+        "tool_calls": result.tool_calls,
+        "usage": (
+            {
+                "input_tokens": result.usage.input_tokens,
+                "output_tokens": result.usage.output_tokens,
+                "total_tokens": result.usage.total_tokens,
+            }
+            if result.usage is not None
+            else None
+        ),
+    }
+
+
+def _interactive() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
 
 
 def start_flow(ctx: typer.Context, prompt: str | None, forced_chat: bool, command: str) -> None:
@@ -92,10 +109,30 @@ def start_flow(ctx: typer.Context, prompt: str | None, forced_chat: bool, comman
         data["created"] = started.created
         data["warnings"] = list(started.warnings)
         data["prompt_recorded"] = prompt is not None
+
         if is_json(ctx):
+            if prompt:
+                session = agent_runtime.build_agent_session(s, started.session, interactive=False)
+                try:
+                    data["turn"] = _turn_dict(agent_runtime.run_turn(session, prompt))
+                except RinariError as err:
+                    fail(ctx, command, err)
             emit_json(success_envelope(command, data, warnings=started.warnings))
             return
-        _print_human(data, started.created, started.warnings, prompt)
+
+        _print_header(data, started.created, started.warnings)
+        session = agent_runtime.build_agent_session(s, started.session, interactive=True)
+        if prompt is not None and not _interactive():
+            result = agent_runtime.run_turn(session, prompt)
+            typer.echo()
+            typer.echo(result.content)
+            if result.kind not in ("answer", "truncated", "cancelled"):
+                typer.echo(f"[{result.kind}]")
+            return
+        try:
+            repl.run_repl(session, initial_prompt=prompt)
+        except RinariError as err:
+            fail(ctx, command, err)
 
 
 def resume_flow(ctx: typer.Context, ref: str | None, command: str) -> None:
@@ -110,4 +147,9 @@ def resume_flow(ctx: typer.Context, ref: str | None, command: str) -> None:
         if is_json(ctx):
             emit_json(success_envelope(command, data, warnings=started.warnings))
             return
-        _print_human(data, created=False, warnings=started.warnings, prompt=None)
+        _print_header(data, created=False, warnings=started.warnings)
+        session = agent_runtime.build_agent_session(s, started.session, interactive=True)
+        try:
+            repl.run_repl(session)
+        except RinariError as err:
+            fail(ctx, command, err)

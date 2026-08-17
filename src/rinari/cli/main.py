@@ -75,7 +75,9 @@ def root(
 @app.command("_session", hidden=True)
 def root_session(
     ctx: typer.Context,
-    prompt: list[str] = typer.Argument(None, help="Prompt for the session (phase 1 records it)."),
+    prompt: list[str] = typer.Argument(
+        None, help="Prompt for the session (runs one agent turn, then the REPL if attached)."
+    ),
 ) -> None:
     """Hidden: root default-command target (see main())."""
     text = " ".join(prompt or ()).strip() if prompt else None

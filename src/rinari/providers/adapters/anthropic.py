@@ -2,19 +2,37 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import Callable
 from typing import Any
 
+import httpx
+
+from rinari.models.types import (
+    ROLE_SYSTEM,
+    ROLE_TOOL,
+    ChatMessage,
+    ModelRequest,
+    ModelResponse,
+    ProviderCapabilities,
+    StopReason,
+    ToolCall,
+    Usage,
+)
 from rinari.providers.adapters.base import AuthStatus, DiscoveredModel, ProviderAdapter
 from rinari.providers.adapters.http import (
+    MODEL_CALL_TIMEOUT,
     auth_failure,
     decode_json,
     provider_error,
+    provider_error_detail,
     send_request,
 )
-from rinari.shared.errors import ProviderModelError
+from rinari.shared.errors import NetworkError, ProviderModelError
 
 DEFAULT_BASE_URL = "https://api.anthropic.com"
 API_VERSION = "2023-06-01"
+DEFAULT_MAX_TOKENS = 8192
 
 
 class AnthropicAdapter(ProviderAdapter):
@@ -63,3 +81,294 @@ class AnthropicAdapter(ProviderAdapter):
             for item in data.get("data", [])
             if isinstance(item, dict) and item.get("id")
         ]
+
+    # -- model invocation ---------------------------------------------------
+
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            streaming=True,
+            tool_calls=True,
+            structured_output=False,
+            reasoning_effort=False,
+        )
+
+    def _messages_url(self, endpoint: str | None) -> str:
+        return f"{self.base_url(endpoint, None)}/v1/messages"
+
+    def invoke(
+        self, request: ModelRequest, secret: str | None, endpoint: str | None = None
+    ) -> ModelResponse:
+        url = self._messages_url(endpoint)
+        response = send_request(
+            self.client(),
+            "POST",
+            url,
+            headers=self._headers(secret),
+            json_body=self._payload(request, stream=False),
+            timeout=MODEL_CALL_TIMEOUT,
+        )
+        if response.status_code in (401, 403):
+            raise auth_failure(response, url)
+        if response.status_code >= 400:
+            raise ProviderModelError(provider_error_detail(response, url))
+        return _response_from_anthropic(decode_json(response, url), url)
+
+    def invoke_stream(
+        self,
+        request: ModelRequest,
+        secret: str | None,
+        endpoint: str | None,
+        on_delta: Callable[[str], None],
+    ) -> ModelResponse:
+        url = self._messages_url(endpoint)
+        content_parts: list[str] = []
+        calls = _ToolCallBlockAccumulator()
+        usage = Usage()
+        stop_reason = StopReason.END_TURN
+        try:
+            with self.client().stream(
+                "POST",
+                url,
+                json=self._payload(request, stream=True),
+                headers=self._headers(secret),
+                timeout=MODEL_CALL_TIMEOUT,
+            ) as response:
+                if response.status_code in (401, 403):
+                    raise auth_failure(response, url)
+                if response.status_code >= 400:
+                    raise ProviderModelError(provider_error_detail(response, url))
+                for line in response.iter_lines():
+                    if not line:
+                        continue
+                    event = _parse_sse_line(line, url)
+                    event_type = event.get("type")
+                    if event_type == "message_start":
+                        usage = _usage_from_anthropic(_event_message(event).get("usage"))
+                    elif event_type == "content_block_start":
+                        calls.begin(_optional_int(event.get("index")), event.get("content_block"))
+                    elif event_type == "content_block_delta":
+                        delta = event.get("delta") or {}
+                        if delta.get("type") == "text_delta" and delta.get("text"):
+                            content_parts.append(delta["text"])
+                            on_delta(delta["text"])
+                        elif delta.get("type") == "input_json_delta":
+                            calls.append_json(
+                                _optional_int(event.get("index")), delta.get("partial_json")
+                            )
+                    elif event_type == "message_delta":
+                        stop_reason = _stop_reason_from_anthropic(
+                            (event.get("delta") or {}).get("stop_reason")
+                        )
+                        output_tokens = _optional_int(
+                            (event.get("usage") or {}).get("output_tokens")
+                        )
+                        usage = Usage(
+                            input_tokens=usage.input_tokens,
+                            output_tokens=output_tokens,
+                            cached_input_tokens=usage.cached_input_tokens,
+                        )
+        except httpx.TimeoutException as exc:
+            raise NetworkError(f"Timed out streaming from {url}") from exc
+        except httpx.TransportError as exc:
+            raise NetworkError(f"Stream interrupted: {exc.__class__.__name__}") from exc
+        tool_calls = calls.finalize()
+        if tool_calls and stop_reason is not StopReason.MAX_TOKENS:
+            stop_reason = StopReason.TOOL_CALLS
+        return ModelResponse(
+            content="".join(content_parts),
+            tool_calls=tool_calls,
+            usage=usage,
+            stop_reason=stop_reason,
+        )
+
+    def _payload(self, request: ModelRequest, *, stream: bool) -> dict[str, Any]:
+        system, messages = _convert_to_anthropic(request.messages)
+        payload: dict[str, Any] = {
+            "model": request.model,
+            "max_tokens": request.max_tokens or DEFAULT_MAX_TOKENS,
+            "messages": messages,
+            "stream": stream,
+        }
+        if system:
+            payload["system"] = "\n\n".join(system)
+        if request.tools:
+            payload["tools"] = [
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.parameters,
+                }
+                for tool in request.tools
+            ]
+        if request.temperature is not None:
+            payload["temperature"] = request.temperature
+        # json_response: Anthropic has no native JSON mode; the runtime checks
+        # capabilities.structured_output before requesting it.
+        return payload
+
+
+# -- helpers -----------------------------------------------------------------
+
+
+def _convert_to_anthropic(
+    messages: tuple[ChatMessage, ...],
+) -> tuple[list[str], list[dict[str, Any]]]:
+    system: list[str] = []
+    converted: list[dict[str, Any]] = []
+    for message in messages:
+        if message.role == ROLE_SYSTEM:
+            if message.content:
+                system.append(message.content)
+            continue
+        if message.role == ROLE_TOOL:
+            converted.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": message.tool_call_id,
+                            "content": message.content or "",
+                        }
+                    ],
+                }
+            )
+            continue
+        if message.role == "assistant":
+            if message.tool_calls:
+                blocks: list[dict[str, Any]] = []
+                if message.content:
+                    blocks.append({"type": "text", "text": message.content})
+                for tc in message.tool_calls:
+                    blocks.append(
+                        {"type": "tool_use", "id": tc.id, "name": tc.name, "input": tc.arguments}
+                    )
+                converted.append({"role": "assistant", "content": blocks})
+            else:
+                converted.append({"role": "assistant", "content": message.content or ""})
+            continue
+        converted.append({"role": "user", "content": message.content or ""})
+    return system, _merge_adjacent(converted)
+
+
+def _merge_adjacent(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    for entry in messages:
+        if merged and merged[-1]["role"] == entry["role"]:
+            previous, current = merged[-1]["content"], entry["content"]
+            if isinstance(previous, str) and isinstance(current, str):
+                merged[-1]["content"] = previous + "\n" + current
+            else:
+                merged[-1]["content"] = _as_blocks(previous) + _as_blocks(current)
+        else:
+            merged.append(entry)
+    return merged
+
+
+def _as_blocks(content: Any) -> list[dict[str, Any]]:
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    return list(content)
+
+
+def _parse_sse_line(line: str, url: str) -> dict[str, Any]:
+    if not line.startswith("data:"):
+        return {}
+    data = line[5:].strip()
+    if not data or data == "[DONE]":
+        return {}
+    try:
+        value = json.loads(data)
+    except json.JSONDecodeError as exc:
+        raise ProviderModelError(f"Provider returned invalid streaming JSON for {url}") from exc
+    return value if isinstance(value, dict) else {}
+
+
+def _event_message(event: dict[str, Any]) -> dict[str, Any]:
+    message = event.get("message")
+    return message if isinstance(message, dict) else {}
+
+
+def _response_from_anthropic(data: Any, url: str) -> ModelResponse:
+    if not isinstance(data, dict):
+        raise ProviderModelError(f"Unexpected messages payload from {url}")
+    blocks = data.get("content") or []
+    text_parts = [
+        b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text"
+    ]
+    tool_calls = tuple(
+        ToolCall(
+            id=str(b.get("id", "")),
+            name=str(b.get("name", "")),
+            arguments=(b.get("input") if isinstance(b.get("input"), dict) else {}),
+        )
+        for b in blocks
+        if isinstance(b, dict) and b.get("type") == "tool_use"
+    )
+    return ModelResponse(
+        content="".join(text_parts),
+        tool_calls=tool_calls,
+        usage=_usage_from_anthropic(data.get("usage")),
+        stop_reason=_stop_reason_from_anthropic(data.get("stop_reason")),
+        raw=data,
+    )
+
+
+def _usage_from_anthropic(raw: Any) -> Usage:
+    if not isinstance(raw, dict):
+        return Usage()
+    return Usage(
+        input_tokens=_optional_int(raw.get("input_tokens")),
+        output_tokens=_optional_int(raw.get("output_tokens")),
+        cached_input_tokens=_optional_int(raw.get("cache_read_input_tokens")),
+    )
+
+
+def _stop_reason_from_anthropic(reason: Any) -> StopReason:
+    if reason == "tool_use":
+        return StopReason.TOOL_CALLS
+    if reason == "max_tokens":
+        return StopReason.MAX_TOKENS
+    return StopReason.END_TURN
+
+
+def _optional_int(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+class _ToolCallBlockAccumulator:
+    """Reassembles streamed tool_use blocks from content_block events."""
+
+    def __init__(self) -> None:
+        self._blocks: dict[int, dict[str, Any]] = {}
+
+    def begin(self, index: int | None, header: Any) -> None:
+        if not isinstance(header, dict) or header.get("type") != "tool_use":
+            return
+        key = index if isinstance(index, int) else len(self._blocks)
+        self._blocks[key] = {
+            "id": str(header.get("id", "")),
+            "name": str(header.get("name", "")),
+            "json": "",
+        }
+
+    def append_json(self, index: int | None, partial: Any) -> None:
+        if not isinstance(index, int) or index not in self._blocks:
+            return
+        if isinstance(partial, str):
+            self._blocks[index]["json"] += partial
+
+    def finalize(self) -> tuple[ToolCall, ...]:
+        result = []
+        for key in sorted(self._blocks):
+            block = self._blocks[key]
+            if not block["name"]:
+                continue
+            try:
+                arguments = json.loads(block["json"] or "{}")
+            except json.JSONDecodeError:
+                arguments = {}
+            if not isinstance(arguments, dict):
+                arguments = {}
+            result.append(ToolCall(id=block["id"], name=block["name"], arguments=arguments))
+        return tuple(result)

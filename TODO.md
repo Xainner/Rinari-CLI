@@ -894,184 +894,184 @@ seguir un agent loop real
 
 ## Model Runtime
 
-- [ ] `ModelProvider` abstraction.
-- [ ] model invocation.
-- [ ] streaming.
-- [ ] tool calls.
-- [ ] structured output.
-- [ ] provider capability normalization.
-- [ ] token usage normalization.
-- [ ] reasoning effort config cuando exista.
-- [ ] model switch in-session.
-- [ ] provider switch in-session.
-- [ ] session state provider-independent.
+- [x] `ModelProvider` abstraction. (ModelRouter + ModelCaller)
+- [x] model invocation.
+- [x] streaming.
+- [x] tool calls.
+- [x] structured output. (json_response → response_format; Anthropic documenta limit)
+- [x] provider capability normalization.
+- [x] token usage normalization.
+- [x] reasoning effort config cuando exista.
+- [x] model switch in-session. (`/model <alias>`, session-scoped)
+- [x] provider switch in-session. (`/provider <alias>`, session-scoped)
+- [x] session state provider-independent. (history = ChatMessage records)
 
 ## Prompt Assembler
 
-- [ ] `PromptSegment`.
-- [ ] authority.
-- [ ] trust.
-- [ ] cache policy.
-- [ ] stable ordering.
-- [ ] Constitution segment.
-- [ ] Runtime Policy segment.
-- [ ] Soul segment.
-- [ ] Preferences segment.
-- [ ] Project instruction slot.
-- [ ] Skill slot.
-- [ ] Task/context slot.
-- [ ] evidence/untrusted wrapping.
-- [ ] tests de precedence.
+- [x] `PromptSegment`.
+- [x] authority.
+- [x] trust.
+- [x] cache policy.
+- [x] stable ordering.
+- [x] Constitution segment.
+- [x] Runtime Policy segment.
+- [x] Soul segment.
+- [x] Preferences segment.
+- [x] Project instruction slot. (RINARI.md/AGENTS.md/CLAUDE.md, bounded)
+- [x] Skill slot.
+- [x] Task/context slot.
+- [x] evidence/untrusted wrapping.
+- [x] tests de precedence.
 
 ## Tool Registry
 
-- [ ] `ToolDefinition`.
-- [ ] input schema.
-- [ ] output schema.
-- [ ] risk.
-- [ ] side-effect class.
-- [ ] permissions.
-- [ ] idempotency metadata.
-- [ ] timeout metadata.
-- [ ] registry.
-- [ ] search.
-- [ ] describe.
-- [ ] load.
-- [ ] unload.
-- [ ] manifests.
+- [x] `ToolDefinition`.
+- [x] input schema.
+- [x] output schema.
+- [x] risk.
+- [x] side-effect class.
+- [x] permissions.
+- [x] idempotency metadata.
+- [x] timeout metadata.
+- [x] registry.
+- [x] search.
+- [x] describe.
+- [x] load.
+- [x] unload.
+- [x] manifests.
 
 ## Tool Result
 
-- [ ] envelope común.
-- [ ] normalized errors.
-- [ ] provenance.
-- [ ] side-effect records.
-- [ ] artifact references.
-- [ ] truncation metadata.
+- [x] envelope común.
+- [x] normalized errors.
+- [x] provenance.
+- [x] side-effect records.
+- [x] artifact references.
+- [x] truncation metadata.
 
 ## Tool Runtime
 
-- [ ] schema validation.
-- [ ] capability resolution.
-- [ ] policy check.
-- [ ] approval gate.
-- [ ] sandbox execution.
-- [ ] result normalization.
-- [ ] secret redaction.
-- [ ] event persistence.
-- [ ] cancellation.
-- [ ] budgets.
-- [ ] artifact spill.
+- [x] schema validation.
+- [x] capability resolution.
+- [x] policy check.
+- [x] approval gate.
+- [x] sandbox execution.
+- [x] result normalization.
+- [x] secret redaction.
+- [x] event persistence.
+- [x] cancellation.
+- [x] budgets.
+- [x] artifact spill.
 
 ## Filesystem tools
 
-- [ ] `fs.read`.
-- [ ] `fs.read_lines`.
-- [ ] `fs.write`.
-- [ ] `fs.patch`.
-- [ ] `fs.list`.
-- [ ] `fs.glob`.
-- [ ] `fs.search_text`.
-- [ ] `fs.stat`.
-- [ ] `fs.diff`.
-- [ ] safe path canonicalization.
-- [ ] symlink boundary tests.
+- [x] `fs.read`.
+- [x] `fs.read_lines`.
+- [x] `fs.write`.
+- [x] `fs.patch`.
+- [x] `fs.list`.
+- [x] `fs.glob`.
+- [x] `fs.search_text`.
+- [x] `fs.stat`.
+- [x] `fs.diff`.
+- [x] safe path canonicalization.
+- [x] symlink boundary tests.
 
 ## Shell / process
 
-- [ ] `shell.exec`.
-- [ ] streaming stdout/stderr.
-- [ ] timeout.
-- [ ] cwd.
-- [ ] env injection.
-- [ ] PTY.
-- [ ] process handles.
-- [ ] process wait.
-- [ ] process signal.
-- [ ] cancellation tree.
-- [ ] output limits.
-- [ ] artifact spill.
+- [x] `shell.exec`.
+- [ ] streaming stdout/stderr. (fase 3; hoy bounded buffer)
+- [x] timeout.
+- [x] cwd.
+- [x] env injection.
+- [ ] PTY. (fase 3)
+- [ ] process handles. (fase 3)
+- [x] process wait.
+- [ ] process signal. (kill-tree en timeout/cancel; señal arbitraria fase 3)
+- [x] cancellation tree. (kill process group: win32 + posix)
+- [x] output limits.
+- [x] artifact spill.
 
 ## Git
 
-- [ ] status.
-- [ ] diff.
-- [ ] log.
-- [ ] show.
-- [ ] branch metadata.
-- [ ] dirty-worktree baseline.
-- [ ] local Git policy.
-- [ ] remote Git classification.
-- [ ] preserve user changes.
-- [ ] safe diff ownership metadata.
+- [x] status.
+- [x] diff.
+- [x] log.
+- [x] show.
+- [x] branch metadata.
+- [ ] dirty-worktree baseline. (fase 3, con verification)
+- [x] local Git policy.
+- [x] remote Git classification.
+- [ ] preserve user changes. (comportamiento; test dedicado fase 3)
+- [ ] safe diff ownership metadata. (fase 3)
 
 ## Policy Engine
 
-- [ ] capability model.
-- [ ] filesystem policy.
-- [ ] shell policy.
-- [ ] Git policy.
-- [ ] network policy foundation.
-- [ ] secret policy.
-- [ ] action-risk model.
-- [ ] policy explanation.
-- [ ] locked organization/system rules.
+- [x] capability model.
+- [x] filesystem policy.
+- [x] shell policy.
+- [x] Git policy.
+- [ ] network policy foundation. (fase 4, con browser/web)
+- [x] secret policy. (sensitive-file locked rule)
+- [x] action-risk model.
+- [x] policy explanation. (PolicyDecision.reason)
+- [x] locked organization/system rules.
 
 ## Sandbox
 
-- [ ] `read-only`.
-- [ ] `workspace`.
-- [ ] `full-access`.
-- [ ] filesystem roots.
-- [ ] process limits.
-- [ ] network hooks.
-- [ ] secret scopes.
-- [ ] tests de escape.
+- [x] `read-only`.
+- [x] `workspace`.
+- [x] `full-access`.
+- [x] filesystem roots.
+- [x] process limits.
+- [ ] network hooks. (fase 4)
+- [x] secret scopes. (redaction de secrets de providers)
+- [x] tests de escape.
 
 ## Approval Engine
 
-- [ ] allow.
-- [ ] prompt.
-- [ ] deny.
-- [ ] once scope.
-- [ ] session scope.
-- [ ] project scope.
-- [ ] persistent scope.
-- [ ] approval audit events.
-- [ ] no approval fatigue para reads normales.
+- [x] allow.
+- [x] prompt.
+- [x] deny.
+- [x] once scope.
+- [x] session scope.
+- [x] project scope.
+- [x] persistent scope.
+- [x] approval audit events.
+- [x] no approval fatigue para reads normales.
 
 ## Agent Loop
 
-- [ ] RECEIVE.
-- [ ] ORIENT.
-- [ ] PLAN.
-- [ ] EXECUTE.
-- [ ] OBSERVE.
-- [ ] EVALUATE.
-- [ ] recovery.
-- [ ] waiting approval.
-- [ ] blocked.
-- [ ] verify transition.
-- [ ] finalize transition.
+- [x] RECEIVE.
+- [x] ORIENT.
+- [x] PLAN.
+- [x] EXECUTE.
+- [x] OBSERVE.
+- [x] EVALUATE.
+- [x] recovery. (errores de tool vuelven al modelo como tool messages)
+- [x] waiting approval. (approval gate dentro del tool runtime)
+- [x] blocked. (deny → tool error al modelo)
+- [ ] verify transition. (fase 3)
+- [ ] finalize transition. (fase 3)
 
 ## Cancellation
 
-- [ ] Ctrl+C model stream.
-- [ ] Ctrl+C tool.
-- [ ] Ctrl+C subprocess.
-- [ ] session interruption state.
-- [ ] second interrupt hard stop.
-- [ ] cleanup.
+- [x] Ctrl+C model stream.
+- [x] Ctrl+C tool.
+- [x] Ctrl+C subprocess.
+- [ ] session interruption state. (estado de sesión en interrupción; hoy queda activo)
+- [x] second interrupt hard stop.
+- [x] cleanup.
 
 ## Trace base
 
-- [ ] session trace.
-- [ ] turn trace.
-- [ ] model call trace.
-- [ ] tool trace.
-- [ ] policy decision trace.
-- [ ] approval trace.
-- [ ] secret redaction.
+- [x] session trace.
+- [x] turn trace.
+- [x] model call trace.
+- [x] tool trace.
+- [x] policy decision trace.
+- [x] approval trace.
+- [x] secret redaction.
 
 ---
 

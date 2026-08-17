@@ -1,8 +1,8 @@
-"""Provider adapter contract (docs/commands.md section 73).
+"""Provider adapter contract (docs/commands.md section 73, harness.md 81).
 
 Adapters normalize a provider family into a common surface: auth
-capabilities, credential validation, model discovery, and health checks.
-Model invocation joins this contract in phase 2 (Model Runtime).
+capabilities, credential validation, model discovery, health checks, and
+model invocation (phase 2 Model Runtime).
 
 Adapters accept an injectable `httpx.Client` so tests can use
 `httpx.MockTransport`; no adapter opens real network connections in tests.
@@ -10,10 +10,13 @@ Adapters accept an injectable `httpx.Client` so tests can use
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
+
+from rinari.models.types import ModelRequest, ModelResponse, ProviderCapabilities
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,3 +85,22 @@ class ProviderAdapter:
             models_discovered=len(models),
             models=models,
         )
+
+    # -- model invocation (phase 2) ---------------------------------------
+
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities()
+
+    def invoke(
+        self, request: ModelRequest, secret: str | None, endpoint: str | None = None
+    ) -> ModelResponse:
+        raise NotImplementedError
+
+    def invoke_stream(
+        self,
+        request: ModelRequest,
+        secret: str | None,
+        endpoint: str | None,
+        on_delta: Callable[[str], None],
+    ) -> ModelResponse:
+        raise NotImplementedError

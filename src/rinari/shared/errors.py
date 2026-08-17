@@ -67,6 +67,11 @@ class PermissionDeniedError(RinariError):
     machine_code = "PERMISSION_DENIED"
 
 
+class SandboxViolationError(RinariError):
+    exit_code = ExitCode.PERMISSION_DENIED
+    machine_code = "SANDBOX_VIOLATION"
+
+
 class ApprovalDeniedError(RinariError):
     exit_code = ExitCode.APPROVAL_DENIED
     machine_code = "APPROVAL_DENIED"

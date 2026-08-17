@@ -10,6 +10,10 @@ import httpx
 
 from rinari.shared.errors import NetworkError, ProviderModelError
 
+# Model generation can run for minutes; the client default (10s) only fits
+# discovery/health probes.
+MODEL_CALL_TIMEOUT = 600.0
+
 
 def send_request(
     client: httpx.Client,
@@ -17,13 +21,29 @@ def send_request(
     url: str,
     *,
     headers: dict[str, str] | None = None,
+    json_body: dict | None = None,
+    timeout: float | None = None,
 ) -> httpx.Response:
     try:
-        return client.request(method, url, headers=headers)
+        return client.request(method, url, headers=headers, json=json_body, timeout=timeout)
     except httpx.TimeoutException as exc:
         raise NetworkError(f"Timed out contacting {url}") from exc
     except httpx.TransportError as exc:
         raise NetworkError(f"Cannot reach {url}: {exc.__class__.__name__}") from exc
+
+
+def provider_error_detail(response: httpx.Response, url: str) -> str:
+    """Best-effort human detail from an error body (no secret leakage)."""
+    try:
+        data = response.json()
+    except ValueError:
+        return f"Provider returned HTTP {response.status_code} for {url}"
+    error = data.get("error") if isinstance(data, dict) else None
+    if isinstance(error, dict):
+        message = error.get("message")
+        if isinstance(message, str):
+            return f"Provider returned HTTP {response.status_code}: {message[:300]}"
+    return f"Provider returned HTTP {response.status_code} for {url}"
 
 
 def auth_failure(response: httpx.Response, url: str) -> ProviderModelError:

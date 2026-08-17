@@ -85,6 +85,15 @@ def load_effective_config(
 
     base = {**load_defaults(), **user}
     profile_name = base.get("profile", "workspace")
+    if not isinstance(profile_name, str) or not profile_name:
+        raise ConfigurationError(
+            "The 'profile' key in config.toml must be a string profile name "
+            f"(found {type(profile_name).__name__}).",
+            hint=(
+                'Use `profile = "<name>"`. Per-profile endpoint tables belong in '
+                "~/.rinari/profiles/<name>.toml, not under a [profile] section."
+            ),
+        )
     profile_data = load_profile(profile_name, layout.dir("profiles"))
     if profile_data:
         layers.append(ConfigLayer(name=f"profile:{profile_name}", data=profile_data))

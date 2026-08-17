@@ -54,14 +54,19 @@ uv run rinari version
   preserva el session ID; `$HOME` nunca es workspace implícito.
 - Soul y Constitution empaquetados con loader (override en `~/.rinari/`,
   versión + sha256 visibles en `rinari version` / `doctor`).
-- El agent loop (invocaciones de model, tools, policy) llega en Fase 2: hoy
-  las sesiones persisten estado pero no llaman a ningún model.
+- Agent loop real (Fase 2): `rinari` / `rinari chat` / `rinari resume` ahora
+  conversan con el model. Turnos con streaming, tool calls normalizadas a
+  través del Tool Runtime (policy → approval → sandbox), REPL con
+  `/provider` y `/model` in-session, prompt one-shot no interactivo,
+  y traza de eventos persistida por sesión.
 
 ## Pendiente
 
-- Fase 2 en curso (agent runtime): Model Runtime, Prompt Assembler, Tool
-  Registry/Runtime, tools filesystem/shell/git, Policy/Sandbox/Approval, agent
-  loop, cancellation y trace. Checklist completo en [TODO.md](TODO.md).
+- Fase 2 (agent runtime) mayormente completa; queda para cierre:
+  streaming live de stdout/stderr del shell, PTY/process handles, network
+  policy sandbox, session-interruption state, y verify/finalize transitions
+  (estos dos últimos son de Fase 3). Checklist completo en
+  [TODO.md](TODO.md).
 - 4 items de Fase 1 siguen abiertos porque dependen del agent loop de Fase 2:
   `Extended Identity bajo demanda`, `detectar project-creation intent`,
   `preservar conversación`, `recalcular permisos`.
