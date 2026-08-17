@@ -100,6 +100,10 @@ reemplaza a RINARI.md en su level; el level más profundo gana conflictos.
   index project-scoped (files con hash sha256, symbols, references, test
   mapping) con invalidation incremental — los files sin cambios no se
   reparsen; la capa semántica queda declarada (`none`) como add-on opcional.
+- Task graph (Fase 3): `rinari tasks list|show|tree|add|update|cancel|retry|blockers`;
+  graph DAG project-scoped con detección de ciclos, y done-when contract
+  (acceptance + validation obligatorios y satisfechos, sin criterios
+  unresolved) que `--status done` fuerza antes de permitir completar.
 
 ## Pendiente
 

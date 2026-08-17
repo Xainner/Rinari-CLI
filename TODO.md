@@ -1239,21 +1239,31 @@ cache por-file + text scan bounded; lo que evita el reparse es el hash cache
 
 ## Task Graph
 
-- [ ] Task nodes.
-- [ ] dependencies.
-- [ ] status.
-- [ ] blockers.
-- [ ] acceptance criteria.
-- [ ] evidence refs.
-- [ ] `rinari tasks ...`.
+- [x] Task nodes. (migración 0006 `tasks`, project-scoped, IDs `task_*`)
+- [x] dependencies. (DAG con detección de ciclos en add y update)
+- [x] status. (`pending | in_progress | done | blocked | cancelled`)
+- [x] blockers. (texto de bloqueo + tareas waiting-on dependencies)
+- [x] acceptance criteria. (checklists por grupo: `[x]`/`[ ]`, líneas sueltas = insatisfechas)
+- [x] evidence refs. (append en `evidence`, refs semicolon-separated)
+- [x] `rinari tasks ...`. (`list|show|tree|add|update|cancel|retry|blockers`, commands.md 31)
 
 ## Done-when contract
 
-- [ ] task-specific acceptance criteria.
-- [ ] implementation criteria.
-- [ ] validation criteria.
-- [ ] scope criteria.
-- [ ] unresolved criteria.
+- [x] task-specific acceptance criteria. (obligatorio y no vacío para completar)
+- [x] implementation criteria. (vacío = vacuously true)
+- [x] validation criteria. (obligatorio y no vacío para completar)
+- [x] scope criteria. (vacío = vacuously true)
+- [x] unresolved criteria. (cualquiera pendiente impide `done`)
+
+Implementation (phase 3): core puro en `src/rinari/tasks/core.py`
+(máquina de estados, `done_when_report`, `completion_blockers`, detección
+de ciclos, profundidades para `tree`), store en
+`src/rinari/storage/repositories/tasks.py`, service en
+`src/rinari/tasks/service.py` (reglas con errores estructurados: `BlockedError`
+para deps pending, `ConflictError` para ciclos, `ValidationFailureError`
+para done-when insatisfecho) y CLI en
+`src/rinari/cli/commands/tasks.py`. 12 tests (`test_tasks.py`) + suite
+completa 402 passed / 2 skipped.
 
 ## Validation Records
 

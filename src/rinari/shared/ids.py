@@ -22,6 +22,7 @@ PROJECT = "prj"
 EVENT = "evt"
 CONFIG = "cfg"
 CREDENTIAL = "cred"
+TASK = "task"
 
 
 class UlidGenerator:

@@ -26,6 +26,7 @@ from rinari.storage.repositories import (
     SessionEventRepository,
     SessionMessageRepository,
     SessionRepository,
+    TaskRepository,
     TrustEntryRepository,
     WorktreeBaselineRepository,
 )
@@ -48,6 +49,7 @@ class AppContext:
     worktree_repo: WorktreeBaselineRepository
     trust_repo: TrustEntryRepository
     index_repo: IndexRepository
+    task_repo: TaskRepository
     config_repo: ConfigValueRepository
 
     def close(self) -> None:
@@ -90,6 +92,7 @@ def build_app_context(
         worktree_repo=WorktreeBaselineRepository(db),
         trust_repo=TrustEntryRepository(db),
         index_repo=IndexRepository(db),
+        task_repo=TaskRepository(db),
         config_repo=ConfigValueRepository(db),
     )
 
