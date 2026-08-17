@@ -72,6 +72,25 @@ def session_show(ctx: typer.Context, ref: str = typer.Argument(...)) -> None:
         typer.echo(json.dumps(session_dict(record), indent=2, ensure_ascii=False, default=str))
 
 
+@session_app.command("fork")
+@with_error_handling("session.fork")
+def session_fork(
+    ctx: typer.Context,
+    ref: str = typer.Argument(..., help="Source session ID (or unique prefix)."),
+    name: str = typer.Option(None, "--name", "-n", help="Title for the forked session."),
+) -> None:
+    """Fork a session: an independent continuation with state + conversation."""
+    with services(ctx) as s:
+        started = s.sessions.fork(ref, title=name)
+        if is_json(ctx):
+            emit_json(success_envelope("session.fork", session_dict(started.session)))
+            return
+        typer.echo(
+            f"Session {started.session.id} forked from {started.session.forked_from} "
+            f"({started.session.kind})."
+        )
+
+
 def chat_cmd(
     ctx: typer.Context,
     prompt: list[str] = typer.Argument(None, help="Initial prompt (phase 2 runs the agent loop)."),

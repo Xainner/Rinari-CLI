@@ -62,6 +62,8 @@ def session_dict(record: SessionRecord) -> dict[str, Any]:
         "profile": record.profile_id,
         "mode": record.mode,
         "state": record.state,
+        "git_branch": record.git_branch,
+        "forked_from": record.forked_from,
         "created_at": record.created_at,
         "updated_at": record.updated_at,
         "last_active_at": record.last_active_at,

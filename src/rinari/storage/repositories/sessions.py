@@ -20,8 +20,8 @@ class SessionRepository:
                 id, kind, title, project_id, project_root_snapshot,
                 created_cwd, current_cwd, provider_id, model_id,
                 profile_id, mode, state, compact_state_json,
-                created_at, updated_at, last_active_at, git_branch
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                created_at, updated_at, last_active_at, git_branch, forked_from
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 rec.id,
@@ -41,6 +41,7 @@ class SessionRepository:
                 rec.updated_at,
                 rec.last_active_at,
                 rec.git_branch,
+                rec.forked_from,
             ),
         )
 
@@ -55,7 +56,7 @@ class SessionRepository:
                 kind = ?, title = ?, project_id = ?, project_root_snapshot = ?,
                 current_cwd = ?, provider_id = ?, model_id = ?, profile_id = ?,
                 mode = ?, state = ?, compact_state_json = ?, updated_at = ?, last_active_at = ?,
-                git_branch = ?
+                git_branch = ?, forked_from = ?
             WHERE id = ?
             """,
             (
@@ -73,6 +74,7 @@ class SessionRepository:
                 rec.updated_at,
                 rec.last_active_at,
                 rec.git_branch,
+                rec.forked_from,
                 rec.id,
             ),
         )
@@ -118,6 +120,7 @@ def _session_to_record(row: dict) -> SessionRecord:
         updated_at=row["updated_at"],
         last_active_at=row["last_active_at"],
         git_branch=row["git_branch"],
+        forked_from=row["forked_from"],
     )
 
 

@@ -77,6 +77,7 @@ class SessionRecord:
     updated_at: str
     last_active_at: str
     git_branch: str | None = None
+    forked_from: str | None = None
 
 
 @dataclass(slots=True)

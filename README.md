@@ -140,9 +140,16 @@ reemplaza a RINARI.md en su level; el level más profundo gana conflictos.
 
 ## Pendiente
 
-- En Fase 4 (resto): session fork, budgets y loop detection, network policy
-  + hook del sandbox, y skill version reconciliation. Checklist completo en
+- En Fase 4 (resto): budgets y loop detection, network policy + hook del
+  sandbox, y skill version reconciliation. Checklist completo en
   [TODO.md](TODO.md).
+- Session fork (Fase 4): `rinari session fork <ref> [--name alias]` crea una
+  sesión independiente desde la fuente: copia kind, identidad de proyecto,
+  cwd, provider/model/profile, mode, `compact_state`, branch grabada y la
+  conversación completa (mensajes con IDs nuevos, `seq` re-numerado).
+  Provenance durable vía `sessions.forked_from` (migración 0013) + evento
+  `SessionForked`; la sesión fuente no se modifica. 7 tests
+  (`test_session_fork.py`).
 - Resume durable + reconciliation (Fase 4): `rinari resume` (y el
   resume-implícito de `rinari`) pasa la sesión por un reconciler que
   re-verifica los hechos duraderos antes de seguirla: identidad de proyecto

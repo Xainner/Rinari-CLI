@@ -1537,9 +1537,20 @@ skill persistido contra el cual reconciliar (ver skills).
 
 ## Session fork
 
-- [ ] fork state.
-- [ ] preserve provenance.
-- [ ] independent continuation.
+- [x] fork state.
+- [x] preserve provenance.
+- [x] independent continuation.
+
+Implementation (session fork): `rinari session fork <ref> [--name alias]`
+(`SessionService.fork`) crea una sesión nueva e independiente desde la
+fuente: copia kind, identidad de proyecto, cwd, provider/model/profile, mode,
+`compact_state`, `git_branch` grabada y la conversación completa (mensajes con
+IDs nuevos; `seq` re-numerado desde 1). Provenance durable: la row lleva
+`forked_from` (migración 0013) y el evento `SessionForked {from: <id>}`.
+Independencia: el fork tiene su propio id, su propio espacio de mensajes y
+estado `active`; la sesión fuente no se modifica (idempotente en mensajes,
+título y `updated_at`). `session_dict` expone `git_branch` y `forked_from`.
+7 tests (`test_session_fork.py`) + migración 0013.
 
 ## Budgets
 
@@ -2648,9 +2659,11 @@ COMPLETADO EN FASE 4 (hasta el momento)
   ResumeReconciler identity/branch/working-tree/permissions/provider/
   model/trust/assumptions, findings estructurados + `data.reconciliation`
   en JSON)
+  Session fork (migración 0013 sessions.forked_from, `session fork` con
+  copia de estado + conversación, provenance via evento SessionForked,
+  sesión fuente inmutable)
 
 SIGUIENTE (fase 4)
-  → Session fork
   → Budgets + loop detection
   → network policy + hooks
   → skill version reconciliation (pendiente de versioning de skills)

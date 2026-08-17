@@ -23,11 +23,16 @@ from rinari.shared.errors import (
     NotFoundError,
     PermissionDeniedError,
 )
-from rinari.storage.records import SessionEventRecord, SessionRecord
+from rinari.storage.records import (
+    SessionEventRecord,
+    SessionMessageRecord,
+    SessionRecord,
+)
 from rinari.trust import TrustService
 
 EVENT_SESSION_STARTED = "SessionStarted"
 EVENT_SESSION_PROMOTED = "SessionPromotedToProject"
+EVENT_SESSION_FORKED = "SessionForked"
 EVENT_USER_PROMPT = "UserPrompt"
 
 SESSION_KIND_CHAT = "CHAT"
@@ -237,6 +242,61 @@ class SessionService:
                 {"kind": kind, "project_id": project_id, "marker": detection.marker},
             )
         return record
+
+    # -- fork -------------------------------------------------------------------
+
+    def fork(self, ref: str, title: str | None = None) -> StartedSession:
+        """Create an independent session continuing from `ref`.
+
+        Fork state: kind, project identity, cwd, provider/model/profile,
+        mode, compact state, stored branch, and the full conversation are
+        copied. Preserve provenance: the new row keeps `forked_from` and a
+        `SessionForked` event. Independent continuation: the copy has its
+        own id, message seq space, and active state; the source session is
+        not modified in any way.
+        """
+        source = self._resolve(ref)
+        now = self._now()
+        record = SessionRecord(
+            id=self._ctx.ids.new("ses"),
+            kind=source.kind,
+            title=title or f"{source.title or source.id} (fork)",
+            project_id=source.project_id,
+            project_root_snapshot=source.project_root_snapshot,
+            created_cwd=source.current_cwd,
+            current_cwd=source.current_cwd,
+            provider_id=source.provider_id,
+            model_id=source.model_id,
+            profile_id=source.profile_id,
+            mode=source.mode,
+            state=SESSION_STATE_ACTIVE,
+            compact_state=source.compact_state,
+            created_at=now,
+            updated_at=now,
+            last_active_at=now,
+            git_branch=source.git_branch,
+            forked_from=source.id,
+        )
+        messages = [
+            SessionMessageRecord(
+                id=self._ctx.ids.new("msg"),
+                session_id=record.id,
+                seq=0,
+                role=message.role,
+                content=message.content,
+                tool_calls=message.tool_calls,
+                tool_call_id=message.tool_call_id,
+                name=message.name,
+                created_at=message.created_at,
+            )
+            for message in self._ctx.message_repo.list(source.id)
+        ]
+        with self._ctx.db.transaction():
+            self._ctx.session_repo.insert(record)
+            if messages:
+                self._ctx.message_repo.append_many(record.id, messages)
+            self._append_event(record.id, EVENT_SESSION_FORKED, {"from": source.id})
+        return StartedSession(session=record, created=True)
 
     # -- promotion ----------------------------------------------------------
 
