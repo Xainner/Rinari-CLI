@@ -1168,12 +1168,15 @@ dirty-worktree protection
 
 ## Search
 
-- [ ] exact file search.
-- [ ] regex/grep.
-- [ ] symbol search.
-- [ ] references.
-- [ ] structural search.
-- [ ] hybrid search.
+- [x] exact file search. (`search.files`, glob under the session root; `fs.glob` pre-existing)
+- [x] regex/grep. (`search.regex`, regex por línea, include + bounds; `fs.search_text` literal pre-existing)
+- [x] symbol search. (`search.symbols`, py/js/ts/rs/go; py/js/rs/go extraction)
+- [x] references. (`search.references`, excluye definitions por defecto, flag para incluirlas)
+- [x] structural search. (queries calificados `Class.method` en `search.symbols`)
+- [x] hybrid search. (`search.hybrid`, ranked con reasons explicables: definition/ref/text/filename)
+- Core de búsqueda pur en `rinari/repo/search.py` (bounded, skip dirs generados);
+  los tools son read-only y clasifican como `fs.read` sobre su base path
+  (policy normal, sin capability especial). 7 tests (test_search.py).
 
 ## Tree-sitter / AST
 

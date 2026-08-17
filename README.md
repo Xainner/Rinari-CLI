@@ -74,6 +74,10 @@ uv run rinari version
   no confiado retiene sus instrucciones hasta un grant explícito, con
   fingerprint de identidad (git HEAD+remotes) y revalidation cuando la
   identidad cambia.
+- Search (Fase 3): tools `search.files` (glob exacto), `search.regex`
+  (regex por línea), `search.symbols` (py/js/ts/rs/go, consultas
+  calificados `Class.method`), `search.references` y `search.hybrid`
+  (ranked con reasons) — todos read-only bajo la policy normal.
 - Repository state (Fase 3): detección por files de languages, frameworks,
   package managers y comandos de build/test/lint/typecheck (con la source de
   cada hint); alimentan el environment del prompt y se excluyen dirs
