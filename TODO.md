@@ -1144,15 +1144,16 @@ dirty-worktree protection
 
 ## RINARI.md
 
-- [ ] global engineering instruction resolver.
-- [ ] root `RINARI.md`.
-- [ ] nested `RINARI.md`.
-- [ ] `RINARI.override.md`.
-- [ ] root → cwd chain.
-- [ ] scope metadata.
-- [ ] trust metadata.
-- [ ] instruction precedence tests.
-- [ ] random README remains untrusted data.
+- [x] global engineering instruction resolver. (`~/.rinari/RINARI.md`, user-owned,
+      siempre confiado; resolver en `rinari/instructions/resolver.py`)
+- [x] root `RINARI.md`.
+- [x] nested `RINARI.md`.
+- [x] `RINARI.override.md`. (reemplaza a RINARI.md en su level, nunca apila)
+- [x] root → cwd chain. (root → ... → cwd; el level más profundo gana)
+- [x] scope metadata. (`global` | `root` | `dir:<rel>` + kind + sha256 + size por file)
+- [x] trust metadata. (project confiado → files de la chain; no confiado → solo global)
+- [x] instruction precedence tests. (`tests/unit/test_instructions_resolver.py`)
+- [x] random README remains untrusted data. (nunca se lee como instruction)
 
 ## Repository state
 

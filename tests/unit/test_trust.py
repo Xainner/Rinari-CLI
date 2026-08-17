@@ -119,7 +119,7 @@ def test_add_requires_existing_path(services, tmp_path) -> None:
 def test_untrusted_project_instructions_are_withheld(services, tmp_path) -> None:
     repo = _git_repo(tmp_path)
     (repo / "RINARI.md").write_text("# Secret project rule: do X\n", encoding="utf-8")
-    (repo / "AGENTS.md").write_text("agents rule\n", encoding="utf-8")
+    (repo / "README.md").write_text("# readme is data, not instructions\n", encoding="utf-8")
     record = services.sessions.start(repo).session
 
     # Untrusted: no project instructions segment, but the environment flags it.
@@ -132,14 +132,14 @@ def test_untrusted_project_instructions_are_withheld(services, tmp_path) -> None
     started = services.sessions.start(repo)
     assert any("not trusted" in w for w in started.warnings)
 
-    # After an explicit grant the instructions load:
+    # After an explicit grant the RINARI.md chain loads:
     services.trust.add(repo)
     trusted = services.sessions.start(repo).session
     ctx_trusted = build_assembler_context(services, trusted)
-    assert {i.provenance for i in ctx_trusted.project_instructions} == {
-        f"{repo.name}/RINARI.md",
-        f"{repo.name}/AGENTS.md",
-    }
+    assert [i.provenance for i in ctx_trusted.project_instructions] == ["./RINARI.md"]
+    assert "# Secret project rule: do X" in ctx_trusted.project_instructions[0].content
+    # README never becomes an instruction.
+    assert all("readme" not in i.content for i in ctx_trusted.project_instructions)
     assert ctx_trusted.environment["project_trust"] == STATE_TRUSTED
 
 

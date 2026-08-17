@@ -1719,6 +1719,21 @@ Instruction chain example:
 ~/repo/src/payments/RINARI.override.md
 ```
 
+Implementation (phase 3):
+
+```text
+resolver    rinari.instructions.resolver.resolve_project_instructions
+chain       ~/.rinari/RINARI.md (global, user-owned, always trusted)
+            then root -> ... -> cwd, deeper files take precedence
+override    RINARI.override.md replaces RINARI.md at its own level
+metadata    per file: scope (global|root|dir:<rel>), kind, trust, sha256, size
+boundary    files are bounded to 32 KiB; README/other files are data,
+            never instructions; untrusted projects contribute nothing
+```
+
+The `project instructions` subcommand surface above is not exposed yet; the
+resolver above is shared by the prompt assembler and the trust gate.
+
 ---
 
 # 29. `trust`

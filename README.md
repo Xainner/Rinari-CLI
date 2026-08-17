@@ -71,9 +71,13 @@ uv run rinari version
   `git.status` etiqueta la ownership de cada path (`user` /
   `modified-in-session` / `new-in-session`).
 - Project trust (Fase 3): `rinari trust add|remove|status|list`; un project
-  no confiado retiene sus instrucciones (RINARI.md/AGENTS.md) hasta un grant
-  explícito, con fingerprint de identidad (git HEAD+remotes) y revalidation
-  cuando la identidad cambia.
+  no confiado retiene sus instrucciones hasta un grant explícito, con
+  fingerprint de identidad (git HEAD+remotes) y revalidation cuando la
+  identidad cambia.
+- Instrucciones de project (Fase 3): resolver de RINARI.md con chain
+  `~/.rinari/RINARI.md` (global) → root → ... → cwd; `RINARI.override.md`
+  reemplaza a RINARI.md en su level; el level más profundo gana conflictos.
+  README y demás files siguen siendo data, no instrucciones.
 
 ## Pendiente
 
