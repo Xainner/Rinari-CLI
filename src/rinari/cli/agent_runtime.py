@@ -32,8 +32,10 @@ from rinari.projects.worktree import WorktreeGuard, snapshot_worktree
 from rinari.prompts.assembler import AssemblerContext, ProjectInstruction, PromptAssembler
 from rinari.prompts.soul_sections import split_soul
 from rinari.runtime.agent import AgentContext, AgentLoop, TurnResult
+from rinari.runtime.budget import BudgetMeter, TurnBudgetLimits
 from rinari.runtime.cancellation import CancellationToken
 from rinari.runtime.identity import load_constitution, load_soul
+from rinari.runtime.loopdetection import LoopDetector
 from rinari.runtime.model_caller import ModelCaller
 from rinari.shared.clock import now_iso
 from rinari.shared.errors import CancelledError, InvalidUsageError, RinariError
@@ -712,6 +714,8 @@ def run_turn(session: AgentSession, message: str, *, on_delta=None, on_tool=None
         session.context.assembler_base = replace(base, include_extended_identity=include_identity)
     before = len(session.context.history)
     dropped_before = session.context.dropped_total
+    budget = BudgetMeter(TurnBudgetLimits(), clock=services.ctx.clock)
+    loop = LoopDetector()
     try:
         result = session.loop.turn(
             session.context,
@@ -719,6 +723,8 @@ def run_turn(session: AgentSession, message: str, *, on_delta=None, on_tool=None
             on_delta=on_delta,
             on_tool=on_tool,
             cancel=session.token,
+            budget=budget,
+            loop=loop,
         )
     except CancelledError:
         _set_session_state(services, session.record, STATE_INTERRUPTED)
@@ -729,7 +735,7 @@ def run_turn(session: AgentSession, message: str, *, on_delta=None, on_tool=None
     _persist_new_messages(services, session.record, new_msgs)
     if result.kind != "cancelled" and session.record.kind == "CHAT":
         _maybe_promote(session)
-    if result.kind in ("answer", "truncated", "budget") and result.tool_calls > 0:
+    if result.kind in ("answer", "truncated", "budget", "loop") and result.tool_calls > 0:
         result = _finalize_turn(session, result)
     if session.context.compacted:
         session.context.compacted = False

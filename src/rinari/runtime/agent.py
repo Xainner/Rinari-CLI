@@ -31,7 +31,9 @@ from rinari.context.tokens import (
 )
 from rinari.models.types import ChatMessage, ModelRequest, StopReason, Usage
 from rinari.prompts.assembler import AssemblerContext, PromptAssembler
+from rinari.runtime.budget import BudgetMeter
 from rinari.runtime.cancellation import CancellationToken
+from rinari.runtime.loopdetection import LoopDetector
 from rinari.shared.errors import CancelledError
 from rinari.tools.definition import ToolErrorCode, ToolErrorInfo, ToolResult
 from rinari.tools.runtime import ToolRuntime
@@ -41,6 +43,7 @@ EVENT_TURN_STARTED = "AgentTurnStarted"
 EVENT_MODEL_INVOKED = "ModelInvoked"
 EVENT_TOOL_COMPLETED = "ToolCompleted"
 EVENT_TURN_COMPLETED = "AgentTurnCompleted"
+EVENT_LOOP_DETECTED = "LoopDetected"
 
 DEFAULT_MAX_MODEL_CALLS = 8
 DEFAULT_MAX_TOOL_CALLS = 32
@@ -48,7 +51,7 @@ DEFAULT_MAX_TOOL_CALLS = 32
 
 @dataclass(frozen=True, slots=True)
 class TurnResult:
-    kind: str  # answer | truncated | cancelled | error | max_model_calls | budget
+    kind: str  # answer | truncated | cancelled | error | max_model_calls | budget | loop
     content: str
     tool_calls: int
     usage: Usage | None
@@ -59,6 +62,8 @@ class TurnResult:
     # Context compaction (phase 4): True when this turn triggered a
     # provider-independent compaction of the in-memory context.
     compacted: bool = False
+    # Turn budgets (phase 4): final meter snapshot when a budget was active.
+    budget: dict | None = None
 
 
 # `model_provider` exposes: capabilities() -> ProviderCapabilities,
@@ -120,18 +125,47 @@ class AgentLoop:
         on_delta: DeltaFn | None = None,
         on_tool: ToolHook | None = None,
         cancel: CancellationToken | None = None,
+        budget: BudgetMeter | None = None,
+        loop: LoopDetector | None = None,
     ) -> TurnResult:
         cancel = cancel if cancel is not None else CancellationToken()
+        loop = loop if loop is not None else LoopDetector()
         self._emit(ctx.session_id, EVENT_TURN_STARTED, {"preview": user_message[:200]})
         ctx.history.append(ChatMessage.user(user_message))
         tool_calls_made = 0
         total_usage: Usage | None = None
 
-        for _ in range(self._max_model_calls):
+        max_iters = self._max_model_calls
+        if budget is not None:
+            max_iters = max(max_iters, budget.limits.max_model_calls)
+        for _ in range(max_iters):
             cancel.throw_if_cancelled()
+            if budget is not None:
+                hit = budget.first_exhausted()
+                if hit is not None:
+                    return self._stop(
+                        ctx.session_id,
+                        "budget",
+                        f"Stopped: turn budget exhausted ({_budget_reason(hit)}).",
+                        tool_calls_made,
+                        total_usage,
+                        budget,
+                    )
+                if budget.model_calls >= budget.limits.max_model_calls:
+                    return self._stop(
+                        ctx.session_id,
+                        "budget",
+                        "Stopped: turn budget exhausted (model-calls).",
+                        tool_calls_made,
+                        total_usage,
+                        budget,
+                    )
+                budget.note_model_call()
             request = self._build_request(ctx)
             response = self._invoke(ctx, request, on_delta)
             total_usage = _merge_usage(total_usage, response.usage)
+            if budget is not None:
+                budget.note_usage(response.usage)
             self._emit(
                 ctx.session_id,
                 EVENT_MODEL_INVOKED,
@@ -149,29 +183,33 @@ class AgentLoop:
                 self._emit(
                     ctx.session_id,
                     EVENT_TURN_COMPLETED,
-                    {"kind": kind, "tool_calls": tool_calls_made},
+                    _turn_completed_payload(kind, tool_calls_made, budget),
                 )
                 return TurnResult(
                     kind=kind,
                     content=response.content or "",
                     tool_calls=tool_calls_made,
                     usage=total_usage,
+                    budget=budget.snapshot() if budget is not None else None,
                 )
 
             # EXECUTE: run every requested tool, feed results back as tool msgs.
             ctx.history.append(ChatMessage.assistant(response.content or "", response.tool_calls))
             for call in response.tool_calls:
                 cancel.throw_if_cancelled()
-                if tool_calls_made >= self._max_tool_calls:
+                allowed = budget is None or budget.allows_tool(call.name)
+                if tool_calls_made >= self._max_tool_calls or not allowed:
                     result = ToolResult(
                         ok=False,
                         error=ToolErrorInfo(
-                            code=ToolErrorCode.TIMEOUT,
+                            code=ToolErrorCode.RESOURCE_EXHAUSTED,
                             message="per-turn tool budget exhausted; stop calling tools",
                             retryable=False,
                         ),
                     )
                 else:
+                    if budget is not None:
+                        budget.note_tool_call(call.name)
                     _hook(on_tool, "start", call.name, call.arguments)
                     result = self._tools.execute(
                         call.name, call.arguments, ctx.tool_ctx, tool_call_id=call.id
@@ -194,6 +232,38 @@ class AgentLoop:
                         "artifacts": [a.uri for a in result.artifacts],
                     },
                 )
+                loop.record_tool(call.name, call.arguments)
+                if result.error is not None:
+                    loop.record_error(call.name, result.error.code.value, result.error.message)
+                signal = loop.check()
+                if signal is not None:
+                    self._emit(
+                        ctx.session_id,
+                        EVENT_LOOP_DETECTED,
+                        {"kind": signal.kind, "detail": signal.detail, "action": signal.action},
+                    )
+                    if signal.action == "stop":
+                        return self._stop(
+                            ctx.session_id,
+                            "loop",
+                            f"Stopped: loop detected ({signal.kind} — {signal.detail}).",
+                            tool_calls_made,
+                            total_usage,
+                            budget,
+                        )
+                    ctx.history.append(ChatMessage.user(loop.nudge_text(signal)))
+
+            if budget is not None:
+                hit = budget.first_exhausted()
+                if hit is not None:
+                    return self._stop(
+                        ctx.session_id,
+                        "budget",
+                        f"Stopped: turn budget exhausted ({_budget_reason(hit)}).",
+                        tool_calls_made,
+                        total_usage,
+                        budget,
+                    )
 
         return self._stop(
             ctx.session_id,
@@ -202,6 +272,7 @@ class AgentLoop:
             "requesting tools.",
             tool_calls_made,
             total_usage,
+            budget,
         )
 
     # -- internals ------------------------------------------------------------
@@ -253,9 +324,18 @@ class AgentLoop:
         content: str,
         tool_calls: int,
         usage: Usage | None,
+        budget: BudgetMeter | None = None,
     ) -> TurnResult:
-        self._emit(session_id, EVENT_TURN_COMPLETED, {"kind": kind, "tool_calls": tool_calls})
-        return TurnResult(kind=kind, content=content, tool_calls=tool_calls, usage=usage)
+        self._emit(
+            session_id, EVENT_TURN_COMPLETED, _turn_completed_payload(kind, tool_calls, budget)
+        )
+        return TurnResult(
+            kind=kind,
+            content=content,
+            tool_calls=tool_calls,
+            usage=usage,
+            budget=budget.snapshot() if budget is not None else None,
+        )
 
     def _emit(self, session_id: str, event_type: str, payload: dict) -> None:
         if self._event_sink is None:
@@ -263,6 +343,28 @@ class AgentLoop:
         with contextlib.suppress(Exception):
             # Observability must never take the conversation down.
             self._event_sink(session_id, event_type, payload)
+
+
+def _turn_completed_payload(kind: str, tool_calls: int, budget: BudgetMeter | None) -> dict:
+    payload = {"kind": kind, "tool_calls": tool_calls}
+    if budget is not None:
+        payload["budget"] = budget.snapshot()
+    return payload
+
+
+_BUDGET_REASONS = {
+    "model-calls": "model-call limit reached",
+    "tool-calls": "tool-call limit reached",
+    "network-calls": "network-call limit reached",
+    "subagents": "subagent limit reached",
+    "recursion-depth": "recursion-depth limit reached",
+    "cost": "cost limit reached",
+    "wall-time": "wall-time limit reached",
+}
+
+
+def _budget_reason(name: str) -> str:
+    return _BUDGET_REASONS.get(name, name)
 
 
 def _hook(on_tool: ToolHook | None, phase: str, name: str, detail: object) -> None:

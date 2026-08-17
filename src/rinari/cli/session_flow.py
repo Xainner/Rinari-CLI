@@ -102,6 +102,7 @@ def _turn_dict(result: TurnResult) -> dict:
         ),
         "completion": result.completion,
         "compacted": result.compacted,
+        "budget": result.budget,
     }
 
 

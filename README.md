@@ -140,9 +140,19 @@ reemplaza a RINARI.md en su level; el level más profundo gana conflictos.
 
 ## Pendiente
 
-- En Fase 4 (resto): budgets y loop detection, network policy + hook del
-  sandbox, y skill version reconciliation. Checklist completo en
-  [TODO.md](TODO.md).
+- En Fase 4 (resto): network policy + hook del sandbox, y skill version
+  reconciliation. Checklist completo en [TODO.md](TODO.md).
+- Budgets + loop detection (Fase 4): cada turno corre con un `BudgetMeter`
+  (model calls, tool calls, network calls, wall time vía clock inyectado,
+  cost estimado desde usage real × pricing declarado — sin pricing el costo
+  queda sin medir y nunca se inventa —, subagents y recursion depth) y un
+  `LoopDetector` por-turno (mismo tool+args, oscilación A-B, rewrites del
+  mismo path, mismo error, approval denegada repetida, subagent duplicado).
+  Presupuesto agotado → turno termina con `kind="budget"` + snapshot
+  observable (`TurnResult.budget`); primera detección de loop inyecta un
+  nudge del harness forzando cambio de estrategia, la segunda detiene el
+  turno con `kind="loop"` (evento `LoopDetected`). 18 tests
+  (`test_budget_loop.py`).
 - Session fork (Fase 4): `rinari session fork <ref> [--name alias]` crea una
   sesión independiente desde la fuente: copia kind, identidad de proyecto,
   cwd, provider/model/profile, mode, `compact_state`, branch grabada y la

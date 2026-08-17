@@ -1554,23 +1554,44 @@ título y `updated_at`). `session_dict` expone `git_branch` y `forked_from`.
 
 ## Budgets
 
-- [ ] model calls.
-- [ ] tool calls.
-- [ ] cost.
-- [ ] wall time.
-- [ ] subagents.
-- [ ] recursion depth.
-- [ ] network calls.
+- [x] model calls.
+- [x] tool calls.
+- [x] cost.
+- [x] wall time.
+- [x] subagents.
+- [x] recursion depth.
+- [x] network calls.
 
 ## Loop detection
 
-- [ ] same tool/args.
-- [ ] same error.
-- [ ] two-action oscillation.
-- [ ] repeated rewrites.
-- [ ] repeated denied approval.
-- [ ] duplicated subagent work.
-- [ ] force strategy change.
+- [x] same tool/args.
+- [x] same error.
+- [x] two-action oscillation.
+- [x] repeated rewrites.
+- [x] repeated denied approval.
+- [x] duplicated subagent work.
+- [x] force strategy change.
+
+Implementation (budgets + loop detection): `BudgetMeter` +
+`TurnBudgetLimits` (`runtime/budget.py`) miden por turno: model calls, tool
+calls, network calls (namespaces `web`/`http`/`browser`, que aterrizan en
+fase 5 pero ya cuentan al existir), wall time (vía `Clock` inyectado), cost
+(estimado desde usage real × pricing declarado en los límites; sin pricing el
+costo queda sin medir y nunca se inventa), subagents y recursion depth
+(los límites ya existen para el runtime multi-agente posterior). El gate se
+evalúa antes de cada model call (`>=`) y antes de cada tool call
+(`allows_tool`); al agotarse el turno termina con `kind="budget"`, contenido
+con la dimensión responsable y snapshot observable del medidor
+(`TurnResult.budget`, evento `AgentTurnCompleted.budget`). `LoopDetector`
+(`runtime/loopdetection.py`) es por-turno (no cruza turns) y detecta: mismo
+tool+args canónicos, oscilación A-B de dos acciones, rewrites repetidas del
+mismo path (`fs.write`/`fs.patch`), mismo error (signatura code+prefijo de
+mensaje), approval denegada repetida y subagent duplicado. Primera detección
+inyecta un nudge del harness (`[harness loop-detector] ...` como mensaje de
+usuario) forzando cambio de estrategia; segunda de la misma clase detiene el
+turno con `kind="loop"` (evento `LoopDetected`). `run_turn` crea los dos por
+turno; JSON y REPL exponen el resultado. 18 tests (`test_budget_loop.py`,
+incluyendo integración real del loop con modelo scripted).
 
 ---
 
@@ -2659,12 +2680,17 @@ COMPLETADO EN FASE 4 (hasta el momento)
   ResumeReconciler identity/branch/working-tree/permissions/provider/
   model/trust/assumptions, findings estructurados + `data.reconciliation`
   en JSON)
-  Session fork (migración 0013 sessions.forked_from, `session fork` con
-  copia de estado + conversación, provenance via evento SessionForked,
-  sesión fuente inmutable)
+Session fork (migración 0013 sessions.forked_from, `session fork` con
+   copia de estado + conversación, provenance via evento SessionForked,
+   sesión fuente inmutable)
+   Budgets por turno (model/tool/network/wall-time/cost/subagents/recursion;
+   kind="budget" + snapshot TurnResult.budget; cost sin pricing nunca se
+   inventa)
+   Loop detection por turno (same tool/args, oscilación A-B, rewrites,
+   mismo error, approval denegada, subagent duplicado; nudge → stop
+   kind="loop", evento LoopDetected)
 
 SIGUIENTE (fase 4)
-  → Budgets + loop detection
-  → network policy + hooks
-  → skill version reconciliation (pendiente de versioning de skills)
+   → network policy + hooks
+   → skill version reconciliation (pendiente de versioning de skills)
 ```
