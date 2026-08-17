@@ -28,6 +28,9 @@ class Database:
     def execute(self, sql: str, params: Sequence[Any] = ()) -> sqlite3.Cursor:
         return self._conn.execute(sql, params)
 
+    def executemany(self, sql: str, params: Sequence[Sequence[Any]]) -> sqlite3.Cursor:
+        return self._conn.executemany(sql, list(params))
+
     def query(self, sql: str, params: Sequence[Any] = ()) -> list[sqlite3.Row]:
         cursor = self._conn.execute(sql, params)
         return list(cursor.fetchall())

@@ -13,6 +13,7 @@ from rinari.application.model_service import ModelService
 from rinari.application.project_service import ProjectService
 from rinari.application.provider_service import ProviderService
 from rinari.application.session_service import SessionService
+from rinari.repo.index_service import IndexService
 from rinari.trust import TrustService
 
 
@@ -24,6 +25,7 @@ class ServiceContainer:
     models: ModelService
     projects: ProjectService
     trust: TrustService
+    index: IndexService
     sessions: SessionService
 
 
@@ -37,6 +39,7 @@ def build_services(
     models = ModelService(ctx, providers, http_client=http_client)
     projects = ProjectService(ctx)
     trust = TrustService(ctx)
+    index = IndexService(ctx)
     sessions = SessionService(ctx, providers, projects, trust=trust, user_home=user_home)
     return ServiceContainer(
         ctx=ctx,
@@ -45,5 +48,6 @@ def build_services(
         models=models,
         projects=projects,
         trust=trust,
+        index=index,
         sessions=sessions,
     )

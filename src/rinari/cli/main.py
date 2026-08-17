@@ -6,6 +6,7 @@ import typer
 
 from rinari import __version__
 from rinari.cli.commands import config as config_cmd
+from rinari.cli.commands import index as index_cmd
 from rinari.cli.commands import model as model_cmd
 from rinari.cli.commands import models as models_cmd
 from rinari.cli.commands import provider as provider_cmd
@@ -30,6 +31,7 @@ app.add_typer(models_cmd.app, name="models")
 app.add_typer(model_cmd.app, name="model")
 app.add_typer(sessions_cmd.session_app, name="session")
 app.add_typer(trust_cmd.app, name="trust")
+app.add_typer(index_cmd.app, name="index")
 app.add_typer(system_cmd.system_app, name=None)
 
 app.command("chat")(sessions_cmd.chat_cmd)

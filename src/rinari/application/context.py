@@ -19,6 +19,7 @@ from rinari.storage.db import Database
 from rinari.storage.migrations import MigrationRunner
 from rinari.storage.repositories import (
     ConfigValueRepository,
+    IndexRepository,
     ModelRepository,
     ProjectRepository,
     ProviderRepository,
@@ -46,6 +47,7 @@ class AppContext:
     message_repo: SessionMessageRepository
     worktree_repo: WorktreeBaselineRepository
     trust_repo: TrustEntryRepository
+    index_repo: IndexRepository
     config_repo: ConfigValueRepository
 
     def close(self) -> None:
@@ -87,6 +89,7 @@ def build_app_context(
         message_repo=SessionMessageRepository(db),
         worktree_repo=WorktreeBaselineRepository(db),
         trust_repo=TrustEntryRepository(db),
+        index_repo=IndexRepository(db),
         config_repo=ConfigValueRepository(db),
     )
 

@@ -96,6 +96,10 @@ reemplaza a RINARI.md en su level; el level más profundo gana conflictos.
   (rename solo planea el WorkspaceEdit, nunca lo aplica). Los servers se
   detectan en PATH (`pyright-langserver`, `typescript-language-server`);
   sin server, los tools indican el fallback a `search.*`.
+- Repository index (Fase 3): `rinari index status|build|update|rebuild|clear|search|doctor`;
+  index project-scoped (files con hash sha256, symbols, references, test
+  mapping) con invalidation incremental — los files sin cambios no se
+  reparsen; la capa semántica queda declarada (`none`) como add-on opcional.
 
 ## Pendiente
 

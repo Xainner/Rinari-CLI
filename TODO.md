@@ -1217,15 +1217,25 @@ universal, stack.md 69). 21 tests contra fake LSP server stdio
 
 ## Repository Index
 
-- [ ] project-scoped index.
-- [ ] file hashes.
-- [ ] symbols.
-- [ ] imports.
-- [ ] references.
-- [ ] test mapping.
-- [ ] incremental invalidation.
-- [ ] optional semantic layer.
-- [ ] `rinari index ...`.
+- [x] project-scoped index. (migración 0005: `repo_index_*` keyed por project root)
+- [x] file hashes. (sha256 por file en `repo_index_files`)
+- [x] symbols. (cache JSON por file; tabla `repo_index_symbols` con `qualified_name`)
+- [x] imports. (`imports_json` por file, usado para el test mapping)
+- [x] references. (`repo_index_references`; exclusión de definitions; bounded text scan)
+- [x] test mapping. (imports + heurística `test_*.py`; `tests_touching(files)`)
+- [x] incremental invalidation. (mismo hash → no se reparse; changed/removed contados)
+- [x] optional semantic layer. (declarada como `none`; nunca default — stack.md 68)
+- [x] `rinari index ...`. (`status|build|update|rebuild|clear|search|doctor`, commands.md 54)
+
+Implementation (phase 3): core puro en `src/rinari/repo/index.py`
+(`build_index` incremental, `_scan_references`, `_test_mapping`,
+`query_index`, `doctor_index`), store en
+`src/rinari/storage/repositories/index.py`, service application-level en
+`src/rinari/repo/index_service.py` y CLI en `src/rinari/cli/commands/index.py`.
+Cross-file data (references/test-map) se recalcula cada build a partir del
+cache por-file + text scan bounded; lo que evita el reparse es el hash cache
+(harness.md 99). 9 tests (`test_repo_index.py`) + suite completa 390 passed /
+2 skipped.
 
 ## Task Graph
 
