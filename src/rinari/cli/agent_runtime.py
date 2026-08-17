@@ -297,6 +297,17 @@ def _build_lsp_manager(root: Path | None):
         return None
 
 
+def _build_browser_manager(session_id: str, home: Path):
+    # Lazy: constructing the manager dials nothing; browser.launch /
+    # browser.connect open the CDP connection (phase 5 "Browser engine").
+    try:
+        from rinari.browser import BrowserManager
+
+        return BrowserManager(session_id=session_id, home_root=home / ".rinari")
+    except Exception:
+        return None
+
+
 def build_agent_session(
     services: ServiceContainer,
     record: SessionRecord,
@@ -340,6 +351,7 @@ def build_agent_session(
         project_trusted=_project_trusted(services, root),
         network=NetworkGuard(network_policy),
         credentials=services.credentials,
+        browser=_build_browser_manager(record.id, home),
     )
     caller = _caller_for(services, record)
     loop = AgentLoop(

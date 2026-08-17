@@ -171,6 +171,9 @@ class ToolContext:
     # CredentialStore (application.credentials): http.* tools resolve secret
     # references (env://VAR, file://key) for auth injection through it.
     credentials: Any = None
+    # Session-scoped BrowserManager (rinari.browser): browser.* tools drive the
+    # CDP-connected browser through it; None only for test contexts.
+    browser: Any = None
 
 
 @dataclass(frozen=True, slots=True)

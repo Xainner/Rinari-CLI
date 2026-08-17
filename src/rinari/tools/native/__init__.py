@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from rinari.tools.definition import ToolDefinition
+from rinari.tools.native.browse import browse_tools
 from rinari.tools.native.context import context_tools
 from rinari.tools.native.fs import filesystem_tools
 from rinari.tools.native.git import git_tools
@@ -33,4 +34,5 @@ def all_native_tools() -> list[ToolDefinition]:
         *pty_tools(),
         *web_tools(),
         *http_tools(),
+        *browse_tools(),
     ]

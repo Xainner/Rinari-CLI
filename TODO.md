@@ -2,7 +2,7 @@
 
 Roadmap canónico de construcción de Rinari.
 
-> **Estado actual:** Fases 0-4 completas (2026-08-17). Fase 5 en curso: Web y HTTP terminadas; browser, plugins, MCP, OpenAPI, unified search y hooks pendientes.
+> **Estado actual:** Fases 0-4 completas (2026-08-17). Fase 5 en curso: Web, HTTP y Browser terminados; plugins, MCP, OpenAPI, unified search y hooks pendientes.
 >
 > **Regla:** las fases expresan **orden de dependencia de implementación**, no alcance opcional del producto.
 >
@@ -1725,39 +1725,90 @@ Tool Runtime + `NetworkGuard` aplican igual que en web). 42 tests
 auth; incluye caminend-to-end por `ToolRuntime` real con policy deny/allow y
 verificación de que el secreto inyectado nunca aparece en el resultado.
 
+## Browser engine (decisión, 2026-08-17)
+
+**Motor elegido: CDP directo.** `src/rinari/browser/` implementa el mínimo
+necesario para hablar Chrome DevTools Protocol:
+
+- `ws.py`: client WebSocket RFC6455 sobre sockets stdlib (handshake con
+  `Sec-WebSocket-Key`/`Accept` verificado, frames text con masking de cliente,
+  continuation, ping/pong, close, tope de frame 8 MiB). Sin dependencias.
+- `cdp.py`: sesión CDP JSON-RPC sobre el WS (request/response con matching por
+  id + timeout, hilo de lectura que despacha a waiters y cola de events;
+  sesiones *flattened* por target vía `Target.attachToTarget`).
+- `manager.py`: `BrowserManager` (session-scoped): descubrir/conectar endpoint
+  CDP (`RINARI_BROWSER_CDP` o `browser.launch`), tab lifecycle, operaciones
+  acotadas (evaluate/snapshot/screenshot/input/cookies/consola/red).
+  Lanzamiento gestionado: Chromium headless con `user-data-dir` aislado en
+  `~/.rinari/browser/profiles/<session_id>` (login/session isolation) y
+  ownership del subprocess (se mata en `close` solo si Rinari lo lanzó).
+
+**Alternativa documentada: Playwright.** Engine off-the-shelf que también habla
+CDP (y BiDi) con helpers de alto nivel. No se adopta como engine inicial por:
+(1) dependencia pesada + descarga de binario del browser en el setup, en
+conflicto con la estrategia de dependencias de stack.md y con tests
+deterministas; (2) el alcance actual (navegación, snapshot, input, screenshots,
+observe, upload/download con policy) se cubre con una decena de comandos CDP.
+Si se requieren después a11y-snapshots ricos, auto-wait, tracing o BiDi, el
+swap es local: `BrowserManager` aísla el driver tras su interfaz y los tools
+`browser.*` no cambian.
+
 ## Browser Runtime
 
-- [ ] Browser Manager.
-- [ ] browser lifecycle.
-- [ ] tabs.
-- [ ] navigation.
-- [ ] DOM snapshot.
-- [ ] accessibility tree.
-- [ ] screenshot.
-- [ ] click.
-- [ ] type/fill.
-- [ ] select.
-- [ ] check/uncheck.
-- [ ] drag.
-- [ ] scroll.
-- [ ] forms.
-- [ ] upload.
-- [ ] download.
-- [ ] cookies/storage.
-- [ ] console.
-- [ ] network observation.
-- [ ] bounded evaluate.
+- [x] Browser Manager.
+- [x] browser lifecycle.
+- [x] tabs.
+- [x] navigation.
+- [x] DOM snapshot.
+- [x] accessibility tree.
+- [x] screenshot.
+- [x] click.
+- [x] type/fill.
+- [x] select.
+- [x] check/uncheck.
+- [x] drag.
+- [x] scroll.
+- [x] forms.
+- [x] upload.
+- [x] download.
+- [x] cookies/storage.
+- [x] console.
+- [x] network observation.
+- [x] bounded evaluate.
 - [ ] auth profiles.
-- [ ] cancellation.
-- [ ] artifact capture.
+- [x] cancellation.
+- [x] artifact capture.
+
+Implementation (browser, bloque de 2026-08-17):
+`src/rinari/browser/` (ws.py client RFC6455 stdlib, cdp.py JSON-RPC + eventos
+con sesiones flattened, manager.py BrowserManager) + `tools/native/browse.py`
+(25 tools `browser.*`). Motor: CDP directo (decision documentada arriba +
+registro de decisiones); alternativa: Playwright.
+
+- Endpoint: `RINARI_BROWSER_CDP` (env) o `browser.launch`/`browser.connect`;
+  launch maneja un Chromium headless con `user-data-dir` aislado por sesión
+  (login/session isolation) y ownership del subprocess (solo mata lo que
+  lanzó).
+- Clasificación de policy: navegar http(s) → `network.outbound` sobre la URL
+  (guard en código, modo ask via approval); lectura del estado del browser →
+  `browser.read`; mutación (click/fill/type/select/check/scroll/drag/
+  set_cookie/launch/…) → `browser.mutate` (siempre consent, nunca read-only;
+  denegado en perfil read-only).
+- Uploads resueltos por el sandbox (provenance: path, bytes, sha256);
+  downloads solo al artifact dir de la sesión (name/size/sha256 provenance).
+- Cookies con valores redactados (son credentials).
+- 40 tests deterministas contra un fake CDP server en loopback
+  (test_browser_cdp.py): RFC6455 frame-by-frame, CDP timeout/error/eventos
+  con requeue, manager y 13 tools vía ToolRuntime real (deny/ask/allow,
+  sandbox, aprovisiones de sesión).
 
 ## Browser policy
 
-- [ ] download policy.
-- [ ] upload provenance.
-- [ ] external side-effect classification.
-- [ ] login/session isolation.
-- [ ] browser subprocess ownership.
+- [x] download policy.
+- [x] upload provenance.
+- [x] external side-effect classification.
+- [x] login/session isolation.
+- [x] browser subprocess ownership.
 
 ## Plugin Runtime
 
@@ -2702,6 +2753,7 @@ Registrar aquí decisiones de producto/roadmap que cambien el contrato.
 | 2026-08-16 | `main` se mantiene como rama estable; no push sin petición/autorización y se prefieren commits pequeños con conventional prefixes. |
 | 2026-08-16 | Licencia MIT confirmada por Xainner; `LICENSE` agregado. Fase 0 completa; se abre Fase 1 (fundaciones, bootstrap y persistencia). |
 | 2026-08-16 | Fase 1 completa: packaging, estructura base, config, estado SQLite, credential store, provider/model/session registries + CLI, Soul/Constitution (assets + loader + overrides), Build Manifest, doctor/status/version. 4 items quedan abiertos por depender del agent loop de Fase 2. Se abre Fase 2 (Agent Runtime, Tool Runtime y seguridad base). |
+| 2026-08-17 | Browser engine: **CDP (Chrome DevTools Protocol) directo**, con un client WebSocket RFC6455 mínimo en repo y **cero dependencias nuevas**; Rinari se conecta a cualquier browser Chromium-family expuesto con `--remote-debugging-port` (conectar a endpoint existente o lanzar un Chromium gestionado headless con profile aislado por sesión). **Alternativa documentada: Playwright** (`playwright.chromium` / `connect_over_cdp`), descartada como engine inicial por ser dependencia pesada que requiere descarga binaria del browser en el setup (conflicta con la estrategia de dependencias y con tests aislados de red); el `BrowserManager` aísla el driver tras una interfaz, de modo que Playwright puede adoptarse después sin reescribir tools/policy si se necesitan sus helpers de alto nivel (a11y snapshots, auto-wait, BiDi). |
 
 ---
 
@@ -2719,7 +2771,9 @@ Registrar aquí decisiones de producto/roadmap que cambien el contrato.
 Estas decisiones pueden resolverse durante implementación porque no cambian el contrato de producto ya definido:
 
 - [ ] backend exacto inicial del Credential Store por plataforma;
-- [ ] librería/engine exacto para browser automation;
+- [x] ~~librería/engine exacto para browser automation~~ — resuelta 2026-08-17:
+      **CDP directo** (ver registro de decisiones y sección "Browser engine" en Fase 5).
+      Alternativa documentada: Playwright.
 - [ ] librería SQLite/ORM ligera vs SQL explícito;
 - [ ] set exacto de LSPs soportados inicialmente;
 - [ ] implementación exacta del semantic index;
@@ -2737,7 +2791,7 @@ Cada una debe decidirse antes de implementar el subsistema correspondiente, con 
 ```text
 FASE ACTUAL
   Fase 5 — Web, browser y capability ecosystem
-  (Web y HTTP terminadas; browser, plugins, MCP, OpenAPI, unified search y
+  (Web, HTTP y Browser terminadas; plugins, MCP, OpenAPI, unified search y
   hooks pendientes)
 
 COMPLETADO
@@ -2775,4 +2829,12 @@ EN FASE 5 (hasta el momento)
     (7 métodos, body/query/auth secret-ref), retry idempotente + backoff +
     Retry-After, SSE WHATWG acotado, redacción de secretos en respuesta/URL,
     artifact de respuesta; 42 tests (test_http_tools.py)
+    Browser (src/rinari/browser + tools browser.*, 25 tools): motor CDP
+    directo con client WebSocket RFC6455 propio (cero dependencias nuevas;
+    alternativa documentada: Playwright, swappable tras BrowserManager);
+    launch/connect lifecycle con subprocess ownership + per-session profiles,
+    navigation network-gated por policy, lectura/mutación browser.classificadas
+    (browser.read/browser.mutate), uploads por sandbox con provenance,
+    downloads solo a artifact dir, cookies redactadas; 40 tests contra un
+    fake CDP server en loopback (test_browser_cdp.py)
 ```

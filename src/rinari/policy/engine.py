@@ -48,6 +48,15 @@ CAPABILITY_NETWORK = "network.outbound"
 # no filesystem or network side effect, so it never asks for approval.
 CAPABILITY_STATE_READ = "state.read"
 CAPABILITY_STATE_WRITE = "state.write"
+# Browser capabilities (phase 5). Navigation is gated as network.outbound on
+# the target URL; the rest of the control surface maps to these two:
+#   browser.read    reads state of the browser this session drives
+#                   (no new dial: the navigation that reached the page was
+#                   already network-gated)
+#   browser.mutate  changes browser/page state; external side effects always
+#                   require explicit consent (AGENTS.md 11)
+CAPABILITY_BROWSER_READ = "browser.read"
+CAPABILITY_BROWSER_WRITE = "browser.mutate"
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +177,41 @@ class PolicyEngine:
             )
         if capability == CAPABILITY_FS_WRITE:
             return self._fs_write(scope, path, risk, risk_class)
+        if capability == CAPABILITY_BROWSER_READ:
+            if scope.profile is PermissionProfile.READ_ONLY:
+                return PolicyDecision(
+                    action=PolicyAction.DENY,
+                    capability=capability,
+                    reason="read-only profile does not read browser state",
+                    risk=risk,
+                    risk_class=risk_class,
+                )
+            return PolicyDecision(
+                action=PolicyAction.ALLOW,
+                capability=capability,
+                reason=(
+                    "reading the state of the browser this session drives "
+                    "(navigation is network-gated)"
+                ),
+                risk=risk,
+                risk_class=risk_class,
+            )
+        if capability == CAPABILITY_BROWSER_WRITE:
+            if scope.profile is PermissionProfile.READ_ONLY:
+                return PolicyDecision(
+                    action=PolicyAction.DENY,
+                    capability=capability,
+                    reason="read-only profile does not control a browser",
+                    risk=risk,
+                    risk_class=risk_class,
+                )
+            return PolicyDecision(
+                action=PolicyAction.ASK,
+                capability=capability,
+                reason="browser control can cause external side effects (consent required)",
+                risk=risk,
+                risk_class=risk_class,
+            )
         if capability == CAPABILITY_SHELL:
             return self._shell(scope, command, risk, risk_class)
         return PolicyDecision(

@@ -2,7 +2,7 @@
 
 **Tu asistente personal de IA en la terminal.**
 
-> **Estado: fases 0-4 completas (2026-08-17); fase 5 en curso (Web + HTTP done).**
+> **Estado: fases 0-4 completas (2026-08-17); fase 5 en curso (Web + HTTP + Browser done).**
 > Producto: CLI funcional (setup, config, providers/models, sesiones
 > CHAT/PROJECT, Soul/Constitution, doctor/status/version), agent + tool
 > runtime con seguridad base (fase 2), trust/index/validation/checkpoints
@@ -143,6 +143,19 @@ reemplaza a RINARI.md en su level; el level más profundo gana conflictos.
 
 ## Pendiente
 
+- Browser (Fase 5): 25 tools `browser.*` sobre un motor **CDP directo**
+  (client WebSocket RFC6455 propio en repo, cero dependencias nuevas;
+  alternativa documentada: Playwright, swappable tras `BrowserManager`).
+  `browser.launch` inicia un Chromium headless con perfil aislado por sesión
+  y ownership del subprocess; `browser.connect` usa `RINARI_BROWSER_CDP`.
+  Navegar http(s) se clasifica `network.outbound` sobre la URL (guard en
+  código + approval en modo ask); lecturas (`snapshot`, `a11y`, `screenshot`,
+  `console`, `network`, `cookies`, `tabs`) son `browser.read`; mutaciones
+  (`click`/`fill`/`type`/`select`/`check`/`scroll`/`drag`/`evaluate`/
+  `set_cookie`/…) son `browser.mutate` (consent explícito, denegado en
+  read-only). Uploads pasan por el sandbox con provenance (path/bytes/sha256);
+  downloads solo al artifact dir de la sesión (name/size/sha256); cookies con
+  valores redactados. 40 tests contra un fake CDP server en loopback.
 - HTTP (Fase 5): tools `http.request` (GET/POST/PUT/PATCH/DELETE/HEAD/
   OPTIONS, headers/query/body, auth por secret-ref `env://`/`file://` vía el
   `CredentialStore` de la sesión — bearer/basic/header/query) y `http.sse`
