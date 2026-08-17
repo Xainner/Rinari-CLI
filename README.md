@@ -140,11 +140,19 @@ reemplaza a RINARI.md en su level; el level más profundo gana conflictos.
 
 ## Pendiente
 
-- En Fase 4 (resto): retrieval/ranking/pins/dedup del Context Engine
-  (junto con las memorias), User/Project/Episodic/Pattern Memory, resume
-  + reconciliation (identity/branch/dirty-tree/trust/auth/model/skill/
-  policy), session fork, budgets y loop detection, y network policy + hook
-  del sandbox. Checklist completo en [TODO.md](TODO.md).
+- En Fase 4 (resto): retrieval general del Context Engine
+  (ranking/pins/dedup), resume + reconciliation
+  (identity/branch/dirty-tree/trust/auth/model/skill/policy), session fork,
+  budgets y loop detection, y network policy + hook del sandbox. Checklist
+  completo en [TODO.md](TODO.md).
+- User/Project/Episodic/Pattern Memory (Fase 4): 4 stores separadas en
+  SQLite (migración 0010) con provenance, confidence, conflict/supersede y
+  stale handling; filtro de sensibilidad que rechaza secretos en escritura;
+  nunca hay persistencia automática de inferencias (todo por store/tool
+  explícito). Tools `memory.remember/recall/update/forget/episodic`,
+  segmento de prompt `memory` (durable, posible-estale, menor autoridad) y
+  CLI `rinari memory list|search|show|add|edit|forget`. 10 tests
+  (`test_memory.py`).
 - Los 4 items de Fase 1 que dependían del agent loop (Extended Identity bajo
   demanda, project-creation intent, preservar conversación, recalcular
   permisos) quedaron resueltos al cerrar Fase 2.

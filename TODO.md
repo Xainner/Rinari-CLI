@@ -1391,8 +1391,9 @@ estricto). CLI `rinari artifacts list|show|open|search|export|remove|gc`.
 - [ ] dedup. (idem)
 - [x] artifact references.
 - [x] history selection.
-- [ ] project retrieval. (con Project Memory)
-- [ ] user-memory retrieval. (con User Memory)
+- [x] project retrieval. (con Project Memory)
+- [x] user-memory retrieval. (con User Memory)
+- [ ] retrieval general del Context Engine (ranking/pins/dedup — siguiente bloque de Fase 4).
 - [x] token accounting integration.
 
 ## Compaction
@@ -1432,30 +1433,55 @@ restaura el todo y re-aplica la selección de cola. 11 tests
 
 ## User Memory
 
-- [ ] record schema.
-- [ ] provenance.
-- [ ] confidence.
-- [ ] explicit durable preferences.
-- [ ] search.
-- [ ] update.
-- [ ] forget.
-- [ ] sensitivity filter.
+- [x] record schema.
+- [x] provenance.
+- [x] confidence.
+- [x] explicit durable preferences.
+- [x] search.
+- [x] update.
+- [x] forget.
+- [x] sensitivity filter.
 
 ## Project Memory
 
-- [ ] project namespace.
-- [ ] stable facts.
-- [ ] conflict detection.
-- [ ] stale fact handling.
-- [ ] promote team-relevant rules to docs when appropriate.
+- [x] project namespace.
+- [x] stable facts.
+- [x] conflict detection.
+- [x] stale fact handling.
+- [x] promote team-relevant rules to docs when appropriate.
 
 ## Episodic / Pattern Memory
 
-- [ ] episodic task summaries.
-- [ ] pattern records.
-- [ ] provenance.
-- [ ] no secret storage.
-- [ ] no automatic inference persistence.
+- [x] episodic task summaries.
+- [x] pattern records.
+- [x] provenance.
+- [x] no secret storage.
+- [x] no automatic inference persistence.
+
+Implementation (phase 4 — Memoria): migración 0010 crea 4 tablas separadas
+(`user_memory`, `project_memory`, `episodic_memory`, `pattern_memory`; nunca
+un bucket común, harness.md 69). `src/rinari/memory/service.py`
+(`MemoryService`): user memory con `kind=preference|rule|fact`, confidence y
+provenance; re-enunciar el mismo (kind, topic) refresca el registro y un
+conflicto lo supera conservando el anterior como historial (stale handling +
+conflict detection); project memory namespaceada por `project_root`;
+episodic con resúmenes de tarea acotados a 400 chars; pattern records
+(global/user) con dedup por (topic, texto). `find_sensitive_match` rechaza en
+escritura cualquier texto con patrones de credential (sk-, ghp_, AKIA, JWT,
+private key, bloques base64/hex largos con diversidad, etc.) y valores de
+credential conocidos: nunca se guarda un secreto (no-secret storage). No hay
+persistencia automática de inferencias: todo registro entra por un store/tool
+explícito. `src/rinari/storage/repositories/memory.py` persiste. Tools nativos
+`memory.remember/recall/update/forget/episodic` (namespace `memory`,
+capability `state.write`/`state.read`, project scope exige sesión PROJECT).
+Segmento de prompt `memory` (harness, TRUSTED, SESSION) inyecta el bloque de
+memoria durable (user + project) marcándolo posible-estale y de menor
+autoridad que las instrucciones. CLI `rinari memory
+list|search|show|add|edit|forget` (deletion siempre con scope explícito).
+10 tests (`test_memory.py`) + migración 0010 en `test_migrations.py`.
+Retrieval de memoria expuesto vía `memory.recall` y el segmento de prompt; el
+sistema general de context-retrieval (ranking/pins/dedup) sigue pendiente con
+el Context Engine.
 
 ## Resume
 
@@ -2570,11 +2596,17 @@ DEFERIDO A FASE 4
   network policy foundation + network hooks (sandbox)
   reconciliation de resume
 
+COMPLETADO EN FASE 4 (hasta el momento)
+  Artifact Store (migración 0009; artifact:// + search + retention + GC)
+  Context Engine (presupuesto por segmento, history selection, token
+  accounting)
+  Compaction (pressure thresholds, preserve task truth, compact-state
+  segment, restore en resume)
+  Memoria user/project/episodic/pattern (migración 0010, sensitivity
+  filter, tools memory.*, segmento de prompt, CLI `rinari memory`)
+
 SIGUIENTE (fase 4)
-  Artifacts (spill + artifact:// + search)
-  → Context Engine (presupuesto por segmento, retrieval)
-  → Compaction (preserve task truth)
-  → Memoria (user/project/episodic/pattern)
+  → Retrieval general del Context Engine (ranking/pins/dedup)
   → Resume durable + reconciliation
   → Budgets + loop detection
   → network policy + hooks

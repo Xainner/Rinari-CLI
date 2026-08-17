@@ -1,6 +1,7 @@
 from rinari.storage.repositories.checkpoints import CheckpointRepository
 from rinari.storage.repositories.config_values import ConfigValueRepository
 from rinari.storage.repositories.index import IndexRepository
+from rinari.storage.repositories.memory import MemoryRepository
 from rinari.storage.repositories.models import ModelRepository
 from rinari.storage.repositories.projects import ProjectRepository
 from rinari.storage.repositories.providers import ProviderRepository
@@ -18,6 +19,7 @@ __all__ = [
     "CheckpointRepository",
     "ConfigValueRepository",
     "IndexRepository",
+    "MemoryRepository",
     "ModelRepository",
     "ProjectRepository",
     "ProviderRepository",

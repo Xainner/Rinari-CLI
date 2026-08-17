@@ -21,6 +21,7 @@ from rinari.storage.repositories import (
     CheckpointRepository,
     ConfigValueRepository,
     IndexRepository,
+    MemoryRepository,
     ModelRepository,
     ProjectRepository,
     ProviderRepository,
@@ -55,6 +56,7 @@ class AppContext:
     validation_repo: ValidationRecordRepository
     checkpoint_repo: CheckpointRepository
     config_repo: ConfigValueRepository
+    memory_repo: MemoryRepository
 
     def close(self) -> None:
         self.db.close()
@@ -100,6 +102,7 @@ def build_app_context(
         validation_repo=ValidationRecordRepository(db),
         checkpoint_repo=CheckpointRepository(db),
         config_repo=ConfigValueRepository(db),
+        memory_repo=MemoryRepository(db),
     )
 
 

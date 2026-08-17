@@ -146,8 +146,19 @@ def build_assembler_context(services: ServiceContainer, record: SessionRecord) -
         extended_identity=extended,
         project_instructions=instructions,
         task_state=task_state,
+        memory=_memory_text(services, root),
         environment=environment,
     )
+
+
+def _memory_text(services: ServiceContainer, root: Path | None) -> str | None:
+    """Durable memory block (user + project); None when no records exist."""
+    try:
+        return services.memory.prompt_segment(str(root) if root is not None else None)
+    except Exception:
+        # Memory is optional prompt context; a storage hiccup must not break
+        # session assembly (the tools still surface the real error).
+        return None
 
 
 def _task_state_text(services: ServiceContainer, root: Path) -> str:
@@ -302,6 +313,7 @@ def build_agent_session(
         worktree=_ensure_worktree_baseline(services, record),
         lsp=_build_lsp_manager(root),
         validation=services.verification,
+        memory=services.memory,
         project_trusted=_project_trusted(services, root),
     )
     caller = _caller_for(services, record)
@@ -594,6 +606,7 @@ def _apply_promotion(session: AgentSession, record: SessionRecord, marker: str) 
         worktree=_ensure_worktree_baseline(services, record),
         lsp=_build_lsp_manager(root),
         validation=services.verification,
+        memory=services.memory,
         project_trusted=_project_trusted(services, root),
     )
     session.context.assembler_base = build_assembler_context(services, record)

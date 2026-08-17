@@ -33,6 +33,10 @@ TABLES_AFTER_MIGRATIONS = {
     "checkpoints",
     "checkpoint_files",
     "artifacts",
+    "user_memory",
+    "project_memory",
+    "episodic_memory",
+    "pattern_memory",
 }
 
 
@@ -52,7 +56,7 @@ def _table_names(db: Database) -> set[str]:
 
 def test_migrate_fresh_database_applies_all(db):
     applied = MigrationRunner(db, FakeClock()).migrate()
-    assert applied == [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    assert applied == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     assert _table_names(db) == TABLES_AFTER_MIGRATIONS
 
 
@@ -60,7 +64,7 @@ def test_migrate_is_idempotent(db):
     runner = MigrationRunner(db, FakeClock())
     runner.migrate()
     assert runner.migrate() == []
-    assert runner.current_version() == 9
+    assert runner.current_version() == 10
 
 
 def test_migrations_are_replayed_from_on_disk(db, tmp_path):

@@ -6,6 +6,7 @@ from rinari.tools.definition import ToolDefinition
 from rinari.tools.native.fs import filesystem_tools
 from rinari.tools.native.git import git_tools
 from rinari.tools.native.lsp import lsp_tools
+from rinari.tools.native.memory import memory_tools
 from rinari.tools.native.process import process_tools
 from rinari.tools.native.ptytools import pty_tools
 from rinari.tools.native.search import search_tools
@@ -24,5 +25,6 @@ def all_native_tools() -> list[ToolDefinition]:
         *process_tools(),
         *lsp_tools(),
         *verify_tools(),
+        *memory_tools(),
         *pty_tools(),
     ]
