@@ -1157,14 +1157,14 @@ dirty-worktree protection
 
 ## Repository state
 
-- [ ] language detection.
-- [ ] framework hints.
-- [ ] package manager detection.
-- [ ] build command discovery.
-- [ ] test command discovery.
-- [ ] lint/typecheck discovery.
-- [ ] generated file hints.
-- [ ] repository summary.
+- [x] language detection. (por extensión, conteo y ranking; `rinari/repo/state.py`)
+- [x] framework hints. (django/flask/fastapi, react/vue/next/express, go-modules, gradle)
+- [x] package manager detection. (uv/poetry/pip, npm/yarn/pnpm, cargo, go, maven, gradle, bundler)
+- [x] build command discovery. (`<pm> run build`, cargo/go/maven/gradle/uv build, con source)
+- [x] test command discovery. (scripts.test, cargo test, go test, pytest por dep/pyproject)
+- [x] lint/typecheck discovery. (ruff, eslint, rubocop, mypy, tsc, scripts.typecheck)
+- [x] generated file hints. (dirs generados detectados y excluidos del scan)
+- [x] repository summary. (dict para el segment environment del prompt; 7 tests)
 
 ## Search
 

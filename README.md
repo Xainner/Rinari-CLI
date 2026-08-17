@@ -74,6 +74,10 @@ uv run rinari version
   no confiado retiene sus instrucciones hasta un grant explícito, con
   fingerprint de identidad (git HEAD+remotes) y revalidation cuando la
   identidad cambia.
+- Repository state (Fase 3): detección por files de languages, frameworks,
+  package managers y comandos de build/test/lint/typecheck (con la source de
+  cada hint); alimentan el environment del prompt y se excluyen dirs
+  generados del scan.
 - Instrucciones de project (Fase 3): resolver de RINARI.md con chain
   `~/.rinari/RINARI.md` (global) → root → ... → cwd; `RINARI.override.md`
   reemplaza a RINARI.md en su level; el level más profundo gana conflictos.
