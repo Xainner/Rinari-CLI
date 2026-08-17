@@ -10,6 +10,7 @@ where safe, re-establish them. Subsystems checked:
     provider       provider row still exists
     model          model row still exists
     trust          project trust / revalidation state
+    skills         active (name, version) pairs vs the discovered skill catalog
     assumptions    recorded cwd still exists
 
 The only automatic fix is re-registering a missing project identity row, or
@@ -27,6 +28,7 @@ from rinari.application.context import AppContext
 from rinari.application.project_service import ProjectService
 from rinari.projects.git import git_state
 from rinari.projects.worktree import snapshot_worktree
+from rinari.skills.catalog import SkillInfo, discover_skills
 from rinari.storage.records import SessionRecord
 from rinari.trust import STATE_REVALIDATION, STATE_TRUSTED, TrustService
 
@@ -112,6 +114,7 @@ class ResumeReconciler:
         findings.append(self._provider(record))
         findings.append(self._model(record))
         findings.append(self._trust_finding(updated, root, root_exists))
+        findings.append(self._skills(record, root, root_exists))
         findings.append(self._assumptions(record))
 
         if updated is not record:
@@ -247,6 +250,40 @@ class ResumeReconciler:
         if "revalidation" in warning:
             return Finding("trust", CHANGED, warning, "warned")
         return Finding("trust", MISSING, warning, "warned")
+
+    def _skills(self, record: SessionRecord, root: Path | None, root_exists: bool) -> Finding:
+        if not record.active_skills:
+            return Finding("skills", OK, "no active skills recorded")
+        catalog = self._skill_catalog(root, root_exists)
+        missing = sorted(name for name, _ in record.active_skills if name not in catalog)
+        changed = sorted(
+            f"{name} ({version} -> {catalog[name].version})"
+            for name, version in record.active_skills
+            if name in catalog and catalog[name].version != version
+        )
+        if missing:
+            return Finding(
+                "skills",
+                MISSING,
+                f"skill(s) no longer installed: {', '.join(missing)} — re-verify any "
+                "procedure that relied on them",
+                "warned",
+            )
+        if changed:
+            return Finding(
+                "skills",
+                CHANGED,
+                f"skill version changed since the session: {', '.join(changed)} — re-read "
+                "it before relying on its procedure",
+                "warned",
+            )
+        return Finding("skills", OK, f"{len(record.active_skills)} active skill(s) unchanged")
+
+    def _skill_catalog(self, root: Path | None, root_exists: bool) -> dict[str, SkillInfo]:
+        project_dir = root / ".rinari" / "skills" if root is not None and root_exists else None
+        return discover_skills(
+            str(self._ctx.layout.dir("skills")), str(project_dir) if project_dir else None
+        )
 
     def _assumptions(self, record: SessionRecord) -> Finding:
         if not record.current_cwd:

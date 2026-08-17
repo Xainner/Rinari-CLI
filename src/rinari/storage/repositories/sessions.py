@@ -20,8 +20,9 @@ class SessionRepository:
                 id, kind, title, project_id, project_root_snapshot,
                 created_cwd, current_cwd, provider_id, model_id,
                 profile_id, mode, state, compact_state_json,
-                created_at, updated_at, last_active_at, git_branch, forked_from
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                created_at, updated_at, last_active_at, git_branch, forked_from,
+                active_skills_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 rec.id,
@@ -42,6 +43,11 @@ class SessionRepository:
                 rec.last_active_at,
                 rec.git_branch,
                 rec.forked_from,
+                (
+                    json.dumps([list(pair) for pair in rec.active_skills])
+                    if rec.active_skills
+                    else None
+                ),
             ),
         )
 
@@ -56,7 +62,7 @@ class SessionRepository:
                 kind = ?, title = ?, project_id = ?, project_root_snapshot = ?,
                 current_cwd = ?, provider_id = ?, model_id = ?, profile_id = ?,
                 mode = ?, state = ?, compact_state_json = ?, updated_at = ?, last_active_at = ?,
-                git_branch = ?, forked_from = ?
+                git_branch = ?, forked_from = ?, active_skills_json = ?
             WHERE id = ?
             """,
             (
@@ -75,6 +81,11 @@ class SessionRepository:
                 rec.last_active_at,
                 rec.git_branch,
                 rec.forked_from,
+                (
+                    json.dumps([list(pair) for pair in rec.active_skills])
+                    if rec.active_skills
+                    else None
+                ),
                 rec.id,
             ),
         )
@@ -102,6 +113,10 @@ class SessionRepository:
 
 def _session_to_record(row: dict) -> SessionRecord:
     compact = row["compact_state_json"]
+    raw_skills = row["active_skills_json"]
+    active_skills = None
+    if raw_skills:
+        active_skills = tuple((str(name), str(version)) for name, version in json.loads(raw_skills))
     return SessionRecord(
         id=row["id"],
         kind=row["kind"],
@@ -121,6 +136,7 @@ def _session_to_record(row: dict) -> SessionRecord:
         last_active_at=row["last_active_at"],
         git_branch=row["git_branch"],
         forked_from=row["forked_from"],
+        active_skills=active_skills,
     )
 
 

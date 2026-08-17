@@ -2,7 +2,7 @@
 
 Roadmap canónico de construcción de Rinari.
 
-> **Estado actual:** Fase 4 — Context, artifacts, memoria y resume durable.
+> **Estado actual:** Fases 0-4 completas (2026-08-17). Fase 5 (Web, browser y capability ecosystem) no iniciada.
 >
 > **Regla:** las fases expresan **orden de dependencia de implementación**, no alcance opcional del producto.
 >
@@ -1362,7 +1362,7 @@ salvo `--allow-mixed` (mixed ownership detection). 6 tests
 
 ---
 
-# Fase 4 — Context, artifacts, memoria y resume durable ← ACTUAL
+# Fase 4 — Context, artifacts, memoria y resume durable — COMPLETA (2026-08-17)
 
 ## Objetivo
 
@@ -1532,7 +1532,7 @@ en el bloque de Context Engine (ver arriba).
 - [x] trust reconciliation.
 - [x] provider auth reconciliation.
 - [x] model availability reconciliation.
-- [ ] skill version reconciliation.
+- [x] skill version reconciliation.
 - [x] policy change reconciliation.
 - [x] stale assumptions.
 
@@ -1558,8 +1558,19 @@ Todo finding que no sea `ok` se convierte en warning visible; el JSON añade
 `data.reconciliation` (subsystem/state/detail/action). No se muta el worktree
 y no se descarta ninguna asunción en silencio.
 
-Skill version reconciliation queda pendiente: aún no hay versión/contenido de
-skill persistido contra el cual reconciliar (ver skills).
+Skill version reconciliation (fundación, patrón "dimensión para fase futura"
+como subagent calls en budgets): las skills activas de una sesión se
+persisten como pares `(name, version)` en `sessions.active_skills_json`
+(migración 0015; el runtime de skills llega en fase 6). Catálogo de skills:
+`src/rinari/skills/catalog.py` descubre `SKILL.md` en
+`~/.rinari/skills/<name>/` (global) y `<project>/.rinari/skills/<name>/`
+(project; shadowing por nombre, requiere trust), parsea el frontmatter
+`name/description/version` y, si no hay versión declarada, la identidad es
+`sha:<12 hex>` del contenido (todo cambio en disco mueve la versión).
+`ResumeReconciler` añade el subsystem `skills`: skill no instalado →
+`missing`, versión divergente → `changed` (ambos como warning, sin absorber
+silencio). El fork copia `active_skills` y `session_dict` los expone.
+13 tests (`test_skill_reconciliation.py`).
 
 ## Session fork
 
@@ -2665,7 +2676,8 @@ Cada una debe decidirse antes de implementar el subsistema correspondiente, con 
 
 ```text
 FASE ACTUAL
-  Fase 4 — Context, artifacts, memoria y resume durable
+  Fase 4 completa (2026-08-17); Fase 5 (Web, browser y capability
+  ecosystem) no iniciada
 
 COMPLETADO
   fase 0 completa (2026-08-16)
@@ -2686,37 +2698,11 @@ COMPLETADO
   repository index (migración 0005, incremental), task graph + done-when
   (0006), validation records + verification planner + completion gate
   (0007), checkpoints/undo `rinari undo` (0008, ownership agent/user/mixed),
-  PTY tools
-
-COMPLETADO EN FASE 4 (hasta el momento)
-  Artifact Store (migración 0009; artifact:// + search + retention + GC)
-  Context Engine (presupuesto por segmento, history selection, token
-  accounting)
-  Compaction (pressure thresholds, preserve task truth, compact-state
-  segment, restore en resume)
-  Memoria user/project/episodic/pattern (migración 0010, sensitivity
-  filter, tools memory.*, segmento de prompt, CLI `rinari memory`)
-  Context retrieval + ranking + pins + dedup (migración 0011, tools
-  context.*, segmento pinned-context, CLI `rinari context`)
-  Resume durable + reconciliation (migración 0012 sessions.git_branch,
-  ResumeReconciler identity/branch/working-tree/permissions/provider/
-  model/trust/assumptions, findings estructurados + `data.reconciliation`
-  en JSON)
-Session fork (migración 0013 sessions.forked_from, `session fork` con
-   copia de estado + conversación, provenance via evento SessionForked,
-   sesión fuente inmutable)
-   Budgets por turno (model/tool/network/wall-time/cost/subagents/recursion;
-   kind="budget" + snapshot TurnResult.budget; cost sin pricing nunca se
-   inventa)
-   Loop detection por turno (same tool/args, oscilación A-B, rewrites,
-   mismo error, approval denegada, subagent duplicado; nudge → stop
-   kind="loop", evento LoopDetected)
-   Network policy foundation + hooks (migración 0014, modo off/ask/allow +
-   reglas allow/deny por host, gate network.outbound en Tool Runtime con
-   audit network_events, NetworkGuard fail-closed en ToolContext,
-   CLI `rinari network`)
-
-SIGUIENTE (fase 4)
-   → skill version reconciliation (pendiente de versioning de skills)
-   → cierre de fase: checklist de aceptación + suite + push
+PTY tools
+   fase 4 completa (2026-08-17)
+   Artifact Store + Context Engine + compaction, memoria, context
+   retrieval + pins, resume durable + reconciliation (9 subsystems,
+   incluido skills), session fork, budgets + loop detection por turno,
+   network policy foundation + hooks, skill version reconciliation
+   (migraciones 0009-0015)
 ```

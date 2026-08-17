@@ -78,6 +78,9 @@ class SessionRecord:
     last_active_at: str
     git_branch: str | None = None
     forked_from: str | None = None
+    # Durable (name, version) pairs of skills active in this session
+    # (phase 4: resume reconciliation; skill runtime arrives in phase 6).
+    active_skills: tuple[tuple[str, str], ...] | None = None
 
 
 @dataclass(slots=True)

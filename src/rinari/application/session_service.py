@@ -276,6 +276,7 @@ class SessionService:
             last_active_at=now,
             git_branch=source.git_branch,
             forked_from=source.id,
+            active_skills=source.active_skills,
         )
         messages = [
             SessionMessageRecord(

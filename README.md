@@ -2,11 +2,13 @@
 
 **Tu asistente personal de IA en la terminal.**
 
-> **Estado: fase 2 — agent runtime, tool runtime y seguridad base.**
-> Fases 0 (contrato del producto) y 1 (fundaciones, bootstrap y persistencia)
-> completas: el CLI real funciona — setup, config, providers/models,
-> sesiones CHAT/PROJECT, Soul/Constitution, doctor/status/version. Ver
-> [TODO.md](TODO.md) por el roadmap y el estado de decisiones.
+> **Estado: fases 0-4 completas (2026-08-17).**
+> Producto: CLI funcional (setup, config, providers/models, sesiones
+> CHAT/PROJECT, Soul/Constitution, doctor/status/version), agent + tool
+> runtime con seguridad base (fase 2), trust/index/validation/checkpoints
+> (fase 3) y contexto/artifacts/memoria/resume durable/budgets/network
+> foundation (fase 4). Ver [TODO.md](TODO.md) por el roadmap y el estado de
+> decisiones.
 
 Segunda construcción de Rinari. La
 [v1](https://github.com/Xainner/Rinari-CLI) (chat REPL, agente con 23 tools,
@@ -140,8 +142,13 @@ reemplaza a RINARI.md en su level; el level más profundo gana conflictos.
 
 ## Pendiente
 
-- En Fase 4 (resto): skill version reconciliation. Checklist completo en
-  [TODO.md](TODO.md).
+- Skill version reconciliation (Fase 4): las skills activas de una sesión se
+  persisten como pares `(name, version)` (`sessions.active_skills_json`,
+  migración 0015) y `rinari resume` las reconcilia contra el catálogo
+  (`SKILL.md` global en `~/.rinari/skills/` y project-local, version
+  declarada o fallback `sha:` del contenido): skill desinstalada o versión
+  divergente → warning, sin absorber silencio. El runtime de skills llega en
+  fase 6. 13 tests (`test_skill_reconciliation.py`).
 - Network policy + hooks (Fase 4): `rinari network status|test|rules|
   allow|deny|remove|history`. El modo (`network.mode` = off/ask/allow) +
   reglas allow/deny persistentes por host (exacto o subdominio) deciden cada
