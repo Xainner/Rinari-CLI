@@ -1315,6 +1315,33 @@ availability/deprecation
 
 ---
 
+## `models pick`
+
+Interactive provider + model selector (hermes model-style): choose a provider,
+discover its real models grouped under it, and save + activate one in one step.
+
+```bash
+rinari models pick
+rinari models pick --provider openai-personal
+rinari models pick --provider openai-personal --name my-alias
+```
+
+Flow:
+
+```text
+1. choose a provider (menu, or --provider)
+2. discover models from that provider (spinner while querying)
+3. pick a model by number, or type a custom ID
+4. save the model (if new) and activate it as the active model
+```
+
+Models already saved are marked `*`; picking one re-activates it without
+duplicating. `--non-interactive` fails instead of prompting (pass
+`--provider` + `--model` via `models add`/`model use` for scripting). With
+`--json` it behaves like `models available`.
+
+---
+
 ## `models refresh`
 
 ```bash

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import typer
+from rich.console import Console
+from rich.table import Table
+from rich.text import Text
 
 from rinari.cli.deps import fail, is_json, services, with_error_handling
 from rinari.cli.output import emit_json, success_envelope
 from rinari.cli.serializers import discovered_model_dict, model_dict
-from rinari.shared.errors import ProviderModelError
+from rinari.shared.errors import InvalidUsageError, ProviderModelError
 
 app = typer.Typer(help="Manage the model registry.", no_args_is_help=True)
 
@@ -80,6 +83,146 @@ def models_available(
                 typer.echo(
                     f"  {m.provider_model_id}  [{m.availability}]" + (f"  ({caps})" if caps else "")
                 )
+
+
+@app.command("pick")
+@with_error_handling("models.pick")
+def models_pick(
+    ctx: typer.Context,
+    provider: str = typer.Option(
+        None, "--provider", help="Provider alias to pick from (defaults to a menu)."
+    ),
+    model_name: str = typer.Option(
+        None, "--name", help="Alias for the chosen model (defaults to the model ID)."
+    ),
+    non_interactive: bool = typer.Option(
+        False, "--non-interactive", help="Fail instead of prompting."
+    ),
+) -> None:
+    """Interactive picker: choose a provider, discover its real models, activate one."""
+    console = Console()
+    with services(ctx) as s:
+        if provider:
+            record = s.providers.get(provider)
+        else:
+            record = _select_provider(s, console, non_interactive)
+        if is_json(ctx):
+            data = {
+                alias: [discovered_model_dict(m) for m in models]
+                for alias, models in s.models.available(record.alias).items()
+            }
+            emit_json(success_envelope("models.pick", data))
+            return
+        model_id = _select_model(s, record, console, non_interactive)
+        chosen = _save_and_activate(s, record, model_id, model_name)
+        console.print(
+            Text(
+                f"Model {chosen.alias!r} saved and active on {record.alias!r} "
+                f"({chosen.provider_model_id}).",
+                style="bold green",
+            )
+        )
+
+
+def _select_provider(s, console, non_interactive: bool):
+    saved = s.providers.list()
+    if not saved:
+        raise InvalidUsageError(
+            "No providers saved yet.",
+            hint="Run `rinari setup` to add one, or `rinari providers add ...`.",
+        )
+    if len(saved) == 1:
+        return saved[0]
+    table = Table(box=None, pad_edge=False)
+    table.add_column("#", no_wrap=True)
+    table.add_column("alias", style="bold")
+    table.add_column("type")
+    table.add_column("auth")
+    for i, p in enumerate(saved, 1):
+        table.add_row(str(i), p.alias, p.type, p.auth_method)
+    console.print(Text("Choose a provider", style="bold bright_magenta"))
+    console.print(table)
+    if non_interactive:
+        raise InvalidUsageError(
+            "Multiple providers saved.",
+            hint=f"Pass --provider <alias> (available: {', '.join(p.alias for p in saved)}).",
+        )
+    while True:
+        raw = (typer.prompt("Provider (number or alias)") or "").strip()
+        if raw.isdigit() and 1 <= int(raw) <= len(saved):
+            return saved[int(raw) - 1]
+        for p in saved:
+            if p.alias == raw:
+                return p
+        console.print("  unknown choice - pick a number or alias.")
+
+
+def _select_model(s, record, console, non_interactive: bool) -> str:
+    from rinari.cli import render
+
+    discovered = []
+    live = render.thinking_status(console, label=f"discovering models on {record.alias}…")
+    live.start()
+    try:
+        try:
+            discovered = s.models.available(record.alias).get(record.alias, [])
+        except Exception as exc:  # discovery is best-effort; fall back to manual
+            discovered = []
+            if not non_interactive:
+                console.print(Text(f"  ! could not auto-discover models: {exc}", style="yellow"))
+    finally:
+        live.stop()
+
+    saved_ids = {m.provider_model_id for m in s.models.list(record.alias)}
+    if discovered:
+        table = Table(box=None, pad_edge=False)
+        table.add_column("#", no_wrap=True)
+        table.add_column("model id", style="bold")
+        table.add_column("state")
+        table.add_column("capabilities")
+        for i, m in enumerate(discovered, 1):
+            caps = ", ".join(k for k in (m.capabilities or {}) if (m.capabilities or {}).get(k))
+            state = "saved *" if m.provider_model_id in saved_ids else "available"
+            table.add_row(str(i), m.provider_model_id, state, caps)
+        console.print(
+            Text(
+                f"Models for {record.alias!r} ({record.type})",
+                style="bold bright_magenta",
+            )
+        )
+
+        console.print(table)
+        if saved_ids:
+            console.print(Text("  * already saved", style="dim"))
+    else:
+        console.print(
+            Text(
+                f"No models discovered for {record.alias!r}; enter the model ID manually.",
+                style="dim",
+            )
+        )
+    if non_interactive:
+        raise InvalidUsageError(
+            "Interactive model selection required.",
+            hint="Pass --provider <alias> --model <id> for non-interactive use.",
+        )
+    while True:
+        raw = (typer.prompt("Model (number or custom ID)") or "").strip()
+        if not raw:
+            continue
+        if raw.isdigit() and 1 <= int(raw) <= len(discovered):
+            return discovered[int(raw) - 1].provider_model_id
+        return raw
+
+
+def _save_and_activate(s, record, model_id: str, model_name: str | None):
+    existing = s.ctx.model_repo.get_by_provider_model_id(record.id, model_id)
+    if existing is not None:
+        s.models.use(existing.id, record.alias)
+        return existing
+    created = s.models.add(record.alias, model_id, model_name or model_id)
+    s.models.use(created.id, record.alias)
+    return created
 
 
 @app.command("refresh")
