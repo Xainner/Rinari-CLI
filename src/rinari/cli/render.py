@@ -21,45 +21,46 @@ if TYPE_CHECKING:  # pragma: no cover
     from rinari.cli.snapshot import RuntimeSnapshot
     from rinari.policy.approvals import ApprovalRequest
 
-# Block-letter art for RINARI: hand-set 6-row glyphs (fixed per letter),
-# rendered with a per-letter color ramp. Keep rows of each glyph aligned.
+# Block-letter art for RINARI: hand-set 5-row glyphs (fixed per letter),
+# rendered in the single UI accent color. Keep rows of each glyph aligned.
 _ART_LETTERS: dict[str, tuple[str, ...]] = {
     "R": (
-        "███████ ",
-        "██    ██",
-        "██    ██",
-        "██████  ",
-        "██  ████",
-        "██   ███",
+        "█████ ",
+        "█    █",
+        "█████ ",
+        "█  █  ",
+        "█   ██",
     ),
     "I": (
-        "███",
-        " █ ",
-        " █ ",
-        " █ ",
-        " █ ",
-        "███",
+        "█████",
+        "  █  ",
+        "  █  ",
+        "  █  ",
+        "█████",
     ),
     "N": (
-        "██   ██",
-        "███  ██",
-        "████ ██",
-        "██ █ ██",
-        "██  ███",
-        "██   ██",
+        "█    █",
+        "██   █",
+        "█ █  █",
+        "█  █ █",
+        "█   ██",
     ),
     "A": (
-        " ██   ██",
-        "██    ██",
-        "████████",
-        "██    ██",
-        "██    ██",
-        "██    ██",
+        " ████ ",
+        "█    █",
+        "██████",
+        "█    █",
+        "█    █",
     ),
 }
 
 _ART_WORDS = "RINARI"
-_ART_COLORS = ("bright_magenta", "magenta", "purple", "bright_blue", "bright_cyan", "cyan")
+
+_ACCENT = "bright_magenta"
+_BORDER = "magenta"
+_MUTED_BORDER = "bright_black"
+_WIDE_BANNER = 104
+_CARD_ROW = 116
 
 UNKNOWN = "—"
 
@@ -162,39 +163,174 @@ def banner_fields(snap: RuntimeSnapshot) -> list[tuple[str, str]]:
 
 
 def banner_art() -> list[Text]:
-    """`RINARI` as big block letters, one Text per row, per-letter color ramp."""
+    """`RINARI` as big block letters in the accent color, one Text per row."""
     rows: list[Text] = [Text() for _ in range(len(next(iter(_ART_LETTERS.values()))))]
     for index, letter in enumerate(_ART_WORDS):
-        color = _ART_COLORS[index % len(_ART_COLORS)]
         for row, row_text in enumerate(_ART_LETTERS[letter]):
-            rows[row].append(row_text, style=color)
+            rows[row].append(row_text, style=_ACCENT)
             if index < len(_ART_WORDS) - 1:
-                rows[row].append(" ")
+                rows[row].append("  ")
     return rows
 
 
+def _field_grid(rows: list[tuple[str, str]], *, expand: bool = True) -> Table:
+    grid = Table.grid(expand=expand, padding=(0, 1), pad_edge=False)
+    grid.add_column(style=f"bold {_ACCENT}", no_wrap=True)
+    grid.add_column(ratio=1, overflow="fold")
+    for label, value in rows:
+        # Values are runtime data, not Rich markup (a Git branch may contain brackets).
+        grid.add_row(label, Text(value))
+    return grid
+
+
+def _section(title: str, rows: list[tuple[str, str]], *, border: str = _MUTED_BORDER) -> Panel:
+    return Panel(
+        _field_grid(rows),
+        title=Text(f" {title} ", style=f"bold {_ACCENT}"),
+        title_align="left",
+        border_style=border,
+        padding=(0, 1),
+    )
+
+
+def _usage_rows(snap: RuntimeSnapshot) -> list[tuple[str, str]]:
+    tokens = snap.usage.tokens_total
+    return [
+        ("model calls", str(snap.usage.model_calls)),
+        ("tool calls", str(snap.usage.tool_calls)),
+        ("tokens", f"{tokens:,}" if tokens is not None else UNKNOWN),
+        ("cost", f"${snap.usage.cost_usd:.4f}" if snap.usage.cost_usd is not None else UNKNOWN),
+    ]
+
+
+def _session_strip(snap: RuntimeSnapshot) -> Text:
+    strip = Text()
+    strip.append("SESSION  ", style=f"bold {_ACCENT}")
+    strip.append(snap.session_id[:12])
+    strip.append("  ·  ", style="dim")
+    strip.append(snap.session_kind.upper(), style="bold")
+    strip.append("  ·  ", style="dim")
+    state_style = "green" if snap.session_state == "active" else None
+    strip.append(snap.session_state.lower(), style=state_style)
+    return strip
+
+
+def _summary_cards(fields: dict[str, str], snap: RuntimeSnapshot, *, horizontal: bool):
+    workspace = _section(
+        "WORKSPACE",
+        [
+            ("project", fields["project"]),
+            ("profile", fields["profile"]),
+            ("network", fields["network"]),
+        ],
+    )
+    capabilities = _section(
+        "CAPABILITIES",
+        [
+            ("context", fields["context"]),
+            ("tools", f"{fields['tools']} loaded"),
+            ("skills", fields["skills"]),
+            ("agents", fields["agents"]),
+        ],
+    )
+    usage = _section("USAGE", _usage_rows(snap))
+    if not horizontal:
+        return Group(workspace, capabilities, usage)
+
+    row = Table.grid(expand=True, padding=(0, 1), pad_edge=False)
+    row.add_column(ratio=1)
+    row.add_column(ratio=1)
+    row.add_column(ratio=1)
+    row.add_row(workspace, capabilities, usage)
+    return row
+
+
+def _rich_hero(console: Console, fields: dict[str, str], snap: RuntimeSnapshot) -> Panel:
+    runtime = Group(
+        Text("RUNTIME", style=f"bold {_ACCENT}"),
+        _field_grid(
+            [
+                ("mode", fields["mode"]),
+                ("provider", fields["provider"]),
+                ("model", fields["model"]),
+                ("reasoning", fields["reasoning"]),
+            ]
+        ),
+    )
+
+    if console.width >= _WIDE_BANNER:
+        brand = Group(
+            *banner_art(),
+            Text("AI engineering companion", style=_ACCENT),
+        )
+        body = Table.grid(expand=True, padding=(0, 3), pad_edge=False)
+        body.add_column(ratio=3)
+        body.add_column(ratio=2)
+        body.add_row(brand, runtime)
+    else:
+        body = Group(
+            Text("RINARI", style=f"bold {_ACCENT}"),
+            Text("AI engineering companion", style=_ACCENT),
+            Text(""),
+            runtime,
+        )
+
+    return Panel(
+        Group(body, Text(""), _session_strip(snap)),
+        title=Text(" RINARI ", style=f"bold {_ACCENT}"),
+        subtitle=Text(f" v{snap.version} ", style=_ACCENT),
+        title_align="left",
+        subtitle_align="right",
+        border_style=_BORDER,
+        padding=(1, 2),
+    )
+
+
+def _compact_banner(fields: dict[str, str], snap: RuntimeSnapshot) -> Panel:
+    rows = [
+        ("session", fields["session"]),
+        ("mode", fields["mode"]),
+        ("provider", fields["provider"]),
+        ("model", fields["model"]),
+        ("reasoning", fields["reasoning"]),
+        ("profile", fields["profile"]),
+        ("project", fields["project"]),
+        ("context", fields["context"]),
+        ("tools", f"{fields['tools']} loaded"),
+        ("skills", fields["skills"]),
+        ("agents", fields["agents"]),
+        ("network", fields["network"]),
+        ("usage", fields["usage"]),
+    ]
+    return Panel(
+        Group(
+            Text("RINARI", style="bold"),
+            Text(f"AI engineering companion  ·  v{snap.version}", style="dim"),
+            Text(""),
+            _field_grid(rows),
+        ),
+        border_style=_MUTED_BORDER,
+        padding=(0, 1),
+    )
+
+
 def render_banner(console: Console, snap: RuntimeSnapshot, mode: RendererMode) -> None:
-    fields = banner_fields(snap)
+    field_rows = banner_fields(snap)
     if mode is RendererMode.PLAIN:
-        for label, value in fields:
+        for label, value in field_rows:
             console.print(f"{label:<10} {value}")
         return
-    grid = Table.grid(padding=(0, 3), pad_edge=False)
-    grid.add_column(style="bold")
-    grid.add_column()
-    grid.add_column()
-    grid.add_column(style="bold")
-    grid.add_column()
-    for i in range(0, len(fields), 2):
-        left_label, left_value = fields[i]
-        right_label, right_value = fields[i + 1] if i + 1 < len(fields) else ("", "")
-        grid.add_row(left_label, left_value, "", right_label, right_value)
-    parts = [*banner_art(), Text("")] if mode is RendererMode.RICH else []
-    parts.append(grid)
-    title = Text(f" Rinari v{snap.version} ", style="bold bright_magenta")
-    border = "bright_magenta" if mode is RendererMode.RICH else "bright_blue"
+    fields = dict(field_rows)
+    if mode is RendererMode.COMPACT:
+        console.print(_compact_banner(fields, snap))
+        return
+
     console.print(
-        Panel(Group(*parts), title=title, border_style=border, expand=False, padding=(1, 2))
+        Group(
+            _rich_hero(console, fields, snap),
+            _summary_cards(fields, snap, horizontal=console.width >= _CARD_ROW),
+            Text("  /help commands  ·  /status runtime details", style="dim"),
+        )
     )
 
 

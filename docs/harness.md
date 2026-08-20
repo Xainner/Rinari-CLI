@@ -6098,7 +6098,7 @@ When Rinari starts interactively, show a branded startup surface before the prom
 The startup surface has four layers:
 
 ```text
-1. Rinari ASCII mark
+1. RINARI text wordmark
 2. product/version + session context
 3. model/runtime card
 4. compact project/policy line
@@ -6106,62 +6106,46 @@ The startup surface has four layers:
 
 It should finish quickly and never block interaction for cosmetic animation.
 
-## Full Rinari ASCII
+## Full RINARI Wordmark
 
-Default for a sufficiently wide interactive terminal on a fresh session:
+Default for a sufficiently wide interactive terminal on a fresh session. The
+identity surface is typographic: it uses the RINARI name without a separate
+graphic logo.
 
 ```text
-                 /\                 /\
-            ____/  \_______________/  \____
-          .'                               '.
-         /        .-----------------.        \
-        /        /     _       _     \        \
-       |        |     (o)     (o)     |        |
-       |        |          ^           |        |
-       |        |        .---.         |        |
-        \        \       '---'        /        /
-         '.        '.___       ___.''        .'
-           '._          '-----'          _.'
-              '--.___     /|\     ___.--'
-                    /|   / | \   |\
-                   / |  /  |  \  | \
-                  /__| /   |   \ |__\
-                     |/    / \    \|
-                    /_____/___\_____\
-                       /_/     \_\
-
-                  R I N A R I
+█████   █████  █    █   ████   █████  █████
+█    █    █    ██   █  █    █  █    █   █
+█████     █    █ █  █  ██████  █████    █
+█  █      █    █  █ █  █    █  █  █     █
+█   ██  █████  █   ██  █    █  █   ██ █████
 ```
 
-The exact ASCII may evolve, but two invariants remain:
+The exact wordmark may evolve, but two invariants remain:
 
 ```text
-recognizable Rinari/cat-headset silhouette
+recognizable RINARI text, without a separate logo
 pure text fallback available without Unicode dependencies
 ```
 
-The ASCII should be stored as a versioned asset rather than hard-coded across renderers:
+If the wordmark is shared by multiple renderers, store it as a versioned asset
+rather than duplicating it across them:
 
 ```text
-assets/ui/rinari-ascii-full.txt
-assets/ui/rinari-ascii-compact.txt
+assets/ui/rinari-wordmark-full.txt
+assets/ui/rinari-wordmark-compact.txt
 ```
 
-## Compact ASCII
+## Compact Wordmark
 
 For resume/narrow terminals:
 
 ```text
-       /\_______/\
-      /  _     _  \
-     |  (o)   (o)  |
-     |      ^      |
-      \   '---'   /
-       '.___|__.'
-          /|\        RINARI
+RINARI v0.8.0
+AI engineering companion
 ```
 
-ASCII is identity decoration only. Screen width must never cause core runtime information to disappear.
+The block wordmark is identity decoration only. Screen width must never cause
+core runtime information to disappear.
 
 ---
 
@@ -6170,17 +6154,6 @@ ASCII is identity decoration only. Screen width must never cause core runtime in
 Example PROJECT startup:
 
 ```text
-                 /\                 /\
-            ____/  \_______________/  \____
-          .'                               '.
-         /        .-----------------.        \
-        /        /     _       _     \        \
-       |        |     (o)     (o)     |        |
-       |        |          ^           |        |
-        \        \       '---'        /        /
-         '._        '.___   ___.''       _.'
-            '--.___     /|\     ___.--'
-
   RINARI  v0.8.0               PROJECT / agent
   ───────────────────────────────────────────────────────────
   provider   openai-personal     model      gpt-main

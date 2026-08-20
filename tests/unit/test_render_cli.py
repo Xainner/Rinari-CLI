@@ -49,8 +49,8 @@ def _snap(**overrides) -> RuntimeSnapshot:
     return RuntimeSnapshot(**base)
 
 
-def _console():
-    return Console(record=True, no_color=True, width=100)
+def _console(*, width: int = 120):
+    return Console(record=True, no_color=True, width=width)
 
 
 # -- renderer selection ------------------------------------------------------
@@ -133,9 +133,16 @@ def test_banner_rich_has_art_plain_has_none() -> None:
     rich_console = _console()
     render_banner(rich_console, snap, RendererMode.RICH)
     rich_text = rich_console.export_text()
-    assert "Rinari v9.9.9" in rich_text
-    assert "████████" in rich_text  # the A's crossbar
-    assert "███████ " in rich_text  # the R's top row
+    assert "RINARI" in rich_text
+    assert "v9.9.9" in rich_text
+    assert "AI engineering companion" in rich_text
+    assert "RUNTIME" in rich_text
+    assert "WORKSPACE" in rich_text
+    assert "CAPABILITIES" in rich_text
+    assert "USAGE" in rich_text
+    assert "/help" in rich_text
+    assert "██████" in rich_text  # the A's crossbar
+    assert "█████ " in rich_text  # the R's top row
 
     plain_console = _console()
     render_banner(plain_console, snap, RendererMode.PLAIN)
@@ -145,10 +152,37 @@ def test_banner_rich_has_art_plain_has_none() -> None:
     assert "█" not in plain
 
 
+def test_banner_narrow_keeps_essential_runtime_information() -> None:
+    console = _console(width=72)
+    render_banner(console, _snap(), RendererMode.RICH)
+    text = console.export_text()
+
+    assert "RINARI" in text
+    assert "fake (openai)" in text
+    assert "m1 (model-x)" in text
+    assert "demo [main] *" in text
+    assert "100/2000 tokens (5%)" in text
+    assert "99 loaded" in text
+    assert "fix-ci" in text
+
+
+def test_banner_compact_uses_wordmark_without_block_art() -> None:
+    console = _console(width=80)
+    render_banner(console, _snap(), RendererMode.COMPACT)
+    text = console.export_text()
+
+    assert "RINARI" in text
+    assert "v9.9.9" in text
+    assert "█" not in text
+    assert "provider" in text
+    assert "project" in text
+    assert "2 model · 5 tools · $0.1235" in text
+
+
 def test_banner_art_rows_spells_rinari() -> None:
     from rinari.cli.render import _ART_LETTERS, _ART_WORDS, banner_art
 
-    expected = [" ".join(_ART_LETTERS[ch][row] for ch in _ART_WORDS) for row in range(6)]
+    expected = ["  ".join(_ART_LETTERS[ch][row] for ch in _ART_WORDS) for row in range(5)]
     rows = banner_art()
     assert [row.plain for row in rows] == expected
 
