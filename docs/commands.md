@@ -383,6 +383,12 @@ Recommended interactive flow:
 10. Installation verification
 ```
 
+Current scope (v0.1): the wizard implements steps 3-5 (provider type/alias,
+endpoint for custom, authentication via api key / env var / none) plus the
+first model, all fully usable in combination with the one-shot flags. Identity,
+language, profile, network, telemetry and completion steps are later onboarding
+phases; the `--minimal` and `--reset` variants are not implemented yet.
+
 Useful variants:
 
 ```bash

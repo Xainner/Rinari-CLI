@@ -97,6 +97,37 @@ def test_use_unknown_provider_not_found(app_ctx, providers) -> None:
         providers.use("ghost")
 
 
+def test_current_falls_back_to_provider_default_model(app_ctx, providers, models) -> None:
+    # `models add` sets the provider's default model; resolution order
+    # (commands.md #20) must use it even without an explicit `model use`.
+    _openai(providers)
+    models.add("openai-personal", "gpt-1", "gpt-main")
+    active = providers.current()
+    assert active is not None
+    assert active.model is not None
+    assert active.model.alias == "gpt-main"
+
+
+def test_explicit_model_use_wins_over_default_fallback(app_ctx, providers, models) -> None:
+    _openai(providers)
+    first = models.add("openai-personal", "gpt-1", "gpt-main")
+    second = models.add("openai-personal", "gpt-2", "gpt-next")
+    models.use(second.id, "openai-personal")
+    assert providers.current().model.alias == "gpt-next"
+    models.use(first.id, "openai-personal")
+    assert providers.current().model.alias == "gpt-main"
+
+
+def test_current_fallback_never_pairs_foreign_model(app_ctx, providers, models) -> None:
+    _openai(providers)
+    _anthropic(providers)
+    models.add("anthropic-work", "claude-opus-1", "opus")
+    providers.use("openai-personal")
+    active = providers.current()
+    assert active.provider.alias == "openai-personal"
+    assert active.model is None
+
+
 def test_logout_preserves_provider_models_and_clears_credential(app_ctx, providers, models) -> None:
     _openai(providers)
     models.add("openai-personal", "gpt-1", "gpt-main")

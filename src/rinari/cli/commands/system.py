@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 import typer
@@ -261,6 +263,9 @@ def setup_cmd(
     non_interactive: bool = typer.Option(
         False, "--non-interactive", help="Fail instead of prompting."
     ),
+    interactive: bool = typer.Option(
+        False, "--interactive", hidden=True, help="Force interactive prompts (testing)."
+    ),
 ) -> None:
     """First-run onboarding. Re-running never erases existing records."""
     with services(ctx) as s:
@@ -280,34 +285,37 @@ def setup_cmd(
             typer.echo("Adjust with: rinari providers|models|model use.")
             return
         if provider is None:
-            raise InvalidUsageError(
-                "Onboarding flags are required (interactive wizard arrives in a later phase).",
-                hint=(
-                    "rinari setup --provider openai --api-key-env OPENAI_API_KEY "
-                    "--model <id> --model-name <alias>"
-                ),
-            )
+            if interactive or (not non_interactive and not is_json(ctx) and _is_terminal()):
+                provider, name, endpoint, api_key, api_key_env, no_auth, model, model_name = (
+                    _run_setup_wizard(s, existing)
+                )
+            else:
+                raise InvalidUsageError(
+                    "Onboarding flags are required when not running on a terminal.",
+                    hint=(
+                        "Run `rinari setup` in a terminal for the interactive wizard, or:\n"
+                        "  rinari setup --provider openai --api-key-env OPENAI_API_KEY "
+                        "--model <id> --model-name <alias>\n"
+                        "  rinari providers add custom --name <alias> --endpoint <URL> "
+                        "--api-key <key>  (+ rinari models add --provider <alias> --model <id>)"
+                    ),
+                )
         if provider not in PROVIDER_TYPES:
             raise InvalidUsageError(
                 f"unknown provider type {provider!r}",
                 hint=f"Expected one of: {', '.join(sorted(PROVIDER_TYPES))}",
             )
-        from rinari.application.provider_service import AddProviderInput
-
-        record = s.providers.add(
-            AddProviderInput(
-                alias=name or provider,
-                provider_type=provider,
-                auth_method="none" if no_auth else "api-key",
-                endpoint=endpoint,
-                secret=api_key,
-                secret_env=api_key_env,
-            )
+        record, model_saved = _execute_onboarding(
+            s,
+            provider,
+            name or provider,
+            endpoint,
+            api_key,
+            api_key_env,
+            no_auth,
+            model,
+            model_name,
         )
-        model_saved = None
-        if model:
-            model_saved = s.models.add(record.alias, model, model_name or model)
-            s.models.use(model_saved.id, record.alias)
         data = {
             "provider": provider_dict(record, credential_ref=s.providers.credential_ref(record)),
             "model": model_saved.alias if model_saved else None,
@@ -320,6 +328,123 @@ def setup_cmd(
         if model_saved:
             typer.echo(f"Model {model_saved.alias!r} saved and active.")
         typer.echo("Setup complete. Run `rinari` to start a session.")
+
+
+def _execute_onboarding(
+    s,
+    provider_type: str,
+    alias: str,
+    endpoint: str | None,
+    api_key: str | None,
+    api_key_env: str | None,
+    no_auth: bool,
+    model: str | None,
+    model_name: str | None,
+):
+    from rinari.application.provider_service import AddProviderInput
+
+    record = s.providers.add(
+        AddProviderInput(
+            alias=alias,
+            provider_type=provider_type,
+            auth_method="none" if no_auth else "api-key",
+            endpoint=endpoint,
+            secret=api_key,
+            secret_env=api_key_env,
+        )
+    )
+    model_saved = None
+    if model:
+        model_saved = s.models.add(record.alias, model, model_name or model)
+        s.models.use(model_saved.id, record.alias)
+    return record, model_saved
+
+
+def _is_terminal() -> bool:
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
+def _prompt_choice(question: str, options: Sequence[str], default: str) -> str:
+    menu = "  ".join(f"[{i}] {o}" for i, o in enumerate(options, start=1))
+    while True:
+        raw = (
+            typer.prompt(f"{question} ({menu})", default=default, show_default=True) or ""
+        ).strip()
+        if not raw:
+            return default
+        lowered = raw.lower()
+        if lowered in {o.lower() for o in options}:
+            return next(o for o in options if o.lower() == lowered)
+        if lowered.isdigit() and 1 <= int(lowered) <= len(options):
+            return options[int(lowered) - 1]
+        typer.echo(f"  Choose one of: {', '.join(options)} (or a number).")
+
+
+def _run_setup_wizard(
+    s, existing
+) -> tuple[str, str, str | None, str | None, str | None, bool, str | None, str | None]:
+    typer.echo("Rinari first-run setup")
+    typer.echo("-" * 40)
+    provider_type = _prompt_choice("Provider type", sorted(PROVIDER_TYPES), default="openai")
+    spec = PROVIDER_TYPES[provider_type]
+
+    alias = (typer.prompt("Provider alias", default=provider_type) or provider_type).strip()
+    if not alias:
+        raise InvalidUsageError("Provider alias is required.", hint="Pick a non-empty alias.")
+
+    endpoint = None
+    if spec.default_base_url is None:
+        while True:
+            endpoint = (
+                typer.prompt("Endpoint (base URL, e.g. https://api.example.com/v1)") or ""
+            ).strip()
+            if endpoint.lower().startswith(("http://", "https://")):
+                break
+            typer.echo("  Endpoint must start with http:// or https://")
+
+    auth_methods = ["api-key", "env"] + (["none"] if "none" in spec.auth_methods else [])
+    default_source = (
+        "env" if os.environ.get(_DEFAULT_ENV_KEYS.get(provider_type, "")) else "api-key"
+    )
+    source = _prompt_choice("Authentication source", auth_methods, default=default_source)
+    api_key = None
+    api_key_env = None
+    no_auth = False
+    if source == "none":
+        no_auth = True
+    elif source == "env":
+        api_key_env = (
+            typer.prompt("Environment variable name", default=_DEFAULT_ENV_KEYS.get(provider_type))
+            or ""
+        ).strip()
+        if not api_key_env:
+            raise InvalidUsageError(
+                "Environment variable name is required.", hint="Pick a non-empty variable name."
+            )
+        if not os.environ.get(api_key_env):
+            typer.echo(
+                f"  note: {api_key_env} is not set in this shell; the provider can still be added."
+            )
+    else:
+        while True:
+            api_key = typer.prompt("API key (input hidden)", hide_input=True)
+            if (api_key or "").strip():
+                api_key = api_key.strip()
+                break
+
+    while True:
+        model = (typer.prompt("Model ID (e.g. gpt-4o, qwen3.8-27b)") or "").strip()
+        if model:
+            break
+        typer.echo("  Model ID is required - it is the exact identifier the provider expects.")
+    model_name = (typer.prompt("Model alias", default=model) or model).strip() or model
+    return provider_type, alias, endpoint, api_key, api_key_env, no_auth, model, model_name
+
+
+_DEFAULT_ENV_KEYS = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY", "custom": ""}
 
 
 # -- init ------------------------------------------------------------------------

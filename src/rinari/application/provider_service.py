@@ -284,6 +284,11 @@ class ProviderService:
         model = self._ctx.model_repo.get(model_id) if model_id else None
         if model is not None and model.provider_id != provider.id:
             model = None
+        if model is None:
+            # Resolution order (commands.md #20): explicit active model, then the
+            # provider's own default / last-used model. `models add` sets the
+            # provider default, so a fresh provider+model pair is immediately usable.
+            model = self._default_model_for(provider)
         return ProviderSelection(provider=provider, model=model)
 
     # -- adapter-backed operations ---------------------------------------

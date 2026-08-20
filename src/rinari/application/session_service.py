@@ -88,7 +88,11 @@ class SessionService:
         if selection is None:
             raise AuthenticationRequiredError(
                 "CONFIG_REQUIRED: Rinari is not configured yet.",
-                hint="Run: rinari setup",
+                hint=(
+                    "Run: rinari setup (interactive wizard in a terminal), or:\n"
+                    "  rinari providers add custom --name A --endpoint URL --api-key <key>\n"
+                    "  rinari models add --provider A --model <id>"
+                ),
             )
         if selection.model is None:
             raise AuthenticationRequiredError(
@@ -207,7 +211,11 @@ class SessionService:
         if selection is None or selection.model is None:
             raise AuthenticationRequiredError(
                 "CONFIG_REQUIRED: configure a provider and model first.",
-                hint="Run: rinari setup",
+                hint=(
+                    "Run: rinari setup (interactive wizard in a terminal), or:\n"
+                    "  rinari providers add custom --name A --endpoint URL --api-key <key>\n"
+                    "  rinari models add --provider A --model <id>"
+                ),
             )
         now = self._now()
         project_id = None
