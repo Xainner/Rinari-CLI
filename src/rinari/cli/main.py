@@ -20,6 +20,7 @@ from rinari.cli.commands import plugins as plugins_cmd
 from rinari.cli.commands import provider as provider_cmd
 from rinari.cli.commands import providers as providers_cmd
 from rinari.cli.commands import sessions as sessions_cmd
+from rinari.cli.commands import skills as skills_cmd
 from rinari.cli.commands import system as system_cmd
 from rinari.cli.commands import tasks as tasks_cmd
 from rinari.cli.commands import trust as trust_cmd
@@ -52,6 +53,7 @@ app.add_typer(plugins_cmd.app, name="plugins")
 app.add_typer(mcp_cmd.app, name="mcp")
 app.add_typer(api_cmd.app, name="api")
 app.add_typer(hooks_cmd.app, name="hooks")
+app.add_typer(skills_cmd.app, name="skills")
 app.add_typer(system_cmd.system_app, name=None)
 
 app.command("chat")(sessions_cmd.chat_cmd)

@@ -52,6 +52,9 @@ class AssemblerContext:
     include_extended_identity: bool = False
     preferences: str | None = None
     project_instructions: tuple[ProjectInstruction, ...] = ()
+    # Compact catalog of available skills (name + one-liner + how to
+    # activate). Bodies stay out until a skill is activated (harness.md 49).
+    skill_catalog: str | None = None
     skills: tuple[ActiveSkill, ...] = ()
     task_state: str | None = None
     # Preserved task truth after context compaction (harness.md 67-68).
@@ -167,6 +170,17 @@ class PromptAssembler:
                     trust=SegmentTrust.SCOPED_TRUSTED,
                     cache_policy=CachePolicy.SESSION,
                     provenance=instruction.provenance,
+                )
+            )
+        if context.skill_catalog:
+            segments.append(
+                PromptSegment(
+                    id="skill-catalog",
+                    kind=SegmentKind.SKILL,
+                    content=context.skill_catalog,
+                    trust=SegmentTrust.SCOPED_TRUSTED,
+                    cache_policy=CachePolicy.SESSION,
+                    provenance="skill:catalog",
                 )
             )
         for skill in context.skills:

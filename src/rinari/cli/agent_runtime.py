@@ -71,6 +71,8 @@ class AgentSession:
     # Set after an in-session CHAT -> PROJECT promotion; the host (REPL)
     # renders the notice once and clears it.
     promoted_root: Path | None = None
+    # Phase 6 orchestrator (subagents); None in test sessions without wiring.
+    orchestrator: object = field(default=None, repr=False)
     # Bound by build_agent_session; the host calls it exactly once when the
     # session ends (emits the SessionEnd lifecycle hook).
     close: object = field(default=None, repr=False)
@@ -151,6 +153,7 @@ def build_assembler_context(services: ServiceContainer, record: SessionRecord) -
         services, root, Path(record.current_cwd), trusted=project_trusted
     )
     task_state = _task_state_text(services, root) if record.kind == "PROJECT" else None
+    skills_tuple, catalog = _skill_prompt_parts(services, root, record)
     return AssemblerContext(
         session_kind=record.kind,
         constitution=constitution,
@@ -158,11 +161,41 @@ def build_assembler_context(services: ServiceContainer, record: SessionRecord) -
         soul=canonical,
         extended_identity=extended,
         project_instructions=instructions,
+        skill_catalog=catalog,
+        skills=skills_tuple,
         task_state=task_state,
         memory=_memory_text(services, root),
         pinned_context=_pinned_context_text(services, record.id, root),
         environment=environment,
     )
+
+
+def _skill_prompt_parts(services: ServiceContainer, root: Path | None, record: SessionRecord):
+    """(active skill bodies, catalog) for the prompt (harness.md 49).
+
+    Only ACTIVE skills get their full procedure injected; everything else
+    stays at the one-line catalog summary (context discipline).
+    """
+    from rinari.prompts.assembler import ActiveSkill
+
+    try:
+        rows = services.skills.summaries(root, session=record)
+    except Exception:
+        return (), None
+    active = tuple(
+        ActiveSkill(name=row["name"], summary=services.skills.load(row["name"], root))
+        for row in rows
+        if row["active"]
+    )
+    if rows:
+        lines = ["Available skills (pin one with skills.activate for its full procedure):"]
+        for row in rows:
+            flag = " [active]" if row["active"] else ""
+            lines.append(f"- {row['name']}{flag}: {row['description']}")
+        catalog = "\n".join(lines)
+    else:
+        catalog = None
+    return active, catalog
 
 
 def _memory_text(services: ServiceContainer, root: Path | None) -> str | None:
@@ -331,15 +364,8 @@ def build_agent_session(
     token = CancellationToken()
     network_policy = services.network.policy()
     hook_engine = _build_hook_engine(services, root)
-    tools = _build_tools(
-        services,
-        record,
-        interactive=interactive,
-        token=token,
-        network_policy=network_policy,
-        root=root,
-        hook_engine=hook_engine,
-    )
+    caller = _caller_for(services, record)
+    policy = PolicyEngine(network=network_policy)
     tool_ctx = ToolContext(
         session_id=record.id,
         kind=record.kind,
@@ -366,7 +392,18 @@ def build_agent_session(
         browser=_build_browser_manager(record.id, home),
         mcp=services.mcp,
     )
-    caller = _caller_for(services, record)
+    orchestrator = _build_orchestrator(services, record, root, token, tool_ctx, policy, caller)
+    tools = _build_tools(
+        services,
+        record,
+        interactive=interactive,
+        token=token,
+        network_policy=network_policy,
+        root=root,
+        hook_engine=hook_engine,
+        policy=policy,
+        orchestrator=orchestrator,
+    )
     loop = AgentLoop(
         caller,
         tools,
@@ -406,6 +443,11 @@ def build_agent_session(
         )
 
     def _end_session() -> None:
+        # Cancellation propagates to in-flight subagents (linked tokens), then
+        # their terminal state is flushed for the SessionEnd trace.
+        for item in orchestrator.list():
+            if item["state"] not in ("completed", "failed", "cancelled", "budget"):
+                orchestrator.cancel(item["id"], reason="session-end")
         if hook_engine is None:
             return
         hook_engine.emit(
@@ -427,8 +469,62 @@ def build_agent_session(
         token=token,
         user_home=home,
     )
+    session.orchestrator = orchestrator
     session.close = _end_session
     return session
+
+
+def _build_orchestrator(
+    services: ServiceContainer,
+    record: SessionRecord,
+    root: Path | None,
+    token: CancellationToken,
+    tool_ctx: ToolContext,
+    policy: PolicyEngine,
+    caller: ModelCaller,
+):
+    """Per-session orchestrator with the production scoped-loop runner."""
+    from rinari.agents.definition import MAX_CONCURRENT, MAX_DEPTH, MAX_TOTAL
+    from rinari.agents.orchestrator import AgentOrchestrator
+    from rinari.agents.runtime import SubagentRuntimeConfig, make_subagent_runner
+    from rinari.agents.worktree_manager import WorktreeManager
+    from rinari.policy.sandbox import FilesystemSandbox
+
+    worktrees = WorktreeManager(root) if (root is not None and (root / ".git").exists()) else None
+
+    def sandbox_factory(profile: PermissionProfile, cwd: Path, write_roots) -> FilesystemSandbox:
+        read_root = root if root is not None else tool_ctx.user_home
+        return FilesystemSandbox(read_root=read_root, write_roots=tuple(write_roots))
+
+    config = SubagentRuntimeConfig(
+        caller=caller,
+        base_registry=None,  # runner filters all_native_tools by the allowlist
+        parent_token=token,
+        policy=policy,
+        sandbox_factory=sandbox_factory,
+        parent_session_ctx=tool_ctx,
+        worktrees=worktrees,
+        constitution="",  # subagents carry a scoped policy, not full identity
+        soul="",
+        runtime_policy="",
+        event_sink=lambda sid, event, payload: _persist_event(services, record.id, event, payload),
+        project_instructions=(),
+    )
+    orchestrator = AgentOrchestrator(
+        make_subagent_runner(config),
+        registry=services.agents,
+        worktrees=worktrees,
+        task_service=services.tasks if record.kind == "PROJECT" else None,
+        task_path=str(root) if (record.kind == "PROJECT" and root is not None) else None,
+        max_concurrent=MAX_CONCURRENT,
+        max_depth=MAX_DEPTH,
+        max_total=MAX_TOTAL,
+        clock=services.ctx.clock,
+        event_sink=lambda sid, event, payload: _persist_event(services, record.id, event, payload),
+    )
+    orchestrator.bind_session(record.id)
+    orchestrator.set_project_root(root)
+    return orchestrator
 
 
 def _plugin_tools(services: ServiceContainer, root: Path | None) -> list:
@@ -478,6 +574,8 @@ def _build_tools(
     network_policy: NetworkPolicy | None = None,
     root: Path | None = None,
     hook_engine=None,
+    policy: PolicyEngine | None = None,
+    orchestrator=None,
 ) -> ToolRuntime:
     registry = ToolRegistry()
     registry.register_all(all_native_tools())
@@ -492,6 +590,16 @@ def _build_tools(
                 registry.register_all(
                     services.api.tool_definitions(row["name"], row.get("scope") or "global")
                 )
+    # Phase 6: skill tools + orchestrator tools join the same registry.
+    with contextlib.suppress(Exception):
+        from rinari.skills.tools import SkillToolHost, skill_tools
+
+        registry.register_all(skill_tools(SkillToolHost(service=services.skills, project=root)))
+    if orchestrator is not None:
+        with contextlib.suppress(Exception):
+            from rinari.agents.tools import AgentToolHost, agent_tools
+
+            registry.register_all(agent_tools(AgentToolHost(orchestrator=orchestrator)))
     # Unified capability search sees whatever is registered above it, so it
     # is added last (harness.md: search across native/plugin/MCP/OpenAPI/browser).
     from rinari.capability_search import capability_search_tool
@@ -519,7 +627,7 @@ def _build_tools(
 
     return ToolRuntime(
         registry,
-        PolicyEngine(network=network_policy),
+        policy if policy is not None else PolicyEngine(network=network_policy),
         ApprovalEngine(prompt=ask),
         clock=services.ctx.clock,
         redactor=Redactor(_secrets_for_redaction(services)),
@@ -847,13 +955,29 @@ def _set_session_state(services: ServiceContainer, record: SessionRecord, state:
     services.ctx.session_repo.update(record)
 
 
+def _root_of(record: SessionRecord) -> Path | None:
+    return Path(record.project_root_snapshot) if record.project_root_snapshot else None
+
+
 def run_turn(session: AgentSession, message: str, *, on_delta=None, on_tool=None) -> TurnResult:
     services = session.services
     _set_session_state(services, session.record, STATE_ACTIVE)
     base = session.context.assembler_base
     include_identity = _needs_identity(message)
     if base.include_extended_identity is not include_identity:
-        session.context.assembler_base = replace(base, include_extended_identity=include_identity)
+        base = replace(base, include_extended_identity=include_identity)
+        session.context.assembler_base = base
+    # Skills may have been activated/deactivated mid-session (skills.activate
+    # tool or `rinari skills activate`); refresh the prompt segments per turn.
+    try:
+        skills_tuple, catalog = _skill_prompt_parts(
+            session.services, _root_of(session.record), session.record
+        )
+    except Exception:
+        skills_tuple, catalog = base.skills, base.skill_catalog
+    if (skills_tuple, catalog) != (base.skills, base.skill_catalog):
+        base = replace(base, skills=skills_tuple, skill_catalog=catalog)
+        session.context.assembler_base = base
     before = len(session.context.history)
     dropped_before = session.context.dropped_total
     budget = BudgetMeter(TurnBudgetLimits(), clock=services.ctx.clock)

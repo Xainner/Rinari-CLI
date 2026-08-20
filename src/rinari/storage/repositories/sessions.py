@@ -152,6 +152,25 @@ class SessionEventRepository:
         return int(row["n"]) if row else 1
 
     def insert(self, rec: SessionEventRecord) -> None:
+        # seq is assigned under an IMMEDIATE transaction when no outer one is
+        # open, so concurrent writers (subagent worker threads) cannot collide
+        # on the (session_id, seq) unique key; rec.seq is the fallback.
+        if self._db.in_transaction():
+            seq = self._next_seq_locked(rec.session_id, rec.seq)
+            self._execute_insert(rec, seq)
+        else:
+            with self._db.transaction():
+                seq = self._next_seq_locked(rec.session_id, rec.seq)
+                self._execute_insert(rec, seq)
+
+    def _next_seq_locked(self, session_id: str, fallback: int) -> int:
+        row = self._db.query_one(
+            "SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM session_events WHERE session_id = ?",
+            (session_id,),
+        )
+        return int(row["n"]) if row is not None else max(fallback, 1)
+
+    def _execute_insert(self, rec: SessionEventRecord, seq: int) -> None:
         self._db.execute(
             """
             INSERT INTO session_events (id, session_id, seq, type, payload_json, created_at)
@@ -160,7 +179,7 @@ class SessionEventRepository:
             (
                 rec.id,
                 rec.session_id,
-                rec.seq,
+                seq,
                 rec.type,
                 json.dumps(rec.payload, sort_keys=True),
                 rec.created_at,

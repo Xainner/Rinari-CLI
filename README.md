@@ -2,13 +2,17 @@
 
 **Tu asistente personal de IA en la terminal.**
 
-> **Estado: fases 0-5 completas (2026-08-20).**
+> **Estado: fases 0-6 completas (2026-08-20).**
 > Producto: CLI funcional (setup, config, providers/models, sesiones
 > CHAT/PROJECT, Soul/Constitution, doctor/status/version), agent + tool
 > runtime con seguridad base (fase 2), trust/index/validation/checkpoints
-> (fase 3), contexto/artifacts/memoria/resume durable/budgets (fase 4) y el
+> (fase 3), contexto/artifacts/memoria/resume durable/budgets (fase 4), el
 > capability ecosystem (fase 5): Web, HTTP, Browser (CDP), plugins, MCP,
-> OpenAPI, unified capability search y lifecycle hooks. Ver
+> OpenAPI, unified capability search y lifecycle hooks, y skills productivos
+> + multi-agent (fase 6): Skill Runtime (manifest, discovery, lazy load, CLI)
+> y 6 agentes built-in con `AgentOrchestrator` (limits, cancel, worktrees),
+> tools `agent.*`, synthesis con contradictions/duplicate-work y subagentes
+> aislados por perfil (read-only/workspace). Ver
 > [TODO.md](TODO.md) por el roadmap y el estado de decisiones.
 
 Segunda construcción de Rinari. La
@@ -167,6 +171,26 @@ reemplaza a RINARI.md en su level; el level más profundo gana conflictos.
   fuentes user/project/plugins con orden determinista, handlers `python`/
   `shell` (este exige capability `shell.exec`), project hooks gated por
   trust, y un hook fallido **nunca** rompe la sesión.
+- Skills productivos + multi-agent (Fase 6): **Skill Runtime** (`rinari
+  skills list|search|show|activate|deactivate|install|update|remove|
+  validate|test|create`): manifest frontmatter+body, discovery por source
+  (`packaged` < `user` < `project` con trust), el prompt lleva solo el
+  catálogo (1 línea/skill) y carga el cuerpo **bajo demanda** del skill
+  activo; activación persistida en la sesión + trace en events. Incluye los 10
+  skills iniciales (repository-explore, implement-feature, fix-bug, debug,
+  test, code-review, refactor, fix-ci, research, final-verification). Tools
+  `skills.list`/`skills.activate` para el modelo. **Multi-agent**: 6 agentes
+  built-in (Explore, Reviewer, Debugger, Researcher, Implementer, Verifier)
+  con allowlist/perfil/budget; `AgentOrchestrator` aplica concurrent/depth/
+  total limits, cancellation propagada y worktrees (`git worktree`) para
+  writers aislados. Tools `agent.spawn|wait|status|message|cancel|result|
+  synthesize` (spawn = `state.write`: denegado en read-only). Cada subagente
+  corre un AgentLoop **scoped** (session `{parent}::{agent}`, ToolContext
+  aislado, approvals auto-deny, perfil read-only o workspace); `synthesize`
+  une resultados detectando duplicate-work y contradicciones de validación y
+  hace el join del task graph. Storage SQLite thread-safe para que los worker
+  threads persistan eventos. 40 tests (`test_skills_runtime.py`,
+  `test_agents_runtime.py`, incl. e2e CLI de spawn/wait).
 - Browser (Fase 5): 25 tools `browser.*` sobre un motor **CDP directo**
   (client WebSocket RFC6455 propio en repo, cero dependencias nuevas;
   alternativa documentada: Playwright, swappable tras `BrowserManager`).

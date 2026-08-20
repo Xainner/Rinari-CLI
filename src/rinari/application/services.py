@@ -7,6 +7,7 @@ from pathlib import Path
 
 import httpx
 
+from rinari.agents.registry import AgentRegistry
 from rinari.application.context import AppContext
 from rinari.application.credentials import CredentialStore
 from rinari.application.model_service import ModelService
@@ -24,6 +25,7 @@ from rinari.memory import MemoryService
 from rinari.openapi import ApiService
 from rinari.plugins import PluginService
 from rinari.repo.index_service import IndexService
+from rinari.skills.service import SkillService
 from rinari.tasks import TaskService
 from rinari.trust import TrustService
 from rinari.verify.service import VerificationService
@@ -51,6 +53,8 @@ class ServiceContainer:
     mcp: McpService
     api: ApiService
     hooks: HookService
+    skills: SkillService
+    agents: AgentRegistry
 
 
 def build_services(
@@ -77,6 +81,8 @@ def build_services(
     mcp = McpService(ctx, trust)
     api = ApiService(ctx, trust)
     hooks = HookService(ctx, trust)
+    skills = SkillService(ctx, trust)
+    agents = AgentRegistry(trust)
     return ServiceContainer(
         ctx=ctx,
         credentials=credentials,
@@ -98,4 +104,6 @@ def build_services(
         mcp=mcp,
         api=api,
         hooks=hooks,
+        skills=skills,
+        agents=agents,
     )

@@ -2,7 +2,7 @@
 
 Roadmap canónico de construcción de Rinari.
 
-> **Estado actual:** Fases 0-4 completas (2026-08-17). Fase 5 completada (2026-08-20): Web, HTTP, Browser, plugins, MCP, OpenAPI, unified capability search y hooks. Pendientes documentados dentro de Fase 5: browser `auth profiles`, contribuciones de plugin no-`tools`/`hooks` (skills/adapters/commands/subagents/context), cancellation tokenizado de MCP, tools de connector nativos, y wiring de `SubagentStart`/`SubagentStop` (Fase 6).
+> **Estado actual:** Fases 0-5 completas (2026-08-20): Fundaciones, Agent/Tool Runtime, Project intelligence, Context/Memory/Resume, y Web/HTTP/Browser/Plugins/MCP/OpenAPI/capability-search/hooks. Fase 6 completada (2026-08-20): Skill Runtime (manifest, discovery, lazy load, CLI) y multi-agent (6 built-in agents, AgentOrchestrator con limits/cancel/worktrees, `agent.*` tools, synthesis con contradictions/duplicates, subagentes scoped read-only/verifier, storage thread-safe). Pendientes documentados dentro de Fase 5: browser `auth profiles`, contribuciones de plugin no-`tools`/`hooks` (skills/adapters/commands/subagents/context), cancellation tokenizado de MCP, tools de connector nativos.
 >
 > **Regla:** las fases expresan **orden de dependencia de implementación**, no alcance opcional del producto.
 >
@@ -1953,12 +1953,13 @@ AfterModel/PreToolUse/PostToolUse/ToolError/BeforeFinal vía `hook_sink`;
 `cli/agent_runtime.py` emite SessionStart/SessionEnd/PermissionRequest/
 BeforeCompact/AfterCompact. Handler types `python` (import path) y `shell`
 (comando, JSON en stdin). `rinari hooks list/show/enable/disable/test/doctor`.
-SubagentStart/Stop: catalogados y forzados por el catálogo, pero sin wiring
-aún (work de Fase 6 multi-agent).
+SubagentStart/Stop: catalogados y forzados por el catálogo; wired desde la
+Fase 6 (`agents/orchestrator.py` los emite vía `event_sink` al pool de
+session_events).
 
 ---
 
-# Fase 6 — Skills productivos y multi-agent
+# Fase 6 — Skills productivos y multi-agent (completada 2026-08-20)
 
 ## Objetivo
 
@@ -1970,119 +1971,141 @@ Rinari debe poder delegar trabajo independiente, aislar writers, cargar skills b
 
 ## Skill Runtime
 
-- [ ] skill manifest.
-- [ ] metadata.
-- [ ] version.
-- [ ] description.
-- [ ] triggers.
-- [ ] required capabilities.
-- [ ] optional capabilities.
-- [ ] risk.
-- [ ] procedure.
-- [ ] verification.
-- [ ] failure policy.
-- [ ] success criteria.
+- [x] skill manifest. (`SkillManifest`, frontmatter `---` + body markdown)
+- [x] metadata. (name, description, source, can_delegate)
+- [x] version. (semver o `sha:` prefix; fallback a `skill_version`)
+- [x] description. (obligatorio para `validate`)
+- [x] triggers. (lista opcional de frases activadoras)
+- [x] required capabilities. (`required_tools`: request, nunca grant — harness 51)
+- [x] optional capabilities. (`optional_tools`)
+- [x] risk. (`low | medium | high`; validado)
+- [x] procedure. (sección `# Procedure` del body)
+- [x] verification. (sección `# Verification`)
+- [x] failure policy. (sección `# Failure handling`)
+- [x] success criteria. (sección `# Success criteria`)
 
 ## Skill discovery
 
-- [ ] packaged.
-- [ ] user.
-- [ ] project trusted.
-- [ ] summaries only initially.
-- [ ] full lazy load.
-- [ ] activation trace.
-- [ ] conflict resolution.
+- [x] packaged. (`assets/skills/<name>/SKILL.md`)
+- [x] user. (`<RINARI_HOME>/skills/<name>/SKILL.md`)
+- [x] project trusted. (`<root>/.rinari/skills/<name>/SKILL.md`, requiere trust del proyecto)
+- [x] summaries only initially. (catálogo 1-línea por skill en el prompt)
+- [x] full lazy load. (cuerpo completo solo del skill activo, inyectado por-turn)
+- [x] activation trace. (eventos `SkillActivated`/`SkillDeactivated` en session_events)
+- [x] conflict resolution. (project > user > packaged, harness 50)
 
 ## Skills iniciales completas
 
-- [ ] repository-explore.
-- [ ] implement-feature.
-- [ ] fix-bug.
-- [ ] debug.
-- [ ] test.
-- [ ] code-review.
-- [ ] refactor.
-- [ ] fix-ci.
-- [ ] research.
-- [ ] final-verification.
+- [x] repository-explore.
+- [x] implement-feature.
+- [x] fix-bug.
+- [x] debug.
+- [x] test.
+- [x] code-review.
+- [x] refactor.
+- [x] fix-ci.
+- [x] research.
+- [x] final-verification.
 
 ## Skill CLI
 
-- [ ] list.
-- [ ] search.
-- [ ] show.
-- [ ] activate.
-- [ ] deactivate.
-- [ ] install.
-- [ ] remove.
-- [ ] update.
-- [ ] validate.
-- [ ] test.
-- [ ] create.
+- [x] list.
+- [x] search.
+- [x] show.
+- [x] activate.
+- [x] deactivate.
+- [x] install.
+- [x] remove.
+- [x] update.
+- [x] validate.
+- [x] test.
+- [x] create.
+
+Implementation (phase 6): core en `src/rinari/skills/` — `manifest.py`
+(frontmatter parser stdlib, `load_skill_manifest`, `validate_skill`),
+`service.py` (`SkillService`: discovery por source con trust, activate/
+deactivate persistido en `sessions.active_skills_json` + trace,
+install/update/remove/create en el user dir), `tools.py` (`skills.list`/
+`skills.activate` para el modelo) y catálogo por-turn en el promptAssembler
+(cuerpo de activas + 1-línea del resto, `AssemblerContext.skill_catalog`). 10 skills packaged en
+`assets/skills/` con las 4 secciones. 17 tests (`test_skills_runtime.py`).
 
 ## Agent Registry
 
-- [ ] AgentDefinition.
-- [ ] tool allowlist.
-- [ ] capability scope.
-- [ ] budget.
-- [ ] context scope.
-- [ ] output contract.
-- [ ] provenance.
+- [x] AgentDefinition. (name, description, objective, allowlist, profile, budget, provenance)
+- [x] tool allowlist. (filtro del ToolRegistry por agente)
+- [x] capability scope. (perfil `read-only`/`workspace` → PolicyEngine por subagente)
+- [x] budget. (`AgentBudget`: model calls + tool calls via BudgetMeter)
+- [x] context scope. (session id `{parent}::{agent}`, artifact_root aislado, objetivo + contexto acotado)
+- [x] output contract. (`AgentResult` structurado + bloco de validación parseable)
+- [x] provenance. (source builtin/project/user + trust requerido para locales)
 
 ## Built-in agents
 
-- [ ] Explore.
-- [ ] Reviewer.
-- [ ] Debugger.
-- [ ] Researcher.
-- [ ] Implementer.
-- [ ] Verifier.
+- [x] Explore. (read-only)
+- [x] Reviewer. (read-only)
+- [x] Debugger. (workspace: reproduce con `shell.exec`; sin `fs.write` en allowlist)
+- [x] Researcher. (read-only: web/http/search, sin writes locales por defecto)
+- [x] Implementer. (workspace)
+- [x] Verifier. (read-only; solo `verify.evaluate` — `verify.plan/record` son `state.write`)
 
 ## Agent Orchestrator
 
-- [ ] spawn.
-- [ ] status.
-- [ ] message.
-- [ ] wait.
-- [ ] cancel.
-- [ ] result.
-- [ ] task ownership.
-- [ ] bounded objective.
-- [ ] concurrency controls.
-- [ ] max depth.
-- [ ] max total agents.
-- [ ] cancellation propagation.
+- [x] spawn. (`agent.spawn` = `state.write`: permitido en workspace, denegado en read-only)
+- [x] status. (`agent.status`, 1 o todos)
+- [x] message. (`agent.message`: fila de seguimiento, recogida entre turns)
+- [x] wait. (`agent.wait` con timeout)
+- [x] cancel. (`agent.cancel` → token propagado a loop y tools)
+- [x] result. (`agent.result`: `AgentResult` o null si sigue corriendo)
+- [x] task ownership. (campo `task_id`; join del task graph al synthesize)
+- [x] bounded objective. (budget per-agent + timeout + objetivo único por spec)
+- [x] concurrency controls. (`MAX_CONCURRENT` simultáneos)
+- [x] max depth. (`MAX_DEPTH`: los subagentes no re-spawn por allowlist)
+- [x] max total agents. (`MAX_TOTAL` por sesión)
+- [x] cancellation propagation. (`_LinkedToken`: parent session ↔ spec token, ambas direcciones)
 
 ## Agent isolation
 
-- [ ] read-only Explore.
-- [ ] read-only Reviewer default.
-- [ ] Researcher without local writes default.
-- [ ] verifier restrictions.
-- [ ] per-agent permissions.
-- [ ] per-agent budgets.
-- [ ] no permission inheritance bugs.
+- [x] read-only Explore.
+- [x] read-only Reviewer default. (harness 112: Explore/Reviewer/Verifier no-writes)
+- [x] Researcher without local writes default.
+- [x] verifier restrictions. (validación `state.read` solo)
+- [x] per-agent permissions. (PolicyEngine con scope propio; approvals auto-deny `prompt=None`)
+- [x] per-agent budgets. (budget meter + limits de proceso: 60s, 128KB output)
+- [x] no permission inheritance bugs. (test: subagente read-only denegado en `fs.write` aunque el parent pueda)
 
 ## Worktrees
 
-- [ ] worktree manager.
-- [ ] isolated writer workspace.
-- [ ] branch naming.
-- [ ] patch/commit result.
-- [ ] merge/integration.
-- [ ] conflict reporting.
-- [ ] cleanup.
-- [ ] prevent blind same-tree parallel writes.
+- [x] worktree manager. (`agents/worktree_manager.py`)
+- [x] isolated writer workspace. (`git worktree add` por writer con `use_worktree`)
+- [x] branch naming. (`subagent/<slug>` con sufijo incremental)
+- [x] patch/commit result. (`commit_result` + `patch` HEAD~1..HEAD)
+- [x] merge/integration. (`try_merge` no-ff en el worktree principal)
+- [x] conflict reporting. (`--diff-filter=U` + `abort_merge`)
+- [x] cleanup. (`remove` + best-effort `branch -D`)
+- [x] prevent blind same-tree parallel writes. (writers solo escriben en su worktree; el main tree no se toca hasta merge)
 
 ## Multi-agent synthesis
 
-- [ ] structured AgentResult.
-- [ ] evidence refs.
-- [ ] contradiction detection.
-- [ ] independent verification.
-- [ ] task graph join.
-- [ ] duplicate-work avoidance.
+- [x] structured AgentResult. (status, ok, summary, validation, files, branch/commit, conflicts, usage)
+- [x] evidence refs. (`extract_evidence`: `artifact://...` refs)
+- [x] contradiction detection. (`_contradictions`: checks passed/failed entre agentes)
+- [x] independent verification. (verifier como agente separado con perfil read-only)
+- [x] task graph join. (join solo en `synthesize` — evita carreras entre spawns simultáneos; contradicciones bloquean el auto-join)
+- [x] duplicate-work avoidance. (`_duplicate_work`: files_changed en común)
+
+Implementation (phase 6): `src/rinari/agents/` — `definition.py` (6 agentes
+builtin, budgets, perfiles), `registry.py` (builtin + project/user con trust),
+`orchestrator.py` (AgentOrchestrator: limits, cancel, worktrees, synthesize)
+con `SubagentStart`/`SubagentStop` en session_events, `worktree_manager.py`,
+`runtime.py` (`make_subagent_runner`: AgentLoop scoped por subagente,
+`_LinkedToken`, ToolContext aislado) y `tools.py` (7 tools `agent.*`).
+Wiring en `cli/agent_runtime.py` (`build_agent_session` → orchestrator +
+`agent.*`/`skills.*` tools; cancel de subagentes en `session.end()`).
+Fix de storage: `Database` thread-safe (RLock + `check_same_thread=False`,
+transacciones nestables per-thread, `seq` asignado atómicamente) porque los
+worker threads persisten eventos. 23 tests (`test_agents_runtime.py`,
+incluido e2e CLI de spawn/wait).
 
 ---
 
