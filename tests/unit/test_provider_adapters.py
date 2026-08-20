@@ -86,6 +86,40 @@ def test_openai_missing_endpoint_rejected() -> None:
         adapter.validate_credential(None, None)
 
 
+class _BytesStream(httpx.SyncByteStream):
+    """A minimal sync stream whose body is not preloaded (is_stream_consumed False)."""
+
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+        self._sent = False
+
+    def __iter__(self):
+        if not self._sent:
+            self._sent = True
+            yield self._data
+
+    def close(self) -> None:
+        return None
+
+
+def test_provider_error_detail_reads_stream_body() -> None:
+    # Regression: a streaming error response is unread when passed to
+    # provider_error_detail; it must read the body instead of crashing with
+    # httpx.ResponseNotRead (which used to mask the real provider error).
+    from rinari.providers.adapters.http import provider_error_detail
+
+    req = httpx.Request("POST", "https://api.test/v1/chat/completions")
+    resp = httpx.Response(
+        503,
+        request=req,
+        stream=_BytesStream(b'{"error": {"message": "unknown model"}}'),
+    )
+    assert resp.is_stream_consumed is False
+    detail = provider_error_detail(resp, "https://api.test/v1")
+    assert "503" in detail
+    assert "unknown model" in detail
+
+
 def test_openai_timeout_maps_to_network_error() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectTimeout("timeout")

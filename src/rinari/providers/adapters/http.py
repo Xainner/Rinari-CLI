@@ -34,6 +34,14 @@ def send_request(
 
 def provider_error_detail(response: httpx.Response, url: str) -> str:
     """Best-effort human detail from an error body (no secret leakage)."""
+    # A streaming response body is not loaded until read(); without this the
+    # error path itself crashes with httpx.ResponseNotRead, masking the real
+    # provider error (openai/anthropic invoke_stream pass unread responses).
+    try:
+        if not response.is_stream_consumed:
+            response.read()
+    except Exception:
+        return f"Provider returned HTTP {response.status_code} for {url}"
     try:
         data = response.json()
     except ValueError:
