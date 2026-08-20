@@ -2,7 +2,7 @@
 
 **Tu asistente personal de IA en la terminal.**
 
-> **Estado: fases 0-7 completas (2026-08-20).**
+> **Estado: fases 0-7 completas + core de fase 8 (2026-08-20).**
 > Producto: CLI funcional (setup, config, providers/models, sesiones
 > CHAT/PROJECT, Soul/Constitution, doctor/status/version), agent + tool
 > runtime con seguridad base (fase 2), trust/index/validation/checkpoints
@@ -12,12 +12,16 @@
 > + multi-agent (fase 6): Skill Runtime (manifest, discovery, lazy load, CLI)
 > y 6 agentes built-in con `AgentOrchestrator` (limits, cancel, worktrees),
 > tools `agent.*`, synthesis con contradictions/duplicate-work y subagentes
-> aislados por perfil (read-only/workspace), y UI/UX + productización (fase
+> aislados por perfil (read-only/workspace), UI/UX + productización (fase
 > 7): `RuntimeSnapshot` como fuente de verdad, renderers Rich/compact/plain/
 > JSON/JSON-stream, banner + status rail + approvals UI, 24 slash commands,
 > y cobertura completa de la superficie de comandos pública (~258
-> subcomandos, `--json` con contracts y exit codes, export/import de sesión
-> v1). Ver [TODO.md](TODO.md) por el roadmap y el estado de decisiones.
+> subcomandos, `--json` con contracts y exit codes). Fase 8 (core): eval
+> runner determinista (21 casos en 6 suites, network-isolated) con
+> `rinari eval`, `metrics` como grupo (all/sessions/.../success), trace spans
+> (`turn_index`/`tool_seq`), export/import como grupos con redacción de
+> secretos, y tests de upgrade de esquema. Ver [TODO.md](TODO.md) por el
+> roadmap y el estado de decisiones.
 
 Segunda construcción de Rinari. La
 [v1](https://github.com/Xainner/Rinari-CLI) (chat REPL, agente con 23 tools,
@@ -311,12 +315,28 @@ reemplaza a RINARI.md en su level; el level más profundo gana conflictos.
   (`/status /usage /tokens /diff /test /review /checkpoint /undo /compact /
   context /trace /new /resume` …). Cobertura completa de la superficie
   pública de comandos de [docs/commands.md](docs/commands.md) (~258
-  subcomandos con `--help` y `--json` con un mismo contract + exit codes):
-  se añadieron `profiles project checkpoint permissions approvals sandbox
-  secrets tools trace logs metrics cache agents` y los top-level `ask plan
-  agent review run stop verify export import update`, más sesiones con
-  rename/stop/archive/delete y export/import de sesión v1. Los comandos
-  deterministas no gastan model; `ask`/`plan`/`review` corren read-only.
+subcomandos con `--help` y `--json` con un mismo contract + exit codes):
+   se añadieron `profiles project checkpoint permissions approvals sandbox
+   secrets tools trace logs metrics cache agents` y los top-level `ask plan
+   agent review run stop verify export import update`, más sesiones con
+   rename/stop/archive/delete y export/import de sesión v1. Los comandos
+   deterministas no gastan model; `ask`/`plan`/`review` corren read-only.
+- Evals + observabilidad + hardening (core, Fase 8): paquete `rinari/evals`
+   con un **eval runner determinista y network-isolated** (model scripted con
+   lanes para el encolado parent/subagent; el harness real de policy/sandbox/
+   approvals/loop/compaction/completion gate corre sin tocar). CLI `rinari
+   eval list|run|show|compare|report|history|create|validate`. 21 casos en 6
+   suites (security, soul, trajectory, coding, long-horizon, multi-agent);
+   `eval compare` expone regressions/fixes entre runs. `rinari metrics` ahora
+   es un grupo (`all|sessions|models|tools|skills|agents|cost|latency|
+   success`) donde `success` reporta task success (gate VERIFIED), human
+   intervention, loop rate y tool errors a partir de eventos persistidos, sin
+   inventar métricas (cost/model latency = `unknown`). Trace spans:
+   `turn_index` en turn/tool events y `tool_seq` en `ToolCompleted`,
+   monotónicos a través de resume. `export`/`import` ahora son grupos
+   (`export session|config|skills|profile`, `import session|config`) con
+   redacción de hojas secret-named; y tests de upgrade de esquema SQLite
+   (0004->latest in place preservando providers/models/sesiones/eventos).
 
 ## Docs
 

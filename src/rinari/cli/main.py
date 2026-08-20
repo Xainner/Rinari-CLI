@@ -13,6 +13,7 @@ from rinari.cli.commands import cache as cache_cmd
 from rinari.cli.commands import checkpoint as checkpoint_cmd
 from rinari.cli.commands import config as config_cmd
 from rinari.cli.commands import context as context_cmd
+from rinari.cli.commands import evals_cmd
 from rinari.cli.commands import export_import as export_import_cmd
 from rinari.cli.commands import hooks as hooks_cmd
 from rinari.cli.commands import index as index_cmd
@@ -81,14 +82,14 @@ app.add_typer(secrets_cmd.app, name="secrets")
 app.add_typer(tools_cmd.app, name="tools")
 app.command("trace", help="Inspect a session's event trace.")(trace_cmd.trace)
 app.add_typer(logs_cmd.app, name="logs")
-app.command("metrics", help="Runtime metrics from stored events.")(metrics_cmd.metrics_all)
+app.add_typer(metrics_cmd.app, name="metrics")
 app.add_typer(cache_cmd.app, name="cache")
 app.add_typer(system_cmd.system_app, name=None)
 
 app.command("chat")(sessions_cmd.chat_cmd)
 app.command("resume")(sessions_cmd.resume_cmd)
-app.command("export")(export_import_cmd.export)
-app.command("import")(export_import_cmd.import_)
+app.add_typer(export_import_cmd.export_app, name="export")
+app.add_typer(export_import_cmd.import_app, name="import")
 app.command("update")(update_cmd.update)
 app.command("ask")(work_cmd.ask)
 app.command("plan")(work_cmd.plan)
@@ -97,6 +98,7 @@ app.command("review")(work_cmd.review)
 app.command("run")(work_cmd.run)
 app.command("stop")(work_cmd.stop)
 app.command("verify")(work_cmd.verify)
+app.add_typer(evals_cmd.eval_app, name="eval")
 
 
 def _version_callback(value: bool) -> None:

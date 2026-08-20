@@ -131,12 +131,17 @@ class AgentLoop:
         cancel: CancellationToken | None = None,
         budget: BudgetMeter | None = None,
         loop: LoopDetector | None = None,
+        turn_index: int | None = None,
     ) -> TurnResult:
         cancel = cancel if cancel is not None else CancellationToken()
         loop = loop if loop is not None else LoopDetector()
-        self._emit(ctx.session_id, EVENT_TURN_STARTED, {"preview": user_message[:200]})
+        started_payload: dict = {"preview": user_message[:200]}
+        if turn_index is not None:
+            started_payload["turn_index"] = turn_index
+        self._emit(ctx.session_id, EVENT_TURN_STARTED, started_payload)
         ctx.history.append(ChatMessage.user(user_message))
         tool_calls_made = 0
+        tool_seq = 0
         total_usage: Usage | None = None
 
         max_iters = self._max_model_calls
@@ -154,6 +159,7 @@ class AgentLoop:
                         tool_calls_made,
                         total_usage,
                         budget,
+                        turn_index,
                     )
                 if budget.model_calls >= budget.limits.max_model_calls:
                     return self._stop(
@@ -163,6 +169,7 @@ class AgentLoop:
                         tool_calls_made,
                         total_usage,
                         budget,
+                        turn_index,
                     )
                 budget.note_model_call()
             request = self._build_request(ctx)
@@ -206,7 +213,7 @@ class AgentLoop:
                 self._emit(
                     ctx.session_id,
                     EVENT_TURN_COMPLETED,
-                    _turn_completed_payload(kind, tool_calls_made, budget),
+                    _turn_completed_payload(kind, tool_calls_made, budget, turn_index),
                 )
                 return TurnResult(
                     kind=kind,
@@ -263,22 +270,23 @@ class AgentLoop:
                         )
                     _hook(on_tool, "end", call.name, result)
                 tool_calls_made += 1
+                tool_seq += 1
                 ctx.history.append(
                     ChatMessage.tool_result(call.id, call.name, result.to_model_text())
                 )
-                self._emit(
-                    ctx.session_id,
-                    EVENT_TOOL_COMPLETED,
-                    {
-                        "tool_call_id": call.id,
-                        "name": call.name,
-                        "ok": result.ok,
-                        "error_code": result.error.code.value if result.error else None,
-                        "duration_ms": round(result.duration_ms, 1),
-                        "truncated": result.truncated,
-                        "artifacts": [a.uri for a in result.artifacts],
-                    },
-                )
+                tool_completed_payload: dict = {
+                    "tool_call_id": call.id,
+                    "name": call.name,
+                    "ok": result.ok,
+                    "error_code": result.error.code.value if result.error else None,
+                    "duration_ms": round(result.duration_ms, 1),
+                    "truncated": result.truncated,
+                    "artifacts": [a.uri for a in result.artifacts],
+                    "tool_seq": tool_seq,
+                }
+                if turn_index is not None:
+                    tool_completed_payload["turn_index"] = turn_index
+                self._emit(ctx.session_id, EVENT_TOOL_COMPLETED, tool_completed_payload)
                 loop.record_tool(call.name, call.arguments)
                 if result.error is not None:
                     loop.record_error(call.name, result.error.code.value, result.error.message)
@@ -297,6 +305,7 @@ class AgentLoop:
                             tool_calls_made,
                             total_usage,
                             budget,
+                            turn_index,
                         )
                     ctx.history.append(ChatMessage.user(loop.nudge_text(signal)))
 
@@ -310,6 +319,7 @@ class AgentLoop:
                         tool_calls_made,
                         total_usage,
                         budget,
+                        turn_index,
                     )
 
         return self._stop(
@@ -320,6 +330,7 @@ class AgentLoop:
             tool_calls_made,
             total_usage,
             budget,
+            turn_index,
         )
 
     # -- internals ------------------------------------------------------------
@@ -372,9 +383,12 @@ class AgentLoop:
         tool_calls: int,
         usage: Usage | None,
         budget: BudgetMeter | None = None,
+        turn_index: int | None = None,
     ) -> TurnResult:
         self._emit(
-            session_id, EVENT_TURN_COMPLETED, _turn_completed_payload(kind, tool_calls, budget)
+            session_id,
+            EVENT_TURN_COMPLETED,
+            _turn_completed_payload(kind, tool_calls, budget, turn_index),
         )
         return TurnResult(
             kind=kind,
@@ -399,10 +413,14 @@ class AgentLoop:
             self._hook_sink(event, payload)
 
 
-def _turn_completed_payload(kind: str, tool_calls: int, budget: BudgetMeter | None) -> dict:
+def _turn_completed_payload(
+    kind: str, tool_calls: int, budget: BudgetMeter | None, turn_index: int | None = None
+) -> dict:
     payload = {"kind": kind, "tool_calls": tool_calls}
     if budget is not None:
         payload["budget"] = budget.snapshot()
+    if turn_index is not None:
+        payload["turn_index"] = turn_index
     return payload
 
 

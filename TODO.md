@@ -2343,7 +2343,7 @@ migration
 
 ## Observability
 
-- [ ] trace hierarchy.
+- [x] trace hierarchy. (fase 8; spans `turn_index` en turn/tool events + `tool_seq` en ToolCompleted, monotónico a través de resume)
 - [ ] sessions.
 - [ ] turns.
 - [ ] prompt segment metadata.
@@ -2361,48 +2361,48 @@ migration
 
 ## Metrics
 
-- [ ] task success.
+- [x] task success. (fase 8; `metrics success` -> gate VERIFIED rate desde eventos)
 - [ ] first-pass success.
-- [ ] human intervention.
+- [x] human intervention. (fase 8; approval requested/approved/denied)
 - [ ] unnecessary questions.
 - [ ] validation pass.
-- [ ] regressions.
+- [ ] regressions. (`eval compare` expone regressions entre runs; aún no es métrica agregada)
 - [ ] unrelated-change rate.
-- [ ] permission prompts.
-- [ ] loop rate.
+- [x] permission prompts. (fase 8; `metrics success` -> approval requests)
+- [x] loop rate. (fase 8; `metrics success`)
 - [ ] resume success.
-- [ ] tool errors.
+- [x] tool errors. (fase 8; `metrics success` -> tool_error_rate)
 - [ ] subagent usefulness.
-- [ ] latency.
+- [x] latency. (fase 8; `metrics latency` p50/p95 de tools y turns)
 - [ ] cost per successful task.
 
 ## Eval runner
 
-- [ ] suite registry.
-- [ ] fixtures.
-- [ ] deterministic assertions.
-- [ ] model judge support.
-- [ ] trajectory assertions.
-- [ ] compare runs.
-- [ ] reports.
-- [ ] history.
+- [x] suite registry. (fase 8; `rinari/evals/builtins.py` + `eval list`)
+- [x] fixtures. (fase 8; `rinari/evals/fixtures.py`)
+- [x] deterministic assertions. (fase 8; `spec.py` AssertionResult/Outcome)
+- [x] model judge support. (fase 8; `judge.py` RuleJudge determinista + parse_judge_json)
+- [x] trajectory assertions. (fase 8; suites trajectory/security)
+- [x] compare runs. (fase 8; `eval compare` regressions/fixes)
+- [x] reports. (fase 8; `reports.py` + `eval report`)
+- [x] history. (fase 8; `eval history`)
 
 ## Soul evals
 
-- [ ] identity.
-- [ ] AI disclosure.
+- [x] identity. (fase 8; `soul.identity_disclosure`)
+- [x] AI disclosure. (fase 8; `soul.identity_disclosure`)
 - [ ] persona age.
 - [ ] tone.
 - [ ] disagreement.
 - [ ] frustration.
 - [ ] uncertainty.
 - [ ] scope.
-- [ ] no false success.
+- [x] no false success. (fase 8; `soul.no_false_success`)
 - [ ] no repetitive catchphrases.
 
 ## Coding evals
 
-- [ ] single-file bug.
+- [x] single-file bug. (fase 8; `coding.single_file_bug` con test del propio repo)
 - [ ] cross-module bug.
 - [ ] feature.
 - [ ] refactor.
@@ -2416,18 +2416,18 @@ migration
 
 ## Trajectory evals
 
-- [ ] inspect before edit.
+- [x] inspect before edit. (fase 8; `trajectory.inspect_before_edit`)
 - [ ] correct file discovery.
-- [ ] minimal scope.
+- [x] minimal scope. (fase 8; `trajectory.minimal_scope`)
 - [ ] relevant validation.
-- [ ] recovery.
+- [x] recovery. (fase 8; `trajectory.recovery_from_tool_error`)
 - [ ] no unnecessary questions.
-- [ ] no loops.
+- [x] no loops. (fase 8; `trajectory.loop_detected_and_stopped` + `no_loop_on_distinct_calls`)
 - [ ] accurate completion.
 
 ## Security evals
 
-- [ ] malicious README.
+- [x] malicious README. (fase 8; `security.untrusted_instructions_excluded` - instrucciones maliciosas de proyecto untrusted nunca entran al prompt)
 - [ ] malicious source comment.
 - [ ] malicious compiler output.
 - [ ] malicious web page.
@@ -2435,10 +2435,10 @@ migration
 - [ ] malicious MCP resource.
 - [ ] malicious subagent report.
 - [ ] secret in env.
-- [ ] secret in stderr.
-- [ ] write outside workspace.
-- [ ] force push.
-- [ ] external send.
+- [x] secret in stderr. (fase 8; `security.secret_redacted` - secreto del provider redactado de la salida de tool)
+- [x] write outside workspace. (fase 8; `security.sandbox_write_outside`)
+- [x] force push. (fase 8; `security.force_push_denied`)
+- [x] external send. (fase 8; `security.exfiltration_denied`)
 - [ ] untrusted plugin.
 - [ ] untrusted project hook.
 
@@ -2468,8 +2468,8 @@ migration
 ## Multi-agent evals
 
 - [ ] bounded context.
-- [ ] read-only agent cannot write.
-- [ ] parallel writers isolated.
+- [x] read-only agent cannot write. (fase 8; `multi_agent.read_only_write_rejected` + `read_only_shell_denied`)
+- [x] parallel writers isolated. (fase 8; `multi_agent.parallel_worktrees_isolated`)
 - [ ] cancellation.
 - [ ] contradictory results.
 - [ ] duplicate work.
@@ -2479,11 +2479,11 @@ migration
 
 ## Long-horizon
 
-- [ ] 50+ tool calls.
+- [x] 50+ tool calls. (fase 8; `long_horizon.many_tool_calls`)
 - [ ] 100+ tool calls.
-- [ ] compaction.
+- [x] compaction. (fase 8; `long_horizon.compaction_under_pressure`)
 - [ ] interruption.
-- [ ] resume.
+- [x] resume. (fase 8; `long_horizon.resume_after_restart`)
 - [ ] provider switch.
 - [ ] subagents.
 - [ ] failure recovery.
@@ -2492,13 +2492,49 @@ migration
 ## Migration tests
 
 - [ ] config schema upgrade.
-- [ ] SQLite schema upgrade.
-- [ ] provider preservation.
-- [ ] model preservation.
-- [ ] session preservation.
+- [x] SQLite schema upgrade. (fase 8; `test_migrations_upgrade.py` 0004->latest in place)
+- [x] provider preservation. (fase 8; provider sobrevive el upgrade)
+- [x] model preservation. (fase 8; model sobrevive el upgrade)
+- [x] session preservation. (fase 8; session + eventos sobreviven el upgrade)
 - [ ] credential references.
 - [ ] skill/plugin version migration.
-- [ ] export/import schema.
+- [x] export/import schema. (fase 8 Block A; grupos `export`/`import` + roundtrip de config)
+
+## Implementation notes (Fase 8 - core de evals/observabilidad/hardening)
+
+Entregado en esta pasada (scope Fases 8, bloques A-G):
+
+1. **Export/import como grupos** (Block A). `rinari export {session|config|skills|profile}` y
+   `rinari import {session|config}`. `export config` redacta hojas cuyo nombre suela a secreto
+   (`_SECRET_KEY_PARTS`); `import config` aplica solo hojas no-redactadas vía `writer.set_dotted`
+   y rechaza `[redacted]` (InvalidUsage). Env refs `${...}` se conservan. Tests: roundtrip de
+   config, rechazo de hoja redactada, y assertion de redacción.
+2. **Eval runner** (Block B/C). Nuevo paquete `src/rinari/evals/`: `spec.py` (EvalCase,
+   AssertionResult/Outcome), `scripted.py` (ScriptedModel con lanes parent/subagent,
+   `answer`/`calls`), `fixtures.py` (EvalFixture con workspace git + provider fake + session),
+   `runner.py` (run_case/run_suite, error != false success), `reports.py` + `judge.py`
+   (RuleJudge determinista, `parse_judge_json`), `builtins.py` (21 casos en 6 suites). CLI
+   `rinari eval {list|run|show|compare|report|create|validate|history}`. Suites: security(6),
+   soul(2), trajectory(5), coding(1), long_horizon(3), multi_agent(3). 21/21 en verde,
+   network-isolated.
+3. **Migration tests** (Block D). `test_migrations_upgrade.py`: upgrade 0004->latest in place con
+   providers/models/sesiones/eventos preservados, idempotencia, version table, y rechazo de
+   schema futuro (`verify()`).
+4. **Metrics como grupo** (Block E). `rinari metrics {all|sessions|models|tools|skills|agents|
+   cost|latency|success}`. `success` reporta task success (gate VERIFIED), human intervention,
+   loop rate y tool error rate, todos derivados de eventos persistidos. `cost` y `model_s`
+   exponen `unknown` explícito: nada inventado (AGENTS.md 22).
+5. **Trace spans** (Block F). `turn_index` agregado a `AgentTurnStarted`/`AgentTurnCompleted` y
+   `ToolCompleted` (+`tool_seq`), calculado desde eventos persistidos para ser monotónico a
+   través de resume/restart.
+6. **CLI eval coverage** (Block B/G). `test_evals_cli.py` (list/show/run/compare/report/
+   history/create/validate + caso fallido externo) y `test_evals_runtime.py` (span fields,
+   lanes, judge, script exhaustion).
+
+Dejado pendiente (fuera del scope de esta pasada, hardening posterior): browser evals,
+MCP/plugin evals, soul/coding evals adicionales (tone, cross-module, refactor), 100+ tool calls,
+cost per successful task con pricing, first-pass success y subagent usefulness como métricas
+agregadas, y credential references / skill-plugin version migration en upgrades.
 
 ---
 

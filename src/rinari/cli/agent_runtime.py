@@ -362,6 +362,7 @@ def build_agent_session(
     interactive: bool,
     user_home: Path | None = None,
     profile: PermissionProfile = PermissionProfile.WORKSPACE,
+    model_caller: ModelCaller | None = None,
 ) -> AgentSession:
     root = Path(record.project_root_snapshot) if record.project_root_snapshot else None
     cwd = Path(record.current_cwd)
@@ -370,7 +371,9 @@ def build_agent_session(
     token = CancellationToken()
     network_policy = services.network.policy()
     hook_engine = _build_hook_engine(services, root)
-    caller = _caller_for(services, record)
+    # model_caller is the eval seam: a scripted/caller-equivalent object that
+    # satisfies invoke/invoke_stream/capabilities. Production never passes it.
+    caller = model_caller if model_caller is not None else _caller_for(services, record)
     policy = PolicyEngine(network=network_policy)
     tool_ctx = ToolContext(
         session_id=record.id,
@@ -655,6 +658,21 @@ def _new_usage():
     from rinari.cli.snapshot import SessionUsage
 
     return SessionUsage()
+
+
+def _turn_index(services: ServiceContainer, session_id: str) -> int:
+    """Zero-based turn ordinal for trace spans.
+
+    Counted from persisted AgentTurnStarted events so it stays monotonic and
+    continuous across session resume/reconcile (survives process restarts).
+    """
+    from rinari.runtime.agent import EVENT_TURN_STARTED
+
+    try:
+        events = services.ctx.event_repo.list(session_id)
+    except Exception:
+        return 0
+    return sum(1 for e in events if e.type == EVENT_TURN_STARTED)
 
 
 def _persistent_grants_store(services: ServiceContainer) -> dict:
@@ -1023,6 +1041,7 @@ def run_turn(session: AgentSession, message: str, *, on_delta=None, on_tool=None
     dropped_before = session.context.dropped_total
     budget = BudgetMeter(TurnBudgetLimits(), clock=services.ctx.clock)
     loop = LoopDetector()
+    turn_index = _turn_index(services, session.record.id)
     try:
         result = session.loop.turn(
             session.context,
@@ -1032,6 +1051,7 @@ def run_turn(session: AgentSession, message: str, *, on_delta=None, on_tool=None
             cancel=session.token,
             budget=budget,
             loop=loop,
+            turn_index=turn_index,
         )
     except CancelledError:
         _set_session_state(services, session.record, STATE_INTERRUPTED)

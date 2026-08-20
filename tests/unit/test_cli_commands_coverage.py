@@ -201,18 +201,18 @@ def test_session_export_import_roundtrip(env):
     assert res.exit_code == 0, res.output
     assert "CHAT" in res.output
 
-    res = _call("export")  # most recent session
+    res = _call("export", "session")  # most recent session
     assert res.exit_code == 0, res.output
     document = json.loads(res.output)
     assert document["version"] == "1"
     session_id = document["session"]["id"]
 
     out = env[0] / "sess.json"
-    res = _call("export", "--out", str(out))
+    res = _call("export", "session", "--out", str(out))
     assert res.exit_code == 0
     assert out.is_file()
 
-    res = _call("import", str(out))
+    res = _call("import", "session", str(out))
     assert res.exit_code == 0, res.output
     imported = res.output.strip().split()[1]
     assert imported != session_id  # new id assigned on import
@@ -241,6 +241,68 @@ def test_session_rename_and_stop(env):
     assert res.exit_code == 0
     res = _call("session", "show", session_id)
     assert "stopped" in res.output
+
+
+def test_export_config_roundtrip(env):
+    tmp = env[0]
+    res = _call("config", "set", "user_name", "tester")
+    assert res.exit_code == 0, res.output
+
+    out = tmp / "config.json"
+    res = _call("export", "config", "--out", str(out))
+    assert res.exit_code == 0, res.output
+    document = json.loads(out.read_text(encoding="utf-8"))
+    assert document["source"] == "rinari-export-config"
+    assert document["data"]["user_name"] == "tester"
+
+    # change the value, then import the bundle back
+    res = _call("config", "set", "user_name", "changed")
+    assert res.exit_code == 0
+    res = _call("import", "config", str(out))
+    assert res.exit_code == 0, res.output
+    res = _call("config", "get", "user_name")
+    assert res.output.strip() == "tester"
+
+    res = _call("export", "skills")
+    assert res.exit_code == 0
+
+    res = _call("export", "profile", "workspace")
+    assert res.exit_code == 0
+
+
+def test_import_config_refuses_redacted(env):
+    tmp = env[0]
+    bad = tmp / "bad.json"
+    bad.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "source": "rinari-export-config",
+                "data": {"user_name": "x", "openai_api_key": "[redacted]"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    res = _call("import", "config", str(bad))
+    assert res.exit_code != 0
+    assert "redacted" in res.output
+
+
+def test_export_config_redacts_secret_named_leaves():
+    from rinari.cli.commands.export_import import _redact
+
+    data = _redact(
+        {
+            "a": {"api_key": "super-secret", "url": "http://x"},
+            "env_ref": "${OPENAI_API_KEY}",
+            "b": {"auth": {"token": "t-123"}},
+        },
+        "",
+    )
+    assert data["a"]["api_key"] == "[redacted]"
+    assert data["a"]["url"] == "http://x"
+    assert data["env_ref"] == "${OPENAI_API_KEY}"  # env references are safe
+    assert data["b"]["auth"]["token"] == "[redacted]"
 
 
 # --- agents -----------------------------------------------------------------
@@ -344,11 +406,18 @@ def test_trace_logs_metrics_on_session(env):
     res = _call("--json", "logs", "search", "Session")
     assert res.exit_code == 0
 
-    res = _call("--json", "metrics")
+    res = _call("--json", "metrics", "all")
     assert res.exit_code == 0
     metrics = json.loads(res.output)["data"]
     assert "sessions" in metrics
     assert "model" in metrics
+
+    for sub in ("sessions", "models", "tools", "skills", "agents", "cost", "latency", "success"):
+        res = _call("--json", "metrics", sub)
+        assert res.exit_code == 0, (sub, res.output)
+        json.loads(res.output)
+    success = json.loads(_call("--json", "metrics", "success").output)["data"]
+    assert "task_success" in success and "human_intervention" in success
 
 
 # --- secrets ----------------------------------------------------------------
