@@ -159,13 +159,21 @@ def run_repl(
             console.print(Text(f"you > {message}", style="bold"))
         streamed = {"any": False}
         turn_started = time.monotonic()
+        status = render.thinking_status(console)
+        status_clear = {"any": not (not json_mode and not no_progress)}
 
-        def _delta(delta: str, streamed=streamed) -> None:
+        def _stop_status(status=status, status_clear=status_clear) -> None:
+            if not status_clear["any"]:
+                status_clear["any"] = True
+                status.stop()
+
+        def _delta(delta, streamed=streamed, stop=_stop_status) -> None:
             if json_mode:
                 print(render.json_stream_event("token", text=delta), flush=True)
             else:
                 if not streamed["any"]:
                     streamed["any"] = True
+                    stop()
                     console.print(Text("rinari > ", style="bold"), end="", highlight=False)
                 _on_delta(delta)
 
@@ -188,9 +196,12 @@ def run_repl(
                 elapsed=_elapsed,
             )
 
+        if not status_clear["any"]:
+            status.start()
         try:
             result = agent_runtime.run_turn(session, message, on_delta=_delta, on_tool=_tool)
         except KeyboardInterrupt:
+            _stop_status()
             # First Ctrl+C: cancel the in-flight turn. Second one: hard exit.
             if interrupted_this_turn:
                 return None
@@ -201,10 +212,13 @@ def run_repl(
             typer.echo("turn cancelled (Ctrl+C again to exit)", err=True)
             continue
         except RinariError as err:
+            _stop_status()
             typer.echo(f"error: {err.message}", err=True)
             if err.hint:
                 typer.echo(f"hint: {err.hint}", err=True)
             continue
+        finally:
+            _stop_status()
 
         if json_mode:
             print(

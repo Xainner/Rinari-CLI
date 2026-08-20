@@ -513,6 +513,20 @@ def render_approval(console: Console, request: ApprovalRequest) -> None:
     )
 
 
+def thinking_status(console: Console, label: str = "rinari thinking…", spinner: str = "dots12"):
+    """A transient rich `Live` spinner for the 'thinking' phase of a turn.
+
+    Returns a `Live` you `start()` before a turn and `stop()` when the first
+    token streams (or the turn ends). `transient=True` erases it on stop so it
+    never collides with streamed model output.
+    """
+    from rich.live import Live
+    from rich.spinner import Spinner
+
+    spin = Spinner(spinner, text=label, style=_ACCENT)
+    return Live(spin, console=console, refresh_per_second=10, transient=True)
+
+
 def json_stream_event(event_type: str, **payload: object) -> str:
     import json
 
@@ -541,6 +555,7 @@ __all__ = [
     "render_banner",
     "status_line",
     "symbol",
+    "thinking_status",
     "tool_arg",
     "tool_label",
     "tool_verb",

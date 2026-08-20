@@ -303,6 +303,14 @@ def test_approval_panel_numbered_options() -> None:
     assert "[5] Deny" in text
 
 
+def test_thinking_status_is_transient_live() -> None:
+    from rinari.cli.render import thinking_status
+
+    live = thinking_status(_console(), spinner="dots12")
+    assert live.transient is True
+    assert hasattr(live, "start") and hasattr(live, "stop")
+
+
 # -- json stream --------------------------------------------------------------
 
 
