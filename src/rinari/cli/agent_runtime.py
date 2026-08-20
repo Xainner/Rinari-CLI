@@ -71,6 +71,15 @@ class AgentSession:
     # Set after an in-session CHAT -> PROJECT promotion; the host (REPL)
     # renders the notice once and clears it.
     promoted_root: Path | None = None
+    # Bound by build_agent_session; the host calls it exactly once when the
+    # session ends (emits the SessionEnd lifecycle hook).
+    close: object = field(default=None, repr=False)
+
+    def end(self) -> None:
+        if callable(self.close):
+            with contextlib.suppress(Exception):
+                self.close()
+        self.close = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -321,12 +330,15 @@ def build_agent_session(
     sandbox = _sandbox_for(record, home)
     token = CancellationToken()
     network_policy = services.network.policy()
+    hook_engine = _build_hook_engine(services, root)
     tools = _build_tools(
         services,
         record,
         interactive=interactive,
         token=token,
         network_policy=network_policy,
+        root=root,
+        hook_engine=hook_engine,
     )
     tool_ctx = ToolContext(
         session_id=record.id,
@@ -352,6 +364,7 @@ def build_agent_session(
         network=NetworkGuard(network_policy),
         credentials=services.credentials,
         browser=_build_browser_manager(record.id, home),
+        mcp=services.mcp,
     )
     caller = _caller_for(services, record)
     loop = AgentLoop(
@@ -360,9 +373,22 @@ def build_agent_session(
         PromptAssembler(),
         event_sink=lambda sid, t, p: _persist_event(services, sid, t, p),
         on_pressure=lambda ctx, p, used, window: context_service_pressure(
-            services, record.id, ctx, used, window
+            services, record.id, ctx, used, window, hook_engine
+        ),
+        hook_sink=lambda event, payload: (
+            hook_engine.emit(event, payload, project=root) if hook_engine is not None else None
         ),
     )
+    if hook_engine is not None:
+        hook_engine.emit(
+            "SessionStart",
+            {
+                "session_id": record.id,
+                "kind": record.kind,
+                "project_root": str(root) if root else "",
+            },
+            project=root,
+        )
     context = AgentContext(
         session_id=record.id,
         model_ref=record.model_id,
@@ -378,7 +404,21 @@ def build_agent_session(
             "ProjectTrustChecked",
             {"state": services.trust.status(root).state, "project_root": str(root)},
         )
-    return AgentSession(
+
+    def _end_session() -> None:
+        if hook_engine is None:
+            return
+        hook_engine.emit(
+            "SessionEnd",
+            {
+                "session_id": record.id,
+                "kind": record.kind,
+                "project_root": str(root) if root else "",
+            },
+            project=root,
+        )
+
+    session = AgentSession(
         services=services,
         record=record,
         caller=caller,
@@ -387,6 +427,46 @@ def build_agent_session(
         token=token,
         user_home=home,
     )
+    session.close = _end_session
+    return session
+
+
+def _plugin_tools(services: ServiceContainer, root: Path | None) -> list:
+    """Contribute plugin tools (namespace `<plugin>.<tool>`)."""
+    from rinari.tools.definition import ToolDefinition
+
+    collected: list[ToolDefinition] = []
+    for loaded in services.plugins.load_all(project=root):
+        if not loaded.ok():
+            continue
+        for tool in loaded.tools:
+            collected.append(tool)
+    return collected
+
+
+def _mcp_tools(services: ServiceContainer, root: Path | None) -> list:
+    """Connect enabled MCP servers and contribute their normalized tools."""
+    from rinari.mcp.client import McpError
+
+    collected = []
+    for row in services.mcp.list():
+        if not row.get("enabled"):
+            continue
+        try:
+            collected.extend(services.mcp.tools(row["name"], root))
+        except McpError:
+            # A server that can't be reached must not break the session.
+            continue
+    return collected
+
+
+def _build_hook_engine(services: ServiceContainer, root: Path | None):
+    # Build the lifecycle hook engine from hooks.json (user/project) + plugins.
+    # A failure here must not prevent session start; return None on error.
+    try:
+        return services.hooks.build_engine(project=root, trace_sink=lambda d: None)
+    except Exception:
+        return None
 
 
 def _build_tools(
@@ -396,11 +476,38 @@ def _build_tools(
     interactive: bool,
     token: CancellationToken,
     network_policy: NetworkPolicy | None = None,
+    root: Path | None = None,
+    hook_engine=None,
 ) -> ToolRuntime:
     registry = ToolRegistry()
     registry.register_all(all_native_tools())
+    # Extension tool sources normalize into the same registry (harness.md 108-110).
+    with contextlib.suppress(Exception):
+        registry.register_all(_plugin_tools(services, root))
+    with contextlib.suppress(Exception):
+        registry.register_all(_mcp_tools(services, root))
+    with contextlib.suppress(Exception):
+        for row in services.api.list():
+            if row.get("enabled"):
+                registry.register_all(
+                    services.api.tool_definitions(row["name"], row.get("scope") or "global")
+                )
+    # Unified capability search sees whatever is registered above it, so it
+    # is added last (harness.md: search across native/plugin/MCP/OpenAPI/browser).
+    from rinari.capability_search import capability_search_tool
+
+    registry.register(capability_search_tool(registry))
 
     def ask(request) -> str:
+        if hook_engine is not None:
+            hook_engine.emit(
+                "PermissionRequest",
+                {
+                    "capability": getattr(request, "capability", ""),
+                    "target": getattr(request, "target", ""),
+                    "risk": getattr(request, "risk", ""),
+                },
+            )
         if not interactive:
             return "n"
         target = f" {request.target}" if request.target else ""
@@ -693,14 +800,23 @@ def context_service_pressure(
     agent_ctx: AgentContext,
     used: int,
     window: int,
+    hook_engine=None,
 ) -> None:
-    """Agent-loop pressure hook: storage-aware compaction (phase 4)."""
+    """Agent-loop pressure hook: storage-aware compaction (phase 4) + compact hooks."""
+    if hook_engine is not None:
+        hook_engine.emit(
+            "BeforeCompact", {"session_id": session_id, "used": used, "window": window}
+        )
     with contextlib.suppress(Exception):
         services.context.maybe_compact(
             agent_ctx,
             session_id=session_id,
             window_tokens=window,
             used_input_tokens=used,
+        )
+    if hook_engine is not None:
+        hook_engine.emit(
+            "AfterCompact", {"session_id": session_id, "compacted": agent_ctx.compacted}
         )
 
 

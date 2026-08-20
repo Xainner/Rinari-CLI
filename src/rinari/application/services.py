@@ -18,7 +18,11 @@ from rinari.artifacts.store import ArtifactStore
 from rinari.checkpoints.service import CheckpointService
 from rinari.context.retrieval import ContextRetrievalService
 from rinari.context.service import ContextService
+from rinari.hooks import HookService
+from rinari.mcp import McpService
 from rinari.memory import MemoryService
+from rinari.openapi import ApiService
+from rinari.plugins import PluginService
 from rinari.repo.index_service import IndexService
 from rinari.tasks import TaskService
 from rinari.trust import TrustService
@@ -43,6 +47,10 @@ class ServiceContainer:
     memory: MemoryService
     retrieval: ContextRetrievalService
     network: NetworkService
+    plugins: PluginService
+    mcp: McpService
+    api: ApiService
+    hooks: HookService
 
 
 def build_services(
@@ -65,6 +73,10 @@ def build_services(
     memory = MemoryService(ctx)
     retrieval = ContextRetrievalService(ctx, artifacts=artifacts, memory=memory)
     network = NetworkService(ctx)
+    plugins = PluginService(ctx, trust)
+    mcp = McpService(ctx, trust)
+    api = ApiService(ctx, trust)
+    hooks = HookService(ctx, trust)
     return ServiceContainer(
         ctx=ctx,
         credentials=credentials,
@@ -82,4 +94,8 @@ def build_services(
         memory=memory,
         retrieval=retrieval,
         network=network,
+        plugins=plugins,
+        mcp=mcp,
+        api=api,
+        hooks=hooks,
     )

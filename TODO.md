@@ -2,7 +2,7 @@
 
 Roadmap canónico de construcción de Rinari.
 
-> **Estado actual:** Fases 0-4 completas (2026-08-17). Fase 5 en curso: Web, HTTP y Browser terminados; plugins, MCP, OpenAPI, unified search y hooks pendientes.
+> **Estado actual:** Fases 0-4 completas (2026-08-17). Fase 5 completada (2026-08-20): Web, HTTP, Browser, plugins, MCP, OpenAPI, unified capability search y hooks. Pendientes documentados dentro de Fase 5: browser `auth profiles`, contribuciones de plugin no-`tools`/`hooks` (skills/adapters/commands/subagents/context), cancellation tokenizado de MCP, tools de connector nativos, y wiring de `SubagentStart`/`SubagentStop` (Fase 6).
 >
 > **Regla:** las fases expresan **orden de dependencia de implementación**, no alcance opcional del producto.
 >
@@ -1632,7 +1632,7 @@ incluyendo integración real del loop con modelo scripted).
 
 ---
 
-# Fase 5 — Web, browser y capability ecosystem ← ACTUAL
+# Fase 5 — Web, browser y capability ecosystem (completada 2026-08-20)
 
 ## Objetivo
 
@@ -1812,82 +1812,149 @@ registro de decisiones); alternativa: Playwright.
 
 ## Plugin Runtime
 
-- [ ] manifest.
-- [ ] install.
-- [ ] remove.
-- [ ] enable.
-- [ ] disable.
-- [ ] update.
-- [ ] requested capabilities.
-- [ ] plugin trust.
-- [ ] contribution registry.
-- [ ] plugin diagnostics.
+- [x] manifest.
+- [x] install.
+- [x] remove.
+- [x] enable.
+- [x] disable.
+- [x] update.
+- [x] requested capabilities.
+- [x] plugin trust.
+- [x] contribution registry.
+- [x] plugin diagnostics.
+
+Implementation (plugins, bloque de 2026-08-20):
+`src/rinari/plugins/` (manifest.py schema+validación `PluginManifest`, loader.py
+importlib del entrypoint `contribute(api)` con namespace `<plugin>.<tool>`,
+service.py `PluginService` install/remove/enable/disable/update/list/show/
+permissions/doctor + repo tabla `plugins`). Fuentes `user` (`~/.rinari/plugins`,
+confiada) y `project` (`<root>/.rinari/plugins`, **requiere project trust**).
+Fallo de carga → diagnostic (code+message), nunca crash. Capability `tools` ya
+contribuye; skills/adapters/commands/subagents/context-providers declarables en
+el manifiesto pero **reservados** en v1 (el loader las rechaza con
+`UNSUPPORTED_CONTRIBUTION` en vez de inventar semántica). `rinari plugins ...`.
 
 ## Plugin contributions
 
-- [ ] tools.
+- [x] tools.
+- [x] hooks.
 - [ ] skills.
 - [ ] provider adapters.
 - [ ] commands.
-- [ ] hooks.
 - [ ] subagent definitions.
 - [ ] context providers.
 
+> skills / provider adapters / commands / subagent definitions / context
+> providers: contribuciones declarables en el manifiesto pero no cargadas en
+> esta pasada (v1). Son work de Fase 6 (skills/subagents) y se habilitan en el
+> same loader/API cuando el runtime destino exista; el loader las rechaza de
+> forma explícita hasta entonces.
+
 ## MCP Runtime
 
-- [ ] server registry.
-- [ ] connect.
-- [ ] disconnect.
-- [ ] tools.
-- [ ] resources.
-- [ ] prompts.
-- [ ] transport abstraction.
-- [ ] project trust.
-- [ ] secret scopes.
-- [ ] MCP ToolDefinition normalization.
-- [ ] normal Policy Engine path.
-- [ ] tracing.
+- [x] server registry.
+- [x] connect.
+- [x] disconnect.
+- [x] tools.
+- [x] resources.
+- [x] prompts.
+- [x] transport abstraction.
+- [x] project trust.
+- [x] secret scopes.
+- [x] MCP ToolDefinition normalization.
+- [x] normal Policy Engine path.
+- [x] tracing.
 - [ ] cancellation.
-- [ ] `rinari mcp ...`.
+- [x] `rinari mcp ...`.
+
+Implementation (MCP, bloque de 2026-08-20): `src/rinari/mcp/` — protocol.py
+(JSON-RPC 2.0 newline-delimited, initialize handshake), transport.py
+(`StdioTransport` subprocess + `InProcessTransport` para tests, interfaz
+común = transport abstraction), client.py (`McpClient` wrappers de métodos),
+adapter.py (normaliza tools/resources/prompts → `ToolDefinition` namespaced
+`mcp.<server>.<tool>`; `readOnlyHint` → capability `mcp.read`, resto `mcp.call`),
+service.py (`McpService` registry + lazy cache + trust gate). Capabilities
+`mcp.read`/`mcp.call` añadidas al Policy Engine (read-only deniega; `call`
+siempre consent). Secretos **solo** `env://VAR`. Project scope exige trust.
+Tracing vía logs de proceso (`mcp.logs`). Cancellation tokenizado pendiente
+(hoy: timeout del transporte). Verificado e2e con un MCP server stdio fake en
+subprocess real. `rinari mcp list/add/remove/enable/disable/show/connect/
+disconnect/tools/resources/prompts/test/logs`.
 
 ## OpenAPI Runtime
 
-- [ ] spec loader.
-- [ ] validator.
-- [ ] auth detection.
-- [ ] operation namespacing.
-- [ ] tool schema generation.
-- [ ] mutation risk defaults.
-- [ ] operation overrides.
-- [ ] refresh.
-- [ ] `rinari api ...`.
+- [x] spec loader.
+- [x] validator.
+- [x] auth detection.
+- [x] operation namespacing.
+- [x] tool schema generation.
+- [x] mutation risk defaults.
+- [x] operation overrides.
+- [x] refresh.
+- [x] `rinari api ...`.
+
+Implementation (OpenAPI, bloque de 2026-08-20): `src/rinari/openapi/` — spec.py
+(loader+validator JSON, `SpecDocument`/`Operation`), tools.py (genera
+`ToolDefinition` namespaced `api.<name>.<operationId|method_path>`; risk por
+verbo GET/HEAD low-idempotent, POST/PUT/PATCH medium, DELETE high-destructive;
+overrides por operación), service.py (`ApiService` add/add_url/remove/enable/
+disable/list/show/validate/refresh/tool_definitions/invoke). Auth detectado
+(securitySchemes http bearer / apiKey); secretos **solo** `env://VAR`,
+faltante → `AUTH_REQUIRED`. Invocación vía `httpx.Client` inyectado
+(`ToolContext.web`) para test con `MockTransport`; `NetworkGuard` se aplica
+antes de salir. `rinari api list/add/remove/enable/disable/show/validate/
+auth/tools/refresh/test`.
 
 ## Unified capability search
 
-- [ ] native tool ranking.
-- [ ] plugin tools.
-- [ ] MCP tools.
-- [ ] OpenAPI tools.
-- [ ] browser fallback.
+- [x] native tool ranking.
+- [x] plugin tools.
+- [x] MCP tools.
+- [x] OpenAPI tools.
+- [x] browser fallback.
 - [ ] connector tools.
-- [ ] reliability/risk ranking.
+- [x] reliability/risk ranking.
+
+Implementation (capability search, bloque de 2026-08-20): `src/rinari/
+capability_search.py` — `search_capabilities` rankea sobre el ToolRegistry
+único (nativo + plugin + mcp.<server> + api.<spec> conviven ahí) por
+`reliability x risk`: native 1.00 > plugin 0.90 > openapi 0.85 > mcp 0.80 > web
+0.75 > browser 0.70, con democión por riesgo. Sin match → fallback `browser.*`
+a score 0. Tool `capability.search` (classifica `state.read`, se registra al
+final del registry). Connector tools: el source `connector` ya clasifica y
+tiene peso 0.95, pero aún no hay tools de connector nativos que listar (quedan
+sin resultados hasta que aparezcan).
 
 ## Hooks
 
-- [ ] SessionStart.
-- [ ] BeforeModel.
-- [ ] AfterModel.
-- [ ] PreToolUse.
-- [ ] PostToolUse.
-- [ ] ToolError.
-- [ ] PermissionRequest.
+- [x] SessionStart.
+- [x] BeforeModel.
+- [x] AfterModel.
+- [x] PreToolUse.
+- [x] PostToolUse.
+- [x] ToolError.
+- [x] PermissionRequest.
 - [ ] SubagentStart.
 - [ ] SubagentStop.
-- [ ] BeforeCompact.
-- [ ] AfterCompact.
-- [ ] BeforeFinal.
-- [ ] SessionEnd.
-- [ ] trust/capability enforcement.
+- [x] BeforeCompact.
+- [x] AfterCompact.
+- [x] BeforeFinal.
+- [x] SessionEnd.
+- [x] trust/capability enforcement.
+
+Implementation (hooks, bloque de 2026-08-20): `src/rinari/hooks/` — events.py
+(catálogo 13 eventos), engine.py (`HookEngine` orden determinista user<project<
+plugin, trust gate para fuente `project`, capability gate para handler
+`shell` (`shell.exec`), timeout+captura de output, fallo de un hook **nunca**
+rompe la sesión), service.py (`HookService` discovery `~/.rinari/hooks.json` +
+`<root>/.rinari/hooks.json` + plugins, enable/disable en tabla `hooks`,
+build_engine, test, doctor). Wiring: `runtime/agent.py` emite BeforeModel/
+AfterModel/PreToolUse/PostToolUse/ToolError/BeforeFinal vía `hook_sink`;
+`cli/agent_runtime.py` emite SessionStart/SessionEnd/PermissionRequest/
+BeforeCompact/AfterCompact. Handler types `python` (import path) y `shell`
+(comando, JSON en stdin). `rinari hooks list/show/enable/disable/test/doctor`.
+SubagentStart/Stop: catalogados y forzados por el catálogo, pero sin wiring
+aún (work de Fase 6 multi-agent).
 
 ---
 

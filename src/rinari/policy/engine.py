@@ -57,6 +57,11 @@ CAPABILITY_STATE_WRITE = "state.write"
 #                   require explicit consent (AGENTS.md 11)
 CAPABILITY_BROWSER_READ = "browser.read"
 CAPABILITY_BROWSER_WRITE = "browser.mutate"
+# MCP capabilities (phase 5). MCP servers are external capability providers:
+#   mcp.read  read-only MCP calls (server-declared readOnlyHint)
+#   mcp.call  any other MCP tool call; external side effects require consent
+CAPABILITY_MCP_READ = "mcp.read"
+CAPABILITY_MCP_WRITE = "mcp.call"
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +214,38 @@ class PolicyEngine:
                 action=PolicyAction.ASK,
                 capability=capability,
                 reason="browser control can cause external side effects (consent required)",
+                risk=risk,
+                risk_class=risk_class,
+            )
+        if capability == CAPABILITY_MCP_READ:
+            if scope.profile is PermissionProfile.READ_ONLY:
+                return PolicyDecision(
+                    action=PolicyAction.DENY,
+                    capability=capability,
+                    reason="read-only profile does not call external MCP servers",
+                    risk=risk,
+                    risk_class=risk_class,
+                )
+            return PolicyDecision(
+                action=PolicyAction.ALLOW,
+                capability=capability,
+                reason="read-only call to a trusted external capability provider",
+                risk=risk,
+                risk_class=risk_class,
+            )
+        if capability == CAPABILITY_MCP_WRITE:
+            if scope.profile is PermissionProfile.READ_ONLY:
+                return PolicyDecision(
+                    action=PolicyAction.DENY,
+                    capability=capability,
+                    reason="read-only profile cannot call external MCP tools",
+                    risk=risk,
+                    risk_class=risk_class,
+                )
+            return PolicyDecision(
+                action=PolicyAction.ASK,
+                capability=capability,
+                reason="external MCP call can cause side effects (consent required)",
                 risk=risk,
                 risk_class=risk_class,
             )

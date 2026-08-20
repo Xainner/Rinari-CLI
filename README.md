@@ -2,14 +2,14 @@
 
 **Tu asistente personal de IA en la terminal.**
 
-> **Estado: fases 0-4 completas (2026-08-17); fase 5 en curso (Web + HTTP + Browser done).**
+> **Estado: fases 0-5 completas (2026-08-20).**
 > Producto: CLI funcional (setup, config, providers/models, sesiones
 > CHAT/PROJECT, Soul/Constitution, doctor/status/version), agent + tool
 > runtime con seguridad base (fase 2), trust/index/validation/checkpoints
-> (fase 3) y contexto/artifacts/memoria/resume durable/budgets/network
-> foundation (fase 4). Fase 5 arrancó con la capa de Web (tools `web.*` bajo
-> el mismo Tool Runtime y policy de red). Ver [TODO.md](TODO.md) por el
-> roadmap y el estado de decisiones.
+> (fase 3), contexto/artifacts/memoria/resume durable/budgets (fase 4) y el
+> capability ecosystem (fase 5): Web, HTTP, Browser (CDP), plugins, MCP,
+> OpenAPI, unified capability search y lifecycle hooks. Ver
+> [TODO.md](TODO.md) por el roadmap y el estado de decisiones.
 
 Segunda construcción de Rinari. La
 [v1](https://github.com/Xainner/Rinari-CLI) (chat REPL, agente con 23 tools,
@@ -143,6 +143,30 @@ reemplaza a RINARI.md en su level; el level más profundo gana conflictos.
 
 ## Pendiente
 
+- Capability ecosystem (Fase 5): todo converge en **un** `ToolRegistry` y
+  pasa por el mismo Tool Runtime/policy/sandbox. **Plugins** (`rinari
+  plugins install|list|show|enable|disable|update|remove|permissions|
+  doctor`): manifiesto `plugin.json`, fuentes `user` (~/.rinari/plugins,
+  confiada) y `project` (<root>/.rinari/plugins, **requiere project
+  trust**), tools namespaced `<plugin>.<tool>`, fallo de carga → diagnostic
+  (nunca crash); contribuciones skills/adapters/commands/subagents/context
+  declarables pero reservadas en v1. **MCP** (`rinari mcp add|list|show|
+  connect|disconnect|tools|resources|prompts|test|logs…`): stdio JSON-RPC 2.0
+  con transporte abstracto, tools → `mcp.<server>.<tool>` (`readOnlyHint` →
+  `mcp.read`, resto `mcp.call`), project scope exige trust, secretos solo
+  `env://VAR`, verificado e2e con un server stdio fake. **OpenAPI**
+  (`rinari api add|list|show|validate|auth|tools|refresh|test…`): specs JSON,
+  tools `api.<name>.<op>`, risk por verbo (GET low / POST·PUT·PATCH medium /
+  DELETE high) con overrides, auth detectado vía `env://`, invocación por el
+  `httpx` de la sesión (testable offline). **Unified capability search**:
+  tool `capability.search` que rankea "qué puedo hacer con X" sobre
+  nativo/plugin/mcp/openapi con reliability×risk y fallback `browser.*`.
+  **Hooks de ciclo de vida** (`rinari hooks list|show|enable|disable|test|
+  doctor`): 13 eventos (SessionStart/End, Before/AfterModel, Pre/PostToolUse,
+  ToolError, PermissionRequest, Subagent*, Before/AfterCompact, BeforeFinal),
+  fuentes user/project/plugins con orden determinista, handlers `python`/
+  `shell` (este exige capability `shell.exec`), project hooks gated por
+  trust, y un hook fallido **nunca** rompe la sesión.
 - Browser (Fase 5): 25 tools `browser.*` sobre un motor **CDP directo**
   (client WebSocket RFC6455 propio en repo, cero dependencias nuevas;
   alternativa documentada: Playwright, swappable tras `BrowserManager`).

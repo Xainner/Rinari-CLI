@@ -74,6 +74,8 @@ ToolHook = Callable[[str, str, object], None]  # (phase, name, detail)
 # (agent_ctx, pressure, used_input_tokens, window_tokens); storage-aware
 # compaction lives outside the loop and mutates AgentContext in place.
 PressureHook = Callable[[object, float, int, int], None]
+# (event, payload) -> None; lifecycle hook sink (hooks engine / trace).
+HookSink = Callable[[str, dict], None]
 
 
 @dataclass(slots=True)
@@ -106,6 +108,7 @@ class AgentLoop:
         max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS,
         event_sink: Callable[[str, str, dict], None] | None = None,
         on_pressure: PressureHook | None = None,
+        hook_sink: HookSink | None = None,
     ) -> None:
         self._provider = model_provider
         self._tools = tool_runtime
@@ -114,6 +117,7 @@ class AgentLoop:
         self._max_tool_calls = max_tool_calls
         self._event_sink = event_sink
         self._on_pressure = on_pressure
+        self._hook_sink = hook_sink
 
     # -- public API ---------------------------------------------------------
 
@@ -162,8 +166,24 @@ class AgentLoop:
                     )
                 budget.note_model_call()
             request = self._build_request(ctx)
+            self._emit_hook(
+                "BeforeModel",
+                {
+                    "model": ctx.model_ref,
+                    "messages": len(request.messages),
+                    "tools": len(request.tools),
+                },
+            )
             response = self._invoke(ctx, request, on_delta)
             total_usage = _merge_usage(total_usage, response.usage)
+            self._emit_hook(
+                "AfterModel",
+                {
+                    "stop_reason": response.stop_reason.value,
+                    "tool_calls": len(response.tool_calls),
+                    "usage": _usage_dict(response.usage),
+                },
+            )
             if budget is not None:
                 budget.note_usage(response.usage)
             self._emit(
@@ -180,6 +200,9 @@ class AgentLoop:
             if not response.has_tool_calls:
                 ctx.history.append(ChatMessage.assistant(response.content or ""))
                 kind = "truncated" if response.stop_reason is StopReason.MAX_TOKENS else "answer"
+                self._emit_hook(
+                    "BeforeFinal", {"kind": kind, "preview": (response.content or "")[:200]}
+                )
                 self._emit(
                     ctx.session_id,
                     EVENT_TURN_COMPLETED,
@@ -210,10 +233,34 @@ class AgentLoop:
                 else:
                     if budget is not None:
                         budget.note_tool_call(call.name)
+                    self._emit_hook(
+                        "PreToolUse",
+                        {"tool": call.name, "arguments": call.arguments, "tool_call_id": call.id},
+                    )
                     _hook(on_tool, "start", call.name, call.arguments)
                     result = self._tools.execute(
                         call.name, call.arguments, ctx.tool_ctx, tool_call_id=call.id
                     )
+                    self._emit_hook(
+                        "PostToolUse",
+                        {
+                            "tool": call.name,
+                            "tool_call_id": call.id,
+                            "ok": result.ok,
+                            "duration_ms": round(result.duration_ms, 1),
+                            "truncated": result.truncated,
+                        },
+                    )
+                    if result.error is not None:
+                        self._emit_hook(
+                            "ToolError",
+                            {
+                                "tool": call.name,
+                                "tool_call_id": call.id,
+                                "code": result.error.code.value,
+                                "message": result.error.message,
+                            },
+                        )
                     _hook(on_tool, "end", call.name, result)
                 tool_calls_made += 1
                 ctx.history.append(
@@ -343,6 +390,13 @@ class AgentLoop:
         with contextlib.suppress(Exception):
             # Observability must never take the conversation down.
             self._event_sink(session_id, event_type, payload)
+
+    def _emit_hook(self, event: str, payload: dict) -> None:
+        if self._hook_sink is None:
+            return
+        with contextlib.suppress(Exception):
+            # Hook failures are recorded in the outcome; never fatal here.
+            self._hook_sink(event, payload)
 
 
 def _turn_completed_payload(kind: str, tool_calls: int, budget: BudgetMeter | None) -> dict:

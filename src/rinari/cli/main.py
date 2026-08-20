@@ -5,14 +5,18 @@ from __future__ import annotations
 import typer
 
 from rinari import __version__
+from rinari.cli.commands import api as api_cmd
 from rinari.cli.commands import artifacts as artifacts_cmd
 from rinari.cli.commands import config as config_cmd
 from rinari.cli.commands import context as context_cmd
+from rinari.cli.commands import hooks as hooks_cmd
 from rinari.cli.commands import index as index_cmd
+from rinari.cli.commands import mcp as mcp_cmd
 from rinari.cli.commands import memory as memory_cmd
 from rinari.cli.commands import model as model_cmd
 from rinari.cli.commands import models as models_cmd
 from rinari.cli.commands import network as network_cmd
+from rinari.cli.commands import plugins as plugins_cmd
 from rinari.cli.commands import provider as provider_cmd
 from rinari.cli.commands import providers as providers_cmd
 from rinari.cli.commands import sessions as sessions_cmd
@@ -44,6 +48,10 @@ app.add_typer(tasks_cmd.app, name="tasks")
 app.add_typer(memory_cmd.app, name="memory")
 app.add_typer(network_cmd.app, name="network")
 app.add_typer(undo_cmd.app, name="undo")
+app.add_typer(plugins_cmd.app, name="plugins")
+app.add_typer(mcp_cmd.app, name="mcp")
+app.add_typer(api_cmd.app, name="api")
+app.add_typer(hooks_cmd.app, name="hooks")
 app.add_typer(system_cmd.system_app, name=None)
 
 app.command("chat")(sessions_cmd.chat_cmd)

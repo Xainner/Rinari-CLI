@@ -18,13 +18,17 @@ from rinari.shared.paths import HomeLayout, ensure_layout, resolve_home
 from rinari.storage.db import Database
 from rinari.storage.migrations import MigrationRunner
 from rinari.storage.repositories import (
+    ApiSpecRepository,
     CheckpointRepository,
     ConfigValueRepository,
+    HookRepository,
     IndexRepository,
+    McpServerRepository,
     MemoryRepository,
     ModelRepository,
     NetworkRepository,
     PinRepository,
+    PluginRepository,
     ProjectRepository,
     ProviderRepository,
     SessionEventRepository,
@@ -61,6 +65,10 @@ class AppContext:
     memory_repo: MemoryRepository
     pin_repo: PinRepository
     network_repo: NetworkRepository
+    plugin_repo: PluginRepository = None
+    mcp_server_repo: McpServerRepository = None
+    api_spec_repo: ApiSpecRepository = None
+    hook_repo: HookRepository = None
 
     def close(self) -> None:
         self.db.close()
@@ -109,6 +117,10 @@ def build_app_context(
         memory_repo=MemoryRepository(db),
         pin_repo=PinRepository(db),
         network_repo=NetworkRepository(db),
+        plugin_repo=PluginRepository(db),
+        mcp_server_repo=McpServerRepository(db),
+        api_spec_repo=ApiSpecRepository(db),
+        hook_repo=HookRepository(db),
     )
 
 

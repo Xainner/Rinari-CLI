@@ -146,6 +146,8 @@ def start_flow(ctx: typer.Context, prompt: str | None, forced_chat: bool, comman
                     data["turn"] = _turn_dict(agent_runtime.run_turn(session, prompt))
                 except RinariError as err:
                     fail(ctx, command, err)
+                finally:
+                    session.end()
                 if session.promoted_root is not None:
                     data["promoted_root"] = str(session.promoted_root)
             emit_json(success_envelope(command, data, warnings=started.warnings))
@@ -154,7 +156,10 @@ def start_flow(ctx: typer.Context, prompt: str | None, forced_chat: bool, comman
         _print_header(data, started.created, started.warnings)
         session = agent_runtime.build_agent_session(s, started.session, interactive=True)
         if prompt is not None and not _interactive():
-            result = agent_runtime.run_turn(session, prompt)
+            try:
+                result = agent_runtime.run_turn(session, prompt)
+            finally:
+                session.end()
             typer.echo()
             typer.echo(result.content)
             if result.kind not in ("answer", "truncated", "cancelled"):
@@ -172,6 +177,8 @@ def start_flow(ctx: typer.Context, prompt: str | None, forced_chat: bool, comman
             repl.run_repl(session, initial_prompt=prompt)
         except RinariError as err:
             fail(ctx, command, err)
+        finally:
+            session.end()
 
 
 def resume_flow(ctx: typer.Context, ref: str | None, command: str) -> None:
@@ -193,3 +200,5 @@ def resume_flow(ctx: typer.Context, ref: str | None, command: str) -> None:
             repl.run_repl(session)
         except RinariError as err:
             fail(ctx, command, err)
+        finally:
+            session.end()

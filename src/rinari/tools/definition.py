@@ -174,6 +174,9 @@ class ToolContext:
     # Session-scoped BrowserManager (rinari.browser): browser.* tools drive the
     # CDP-connected browser through it; None only for test contexts.
     browser: Any = None
+    # Application-level McpService (rinari.mcp): dynamic mcp.* tools resolve a
+    # connected client through it. None in test/CHAT contexts without MCP.
+    mcp: Any = None
 
 
 @dataclass(frozen=True, slots=True)
