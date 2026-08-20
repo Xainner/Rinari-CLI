@@ -8,11 +8,15 @@ from rinari.cli.render import (
     RendererMode,
     approval_lines,
     banner_fields,
+    context_meter,
     detect_mode,
+    extensions_line,
     json_stream_event,
     render_approval,
     render_banner,
     status_line,
+    tool_label,
+    tool_verb,
 )
 from rinari.cli.snapshot import RuntimeSnapshot, SessionUsage
 from rinari.policy.approvals import ApprovalRequest
@@ -204,7 +208,8 @@ def test_banner_agents_running() -> None:
 def test_status_line_only_real_numbers() -> None:
     line = status_line(_snap(), turn_kind="answer")
     assert line.startswith("answer")
-    assert "ctx 5%" in line
+    assert "ctx" in line and "5%" in line
+    assert "░░" in line  # context meter bar (5% of 8 wide)
     assert "2m/5t" in line
     assert "$0.1235" in line
 
@@ -247,6 +252,55 @@ def test_render_approval_panel() -> None:
     text = console.export_text()
     assert "shell.exec" in text
     assert "approval required" in text
+
+
+# -- tool rendering / context meter / extensions (R1-R3) ---------------------
+
+
+def test_context_meter_unknown_is_empty() -> None:
+    assert context_meter(None) == ""
+    assert context_meter(0.5) == "████░░░░"
+    assert context_meter(0.5, ascii_=True) == "####----"
+
+
+def test_tool_verb_and_label() -> None:
+    assert tool_verb("fs.read") == "read"
+    assert tool_verb("fs.patch") == "edit"
+    assert tool_verb("shell.exec") == "run"
+    assert tool_verb("search.regex") == "read"
+    assert tool_verb("git.status") == "git"
+    assert tool_verb("browser.open") == "browser"
+    assert tool_label("fs.read", {"path": "src/a.ts"}) == "read src/a.ts"
+    assert tool_label("shell.exec", {"command": "pytest"}) == "run pytest"
+
+
+def test_extensions_line_counts() -> None:
+    snap = _snap(
+        skills_active=("fix-ci",),
+        skills_known=10,
+        agents=({"id": "a", "agent": "debugger", "state": "running"},),
+        mcp_connected=2,
+        plugins_loaded=3,
+    )
+    line = extensions_line(snap)
+    assert "tools 99" in line
+    assert "skills 1/10" in line
+    assert "agents 1/1" in line
+    assert "mcp 2" in line
+    assert "plugins 3" in line
+
+
+def test_approval_panel_numbered_options() -> None:
+    console = _console()
+    render_approval(
+        console, ApprovalRequest(capability="git.push", description="remote", risk="high")
+    )
+    text = console.export_text()
+    assert "approval required" in text
+    assert "[1] Allow once" in text
+    assert "[2] Allow for session" in text
+    assert "[3] Allow for project" in text
+    assert "[5] Deny" in text
 
 
 # -- json stream --------------------------------------------------------------

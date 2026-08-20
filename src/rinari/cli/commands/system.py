@@ -232,13 +232,25 @@ def doctor_cmd(ctx: typer.Context) -> None:
         if is_json(ctx):
             emit_json(success_envelope("doctor", {"checks": checks, "failed": len(failed)}))
             return
-        width = max(len(c["check"]) for c in checks)
+        from rich.console import Console
+        from rich.table import Table
+        from rich.text import Text
+
+        console = Console()
+        table = Table(show_header=False, box=None, pad_edge=False)
+        table.add_column(style="bold", no_wrap=True)
+        table.add_column(no_wrap=True)
+        table.add_column()
+        status_style = {"ok": "green", "warn": "yellow", "fail": "red"}
+        status_glyph = {"ok": "✓", "warn": "!", "fail": "×"}  # noqa: RUF001
         for c in checks:
-            icon = {"ok": "ok  ", "warn": "warn", "fail": "FAIL"}[c["status"]]
-            typer.echo(f"{c['check']:<{width}}  {icon}  {c['detail']}")
-        typer.echo(f"\n{len(failed)} failed" if failed else "\nall checks passed")
+            glyph = status_glyph[c["status"]]
+            table.add_row(c["check"], Text(glyph, style=status_style[c["status"]]), c["detail"])
+        console.print(table)
         if failed:
+            console.print(Text(f"{len(failed)} failed", style="red"))
             raise typer.Exit(1)
+        console.print(Text("all checks passed", style="green"))
 
 
 # -- setup ---------------------------------------------------------------------

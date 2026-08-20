@@ -104,6 +104,8 @@ class RuntimeSnapshot:
     agents: tuple[dict[str, Any], ...]
     # validation
     last_completion: dict[str, Any] | None
+    mcp_connected: int = 0
+    plugins_loaded: int = 0
     # usage (this CLI run)
     usage: SessionUsage = field(default_factory=SessionUsage, repr=False)
 
@@ -142,6 +144,8 @@ class RuntimeSnapshot:
                 "skills_active": list(self.skills_active),
                 "skills_known": self.skills_known,
                 "agents": list(self.agents),
+                "mcp_connected": self.mcp_connected,
+                "plugins_loaded": self.plugins_loaded,
             },
             "validation": {"last_completion": self.last_completion},
             "usage": {
@@ -259,6 +263,17 @@ def build_snapshot(session: AgentSession) -> RuntimeSnapshot:
         except Exception:
             agents = ()
 
+    mcp_connected = 0
+    plugins_loaded = 0
+    try:
+        mcp_connected = len(session.services.mcp.list())
+    except Exception:
+        mcp_connected = 0
+    try:
+        plugins_loaded = len(session.services.plugins.list())
+    except Exception:
+        plugins_loaded = 0
+
     usage = session.usage if isinstance(session.usage, SessionUsage) else SessionUsage()
 
     return RuntimeSnapshot(
@@ -284,6 +299,8 @@ def build_snapshot(session: AgentSession) -> RuntimeSnapshot:
         skills_active=skills_active,
         skills_known=skills_known,
         agents=agents,
+        mcp_connected=mcp_connected,
+        plugins_loaded=plugins_loaded,
         last_completion=getattr(session, "last_completion", None),
         usage=usage,
     )

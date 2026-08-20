@@ -15,6 +15,7 @@ Cancellation (harness.md phase-2 cancellation spec):
 from __future__ import annotations
 
 import sys
+import time
 
 import typer
 from rich.console import Console
@@ -31,7 +32,17 @@ def _on_delta(delta: str) -> None:
     sys.stdout.flush()
 
 
-def _on_tool(console: Console, phase: str, name: str, detail: object, *, json_mode: bool) -> None:
+def _on_tool(
+    console: Console,
+    phase: str,
+    name: str,
+    detail: object,
+    *,
+    json_mode: bool,
+    ascii_: bool,
+    state: dict,
+    elapsed: object,
+) -> None:
     if json_mode:
         if phase == "start":
             print(render.json_stream_event("tool", phase="start", tool=name), flush=True)
@@ -49,21 +60,33 @@ def _on_tool(console: Console, phase: str, name: str, detail: object, *, json_mo
             )
         return
     if phase == "start":
-        args = ""
-        if isinstance(detail, dict):
-            for key in ("path", "pattern", "command"):
-                value = detail.get(key)
-                if value:
-                    args = f" {str(value)[:80]}"
-                    break
-        console.print(Text(f"  [tool] {name}{args} ...", style="dim"), highlight=False)
+        label = render.tool_label(name, detail)
+        state["label"] = label
+        active = render.symbol(render.SYMBOL_ACTIVE, ascii_=ascii_)
+        console.print(Text(f"{active} {label}", style="bold"), highlight=False)
     else:
         from rinari.tools.definition import ToolResult
 
-        if isinstance(detail, ToolResult):
-            state = "ok" if detail.ok else f"error({detail.error.code.value})"
+        label = state.pop("label", name)
+        if isinstance(detail, ToolResult) and not detail.ok and detail.error is not None:
+            retryable = detail.error.retryable
+            glyph = render.SYMBOL_RETRY if retryable else render.SYMBOL_FAIL
+            sym = render.symbol(glyph, ascii_=ascii_)
+            style = "yellow" if retryable else "red"
+            tail = f" · {elapsed():.0f}s" if not retryable else ""
             console.print(
-                Text(f"  [tool] {name} {state} ({detail.duration_ms:.0f}ms)", style="dim"),
+                Text(
+                    f"  {sym} {label}  {detail.error.code.value}{tail}  "
+                    f"({detail.duration_ms:.0f}ms)",
+                    style=style,
+                ),
+                highlight=False,
+            )
+        else:
+            sym = render.symbol(render.SYMBOL_OK, ascii_=ascii_)
+            ms = f" ({detail.duration_ms:.0f}ms)" if isinstance(detail, ToolResult) else ""
+            console.print(
+                Text(f"  {sym} {label} · {elapsed():.0f}s{ms}", style="dim"),
                 highlight=False,
             )
 
@@ -86,6 +109,7 @@ def run_repl(
     )
     console = render.make_console(mode, no_color)
     json_mode = mode is render.RendererMode.JSON_STREAM
+    ascii_ = mode is not render.RendererMode.RICH
 
     if not no_banner and banner_allowed:
         render.render_banner(console, build_snapshot(session), mode)
@@ -130,20 +154,39 @@ def run_repl(
                 continue
             continue
 
-        _print_turn_header(json_mode)
+        if not json_mode:
+            typer.echo()
+            console.print(Text(f"you > {message}", style="bold"))
         streamed = {"any": False}
+        turn_started = time.monotonic()
 
         def _delta(delta: str, streamed=streamed) -> None:
             if json_mode:
                 print(render.json_stream_event("token", text=delta), flush=True)
             else:
-                streamed["any"] = True
+                if not streamed["any"]:
+                    streamed["any"] = True
+                    console.print(Text("rinari > ", style="bold"), end="", highlight=False)
                 _on_delta(delta)
 
-        def _tool(phase: str, name: str, detail: object) -> None:
+        def _elapsed(turn_started=turn_started) -> float:
+            return time.monotonic() - turn_started
+
+        tool_state: dict = {}
+
+        def _tool(phase: str, name: str, detail: object, tool_state=tool_state) -> None:
             if no_progress and not json_mode:
                 return
-            _on_tool(console, phase, name, detail, json_mode=json_mode)
+            _on_tool(
+                console,
+                phase,
+                name,
+                detail,
+                json_mode=json_mode,
+                ascii_=ascii_,
+                state=tool_state,
+                elapsed=_elapsed,
+            )
 
         try:
             result = agent_runtime.run_turn(session, message, on_delta=_delta, on_tool=_tool)
@@ -177,12 +220,16 @@ def run_repl(
             typer.echo()
             # Non-streaming providers deliver the answer only in the result.
             if not streamed["any"] and result.content:
-                console.print(result.content)
+                from rich.markdown import Markdown
+
+                console.print(Markdown(result.content))
             if result.kind == "truncated":
                 typer.echo("(output stopped at the model's max tokens)", err=True)
 
         snap = build_snapshot(session)
-        typer.echo(Text(render.status_line(snap, turn_kind=result.kind), style="dim"))
+        typer.echo(
+            Text(render.status_line(snap, turn_kind=result.kind, ascii_=ascii_), style="dim")
+        )
 
         if result.compacted:
             console.print(
@@ -218,11 +265,6 @@ def _turn_payload(result, session) -> dict:
     payload = dict(_turn_dict(result))
     payload["session_id"] = session.record.id
     return payload
-
-
-def _print_turn_header(json_mode: bool) -> None:
-    if not json_mode:
-        typer.echo()
 
 
 __all__ = ["run_repl"]

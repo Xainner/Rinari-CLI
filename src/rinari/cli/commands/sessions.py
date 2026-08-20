@@ -51,11 +51,26 @@ def session_list(
         if not records:
             typer.echo("No sessions yet.")
             return
-        typer.echo(f"{'ID':<20} {'KIND':<8} {'STATE':<8} {'TITLE':<28} LAST ACTIVE")
+        from rich.console import Console
+        from rich.table import Table
+        from rich.text import Text
+
+        state_style = {
+            "active": "green",
+            "interrupted": "yellow",
+            "completed": "blue",
+            "archived": "dim",
+        }
+        table = Table(box=None, pad_edge=False)
+        table.add_column("ID", no_wrap=True)
+        table.add_column("KIND", no_wrap=True)
+        table.add_column("STATE", no_wrap=True)
+        table.add_column("TITLE", overflow="ellipsis")
+        table.add_column("LAST ACTIVE", no_wrap=True)
         for r in records:
-            typer.echo(
-                f"{r.id:<20} {r.kind:<8} {r.state:<8} {(r.title or ''):<28} {r.last_active_at}"
-            )
+            state = Text(r.state, style=state_style.get(r.state))
+            table.add_row(r.id, r.kind, state, r.title or "", r.last_active_at or "")
+        Console().print(table)
 
 
 @session_app.command("show")

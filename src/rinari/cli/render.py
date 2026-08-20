@@ -276,7 +276,7 @@ def _rich_hero(console: Console, fields: dict[str, str], snap: RuntimeSnapshot) 
         )
 
     return Panel(
-        Group(body, Text(""), _session_strip(snap)),
+        Group(body, Text(""), _session_strip(snap), Text(extensions_line(snap), style="dim")),
         title=Text(" RINARI ", style=f"bold {_ACCENT}"),
         subtitle=Text(f" v{snap.version} ", style=_ACCENT),
         title_align="left",
@@ -334,12 +334,15 @@ def render_banner(console: Console, snap: RuntimeSnapshot, mode: RendererMode) -
     )
 
 
-def status_line(snap: RuntimeSnapshot, *, turn_kind: str, active_tool: str | None = None) -> str:
+def status_line(
+    snap: RuntimeSnapshot, *, turn_kind: str, active_tool: str | None = None, ascii_: bool = False
+) -> str:
     """One dim line after each turn: state + the few numbers that exist."""
     kind = turn_kind
     context = ""
     if snap.context_percent is not None and snap.context_window_tokens:
-        context = f" ctx {snap.context_percent:.0%}"
+        meter = context_meter(snap.context_percent, ascii_=ascii_)
+        context = f" ctx {meter} {snap.context_percent:.0%}"
     usage = f" {snap.usage.model_calls}m/{snap.usage.tool_calls}t"
     cost = f" ${snap.usage.cost_usd:.4f}" if snap.usage.cost_usd is not None else ""
     elapsed = f" {snap.usage.elapsed_s:.1f}s"
@@ -356,6 +359,128 @@ def status_line(snap: RuntimeSnapshot, *, turn_kind: str, active_tool: str | Non
     return line.strip()
 
 
+# -- live-state symbols (harness.md): rich glyphs with ASCII fallback ----------
+
+SYMBOL_ACTIVE = "◆"
+SYMBOL_OK = "✓"
+SYMBOL_WARN = "!"
+SYMBOL_FAIL = "×"  # noqa: RUF001
+SYMBOL_RETRY = "↻"
+
+_ASCII_SYMBOLS = {
+    SYMBOL_ACTIVE: ">",
+    SYMBOL_OK: "OK",
+    SYMBOL_WARN: "!",
+    SYMBOL_FAIL: "X",
+    SYMBOL_RETRY: "~",
+}
+
+
+def symbol(glyph: str, *, ascii_: bool) -> str:
+    return _ASCII_SYMBOLS.get(glyph, glyph) if ascii_ else glyph
+
+
+def context_meter(percent: float | None, width: int = 8, *, ascii_: bool = False) -> str:
+    """Fill bar for context usage; empty string when the percent is unknown."""
+    if percent is None:
+        return ""
+    filled = max(0, min(width, round(percent * width)))
+    on, off = ("█", "░") if not ascii_ else ("#", "-")
+    return on * filled + off * (width - filled)
+
+
+# -- tool rendering (harness.md #Tool Rendering) -------------------------------
+
+_TOOL_VERB_READ = (
+    "fs.read",
+    "fs.read_lines",
+    "fs.list",
+    "fs.glob",
+    "fs.stat",
+    "fs.diff",
+    "search.files",
+    "search.regex",
+    "search.symbols",
+    "search.references",
+    "search.hybrid",
+    "context.retrieve",
+    "memory.recall",
+)
+
+_TOOL_ARG_KEYS = (
+    "path",
+    "pattern",
+    "command",
+    "url",
+    "href",
+    "host",
+    "glob",
+    "query",
+    "name",
+    "ref",
+)
+
+
+def tool_verb(name: str) -> str:
+    if name in _TOOL_VERB_READ or name.startswith(("fs.read", "search.", "context.retrieve")):
+        return "read"
+    if name.startswith("fs."):
+        return "edit"
+    if name.startswith(("shell.", "process.", "pty.")):
+        return "run"
+    if name.startswith("git."):
+        return "git"
+    if name.startswith(("web.", "http.")):
+        return "web"
+    if name.startswith("browser."):
+        return "browser"
+    if name.startswith("memory."):
+        return "memory"
+    if name.startswith("context."):
+        return "context"
+    if name.startswith("verify."):
+        return "verify"
+    return name
+
+
+def tool_arg(detail: object) -> str:
+    if not isinstance(detail, dict):
+        return ""
+    for key in _TOOL_ARG_KEYS:
+        value = detail.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
+def tool_label(name: str, detail: object) -> str:
+    verb = tool_verb(name)
+    arg = tool_arg(detail)
+    return f"{verb} {arg}".strip() if arg else verb
+
+
+def extensions_line(snap: RuntimeSnapshot) -> str:
+    running = sum(
+        1
+        for a in snap.agents
+        if a.get("state") not in ("completed", "failed", "cancelled", "budget")
+    )
+    skills = (
+        f"{len(snap.skills_active)}/{snap.skills_known}"
+        if snap.skills_known
+        else str(len(snap.skills_active))
+    )
+    return "  ·  ".join(
+        [
+            f"tools {snap.tools_loaded}",
+            f"skills {skills}",
+            f"agents {running}/{len(snap.agents)}",
+            f"mcp {snap.mcp_connected}",
+            f"plugins {snap.plugins_loaded}",
+        ]
+    )
+
+
 def approval_lines(request: ApprovalRequest) -> list[str]:
     target = f" {request.target}" if request.target else ""
     risk = request.risk or "medium"
@@ -368,14 +493,22 @@ def approval_lines(request: ApprovalRequest) -> list[str]:
 
 
 def render_approval(console: Console, request: ApprovalRequest) -> None:
-    body = Text("\n".join(approval_lines(request)))
     critical = (request.risk or "medium") == "high"
+    body = Text("\n".join(approval_lines(request)))
+    body.append("\n\n")
+    body.append("  [1] Allow once  ", style="bold")
+    body.append("[2] Allow for session  ", style="bold")
+    body.append("[3] Allow for project  ", style="bold")
+    body.append("[4] Always  ", style="bold")
+    body.append("[5] Deny (default)")
     title = Text(" approval required ", style="bold red" if critical else "bold yellow")
-    console.print(Panel(body, title=title, expand=False, padding=(0, 1)))
     console.print(
-        Text(
-            "  [y]es once · [s]ession · [p]roject · [a]lways · [n]o (default)",
-            style="dim",
+        Panel(
+            body,
+            title=title,
+            border_style="red" if critical else "yellow",
+            expand=False,
+            padding=(0, 1),
         )
     )
 
@@ -389,15 +522,26 @@ def json_stream_event(event_type: str, **payload: object) -> str:
 
 
 __all__ = [
+    "SYMBOL_ACTIVE",
+    "SYMBOL_FAIL",
+    "SYMBOL_OK",
+    "SYMBOL_RETRY",
+    "SYMBOL_WARN",
     "UNKNOWN",
     "RendererMode",
     "approval_lines",
     "banner_art",
     "banner_fields",
+    "context_meter",
     "detect_mode",
+    "extensions_line",
     "json_stream_event",
     "make_console",
     "render_approval",
     "render_banner",
     "status_line",
+    "symbol",
+    "tool_arg",
+    "tool_label",
+    "tool_verb",
 ]
