@@ -2,7 +2,8 @@
 
 **Tu asistente personal de IA en la terminal.**
 
-> **Estado: fases 0-7 completas + core de fase 8 (2026-08-20).**
+> **Estado: fases 0-7 + core de fase 8 completas (2026-08-20); Fase 9
+> release prep en curso.**
 > Producto: CLI funcional (setup, config, providers/models, sesiones
 > CHAT/PROJECT, Soul/Constitution, doctor/status/version), agent + tool
 > runtime con seguridad base (fase 2), trust/index/validation/checkpoints
@@ -337,6 +338,16 @@ subcomandos con `--help` y `--json` con un mismo contract + exit codes):
    (`export session|config|skills|profile`, `import session|config`) con
    redacción de hojas secret-named; y tests de upgrade de esquema SQLite
    (0004->latest in place preservando providers/models/sesiones/eventos).
+- Release prep (Fase 9): `rinari config migrate` convierte la config
+   v1-legacy (`[user]`, `[default]`, `[profile.*]` endpoint tables con
+   `api_key` inline) al schema moderno de forma determinista y no
+   destructiva: backup exacto (`config.toml.bak-<stamp>`), conserva solo
+   claves del schema, y reporta las commands exactas para recrear
+   providers/models; los valores de API key nunca se ecoan ni duplican
+   (queda en el backup). Packaging verificado en Windows: clean install /
+   clean upgrade con `uv`, `rinari completion` (bash/zsh/fish/powershell/
+   pwsh), version/build manifest; LICENSE MIT. Release pendiente: CI
+   Linux/macOS y github release artifact.
 
 ## Docs
 

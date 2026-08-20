@@ -4,7 +4,7 @@ import typer
 
 from rinari.application.config import writer
 from rinari.application.config.schema import key_type, leaf_keys
-from rinari.cli.deps import app_context, is_json, with_error_handling
+from rinari.cli.deps import app_context, home_layout, is_json, with_error_handling
 from rinari.shared.errors import InvalidUsageError, NotFoundError
 
 from ..output import emit_json, success_envelope
@@ -144,6 +144,44 @@ def config_validate(ctx: typer.Context) -> None:
             )
         else:
             typer.echo(f"Config OK ({len(leaf_keys())} keys; layers: {', '.join(layers)})")
+
+
+@app.command("migrate")
+@with_error_handling("config.migrate")
+def config_migrate(
+    ctx: typer.Context,
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show the plan without writing."),
+) -> None:
+    """Migrate the v1-legacy config layout (inline [default]/[profile.*] endpoint
+    tables, [user] table) to the modern schema. Backs up the original, keeps
+    schema-known values, and reports exact recreate commands for endpoints.
+    API keys are never echoed or duplicated; the backup is the only surviving
+    copy."""
+    import time
+
+    from rinari.application.config.migration import migrate_legacy_config
+
+    with home_layout(ctx) as layout:
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+        report = migrate_legacy_config(layout, stamp, dry_run=dry_run)
+        if is_json(ctx):
+            emit_json(success_envelope("config.migrate", report.to_dict()))
+            return
+        if not report.migrated:
+            typer.echo(f"Nothing to migrate: {report.reason}")
+            return
+        if dry_run:
+            typer.echo("[dry-run] would migrate the v1-legacy config layout:")
+            typer.echo(f"  kept keys: {sorted(report.kept) or '(none)'}")
+        else:
+            typer.echo(f"Migrated legacy config -> {layout.config_file}")
+            typer.echo(f"Backup: {report.backup}")
+        for endpoint in report.endpoints:
+            typer.echo(f"Endpoint {endpoint.name} (recreate, key comes from the backup):")
+            for command in endpoint.recreate_commands():
+                typer.echo(f"  {command}")
+        for warning in report.warnings:
+            typer.echo(f"warning: {warning}")
 
 
 def _jsonable(value: object) -> object:

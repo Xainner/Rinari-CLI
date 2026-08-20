@@ -2,7 +2,14 @@
 
 Roadmap canónico de construcción de Rinari.
 
-> **Estado actual:** Fases 0-5 completas (2026-08-20): Fundaciones, Agent/Tool Runtime, Project intelligence, Context/Memory/Resume, y Web/HTTP/Browser/Plugins/MCP/OpenAPI/capability-search/hooks. Fase 6 completada (2026-08-20): Skill Runtime (manifest, discovery, lazy load, CLI) y multi-agent (6 built-in agents, AgentOrchestrator con limits/cancel/worktrees, `agent.*` tools, synthesis con contradictions/duplicates, subagentes scoped read-only/verifier, storage thread-safe). Pendientes documentados dentro de Fase 5: browser `auth profiles`, contribuciones de plugin no-`tools`/`hooks` (skills/adapters/commands/subagents/context), cancellation tokenizado de MCP, tools de connector nativos.
+> **Estado actual:** Fases 0-7 completas (2026-08-16/20) + core de Fase 8 completo (2026-08-20):
+> eval runner determinista (21 casos/6 suites), `metrics` grupo, trace spans, export/import
+> grupos, upgrade tests. Fase 9 en curso (2026-08-20): `rinari config migrate`
+> (v1-legacy -> modern con backup, secretos sin ecoar), packaging verificado en Windows
+> (clean install/upgrade, completions, build manifest). Pendientes de F5 documentados:
+> browser `auth profiles`, contribuciones de plugin no-`tools`/`hooks`, cancellation MCP
+> tokenizado. Faltan para release: CI Linux/macOS, github release artifact, resto de
+> prompt-injection suite, troubleshooting doc.
 >
 > **Regla:** las fases expresan **orden de dependencia de implementación**, no alcance opcional del producto.
 >
@@ -2552,81 +2559,104 @@ Todos los gates críticos anteriores pasan en plataformas soportadas.
 
 ### Funcional
 
-- [ ] setup.
-- [ ] CHAT.
-- [ ] PROJECT.
-- [ ] CHAT → PROJECT.
-- [ ] providers.
-- [ ] models.
-- [ ] tools.
-- [ ] skills.
-- [ ] browser.
-- [ ] plugins.
-- [ ] MCP.
-- [ ] OpenAPI.
-- [ ] memory.
-- [ ] context/compaction.
-- [ ] multi-agent.
-- [ ] resume.
-- [ ] verification.
-- [ ] completion gate.
+- [x] setup. (fase 1; suite F9 verde)
+- [x] CHAT. (fase 2)
+- [x] PROJECT. (fase 2/3)
+- [x] CHAT → PROJECT. (fase 3)
+- [x] providers. (fase 1)
+- [x] models. (fase 1)
+- [x] tools. (fase 2)
+- [x] skills. (fase 6)
+- [x] browser. (fase 5)
+- [x] plugins. (fase 5)
+- [x] MCP. (fase 5)
+- [x] OpenAPI. (fase 5)
+- [x] memory. (fase 4)
+- [x] context/compaction. (fase 4)
+- [x] multi-agent. (fase 6)
+- [x] resume. (fase 4)
+- [x] verification. (fase 3)
+- [x] completion gate. (fase 3)
 
 ### Seguridad
 
-- [ ] sandbox.
-- [ ] approvals.
-- [ ] secrets.
-- [ ] redaction.
-- [ ] trust.
-- [ ] destructive-action gates.
-- [ ] prompt-injection suite.
+- [x] sandbox. (fases 2/8; eval `sandbox_write_outside`)
+- [x] approvals. (fase 2; approvals store fase 7)
+- [x] secrets. (credential store; secretos nunca en config)
+- [x] redaction. (fase 8; eval `secret_redacted`)
+- [x] trust. (fase 7)
+- [x] destructive-action gates. (fase 2; eval `force_push_denied`)
+- [ ] prompt-injection suite. (parcial: `untrusted_instructions_excluded`; faltan fuentes: source comment/web/MCP/subagent report)
 
 ### Calidad
 
-- [ ] unit tests.
-- [ ] integration tests.
-- [ ] E2E.
-- [ ] eval suites.
-- [ ] no blockers críticos.
-- [ ] supported migration paths.
-- [ ] docs sincronizados.
+- [x] unit tests. (gate F9: 846 passed, 3 skipped)
+- [x] integration tests. (CLI coverage 258 subcomandos + evals end-to-end)
+- [x] E2E. (CLI command coverage + eval runner con harness real completo)
+- [x] eval suites. (fase 8; 21 casos / 6 suites en verde)
+- [x] no blockers críticos. (suites verdes; el blocker de config legacy v1 se resuelve con `config migrate`)
+- [x] supported migration paths. (DB 0001->latest en place preserving data + `rinari config migrate` v1->modern con backup)
+- [x] docs sincronizados. (README/TODO/docs actualizados al cierre de fase)
 
 ### Plataformas
 
-- [ ] Linux.
-- [ ] macOS.
-- [ ] Windows.
+- [ ] Linux. (no verificado en esta máquina; requiere CI)
+- [ ] macOS. (no verificado en esta máquina; requiere CI)
+- [x] Windows. (verificado: suite completa + clean install en venv fresco)
 
 ### Packaging
 
-- [ ] clean install.
-- [ ] clean upgrade.
-- [ ] `uv` workflow.
-- [ ] shell completions.
-- [ ] version/build manifest.
-- [ ] release artifact.
+- [x] clean install. (verificado: `uv venv` + `uv pip install .` en venv aislado → `rinari --version`/`config migrate` OK)
+- [x] clean upgrade. (verificado: reinstalar sobre venv existente → suite verde)
+- [x] `uv` workflow. (uv venv/pip/install -e)
+- [x] shell completions. (`rinari completion --shell bash|zsh|fish|powershell|pwsh`)
+- [x] version/build manifest. (`rinari --version`, build manifest: cli/harness/db_schema/config/tool_protocol/skill_api + sha de soul/constitution)
+- [ ] release artifact. (requiere publicacion de release en GitHub)
 
 ### Documentación
 
-- [ ] README final.
-- [ ] install.
-- [ ] setup.
-- [ ] providers/models.
-- [ ] project usage.
-- [ ] chat usage.
-- [ ] skills/tools.
-- [ ] MCP/plugins.
-- [ ] browser.
-- [ ] multi-agent.
-- [ ] security.
-- [ ] troubleshooting.
-- [ ] migration.
-- [ ] contributing.
-- [ ] architecture links.
+- [x] README final. (estado fases 0-8+core9, qué funciona, quickstart, docs links)
+- [x] install. (quickstart `uv sync`)
+- [x] setup. (quickstart `rinari setup`)
+- [x] providers/models. (quickstart `providers add`/`provider use`)
+- [x] project usage. (README + docs/commands.md sesiones PROJECT)
+- [x] chat usage. (quickstart `rinari chat`)
+- [x] skills/tools. (README + docs/skills.md + docs/tools.md)
+- [x] MCP/plugins. (README + docs)
+- [x] browser. (README feature list)
+- [x] multi-agent. (README feature list)
+- [x] security. (README security bullets + docs/harness.md)
+- [ ] troubleshooting. (command `rinari doctor` existe pero sin doc de usuario dedicato)
+- [x] migration. (`config migrate` + notes; DB migrations en `storage/migrations`)
+- [x] contributing. (AGENTS.md — reglas de trabajo para agentes y humanos)
+- [x] architecture links. (sección Docs del README)
 
 ### Licencia
 
-- [ ] `LICENSE` presente y consistente con decisión de Fase 0.
+- [x] `LICENSE` presente y consistente con decisión de Fase 0. (MIT, confirmado 2026-08-16)
+
+## Implementation notes (Fase 9 - release prep)
+
+Entregado en esta pasada:
+
+1. **`rinari config migrate`** (release blocker resuelto). La config `~/.rinari` del
+   usuario era v1-legacy (`[user]`, `[default]`, `[profile.*]` con `api_key` inline) y el
+   loader moderno la rechazaba → `rinari` no arrancaba. El comando migra de forma
+   determinista y no destructiva: backup exacto (`config.toml.bak-<stamp>`), conserva solo
+   claves del schema moderno (deep-merge validado antes de escribir), remueve tablas endpoint
+   legacy y reporta las commands exactas para recrear los providers/models (`--api-key` o
+   `--+api-key-env` para refs `${VAR}`). Los valores de API key nunca se ecoan, duplican ni
+   reescriben: la única copia sobreviviente queda en el backup. 8 tests
+   (`test_config_migration.py`) incluido el flujo CLI dry-run→apply y `--json`.
+2. **Dep ligero `home_layout`** en `cli/deps.py`: resuelve home+layout SIN validar la config
+   (necesario para comandos de bootstrap cuyo motivo es que la config legacy falla).
+3. **Packaging verificado**: clean install en venv fresco (`uv venv` + `uv pip install .`),
+   clean upgrade (reinstalar sobre venv existente), `uv` workflow, `rinari completion`
+   (5 shells), version/build manifest. Windows verificado; Linux/macOS requieren CI.
+
+Dejado pendiente (requiere CI/publicacion, fuera de alcance de una sola máquina): release
+artifact (github release), verificacion en Linux/macOS, y el resto de la suite de
+prompt-injection (fuentes: source comment, web, MCP resource, subagent report).
 
 ---
 

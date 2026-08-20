@@ -16,6 +16,7 @@ from rinari.application.context import AppContext, build_app_context
 from rinari.application.services import ServiceContainer, build_services
 from rinari.cli.output import emit_json, failure_envelope
 from rinari.shared.errors import RinariError
+from rinari.shared.paths import HomeLayout
 
 
 @dataclass(slots=True)
@@ -63,6 +64,19 @@ def app_context(ctx: typer.Context) -> Iterator[AppContext]:
         yield built
     finally:
         built.close()
+
+
+@contextmanager
+def home_layout(ctx: typer.Context | None = None) -> Iterator[HomeLayout]:
+    """Resolve home + layout WITHOUT loading/validating the user config.
+
+    Needed for bootstrap-time commands (e.g. ``config migrate``) whose whole
+    reason for existing is that the legacy user config fails validation.
+    """
+    from rinari.shared.paths import ensure_layout, resolve_home
+
+    layout = ensure_layout(resolve_home(None))
+    yield layout
 
 
 @contextmanager
