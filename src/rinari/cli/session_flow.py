@@ -17,7 +17,7 @@ import typer
 
 from rinari import __version__
 from rinari.cli import agent_runtime, repl
-from rinari.cli.deps import fail, is_json, services
+from rinari.cli.deps import fail, get_params, is_json, services
 from rinari.cli.output import emit_json, success_envelope
 from rinari.cli.serializers import session_dict
 from rinari.projects.git import git_state
@@ -128,6 +128,24 @@ def _interactive() -> bool:
 
 
 def start_flow(ctx: typer.Context, prompt: str | None, forced_chat: bool, command: str) -> None:
+    """Start (or, after /new, restart) a session for the current context."""
+    params = get_params(ctx)
+    while True:
+        restart = _run_session(ctx, prompt, forced_chat, command, params)
+        if restart is None or not restart.startswith("new"):
+            return
+        # /new: fresh session in the same context, prompt dropped.
+        prompt = None
+        forced_chat = False
+
+
+def _run_session(
+    ctx: typer.Context,
+    prompt: str | None,
+    forced_chat: bool,
+    command: str,
+    params,
+) -> str | None:
     with services(ctx) as s:
         try:
             started = s.sessions.start(Path.cwd(), forced_chat=forced_chat, prompt=prompt)
@@ -151,9 +169,10 @@ def start_flow(ctx: typer.Context, prompt: str | None, forced_chat: bool, comman
                 if session.promoted_root is not None:
                     data["promoted_root"] = str(session.promoted_root)
             emit_json(success_envelope(command, data, warnings=started.warnings))
-            return
+            return None
 
-        _print_header(data, started.created, started.warnings)
+        if not params.no_banner:
+            _print_header(data, started.created, started.warnings)
         session = agent_runtime.build_agent_session(s, started.session, interactive=True)
         if prompt is not None and not _interactive():
             try:
@@ -172,9 +191,15 @@ def start_flow(ctx: typer.Context, prompt: str | None, forced_chat: bool, comman
                 typer.echo(completion)
             if session.promoted_root is not None:
                 typer.echo(f"*** session promoted to PROJECT — root: {session.promoted_root} ***")
-            return
+            return None
         try:
-            repl.run_repl(session, initial_prompt=prompt)
+            return repl.run_repl(
+                session,
+                initial_prompt=prompt,
+                no_banner=params.no_banner,
+                no_progress=params.no_progress,
+                json_flag=is_json(ctx),
+            )
         except RinariError as err:
             fail(ctx, command, err)
         finally:
@@ -182,6 +207,16 @@ def start_flow(ctx: typer.Context, prompt: str | None, forced_chat: bool, comman
 
 
 def resume_flow(ctx: typer.Context, ref: str | None, command: str) -> None:
+    """Resume a session; a /resume inside the REPL restarts the flow."""
+    while True:
+        target = _run_resume(ctx, ref, command)
+        if target is None:
+            return
+        ref = target
+
+
+def _run_resume(ctx: typer.Context, ref: str | None, command: str) -> str | None:
+    params = get_params(ctx)
     with services(ctx) as s:
         try:
             started = s.sessions.resume(ref, cwd=Path.cwd())
@@ -193,12 +228,24 @@ def resume_flow(ctx: typer.Context, ref: str | None, command: str) -> None:
         data["reconciliation"] = _reconciliation_dict(started.findings)
         if is_json(ctx):
             emit_json(success_envelope(command, data, warnings=started.warnings))
-            return
-        _print_header(data, created=False, warnings=started.warnings)
+            return None
+        if not params.no_banner:
+            _print_header(data, created=False, warnings=started.warnings)
         session = agent_runtime.build_agent_session(s, started.session, interactive=True)
         try:
-            repl.run_repl(session)
+            outcome = repl.run_repl(
+                session,
+                no_banner=params.no_banner,
+                no_progress=params.no_progress,
+                json_flag=is_json(ctx),
+            )
         except RinariError as err:
             fail(ctx, command, err)
         finally:
             session.end()
+        if outcome and outcome.startswith("resume:"):
+            return outcome.removeprefix("resume:")
+        if outcome == "new":
+            # /new during a resume flow falls through to a fresh auto session.
+            start_flow(ctx, None, forced_chat=False, command=command)
+        return None

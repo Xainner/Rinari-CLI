@@ -5,26 +5,42 @@ from __future__ import annotations
 import typer
 
 from rinari import __version__
+from rinari.cli.commands import agents as agents_cmd
 from rinari.cli.commands import api as api_cmd
+from rinari.cli.commands import approvals as approvals_cmd
 from rinari.cli.commands import artifacts as artifacts_cmd
+from rinari.cli.commands import cache as cache_cmd
+from rinari.cli.commands import checkpoint as checkpoint_cmd
 from rinari.cli.commands import config as config_cmd
 from rinari.cli.commands import context as context_cmd
+from rinari.cli.commands import export_import as export_import_cmd
 from rinari.cli.commands import hooks as hooks_cmd
 from rinari.cli.commands import index as index_cmd
+from rinari.cli.commands import logs as logs_cmd
 from rinari.cli.commands import mcp as mcp_cmd
 from rinari.cli.commands import memory as memory_cmd
+from rinari.cli.commands import metrics as metrics_cmd
 from rinari.cli.commands import model as model_cmd
 from rinari.cli.commands import models as models_cmd
 from rinari.cli.commands import network as network_cmd
+from rinari.cli.commands import permissions as permissions_cmd
 from rinari.cli.commands import plugins as plugins_cmd
+from rinari.cli.commands import profiles as profiles_cmd
+from rinari.cli.commands import project as project_cmd
 from rinari.cli.commands import provider as provider_cmd
 from rinari.cli.commands import providers as providers_cmd
+from rinari.cli.commands import sandbox as sandbox_cmd
+from rinari.cli.commands import secrets as secrets_cmd
 from rinari.cli.commands import sessions as sessions_cmd
 from rinari.cli.commands import skills as skills_cmd
 from rinari.cli.commands import system as system_cmd
 from rinari.cli.commands import tasks as tasks_cmd
+from rinari.cli.commands import tools as tools_cmd
+from rinari.cli.commands import trace as trace_cmd
 from rinari.cli.commands import trust as trust_cmd
 from rinari.cli.commands import undo as undo_cmd
+from rinari.cli.commands import update_cmd as update_cmd
+from rinari.cli.commands import work as work_cmd
 from rinari.cli.deps import CliParams, fail, set_params
 from rinari.cli.session_flow import start_flow
 from rinari.shared.errors import RinariError
@@ -54,10 +70,33 @@ app.add_typer(mcp_cmd.app, name="mcp")
 app.add_typer(api_cmd.app, name="api")
 app.add_typer(hooks_cmd.app, name="hooks")
 app.add_typer(skills_cmd.app, name="skills")
+app.add_typer(agents_cmd.app, name="agents")
+app.add_typer(profiles_cmd.app, name="profiles")
+app.add_typer(project_cmd.app, name="project")
+app.add_typer(checkpoint_cmd.app, name="checkpoint")
+app.add_typer(permissions_cmd.app, name="permissions")
+app.add_typer(approvals_cmd.app, name="approvals")
+app.add_typer(sandbox_cmd.app, name="sandbox")
+app.add_typer(secrets_cmd.app, name="secrets")
+app.add_typer(tools_cmd.app, name="tools")
+app.command("trace", help="Inspect a session's event trace.")(trace_cmd.trace)
+app.add_typer(logs_cmd.app, name="logs")
+app.command("metrics", help="Runtime metrics from stored events.")(metrics_cmd.metrics_all)
+app.add_typer(cache_cmd.app, name="cache")
 app.add_typer(system_cmd.system_app, name=None)
 
 app.command("chat")(sessions_cmd.chat_cmd)
 app.command("resume")(sessions_cmd.resume_cmd)
+app.command("export")(export_import_cmd.export)
+app.command("import")(export_import_cmd.import_)
+app.command("update")(update_cmd.update)
+app.command("ask")(work_cmd.ask)
+app.command("plan")(work_cmd.plan)
+app.command("agent")(work_cmd.agent)
+app.command("review")(work_cmd.review)
+app.command("run")(work_cmd.run)
+app.command("stop")(work_cmd.stop)
+app.command("verify")(work_cmd.verify)
 
 
 def _version_callback(value: bool) -> None:
@@ -88,9 +127,26 @@ def root(
         help="Emit the machine output envelope (docs/commands.md section 67).",
         is_eager=True,
     ),
+    no_banner: bool = typer.Option(
+        False,
+        "--no-banner",
+        help="Skip the startup banner and session header.",
+        is_eager=True,
+    ),
+    no_progress: bool = typer.Option(
+        False,
+        "--no-progress",
+        help="Hide live tool progress lines (final status rail stays).",
+        is_eager=True,
+    ),
 ) -> None:
     """Rinari CLI. With no subcommand, starts the session for the current context."""
-    set_params(ctx, CliParams(config=config, json_output=json_output))
+    set_params(
+        ctx,
+        CliParams(
+            config=config, json_output=json_output, no_banner=no_banner, no_progress=no_progress
+        ),
+    )
     if ctx.invoked_subcommand is None:
         try:
             start_flow(ctx, None, forced_chat=False, command="session.start")
@@ -113,7 +169,7 @@ def root_session(
         fail(ctx, "session.start", err)
 
 
-ROOT_FLAG_TOKENS = {"-h", "--help", "-V", "--version", "--json"}
+ROOT_FLAG_TOKENS = {"-h", "--help", "-V", "--version", "--json", "--no-banner", "--no-progress"}
 ROOT_VALUE_TOKENS = {"--config"}
 
 

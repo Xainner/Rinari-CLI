@@ -16,10 +16,10 @@ from rinari.runtime.identity import IdentityAsset, load_constitution, load_soul
 
 HARNESS_VERSION = "1"
 CONFIG_SCHEMA_VERSION = "1"
-TOOL_PROTOCOL_VERSION = "none (phase 2)"
-SESSION_EXPORT_VERSION = "none (phase 4)"
-PLUGIN_API_VERSION = "none (phase 5)"
-SKILL_API_VERSION = "none (phase 6)"
+TOOL_PROTOCOL_VERSION = "1"
+SESSION_EXPORT_VERSION = "1"
+PLUGIN_API_VERSION = "1"
+SKILL_API_VERSION = "1"
 
 
 @dataclass(frozen=True, slots=True)

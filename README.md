@@ -2,18 +2,22 @@
 
 **Tu asistente personal de IA en la terminal.**
 
-> **Estado: fases 0-6 completas (2026-08-20).**
+> **Estado: fases 0-7 completas (2026-08-20).**
 > Producto: CLI funcional (setup, config, providers/models, sesiones
 > CHAT/PROJECT, Soul/Constitution, doctor/status/version), agent + tool
 > runtime con seguridad base (fase 2), trust/index/validation/checkpoints
 > (fase 3), contexto/artifacts/memoria/resume durable/budgets (fase 4), el
 > capability ecosystem (fase 5): Web, HTTP, Browser (CDP), plugins, MCP,
-> OpenAPI, unified capability search y lifecycle hooks, y skills productivos
+> OpenAPI, unified capability search y lifecycle hooks, skills productivos
 > + multi-agent (fase 6): Skill Runtime (manifest, discovery, lazy load, CLI)
 > y 6 agentes built-in con `AgentOrchestrator` (limits, cancel, worktrees),
 > tools `agent.*`, synthesis con contradictions/duplicate-work y subagentes
-> aislados por perfil (read-only/workspace). Ver
-> [TODO.md](TODO.md) por el roadmap y el estado de decisiones.
+> aislados por perfil (read-only/workspace), y UI/UX + productización (fase
+> 7): `RuntimeSnapshot` como fuente de verdad, renderers Rich/compact/plain/
+> JSON/JSON-stream, banner + status rail + approvals UI, 24 slash commands,
+> y cobertura completa de la superficie de comandos pública (~258
+> subcomandos, `--json` con contracts y exit codes, export/import de sesión
+> v1). Ver [TODO.md](TODO.md) por el roadmap y el estado de decisiones.
 
 Segunda construcción de Rinari. La
 [v1](https://github.com/Xainner/Rinari-CLI) (chat REPL, agente con 23 tools,
@@ -294,6 +298,25 @@ reemplaza a RINARI.md en su level; el level más profundo gana conflictos.
   SQLite/ORM, LSPs iniciales, etc.): sección "Decisiones pendientes" de
   [TODO.md](TODO.md). Se resuelve cada una antes de implementar su
   subsistema.
+- UI/UX + productización (Fase 7): `RuntimeSnapshot` (`cli/snapshot.py`) como
+  única fuente de verdad de la terminal — provider/model, context
+  used/window, profile, project/branch/dirty, tools, skills, agents, network,
+  usage acumulativo (tokens/model calls/tool calls/elapsed; cost solo con
+  pricing confiable, `unknown` cuando no existe). Renderers
+  Rich/compact/plain/JSON/JSON-stream detectados por entorno
+  (`TERM=dumb`, `NO_COLOR`, `--json`, piped) con `--no-banner` y
+  `--no-progress`. Banner de arranque, status rail post-turn, approval UI
+  por panel rich con riesgo y grants persistentes
+  (`policy/approval_store.py`, `rinari approvals`). 24 slash commands
+  (`/status /usage /tokens /diff /test /review /checkpoint /undo /compact /
+  context /trace /new /resume` …). Cobertura completa de la superficie
+  pública de comandos de [docs/commands.md](docs/commands.md) (~258
+  subcomandos con `--help` y `--json` con un mismo contract + exit codes):
+  se añadieron `profiles project checkpoint permissions approvals sandbox
+  secrets tools trace logs metrics cache agents` y los top-level `ask plan
+  agent review run stop verify export import update`, más sesiones con
+  rename/stop/archive/delete y export/import de sesión v1. Los comandos
+  deterministas no gastan model; `ask`/`plan`/`review` corren read-only.
 
 ## Docs
 

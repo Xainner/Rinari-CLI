@@ -91,6 +91,157 @@ def session_fork(
         )
 
 
+@session_app.command("current")
+@with_error_handling("session.current")
+def session_current(ctx: typer.Context) -> None:
+    """Show the most recently active session for this context."""
+    with services(ctx) as s:
+        records = s.sessions.list(limit=1)
+        if not records:
+            typer.echo("no sessions yet")
+            return
+        record = records[0]
+        if is_json(ctx):
+            emit_json(success_envelope("session.current", session_dict(record)))
+            return
+        typer.echo(
+            f"{record.id}  {record.kind}  {record.state}  last active {record.last_active_at}"
+        )
+
+
+@session_app.command("rename")
+@with_error_handling("session.rename")
+def session_rename(
+    ctx: typer.Context,
+    ref: str = typer.Argument(...),
+    title: str = typer.Argument(...),
+) -> None:
+    """Rename a session's title."""
+    with services(ctx) as s:
+        record = s.sessions.show(ref)
+        record.title = title
+        s.ctx.session_repo.update(record)
+        if is_json(ctx):
+            emit_json(success_envelope("session.rename", session_dict(record)))
+            return
+        typer.echo(f"renamed {record.id} -> {title}")
+
+
+@session_app.command("stop")
+@with_error_handling("session.stop")
+def session_stop(ctx: typer.Context, ref: str = typer.Argument(...)) -> None:
+    """Mark a session as stopped (no further turns accepted)."""
+    with services(ctx) as s:
+        record = s.sessions.show(ref)
+        record.state = "stopped"
+        s.ctx.session_repo.update(record)
+        if is_json(ctx):
+            emit_json(success_envelope("session.stop", session_dict(record)))
+            return
+        typer.echo(f"{record.id} stopped")
+
+
+@session_app.command("cancel")
+@with_error_handling("session.cancel")
+def session_cancel(ctx: typer.Context, ref: str = typer.Argument(...)) -> None:
+    """Mark a session's last turn as cancelled/interrupted."""
+    with services(ctx) as s:
+        record = s.sessions.show(ref)
+        record.state = "interrupted"
+        s.ctx.session_repo.update(record)
+        if is_json(ctx):
+            emit_json(success_envelope("session.cancel", session_dict(record)))
+            return
+        typer.echo(f"{record.id} marked interrupted")
+
+
+@session_app.command("archive")
+@with_error_handling("session.archive")
+def session_archive(ctx: typer.Context, ref: str = typer.Argument(...)) -> None:
+    """Archive a session (hidden from default lists, still resumable by ID)."""
+    with services(ctx) as s:
+        record = s.sessions.show(ref)
+        record.state = "archived"
+        s.ctx.session_repo.update(record)
+        if is_json(ctx):
+            emit_json(success_envelope("session.archive", session_dict(record)))
+            return
+        typer.echo(f"archived {record.id}")
+
+
+@session_app.command("delete")
+@with_error_handling("session.delete")
+def session_delete(
+    ctx: typer.Context,
+    ref: str = typer.Argument(...),
+    yes: bool = typer.Option(False, "--yes", help="Skip confirmation."),
+) -> None:
+    """Delete a session and its messages/events (irreversible)."""
+    with services(ctx) as s:
+        record = s.sessions.show(ref)
+        if not yes:
+            answer = typer.prompt(f"Delete session {record.id} permanently?", default="n").lower()
+            if answer not in ("y", "yes"):
+                typer.echo("cancelled")
+                return
+        s.ctx.db.execute("DELETE FROM session_events WHERE session_id = ?", (record.id,))
+        s.ctx.db.execute("DELETE FROM session_messages WHERE session_id = ?", (record.id,))
+        s.ctx.db.execute("DELETE FROM sessions WHERE id = ?", (record.id,))
+        if is_json(ctx):
+            emit_json(success_envelope("session.delete", {"id": record.id}))
+            return
+        typer.echo(f"deleted {record.id}")
+
+
+@session_app.command("export")
+@with_error_handling("session.export")
+def session_export(
+    ctx: typer.Context,
+    ref: str = typer.Argument(None),
+    out: str = typer.Option(None, "--out", help="Output file (default: stdout)."),
+) -> None:
+    """Export a session (record + messages + events) as a JSON document."""
+    with services(ctx) as s:
+        from rinari.cli.session_export import export_session
+
+        document = export_session(s, ref)
+        if out:
+            from pathlib import Path
+
+            Path(out).write_text(_json(document), encoding="utf-8")
+            if is_json(ctx):
+                emit_json(success_envelope("session.export", {"session": ref, "path": out}))
+            else:
+                typer.echo(f"exported -> {out}")
+            return
+        typer.echo(_json(document))
+
+
+@session_app.command("import")
+@with_error_handling("session.import")
+def session_import(
+    ctx: typer.Context,
+    path: str = typer.Argument(...),
+) -> None:
+    """Import a previously exported session document."""
+    with services(ctx) as s:
+        from pathlib import Path
+
+        from rinari.cli.session_export import import_session
+
+        record = import_session(s, Path(path).read_text(encoding="utf-8"))
+        if is_json(ctx):
+            emit_json(success_envelope("session.import", session_dict(record)))
+            return
+        typer.echo(f"imported {record.id} ({record.kind})")
+
+
+def _json(document) -> str:
+    import json
+
+    return json.dumps(document, indent=2, ensure_ascii=False, default=str)
+
+
 def chat_cmd(
     ctx: typer.Context,
     prompt: list[str] = typer.Argument(None, help="Initial prompt (phase 2 runs the agent loop)."),

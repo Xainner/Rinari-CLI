@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -73,6 +74,10 @@ class AgentSession:
     promoted_root: Path | None = None
     # Phase 6 orchestrator (subagents); None in test sessions without wiring.
     orchestrator: object = field(default=None, repr=False)
+    # Phase 7 UI state: cumulative usage for this CLI run + last completion
+    # gate outcome (both fed to the RuntimeSnapshot, the UI's source of truth).
+    usage: object = field(default_factory=lambda: _new_usage(), repr=False)
+    last_completion: dict | None = None
     # Bound by build_agent_session; the host calls it exactly once when the
     # session ends (emits the SessionEnd lifecycle hook).
     close: object = field(default=None, repr=False)
@@ -356,6 +361,7 @@ def build_agent_session(
     *,
     interactive: bool,
     user_home: Path | None = None,
+    profile: PermissionProfile = PermissionProfile.WORKSPACE,
 ) -> AgentSession:
     root = Path(record.project_root_snapshot) if record.project_root_snapshot else None
     cwd = Path(record.current_cwd)
@@ -372,7 +378,7 @@ def build_agent_session(
         cwd=root if root is not None else cwd,
         project_root=root,
         user_home=home,
-        profile=PermissionProfile.WORKSPACE,
+        profile=profile,
         sandbox=sandbox,
         limits=ProcessLimits(timeout_s=300, max_output_bytes=128 * 1024),
         artifact_root=home / ".rinari" / "artifacts" / record.id,
@@ -619,16 +625,21 @@ def _build_tools(
         if not interactive:
             return "n"
         target = f" {request.target}" if request.target else ""
-        answer = typer.prompt(
-            f"Approve {request.capability}{target} (risk: {request.risk})? [y/s/p/n]",
-            default="n",
-        ).lower()
+        if sys.stdout.isatty():
+            from rich.console import Console
+
+            from rinari.cli import render
+
+            render.render_approval(Console(), request)
+        options = "[y] once · [s] session · [p] project · [a] always · [n] no"
+        question = f"Approve {request.capability}{target}? {options}"
+        answer = typer.prompt(question, default="n").lower()
         return answer if answer else "n"
 
     return ToolRuntime(
         registry,
         policy if policy is not None else PolicyEngine(network=network_policy),
-        ApprovalEngine(prompt=ask),
+        ApprovalEngine(prompt=ask, persistent_store=_persistent_grants_store(services)),
         clock=services.ctx.clock,
         redactor=Redactor(_secrets_for_redaction(services)),
         event_sink=lambda event_type, payload: _persist_event(
@@ -638,6 +649,36 @@ def _build_tools(
             session_id, tool, host, action, reason
         ),
     )
+
+
+def _new_usage():
+    from rinari.cli.snapshot import SessionUsage
+
+    return SessionUsage()
+
+
+def _persistent_grants_store(services: ServiceContainer) -> dict:
+    """A live dict of persistent approval grants, saved on every mutation."""
+    from rinari.policy.approval_store import ApprovalStore, store_path_for
+
+    store = ApprovalStore(store_path_for(services.ctx.layout))
+
+    class _LiveGrants(dict):
+        def _persist(self) -> None:
+            with contextlib.suppress(Exception):
+                store.save(dict(self))
+
+        def __setitem__(self, key, value):  # type: ignore[override]
+            super().__setitem__(key, value)
+            self._persist()
+
+        def __delitem__(self, key):  # type: ignore[override]
+            super().__delitem__(key)
+            self._persist()
+
+    live = _LiveGrants()
+    live.update(store.load())
+    return live
 
 
 def _caller_for(services: ServiceContainer, record: SessionRecord) -> ModelCaller:
@@ -996,6 +1037,13 @@ def run_turn(session: AgentSession, message: str, *, on_delta=None, on_tool=None
         _set_session_state(services, session.record, STATE_INTERRUPTED)
         new_msgs = _new_history(session.context, before, dropped_before)
         _persist_new_messages(services, session.record, new_msgs)
+        _account_turn(
+            session,
+            result=TurnResult(
+                kind="cancelled", content="Turn cancelled.", tool_calls=0, usage=None
+            ),
+            budget=budget,
+        )
         return TurnResult(kind="cancelled", content="Turn cancelled.", tool_calls=0, usage=None)
     new_msgs = _new_history(session.context, before, dropped_before)
     _persist_new_messages(services, session.record, new_msgs)
@@ -1006,7 +1054,24 @@ def run_turn(session: AgentSession, message: str, *, on_delta=None, on_tool=None
     if session.context.compacted:
         session.context.compacted = False
         result = replace(result, compacted=True)
+    _account_turn(session, result=result, budget=budget)
     return result
+
+
+def _account_turn(session: AgentSession, *, result: TurnResult, budget: BudgetMeter) -> None:
+    """Feed the UI's usage cumulative + completion gate (snapshot source of truth)."""
+    from rinari.cli.snapshot import merge_usage_for_turn
+
+    if session.usage is not None:
+        merge_usage_for_turn(
+            session,
+            result.usage,
+            tool_calls=budget.tool_calls,
+            model_calls=budget.model_calls,
+            elapsed_s=budget.elapsed_s(),
+        )
+    if result.completion is not None:
+        session.last_completion = result.completion
 
 
 def _new_history(context: AgentContext, before: int, dropped_before: int) -> list[ChatMessage]:

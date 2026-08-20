@@ -22,6 +22,8 @@ from rinari.shared.errors import RinariError
 class CliParams:
     config: str | None = None
     json_output: bool = False
+    no_banner: bool = False
+    no_progress: bool = False
 
 
 _global_json = False
@@ -40,7 +42,12 @@ def get_params(ctx: typer.Context | None) -> CliParams:
     obj = ctx.obj if ctx is not None else None
     params = obj if isinstance(obj, CliParams) else CliParams()
     if _global_json and not params.json_output:
-        params = CliParams(config=params.config, json_output=True)
+        params = CliParams(
+            config=params.config,
+            json_output=True,
+            no_banner=params.no_banner,
+            no_progress=params.no_progress,
+        )
     return params
 
 

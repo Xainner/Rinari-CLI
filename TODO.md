@@ -2134,126 +2134,185 @@ sin convertir la terminal en ruido.
 
 ## Startup banner
 
-- [ ] ASCII de Rinari.
-- [ ] versión desde Build Manifest.
-- [ ] session kind.
-- [ ] mode.
-- [ ] provider.
-- [ ] model alias.
-- [ ] provider model ID.
-- [ ] reasoning effort.
-- [ ] context used/window.
-- [ ] profile.
-- [ ] project.
-- [ ] branch.
-- [ ] dirty state.
-- [ ] loaded tools.
-- [ ] active skills.
-- [ ] agents.
-- [ ] network state.
-- [ ] responsive width.
+- [x] ASCII de Rinari.
+- [x] versión desde Build Manifest.
+- [x] session kind.
+- [x] mode.
+- [x] provider.
+- [x] model alias.
+- [x] provider model ID.
+- [x] reasoning effort.
+- [x] context used/window.
+- [x] profile.
+- [x] project.
+- [x] branch.
+- [x] dirty state.
+- [x] loaded tools.
+- [x] active skills.
+- [x] agents.
+- [x] network state.
+- [x] responsive width.
 
 ## Runtime Snapshot
 
-- [ ] una fuente de verdad para UI.
-- [ ] provider/model data.
-- [ ] usage accounting.
-- [ ] context metrics.
-- [ ] project state.
-- [ ] policy state.
-- [ ] tool state.
-- [ ] skill state.
-- [ ] agent state.
-- [ ] validation state.
+- [x] una fuente de verdad para UI.
+- [x] provider/model data.
+- [x] usage accounting.
+- [x] context metrics.
+- [x] project state.
+- [x] policy state.
+- [x] tool state.
+- [x] skill state.
+- [x] agent state.
+- [x] validation state.
 
 ## Usage Accounting
 
-- [ ] input tokens.
-- [ ] output tokens.
-- [ ] cached tokens cuando provider los dé.
-- [ ] reasoning tokens cuando provider los dé.
-- [ ] model calls.
-- [ ] tool calls.
-- [ ] elapsed.
-- [ ] cost con pricing confiable.
-- [ ] no inventar unsupported metrics.
+- [x] input tokens.
+- [x] output tokens.
+- [x] cached tokens cuando provider los dé.
+- [x] reasoning tokens cuando provider los dé.
+- [x] model calls.
+- [x] tool calls.
+- [x] elapsed.
+- [x] cost con pricing confiable.
+- [x] no inventar unsupported metrics.
 
 ## Status rail
 
-- [ ] orient.
-- [ ] plan.
-- [ ] execute.
-- [ ] verify.
-- [ ] approval.
-- [ ] blocked.
-- [ ] complete.
-- [ ] active tool.
-- [ ] context usage.
-- [ ] effort.
-- [ ] cost.
-- [ ] agents.
-- [ ] elapsed.
+- [x] orient.
+- [x] plan.
+- [x] execute.
+- [x] verify.
+- [x] approval.
+- [x] blocked.
+- [x] complete.
+- [x] active tool.
+- [x] context usage.
+- [x] effort.
+- [x] cost.
+- [x] agents.
+- [x] elapsed.
 
 ## Renderers
 
-- [ ] Rich TTY.
-- [ ] compact.
-- [ ] plain.
-- [ ] JSON.
-- [ ] JSON stream.
-- [ ] `NO_COLOR`.
-- [ ] `TERM=dumb`.
-- [ ] `--no-banner`.
-- [ ] `--no-progress`.
-- [ ] width adaptation.
+- [x] Rich TTY.
+- [x] compact.
+- [x] plain.
+- [x] JSON.
+- [x] JSON stream.
+- [x] `NO_COLOR`.
+- [x] `TERM=dumb`.
+- [x] `--no-banner`.
+- [x] `--no-progress`.
+- [x] width adaptation.
 
 ## Interactive slash commands
 
-- [ ] `/help`.
-- [ ] `/status`.
-- [ ] `/provider`.
-- [ ] `/model`.
-- [ ] `/mode`.
-- [ ] `/usage`.
-- [ ] `/tokens`.
-- [ ] `/plan`.
-- [ ] `/tasks`.
-- [ ] `/diff`.
-- [ ] `/test`.
-- [ ] `/review`.
-- [ ] `/skills`.
-- [ ] `/tools`.
-- [ ] `/agents`.
-- [ ] `/permissions`.
-- [ ] `/checkpoint`.
-- [ ] `/undo`.
-- [ ] `/compact`.
-- [ ] `/context`.
-- [ ] `/trace`.
-- [ ] `/new`.
-- [ ] `/resume`.
-- [ ] `/exit`.
+- [x] `/help`.
+- [x] `/status`.
+- [x] `/provider`.
+- [x] `/model`.
+- [x] `/mode`.
+- [x] `/usage`.
+- [x] `/tokens`.
+- [x] `/plan`.
+- [x] `/tasks`.
+- [x] `/diff`.
+- [x] `/test`.
+- [x] `/review`.
+- [x] `/skills`.
+- [x] `/tools`.
+- [x] `/agents`.
+- [x] `/permissions`.
+- [x] `/checkpoint`.
+- [x] `/undo`.
+- [x] `/compact`.
+- [x] `/context`.
+- [x] `/trace`.
+- [x] `/new`.
+- [x] `/resume`.
+- [x] `/exit`.
 
 ## Approvals UI
 
-- [ ] exact action.
-- [ ] target.
-- [ ] reason.
-- [ ] risk.
-- [ ] expected side effects.
-- [ ] allow once.
-- [ ] allow session.
-- [ ] deny.
-- [ ] critical action distinction.
+- [x] exact action.
+- [x] target.
+- [x] reason.
+- [x] risk.
+- [x] expected side effects.
+- [x] allow once.
+- [x] allow session.
+- [x] deny.
+- [x] critical action distinction.
 
 ## Command coverage
 
-- [ ] todos los comandos públicos de `docs/commands.md` registrados.
-- [ ] `--help` consistente.
-- [ ] JSON contracts.
-- [ ] exit codes.
-- [ ] no model call para commands deterministas.
-- [ ] shell completion.
+- [x] todos los comandos públicos de `docs/commands.md` registrados.
+- [x] `--help` consistente.
+- [x] JSON contracts.
+- [x] exit codes.
+- [x] no model call para commands deterministas.
+- [x] shell completion.
+
+
+## Implementation notes (Fase 7 — completada)
+
+**Snapshot/usage** (`cli/snapshot.py`, wiring en `cli/agent_runtime.py`):
+`RuntimeSnapshot` es la única fuente de verdad de la UI; `build_snapshot`
+resuelve provider/model/context/tools/skills/agents/policy/verification del
+`ServiceContainer`. `AgentSession.usage` (cumulativo, sobrevive turns) se
+alimenta con `merge_usage_for_turn` en `run_turn` (model/tool calls, elapsed,
+tokens; cost solo con pricing confiable). Métricas desconocidas → `unknown`,
+nunca inventadas. 6 tests (`test_snapshot_runtime.py`).
+
+**Renderers** (`cli/render.py`): `RendererMode` (rich/compact/plain/
+json/json-stream) detectado por `detect_mode` (TTY, `--json`, `TERM=dumb`,
+`NO_COLOR`, `RINARI_RENDERER`); console única vía `make_console`. Banner con
+ASCII only en rich; fields: session, mode, provider, model (alias+ID),
+reasoning, context used/window+%, profile, project[branch] dirty, tools,
+skills, agents, network, cost. `status_line` post-turn (state, ctx%, calls,
+cost, elapsed, agents, active tool). `render_approval` (panel rich, riesgo
+critical destacado). `json_stream_event` NDJSON. 9 tests (`test_render_cli.py`).
+
+**REPL** (`cli/repl.py`): modo según renderer; JSON stream emite eventos
+`session`/`token`/`tool`/`turn_end`; status rail tras cada turn; `--no-banner`
+y `--no-progress` (flags root) suprimen esos tramos; outcomes `/new` y
+`/resume:<ref>` permiten reiniciar sesión sin salir; fallback real: en
+providers non-streaming se imprime `result.content` (bug real detectado y
+corregido).
+
+**Slash** (`cli/slash.py`): 24 comandos (`/help /status /provider /model
+/session /mode /usage /tokens /plan /tasks /diff /test /review /skills /tools
+/agents /permissions /checkpoint /undo /compact /context /trace /new /resume
+/exit`). 22 tests (`test_slash_commands.py`).
+
+**Approvals UI**: prompt TTY con panel `render_approval` (action/target/risk)
+o línea compacta; respuestas `y/s/p/a/n` (once/session/project/always/deny).
+Persistencia de grants persistentes: `policy/approval_store.py`
+(`~/.rinari/policies/approval_grants.json`), conectado a `ApprovalEngine` con
+`persistent_store`. Grants consultables/revocables vía `rinari approvals`.
+
+**Command coverage** (`cli/commands/*.py`, registro en `cli/main.py`): 52
+comandos/top-level y ~258 subcomandos con `--help` verificado. Grupos nuevos:
+`profiles project checkpoint permissions approvals sandbox secrets tools
+trace logs metrics cache agents` + top-level `ask plan agent review run stop
+verify export import update` + ampliación de `session` (rename/stop/cancel/
+archive/delete/export/import). Export/import de sesión v1
+(`cli/session_export.py`, `SESSION_EXPORT_VERSION="1"` en build manifest; `sandbox exec` registrado).
+`update` consulta PyPI (mockeable en tests), `--check` exit 1 con update.
+Los comandos deterministas no gastan llamada de modelo; work commands
+(ask/plan/review) corren bajo perfil read-only; `verify` detecta la test
+command del proyecto y registra evidencia en `VerificationService`.
+
+**Deferido a Fase 8** (documentado explícitamente): `eval` y `dev` —
+dependen del eval runtime y del observability runtime que se construyen en
+la Fase 8 (commands.md los clasifica P2: "pueden existir internamente antes
+de ser UX pública").
+
+**Verificación**: suite completa 819 passed / 3 skipped; `ruff check` y
+`ruff format --check` limpios; auditoría de comandos vs commands.md sin gaps
+excepto eval/dev (deferidos).
 
 ---
 
