@@ -351,6 +351,28 @@ def test_repl_json_stream_emits_json_events(env, monkeypatch) -> None:
         session.end()
 
 
+def test_repl_input_prompt_uses_typer_signature(env, monkeypatch) -> None:
+    # Regression: the REPL input used to pass click-only kwargs
+    # (no_default) to typer.prompt, raising TypeError on the first input.
+    _, _s, _record, session = _session(env, monkeypatch)
+    calls: list[tuple[str, dict]] = []
+
+    def fake_prompt(text, **kwargs):
+        calls.append((text, kwargs))
+        return "/exit"
+
+    monkeypatch.setattr(typer, "prompt", fake_prompt)
+    try:
+        assert run_repl(session, no_banner=True) is None
+    finally:
+        session.end()
+    assert calls, "REPL input prompt was never requested"
+    text, kwargs = calls[0]
+    assert text == "rinari"
+    assert kwargs.get("prompt_suffix") == "> "
+    assert "no_default" not in kwargs
+
+
 def test_repl_exit_returns_none(env, monkeypatch) -> None:
     _, _s, _record, session = _session(env, monkeypatch)
     script = iter(["/exit"])

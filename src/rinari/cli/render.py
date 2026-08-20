@@ -12,23 +12,54 @@ import os
 from enum import Enum
 from typing import TYPE_CHECKING
 
-from rich.console import Console
+from rich.console import Console, Group
 from rich.panel import Panel
+from rich.table import Table
 from rich.text import Text
 
 if TYPE_CHECKING:  # pragma: no cover
     from rinari.cli.snapshot import RuntimeSnapshot
     from rinari.policy.approvals import ApprovalRequest
 
-ART = (
-    " ____   ____ ____  ____  ",
-    "/ ___| / ___/ ___||  _ \\ ",
-    "\\___ \\\\ |  | |__  | |_) |",
-    " ___) | |__| ___| |  _ < ",
-    "|____/ \\____|_|   |_| \\_\\",
-)
+# Block-letter art for RINARI: hand-set 6-row glyphs (fixed per letter),
+# rendered with a per-letter color ramp. Keep rows of each glyph aligned.
+_ART_LETTERS: dict[str, tuple[str, ...]] = {
+    "R": (
+        "███████ ",
+        "██    ██",
+        "██    ██",
+        "██████  ",
+        "██  ████",
+        "██   ███",
+    ),
+    "I": (
+        "███",
+        " █ ",
+        " █ ",
+        " █ ",
+        " █ ",
+        "███",
+    ),
+    "N": (
+        "██   ██",
+        "███  ██",
+        "████ ██",
+        "██ █ ██",
+        "██  ███",
+        "██   ██",
+    ),
+    "A": (
+        " ██   ██",
+        "██    ██",
+        "████████",
+        "██    ██",
+        "██    ██",
+        "██    ██",
+    ),
+}
 
-ART_TEXT = "\n".join(ART).rstrip()
+_ART_WORDS = "RINARI"
+_ART_COLORS = ("bright_magenta", "magenta", "purple", "bright_blue", "bright_cyan", "cyan")
 
 UNKNOWN = "—"
 
@@ -130,21 +161,41 @@ def banner_fields(snap: RuntimeSnapshot) -> list[tuple[str, str]]:
     ]
 
 
+def banner_art() -> list[Text]:
+    """`RINARI` as big block letters, one Text per row, per-letter color ramp."""
+    rows: list[Text] = [Text() for _ in range(len(next(iter(_ART_LETTERS.values()))))]
+    for index, letter in enumerate(_ART_WORDS):
+        color = _ART_COLORS[index % len(_ART_COLORS)]
+        for row, row_text in enumerate(_ART_LETTERS[letter]):
+            rows[row].append(row_text, style=color)
+            if index < len(_ART_WORDS) - 1:
+                rows[row].append(" ")
+    return rows
+
+
 def render_banner(console: Console, snap: RuntimeSnapshot, mode: RendererMode) -> None:
     fields = banner_fields(snap)
     if mode is RendererMode.PLAIN:
         for label, value in fields:
             console.print(f"{label:<10} {value}")
         return
-    body = Text()
-    if mode is RendererMode.RICH:
-        body.append(ART_TEXT)
-        body.append("\n\n")
-    for label, value in fields:
-        body.append(f"{label:<11}", style="bold")
-        body.append(f"{value}\n")
-    header = Text(f" Rinari v{snap.version}", style="bold magenta")
-    console.print(Panel(body, title=header, expand=False, padding=(0, 1)))
+    grid = Table.grid(padding=(0, 3), pad_edge=False)
+    grid.add_column(style="bold")
+    grid.add_column()
+    grid.add_column()
+    grid.add_column(style="bold")
+    grid.add_column()
+    for i in range(0, len(fields), 2):
+        left_label, left_value = fields[i]
+        right_label, right_value = fields[i + 1] if i + 1 < len(fields) else ("", "")
+        grid.add_row(left_label, left_value, "", right_label, right_value)
+    parts = [*banner_art(), Text("")] if mode is RendererMode.RICH else []
+    parts.append(grid)
+    title = Text(f" Rinari v{snap.version} ", style="bold bright_magenta")
+    border = "bright_magenta" if mode is RendererMode.RICH else "bright_blue"
+    console.print(
+        Panel(Group(*parts), title=title, border_style=border, expand=False, padding=(1, 2))
+    )
 
 
 def status_line(snap: RuntimeSnapshot, *, turn_kind: str, active_tool: str | None = None) -> str:
@@ -202,10 +253,10 @@ def json_stream_event(event_type: str, **payload: object) -> str:
 
 
 __all__ = [
-    "ART",
     "UNKNOWN",
     "RendererMode",
     "approval_lines",
+    "banner_art",
     "banner_fields",
     "detect_mode",
     "json_stream_event",

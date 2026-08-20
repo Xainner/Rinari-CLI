@@ -134,14 +134,23 @@ def test_banner_rich_has_art_plain_has_none() -> None:
     render_banner(rich_console, snap, RendererMode.RICH)
     rich_text = rich_console.export_text()
     assert "Rinari v9.9.9" in rich_text
-    assert rich_text.count("____") >= 3
+    assert "████████" in rich_text  # the A's crossbar
+    assert "███████ " in rich_text  # the R's top row
 
     plain_console = _console()
     render_banner(plain_console, snap, RendererMode.PLAIN)
     plain = plain_console.export_text()
     assert "session" in plain
     assert "provider" in plain
-    assert "____" not in plain
+    assert "█" not in plain
+
+
+def test_banner_art_rows_spells_rinari() -> None:
+    from rinari.cli.render import _ART_LETTERS, _ART_WORDS, banner_art
+
+    expected = [" ".join(_ART_LETTERS[ch][row] for ch in _ART_WORDS) for row in range(6)]
+    rows = banner_art()
+    assert [row.plain for row in rows] == expected
 
 
 def test_banner_agents_running() -> None:

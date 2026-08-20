@@ -103,7 +103,7 @@ def run_repl(
             message = prompt
             prompt = None
         else:
-            message = typer.prompt("rinari>", no_default=True)
+            message = typer.prompt("rinari", prompt_suffix="> ")
             message = message.strip()
             if not message:
                 continue
