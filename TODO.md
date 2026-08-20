@@ -8,8 +8,9 @@ Roadmap canónico de construcción de Rinari.
 > (v1-legacy -> modern con backup, secretos sin ecoar), packaging verificado en Windows
 > (clean install/upgrade, completions, build manifest). Pendientes de F5 documentados:
 > browser `auth profiles`, contribuciones de plugin no-`tools`/`hooks`, cancellation MCP
-> tokenizado. Faltan para release: CI Linux/macOS, github release artifact, resto de
-> prompt-injection suite, troubleshooting doc.
+> tokenizado. Faltan para release: CI Linux/macOS, publicacion del release artifact
+> en GitHub (build local con `uv build` verificado: sdist+wheel), resto de la
+> prompt-injection suite y metricas agregadas faltantes.
 >
 > **Regla:** las fases expresan **orden de dependencia de implementación**, no alcance opcional del producto.
 >
@@ -2626,7 +2627,7 @@ Todos los gates críticos anteriores pasan en plataformas soportadas.
 - [x] browser. (README feature list)
 - [x] multi-agent. (README feature list)
 - [x] security. (README security bullets + docs/harness.md)
-- [ ] troubleshooting. (command `rinari doctor` existe pero sin doc de usuario dedicato)
+- [x] troubleshooting. (fase 9; `docs/troubleshooting.md` - config legacy/trust/providers/network/sesiones/estado)
 - [x] migration. (`config migrate` + notes; DB migrations en `storage/migrations`)
 - [x] contributing. (AGENTS.md — reglas de trabajo para agentes y humanos)
 - [x] architecture links. (sección Docs del README)
@@ -2653,10 +2654,21 @@ Entregado en esta pasada:
 3. **Packaging verificado**: clean install en venv fresco (`uv venv` + `uv pip install .`),
    clean upgrade (reinstalar sobre venv existente), `uv` workflow, `rinari completion`
    (5 shells), version/build manifest. Windows verificado; Linux/macOS requieren CI.
+4. **Release artifact local**: `uv build` genera sdist + wheel; la wheel se instala y
+   corre en un venv limpio (`rinari --version` OK). Publicacion como GitHub release
+   pendiente de decision (tag/canal).
+5. **Docs**: `docs/troubleshooting.md` (config legacy/trust/providers/network/sesiones/
+   estado) + link en README.
+6. **Migracion aplicada al home real**: `rinari config migrate` ejecutado sobre
+   `~/.rinari/config.toml` (backup `config.toml.bak-20260820-143611`); la CLI vuelve a
+   arrancar en la maquina del usuario; pendientes solo los `providers add` para
+   re-crear endpoints (commands impresas).
 
-Dejado pendiente (requiere CI/publicacion, fuera de alcance de una sola máquina): release
-artifact (github release), verificacion en Linux/macOS, y el resto de la suite de
-prompt-injection (fuentes: source comment, web, MCP resource, subagent report).
+Dejado pendiente (requiere CI/publicacion o alcance mayor, fuera de una sola máquina):
+verificacion en Linux/macOS, publicacion del release artifact en GitHub, y el resto de
+la suite de prompt-injection (fuentes: source comment, web, MCP resource, subagent
+report) + metricas agregadas faltantes (first-pass success, subagent usefulness, cost
+per successful task con pricing).
 
 ---
 

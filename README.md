@@ -346,8 +346,9 @@ subcomandos con `--help` y `--json` con un mismo contract + exit codes):
    providers/models; los valores de API key nunca se ecoan ni duplican
    (queda en el backup). Packaging verificado en Windows: clean install /
    clean upgrade con `uv`, `rinari completion` (bash/zsh/fish/powershell/
-   pwsh), version/build manifest; LICENSE MIT. Release pendiente: CI
-   Linux/macOS y github release artifact.
+   pwsh), version/build manifest, `uv build` (sdist + wheel instalable en
+   venv limpio); LICENSE MIT. Release pendiente: CI Linux/macOS y
+   publicacion del artifact como GitHub release.
 
 ## Docs
 
@@ -367,3 +368,5 @@ subcomandos con `--help` y `--json` con un mismo contract + exit codes):
 - [docs/harness.md](docs/harness.md) — blueprint completo: boot, sesiones,
   state, policy/sandbox, runtime, visual, testing y dependencia de
   implementación
+- [docs/troubleshooting.md](docs/troubleshooting.md) — resolución de
+  problemas (config legacy, trust, providers, network, sesiones, estado)
