@@ -1329,10 +1329,13 @@ rinari models pick --provider openai-personal --name my-alias
 Flow:
 
 ```text
-1. choose a provider (menu, or --provider)
-2. discover models from that provider (spinner while querying)
-3. pick a model by number, or type a custom ID
-4. save the model (if new) and activate it as the active model
+1. choose a provider (menu of saved + "add a new provider", or --provider)
+2. add a new provider from the built-in catalog (OpenAI, Anthropic, OpenRouter,
+   DeepSeek, Groq, Together, Mistral, xAI, Ollama, LM Studio, custom endpoint)
+   -> pre-fills base URL + suggested env-var name
+3. discover models from that provider (spinner while querying)
+4. pick a model by number, or type a custom ID
+5. save the model (if new) and activate it as the active model
 ```
 
 Models already saved are marked `*`; picking one re-activates it without

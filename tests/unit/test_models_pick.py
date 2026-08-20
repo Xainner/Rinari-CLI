@@ -87,3 +87,21 @@ def test_pick_numbered_selection(app_ctx, monkeypatch) -> None:
     console = Console(record=True, no_color=True, width=100)
     chosen = _select_model(s, record, console, False)
     assert chosen == "beta"
+
+
+def test_add_provider_from_catalog(app_ctx, monkeypatch) -> None:
+    from rich.console import Console
+
+    from rinari.application.services import build_services
+    from rinari.cli.commands.models import _add_provider
+
+    s = build_services(app_ctx, user_home=app_ctx.home / "home")
+    # catalog: openai(1) anthropic(2) openrouter(3) ...
+    script = iter(["3", "", "env", "OPENROUTER_API_KEY"])
+    monkeypatch.setattr("rinari.cli.commands.models.typer.prompt", lambda *a, **k: next(script))
+    console = Console(record=True, no_color=True, width=100)
+    rec = _add_provider(s, console)
+    assert rec.alias == "openrouter"
+    assert rec.type == "custom"
+    assert rec.endpoint == "https://openrouter.ai/api/v1"
+    assert rec.auth_method == "api-key"

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -102,17 +104,17 @@ def models_pick(
     """Interactive picker: choose a provider, discover its real models, activate one."""
     console = Console()
     with services(ctx) as s:
-        if provider:
-            record = s.providers.get(provider)
-        else:
-            record = _select_provider(s, console, non_interactive)
         if is_json(ctx):
             data = {
                 alias: [discovered_model_dict(m) for m in models]
-                for alias, models in s.models.available(record.alias).items()
+                for alias, models in s.models.available(provider).items()
             }
             emit_json(success_envelope("models.pick", data))
             return
+        if provider:
+            record = s.providers.get(provider)
+        else:
+            record = _pick_provider(s, console, non_interactive)
         model_id = _select_model(s, record, console, non_interactive)
         chosen = _save_and_activate(s, record, model_id, model_name)
         console.print(
@@ -124,37 +126,125 @@ def models_pick(
         )
 
 
-def _select_provider(s, console, non_interactive: bool):
+def _pick_provider(s, console, non_interactive: bool):
     saved = s.providers.list()
-    if not saved:
-        raise InvalidUsageError(
-            "No providers saved yet.",
-            hint="Run `rinari setup` to add one, or `rinari providers add ...`.",
-        )
-    if len(saved) == 1:
-        return saved[0]
+    options: list[tuple[str, object]] = [(f"{p.alias} ({p.type})", p) for p in saved]
+    options.append(("+ add a new provider", None))
+    options.append(("cancel", "cancel"))
     table = Table(box=None, pad_edge=False)
     table.add_column("#", no_wrap=True)
-    table.add_column("alias", style="bold")
-    table.add_column("type")
-    table.add_column("auth")
-    for i, p in enumerate(saved, 1):
-        table.add_row(str(i), p.alias, p.type, p.auth_method)
+    table.add_column("provider")
+    for i, (label, _) in enumerate(options, 1):
+        table.add_row(str(i), label)
     console.print(Text("Choose a provider", style="bold bright_magenta"))
     console.print(table)
     if non_interactive:
         raise InvalidUsageError(
-            "Multiple providers saved.",
-            hint=f"Pass --provider <alias> (available: {', '.join(p.alias for p in saved)}).",
+            "Interactive provider selection required.",
+            hint="Pass --provider <alias>, or `rinari providers add ...` first.",
         )
     while True:
         raw = (typer.prompt("Provider (number or alias)") or "").strip()
-        if raw.isdigit() and 1 <= int(raw) <= len(saved):
-            return saved[int(raw) - 1]
+        if raw.isdigit() and 1 <= int(raw) <= len(options):
+            _, value = options[int(raw) - 1]
+            if value == "cancel":
+                raise InvalidUsageError("Cancelled.")
+            if value is None:
+                return _add_provider(s, console)
+            return value  # type: ignore[return-value]
         for p in saved:
             if p.alias == raw:
                 return p
+        if raw.lower() in ("add", "new"):
+            return _add_provider(s, console)
         console.print("  unknown choice - pick a number or alias.")
+
+
+def _add_provider(s, console):
+    from rinari.application.provider_service import AddProviderInput
+    from rinari.providers.catalog import PROVIDER_CATALOG
+
+    table = Table(box=None, pad_edge=False)
+    table.add_column("#", no_wrap=True)
+    table.add_column("provider", style="bold")
+    table.add_column("base url")
+    table.add_column("auth")
+    for i, preset in enumerate(PROVIDER_CATALOG, 1):
+        auth = "none" if preset.local else f"env {preset.default_env or 'key'}"
+        table.add_row(str(i), preset.name, preset.base_url or "-", auth)
+    console.print(Text("Add a provider", style="bold bright_magenta"))
+    console.print(table)
+    while True:
+        raw = (typer.prompt("Provider (number or name)") or "").strip()
+        if raw.isdigit() and 1 <= int(raw) <= len(PROVIDER_CATALOG):
+            preset = PROVIDER_CATALOG[int(raw) - 1]
+            break
+        for preset in PROVIDER_CATALOG:
+            if raw.lower() in (preset.key, preset.name.lower()):
+                break
+        else:
+            console.print("  unknown choice - pick a number or name.")
+            continue
+        break
+
+    alias = (typer.prompt("Provider alias", default=preset.key) or preset.key).strip()
+    endpoint = preset.base_url
+    if preset.provider_type == "custom" and preset.base_url is None:
+        while True:
+            endpoint = (
+                typer.prompt("Endpoint (base URL, e.g. https://api.example.com/v1)") or ""
+            ).strip()
+            if endpoint.lower().startswith(("http://", "https://")):
+                break
+            console.print("  endpoint must start with http:// or https://")
+
+    no_auth = preset.local
+    secret = None
+    secret_env = None
+    if not no_auth:
+        source = _prompt_auth_source(s, preset, console)
+        if source == "none":
+            no_auth = True
+        elif source == "env":
+            secret_env = (
+                typer.prompt("Environment variable name", default=preset.default_env) or ""
+            ).strip() or preset.default_env
+        else:
+            secret = _prompt_hidden("API key (hidden)")
+
+    record = s.providers.add(
+        AddProviderInput(
+            alias=alias,
+            provider_type=preset.provider_type,
+            auth_method="none" if no_auth else "api-key",
+            endpoint=endpoint,
+            secret=secret,
+            secret_env=secret_env,
+        )
+    )
+    console.print(Text(f"Provider {record.alias!r} added.", style="bold green"))
+    return record
+
+
+def _prompt_auth_source(s, preset, console) -> str:
+    options = ("api-key", "env", "none")
+    default = "env" if (preset.default_env and os.environ.get(preset.default_env)) else "api-key"
+    while True:
+        raw = (
+            (typer.prompt(f"Auth source ({'/'.join(options)})", default=default) or "")
+            .strip()
+            .lower()
+        )
+        if raw in options:
+            return raw
+        console.print("  pick one of: api-key, env, none")
+
+
+def _prompt_hidden(text: str) -> str:
+    while True:
+        value = typer.prompt(text, hide_input=True)
+        if (value or "").strip():
+            return value.strip()
 
 
 def _select_model(s, record, console, non_interactive: bool) -> str:
