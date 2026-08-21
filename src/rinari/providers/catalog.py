@@ -70,6 +70,20 @@ PROVIDER_CATALOG: tuple[ProviderPreset, ...] = (
         "xai", "xAI (Grok)", "custom", base_url="https://api.x.ai/v1", default_env="XAI_API_KEY"
     ),
     ProviderPreset(
+        "opencode-zen",
+        "OpenCode Zen",
+        "custom",
+        base_url="https://opencode.ai/zen/v1",
+        default_env="OPENCODE_API_KEY",
+    ),
+    ProviderPreset(
+        "opencode-go",
+        "OpenCode Go",
+        "custom",
+        base_url="https://opencode.ai/zen/go/v1",
+        default_env="OPENCODE_GO_API_KEY",
+    ),
+    ProviderPreset(
         "ollama", "Ollama (local)", "custom", base_url="http://localhost:11434/v1", local=True
     ),
     ProviderPreset(

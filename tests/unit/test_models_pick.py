@@ -105,3 +105,15 @@ def test_add_provider_from_catalog(app_ctx, monkeypatch) -> None:
     assert rec.type == "custom"
     assert rec.endpoint == "https://openrouter.ai/api/v1"
     assert rec.auth_method == "api-key"
+
+
+def test_opencode_presets_have_real_endpoints() -> None:
+    from rinari.providers.catalog import PROVIDER_CATALOG
+
+    by_key = {p.key: p for p in PROVIDER_CATALOG}
+    zen = by_key["opencode-zen"]
+    assert zen.base_url == "https://opencode.ai/zen/v1"
+    assert zen.default_env == "OPENCODE_API_KEY"
+    go = by_key["opencode-go"]
+    assert go.base_url == "https://opencode.ai/zen/go/v1"
+    assert go.default_env == "OPENCODE_GO_API_KEY"
