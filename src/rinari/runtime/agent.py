@@ -364,6 +364,7 @@ class AgentLoop:
             model=ctx.model_ref,
             messages=tuple(messages),
             tools=self._tools.registry.for_model(),
+            session_id=ctx.session_id,
         )
 
     def _check_pressure(self, ctx: AgentContext, response: Any) -> None:

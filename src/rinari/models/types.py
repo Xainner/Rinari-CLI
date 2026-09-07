@@ -118,3 +118,6 @@ class ModelRequest:
     max_tokens: int | None = None
     reasoning_effort: str | None = None
     json_response: bool = False
+    session_id: str | None = None
+    """Opaque conversation id, forwarded only to vendors that require
+    session affinity (e.g. OpenCode's x-opencode-session header)."""

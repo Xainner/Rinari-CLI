@@ -187,6 +187,15 @@ def test_streaming_deltas(env) -> None:
     assert "".join(deltas) == "hello world"
 
 
+def test_request_carries_session_id(env) -> None:
+    # Vendor session-affinity headers (e.g. x-opencode-session) are derived
+    # from the request; the loop must propagate the session id.
+    model = FakeModel(scripted=[ModelResponse(content="hi")])
+    loop = AgentLoop(model, env["runtime"], env["assembler"])
+    loop.turn(env["ctx"], "hello")
+    assert model.requests[0].session_id == "s1"
+
+
 def test_max_tokens_truncation(env) -> None:
     model = FakeModel(
         scripted=[ModelResponse(content="partial", stop_reason=StopReason.MAX_TOKENS)]

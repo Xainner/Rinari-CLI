@@ -27,6 +27,7 @@ from rinari.providers.adapters.http import (
     provider_error,
     provider_error_detail,
     send_request,
+    session_affinity_headers,
 )
 from rinari.shared.errors import NetworkError, ProviderModelError
 
@@ -99,11 +100,12 @@ class AnthropicAdapter(ProviderAdapter):
         self, request: ModelRequest, secret: str | None, endpoint: str | None = None
     ) -> ModelResponse:
         url = self._messages_url(endpoint)
+        headers = {**self._headers(secret), **session_affinity_headers(url, request.session_id)}
         response = send_request(
             self.client(),
             "POST",
             url,
-            headers=self._headers(secret),
+            headers=headers,
             json_body=self._payload(request, stream=False),
             timeout=MODEL_CALL_TIMEOUT,
         )
@@ -125,12 +127,13 @@ class AnthropicAdapter(ProviderAdapter):
         calls = _ToolCallBlockAccumulator()
         usage = Usage()
         stop_reason = StopReason.END_TURN
+        headers = {**self._headers(secret), **session_affinity_headers(url, request.session_id)}
         try:
             with self.client().stream(
                 "POST",
                 url,
                 json=self._payload(request, stream=True),
-                headers=self._headers(secret),
+                headers=headers,
                 timeout=MODEL_CALL_TIMEOUT,
             ) as response:
                 if response.status_code in (401, 403):

@@ -241,7 +241,90 @@ def test_openai_stream_auth_failure() -> None:
         adapter.invoke_stream(_request(), "sk-bad", None, lambda d: None)
 
 
+# -- OpenCode session affinity header ----------------------------------------
+
+OPENCODE_GO = "https://opencode.ai/zen/go/v1"
+
+
+def _chat_ok() -> dict:
+    return {
+        "choices": [{"message": {"role": "assistant", "content": "hola"}, "finish_reason": "stop"}],
+    }
+
+
+def test_openai_invoke_sends_opencode_session_header() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=_chat_ok())
+
+    adapter = OpenAICompatibleAdapter(OPENCODE_GO, client=_client(handler))
+    response = adapter.invoke(_request(session_id="ses_123"), "sk-test", None)
+    assert response.content == "hola"
+    assert seen[0].headers["x-opencode-session"] == "ses_123"
+
+
+def test_openai_stream_sends_opencode_session_header() -> None:
+    seen: list[httpx.Request] = []
+    body = 'data: {"choices":[{"delta":{"content":"hola"}}]}\ndata: [DONE]\n'
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, content=body.encode())
+
+    adapter = OpenAICompatibleAdapter(OPENCODE_GO, client=_client(handler))
+    adapter.invoke_stream(_request(session_id="ses_123"), "sk-test", None, lambda d: None)
+    assert seen[0].headers["x-opencode-session"] == "ses_123"
+
+
+def test_openai_omits_session_header_off_vendor() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=_chat_ok())
+
+    adapter = OpenAICompatibleAdapter("https://api.test/v1", client=_client(handler))
+    adapter.invoke(_request(session_id="ses_123"), "sk-test", None)
+    assert "x-opencode-session" not in seen[0].headers
+
+
+def test_openai_omits_session_header_without_session() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=_chat_ok())
+
+    adapter = OpenAICompatibleAdapter(OPENCODE_GO, client=_client(handler))
+    adapter.invoke(_request(), "sk-test", None)
+    assert "x-opencode-session" not in seen[0].headers
+
+
 # -- Anthropic ---------------------------------------------------------------
+
+
+def test_anthropic_invoke_sends_opencode_session_header() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "content": [{"type": "text", "text": "hola"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    adapter = AnthropicAdapter(client=_client(handler))
+    response = adapter.invoke(
+        _request(session_id="ses_123"), "key", "https://opencode.ai/zen/go/v1"
+    )
+    assert response.content == "hola"
+    assert seen[0].headers["x-opencode-session"] == "ses_123"
 
 
 def test_anthropic_invoke_normalizes() -> None:
@@ -393,6 +476,156 @@ def test_capabilities() -> None:
     assert anthropic.capabilities() == ProviderCapabilities(
         streaming=True, tool_calls=True, structured_output=False, reasoning_effort=False
     )
+
+
+# -- vendor tool-name aliasing -------------------------------------------------
+
+OPENCODE_GO_URL = "https://opencode.ai/zen/go/v1"
+
+
+def test_sanitize_tool_name() -> None:
+    from rinari.providers.adapters.http import sanitize_tool_name
+
+    assert sanitize_tool_name("fs.read") == "fs_read"
+    assert sanitize_tool_name("fs.read_lines") == "fs_read_lines"
+    assert sanitize_tool_name("plain") == "plain"
+    assert sanitize_tool_name("a b-c_d") == "a_b-c_d"
+
+
+def test_native_tool_names_sanitize_injectively() -> None:
+    from rinari.providers.adapters.http import sanitize_tool_name
+    from rinari.tools.native import all_native_tools
+
+    names = [t.name for t in all_native_tools()]
+    assert len({sanitize_tool_name(n) for n in names}) == len(names)
+
+
+def _add_custom_input(alias: str, endpoint: str):
+    from rinari.application.provider_service import AddProviderInput
+
+    return AddProviderInput(
+        alias=alias,
+        provider_type="custom",
+        auth_method="api-key",
+        endpoint=endpoint,
+        secret="sk-test-key",
+    )
+
+
+def _tool_call_response(name: str) -> dict:
+    return {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "c1",
+                            "type": "function",
+                            "function": {"name": name, "arguments": "{}"},
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+    }
+
+
+def test_router_aliases_tool_names_for_opencode(monkeypatch, tmp_path) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=_tool_call_response("fs_read"))
+
+    ctx, services = _app_and_services(handler, monkeypatch, tmp_path)
+    try:
+        provider = services.providers.add(_add_custom_input("go", OPENCODE_GO_URL))
+        model = services.models.add(provider.alias, "m-x", "mx")
+        router = ModelRouter(services.providers, services.models, http_client=_client(handler))
+        req = _request(tools=(ToolSchema(name="fs.read", description="read", parameters={}),))
+        response = router.invoke(provider, model.id, req)
+        body = json.loads(seen[-1].content)
+        assert body["tools"][0]["function"]["name"] == "fs_read"
+        assert response.tool_calls[0].name == "fs.read"
+    finally:
+        ctx.close()
+
+
+def test_router_keeps_tool_names_off_vendor(monkeypatch, tmp_path) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=_tool_call_response("fs.read"))
+
+    ctx, services = _app_and_services(handler, monkeypatch, tmp_path)
+    try:
+        provider = services.providers.add(_add_custom_input("other", "https://api.test/v1"))
+        model = services.models.add(provider.alias, "m-x", "mx")
+        router = ModelRouter(services.providers, services.models, http_client=_client(handler))
+        req = _request(tools=(ToolSchema(name="fs.read", description="read", parameters={}),))
+        response = router.invoke(provider, model.id, req)
+        body = json.loads(seen[-1].content)
+        assert body["tools"][0]["function"]["name"] == "fs.read"
+        assert response.tool_calls[0].name == "fs.read"
+    finally:
+        ctx.close()
+
+
+def test_router_disambiguates_colliding_aliases(monkeypatch, tmp_path) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=_tool_call_response("a_b__2"))
+
+    ctx, services = _app_and_services(handler, monkeypatch, tmp_path)
+    try:
+        provider = services.providers.add(_add_custom_input("go", OPENCODE_GO_URL))
+        model = services.models.add(provider.alias, "m-x", "mx")
+        router = ModelRouter(services.providers, services.models, http_client=_client(handler))
+        req = _request(
+            tools=(
+                ToolSchema(name="a.b", description="dotted", parameters={}),
+                ToolSchema(name="a_b", description="underscored", parameters={}),
+            )
+        )
+        response = router.invoke(provider, model.id, req)
+        body = json.loads(seen[-1].content)
+        assert [t["function"]["name"] for t in body["tools"]] == ["a_b", "a_b__2"]
+        assert response.tool_calls[0].name == "a_b"
+    finally:
+        ctx.close()
+
+
+def test_router_stream_unaliases_tool_names(monkeypatch, tmp_path) -> None:
+    seen: list[httpx.Request] = []
+    body = (
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1",'
+        '"function":{"name":"fs_read","arguments":"{}"}}]}}]}\n'
+        'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n'
+        "data: [DONE]\n"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, content=body.encode())
+
+    ctx, services = _app_and_services(handler, monkeypatch, tmp_path)
+    try:
+        provider = services.providers.add(_add_custom_input("go", OPENCODE_GO_URL))
+        model = services.models.add(provider.alias, "m-x", "mx")
+        router = ModelRouter(services.providers, services.models, http_client=_client(handler))
+        req = _request(tools=(ToolSchema(name="fs.read", description="read", parameters={}),))
+        response = router.invoke_stream(provider, model.id, req, lambda d: None)
+        wire = json.loads(seen[-1].content)
+        assert wire["tools"][0]["function"]["name"] == "fs_read"
+        assert response.tool_calls[0].name == "fs.read"
+    finally:
+        ctx.close()
 
 
 # -- router ---------------------------------------------------------------------
