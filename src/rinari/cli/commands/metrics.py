@@ -83,7 +83,7 @@ def _tool_metrics(events):
     total_err = 0
     durations: list[float] = []
     for e in events:
-        if e.type != "ToolCompleted" or "tool_call_id" not in (e.payload or {}):
+        if e.type not in ("ToolCompleted", "ToolFailed") or "tool_call_id" not in (e.payload or {}):
             continue
         payload = e.payload or {}
         name = payload.get("name", "?")
@@ -212,7 +212,7 @@ def _latency_metrics(events):
     turn_durations: list[float] = []
     started: list[str] = []
     for e in events:
-        if e.type == "ToolCompleted" and "tool_call_id" in (e.payload or {}):
+        if e.type in ("ToolCompleted", "ToolFailed") and "tool_call_id" in (e.payload or {}):
             d = (e.payload or {}).get("duration_ms")
             if isinstance(d, (int, float)):
                 tool_durations.append(d)

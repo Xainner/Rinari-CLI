@@ -204,6 +204,9 @@ def dispatch_root_command(args: list[str]) -> list[str]:
 
 
 def main() -> int:
+    from rinari.cli.text import configure_utf8_stdio
+
+    configure_utf8_stdio()
     # Register typer's shell-completion classes so `_RINARI_COMPLETE=...` works.
     from typer._completion_classes import completion_init
 

@@ -459,6 +459,22 @@ def tool_label(name: str, detail: object) -> str:
     return f"{verb} {arg}".strip() if arg else verb
 
 
+def tool_style(name: str) -> str:
+    """Stable visual category for a tool without deriving runtime state."""
+    verb = tool_verb(name)
+    return {
+        "read": "bold cyan",
+        "edit": "bold magenta",
+        "run": "bold yellow",
+        "git": "bold blue",
+        "web": "bold bright_blue",
+        "browser": "bold bright_blue",
+        "verify": "bold green",
+        "memory": "bold bright_magenta",
+        "context": "bold bright_magenta",
+    }.get(verb, "bold")
+
+
 def extensions_line(snap: RuntimeSnapshot) -> str:
     running = sum(
         1
@@ -558,5 +574,6 @@ __all__ = [
     "thinking_status",
     "tool_arg",
     "tool_label",
+    "tool_style",
     "tool_verb",
 ]

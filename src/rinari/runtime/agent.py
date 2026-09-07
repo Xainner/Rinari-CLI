@@ -119,6 +119,10 @@ class AgentLoop:
         self._on_pressure = on_pressure
         self._hook_sink = hook_sink
 
+    @property
+    def tool_registry(self):
+        return self._tools.registry
+
     # -- public API ---------------------------------------------------------
 
     def turn(
@@ -228,6 +232,7 @@ class AgentLoop:
             for call in response.tool_calls:
                 cancel.throw_if_cancelled()
                 allowed = budget is None or budget.allows_tool(call.name)
+                executed = False
                 if tool_calls_made >= self._max_tool_calls or not allowed:
                     result = ToolResult(
                         ok=False,
@@ -238,6 +243,7 @@ class AgentLoop:
                         ),
                     )
                 else:
+                    executed = True
                     if budget is not None:
                         budget.note_tool_call(call.name)
                     self._emit_hook(
@@ -245,8 +251,15 @@ class AgentLoop:
                         {"tool": call.name, "arguments": call.arguments, "tool_call_id": call.id},
                     )
                     _hook(on_tool, "start", call.name, call.arguments)
+                    trace = {"tool_seq": tool_seq + 1}
+                    if turn_index is not None:
+                        trace["turn_index"] = turn_index
                     result = self._tools.execute(
-                        call.name, call.arguments, ctx.tool_ctx, tool_call_id=call.id
+                        call.name,
+                        call.arguments,
+                        ctx.tool_ctx,
+                        tool_call_id=call.id,
+                        trace=trace,
                     )
                     self._emit_hook(
                         "PostToolUse",
@@ -274,19 +287,20 @@ class AgentLoop:
                 ctx.history.append(
                     ChatMessage.tool_result(call.id, call.name, result.to_model_text())
                 )
-                tool_completed_payload: dict = {
-                    "tool_call_id": call.id,
-                    "name": call.name,
-                    "ok": result.ok,
-                    "error_code": result.error.code.value if result.error else None,
-                    "duration_ms": round(result.duration_ms, 1),
-                    "truncated": result.truncated,
-                    "artifacts": [a.uri for a in result.artifacts],
-                    "tool_seq": tool_seq,
-                }
-                if turn_index is not None:
-                    tool_completed_payload["turn_index"] = turn_index
-                self._emit(ctx.session_id, EVENT_TOOL_COMPLETED, tool_completed_payload)
+                if not executed:
+                    tool_completed_payload: dict = {
+                        "tool_call_id": call.id,
+                        "name": call.name,
+                        "ok": result.ok,
+                        "error_code": result.error.code.value if result.error else None,
+                        "duration_ms": round(result.duration_ms, 1),
+                        "truncated": result.truncated,
+                        "artifacts": [a.uri for a in result.artifacts],
+                        "tool_seq": tool_seq,
+                    }
+                    if turn_index is not None:
+                        tool_completed_payload["turn_index"] = turn_index
+                    self._emit(ctx.session_id, EVENT_TOOL_COMPLETED, tool_completed_payload)
                 loop.record_tool(call.name, call.arguments)
                 if result.error is not None:
                     loop.record_error(call.name, result.error.code.value, result.error.message)

@@ -234,18 +234,26 @@ def test_redaction_and_events(project) -> None:
         redactor=Redactor(["sk-live-abc123xyz"]),
         event_sink=lambda t, p: events.append((t, p)),
     )
-    result = runtime.execute("echo.secret", {}, ctx)
+    result = runtime.execute(
+        "echo.secret", {}, ctx, tool_call_id="call-1", trace={"turn_index": 2, "tool_seq": 3}
+    )
     assert result.ok is True
     assert "sk-live-abc123xyz" not in result.data
     assert "[REDACTED]" in result.data
     types = [t for t, _ in events]
     assert "ToolRequested" in types and "ToolCompleted" in types
+    completed = next(payload for kind, payload in events if kind == "ToolCompleted")
+    assert completed["tool_call_id"] == "call-1"
+    assert completed["turn_index"] == 2
+    assert completed["tool_seq"] == 3
 
     spilled = runtime.execute("fs.read", {"path": "big.py"}, ctx)
     assert spilled.ok is True
     assert spilled.truncated is True
-    assert "bytes spilled to" in spilled.data["text"]
-    spill_files = list((tmp_path / "artifacts" / "s1").glob("*.txt"))
+    assert spilled.data["artifact"].startswith("artifact://s1/runtime/")
+    assert "spill_guidance" in spilled.data
+    assert "text" not in spilled.data
+    spill_files = list((tmp_path / "artifacts" / "s1" / "runtime").glob("*.txt"))
     assert len(spill_files) == 1
     assert spill_files[0].stat().st_size > 64 * 1024
 

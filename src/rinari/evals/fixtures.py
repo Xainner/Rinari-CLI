@@ -174,13 +174,12 @@ class EvalFixture:
     def tools(self) -> list[dict]:
         from rinari.runtime.agent import EVENT_TOOL_COMPLETED
 
-        # The agent loop emits ToolCompleted with tool_call_id; the hook sink
-        # emits a same-named hook event with a different shape. Keep only the
-        # loop's trace events (deterministic, ordered, tool-scoped).
+        # Runtime terminal events are correlated by tool_call_id. Successful
+        # calls are ToolCompleted; failures are ToolFailed.
         return [
             e.payload
             for e in self.events()
-            if e.type == EVENT_TOOL_COMPLETED and "tool_call_id" in e.payload
+            if e.type in (EVENT_TOOL_COMPLETED, "ToolFailed") and "tool_call_id" in e.payload
         ]
 
     @property

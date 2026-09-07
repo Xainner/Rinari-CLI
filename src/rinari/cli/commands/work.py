@@ -11,14 +11,19 @@ so they cannot modify the working tree.
 from __future__ import annotations
 
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import typer
+from rich.markdown import Markdown
+from rich.text import Text
 
-from rinari.cli import agent_runtime
-from rinari.cli.deps import is_json, services, with_error_handling
+from rinari.cli import agent_runtime, render, repl
+from rinari.cli.deps import get_params, is_json, services, with_error_handling
 from rinari.cli.output import emit_json, success_envelope
 from rinari.policy.engine import PermissionProfile
+from rinari.shared.clock import now_iso
 from rinari.shared.errors import InvalidUsageError, NotFoundError
 
 app = typer.Typer(help="One-shot work commands.", no_args_is_help=True)
@@ -70,16 +75,94 @@ def _one_shot(ctx: typer.Context, command: str, target: list[str] | None) -> Non
     with services(ctx) as s:
         started = s.sessions.start(Path.cwd())
         record = started.session
+        requested_mode = "agent" if command == "run" else command
+        if record.mode != requested_mode:
+            record.mode = requested_mode
+            record.updated_at = now_iso(s.ctx.clock)
+            s.ctx.session_repo.update(record)
+        json_mode = is_json(ctx)
+        params = get_params(ctx)
+        tty = sys.stdout.isatty() and not json_mode
+        mode, no_color, _banner = render.detect_mode(interactive=tty, json_flag=json_mode, env=None)
+        console = render.make_console(mode, no_color)
         session = agent_runtime.build_agent_session(
-            s, record, interactive=False, profile=_profile_for(command)
+            s,
+            record,
+            interactive=False,
+            live_output=tty,
+            profile=_profile_for(command),
         )
+        streamed = {"any": False, "open": False, "ends_newline": True}
+        tool_state: dict = {}
+        started_at = time.monotonic()
+        status = {"live": None}
+
+        def stop_status() -> None:
+            live = status["live"]
+            if live is not None:
+                live.stop()
+                status["live"] = None
+
+        def start_status(label: str = "rinari working…") -> None:
+            if not tty or params.no_progress or status["live"] is not None:
+                return
+            live = render.thinking_status(console, label=label)
+            status["live"] = live
+            live.start()
+
+        def close_segment() -> None:
+            if not streamed["open"]:
+                return
+            if not streamed["ends_newline"]:
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+            streamed["open"] = False
+
+        def on_delta(delta: str) -> None:
+            if not streamed["open"]:
+                streamed["any"] = True
+                streamed["open"] = True
+                stop_status()
+                if tty:
+                    console.print(
+                        Text("RINARI  ", style="bold bright_magenta"),
+                        end="",
+                        highlight=False,
+                    )
+            sys.stdout.write(delta)
+            sys.stdout.flush()
+            streamed["ends_newline"] = delta.endswith(("\n", "\r"))
+
+        def on_tool(phase: str, name: str, detail: object) -> None:
+            if not tty or params.no_progress:
+                return
+            if phase == "start":
+                stop_status()
+                close_segment()
+            repl.render_tool_event(
+                console,
+                phase,
+                name,
+                detail,
+                json_mode=False,
+                ascii_=mode is not render.RendererMode.RICH,
+                state=tool_state,
+                elapsed=lambda: time.monotonic() - started_at,
+            )
+            if phase == "end":
+                start_status("rinari evaluating results…")
+
+        start_status()
         try:
             result = agent_runtime.run_turn(
                 session,
                 _preamble(command, text),
-                on_delta=lambda d: print(d, end="", flush=True),
+                on_delta=None if json_mode else on_delta,
+                on_tool=None if json_mode else on_tool,
             )
         finally:
+            stop_status()
+            close_segment()
             session.end()
         data = {
             "command": command,
@@ -91,13 +174,16 @@ def _one_shot(ctx: typer.Context, command: str, target: list[str] | None) -> Non
             "completion": result.completion,
             "usage": result.usage,
         }
-        if is_json(ctx):
+        if json_mode:
             emit_json(success_envelope(f"{command}", data))
             return
         if result.kind in ("answer", "truncated"):
-            if result.content:
-                typer.echo()
-            typer.echo(result.content)
+            if not streamed["any"] and result.content:
+                if tty:
+                    console.print(Text("RINARI", style="bold bright_magenta"))
+                    console.print(Markdown(result.content))
+                else:
+                    typer.echo(result.content)
             if result.kind == "truncated":
                 typer.echo("(output stopped at the model's max tokens)", err=True)
         else:

@@ -272,6 +272,10 @@ def test_tool_verb_and_label() -> None:
     assert tool_verb("browser.open") == "browser"
     assert tool_label("fs.read", {"path": "src/a.ts"}) == "read src/a.ts"
     assert tool_label("shell.exec", {"command": "pytest"}) == "run pytest"
+    from rinari.cli.render import tool_style
+
+    assert tool_style("fs.read") == "bold cyan"
+    assert tool_style("fs.patch") == "bold magenta"
 
 
 def test_extensions_line_counts() -> None:

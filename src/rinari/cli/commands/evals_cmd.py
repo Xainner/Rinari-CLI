@@ -13,6 +13,7 @@ import typer
 
 from rinari.cli.deps import app_context, is_json, with_error_handling
 from rinari.cli.output import emit_json, success_envelope
+from rinari.cli.text import choice
 from rinari.evals import builtins
 from rinari.evals.reports import compare, list_reports, load_report, new_run_id, save_report
 from rinari.evals.runner import run_suite
@@ -157,7 +158,11 @@ def eval_run(
 
         def _progress(eval_case):
             if not is_json(ctx):
-                typer.echo(f"• {eval_case.case_id} …", err=True)
+                typer.echo(
+                    f"{choice('•', '*', sys.stderr)} {eval_case.case_id} "
+                    f"{choice('…', '...', sys.stderr)}",
+                    err=True,
+                )
 
         summary = run_suite(
             cases, base_dir=scratch, run_id=run_id, fail_fast=fail_fast, progress=_progress
@@ -174,14 +179,20 @@ def eval_run(
             code = 0 if summary.failed == 0 and summary.error == 0 else 1
             raise typer.Exit(code)
         for result in summary.results:
-            marker = {"passed": "✓", "failed": "✗", "error": "!", "skipped": "·"}[result.status]
+            marker = {
+                "passed": choice("✓", "OK"),
+                "failed": choice("✗", "X"),
+                "error": "!",
+                "skipped": choice("·", "-"),
+            }[result.status]
             typer.echo(f"{marker} {result.case_id} ({result.duration_ms:.0f} ms) {result.status}")
             for assertion in result.assertions:
                 if assertion.outcome.value != "passed":
                     typer.echo(f"    - {assertion.name}: {assertion.detail}")
         typer.echo(
             f"{summary.passed} passed, {summary.failed} failed, "
-            f"{summary.error} errors, {summary.skipped} skipped — report: {path}"
+            f"{summary.error} errors, {summary.skipped} skipped "
+            f"{choice('—', '-')} report: {path}"
         )
         raise typer.Exit(0 if summary.failed == 0 and summary.error == 0 else 1)
 

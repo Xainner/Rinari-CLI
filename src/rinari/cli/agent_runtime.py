@@ -360,6 +360,7 @@ def build_agent_session(
     record: SessionRecord,
     *,
     interactive: bool,
+    live_output: bool | None = None,
     user_home: Path | None = None,
     profile: PermissionProfile = PermissionProfile.WORKSPACE,
     model_caller: ModelCaller | None = None,
@@ -384,10 +385,10 @@ def build_agent_session(
         profile=profile,
         sandbox=sandbox,
         limits=ProcessLimits(timeout_s=300, max_output_bytes=128 * 1024),
-        artifact_root=home / ".rinari" / "artifacts" / record.id,
+        artifact_root=home / ".rinari" / "artifacts",
         clock=services.ctx.clock,
         cancellation=token,
-        output_sink=_live_output_sink(interactive),
+        output_sink=_live_output_sink(interactive if live_output is None else live_output),
         processes=ProcessRegistry(),
         pty=_build_pty_registry(),
         worktree=_ensure_worktree_baseline(services, record),
@@ -1018,7 +1019,61 @@ def _root_of(record: SessionRecord) -> Path | None:
     return Path(record.project_root_snapshot) if record.project_root_snapshot else None
 
 
+def _validation_ids(session: AgentSession) -> set[str]:
+    root = _root_of(session.record)
+    if root is None:
+        return set()
+    try:
+        return {str(row["id"]) for row in session.services.verification.latest(root, limit=200)}
+    except Exception:
+        return set()
+
+
+def _turn_requested_mutation(session: AgentSession, turn_index: int) -> bool:
+    """Whether this turn attempted a side-effecting tool.
+
+    Read-only questions should not inherit a previous turn's completion badge.
+    Failed mutation attempts still count so false-success claims reach the gate.
+    """
+    from rinari.tools.definition import SIDE_EFFECT_NONE
+
+    try:
+        events = session.services.ctx.event_repo.list(session.record.id)
+    except Exception:
+        return False
+    for event in events:
+        payload = event.payload or {}
+        if event.type != "ToolRequested" or payload.get("turn_index") != turn_index:
+            continue
+        tool = session.loop.tool_registry.get(str(payload.get("tool") or ""))
+        if tool is not None and tool.side_effects != SIDE_EFFECT_NONE:
+            return True
+    return False
+
+
+def _claims_completion(content: str) -> bool:
+    import re
+
+    return bool(
+        re.search(
+            r"\b(done|fixed|implemented|completed|tests?\s+(?:pass|passed|passing))\b",
+            content or "",
+            re.IGNORECASE,
+        )
+    )
+
+
 def run_turn(session: AgentSession, message: str, *, on_delta=None, on_tool=None) -> TurnResult:
+    from rinari.sessions.turn_lock import SessionTurnLock
+
+    lock_path = session.services.ctx.layout.dir("sessions") / f"{session.record.id}.turn.lock"
+    with SessionTurnLock(lock_path, session.record.id):
+        return _run_turn_unlocked(session, message, on_delta=on_delta, on_tool=on_tool)
+
+
+def _run_turn_unlocked(
+    session: AgentSession, message: str, *, on_delta=None, on_tool=None
+) -> TurnResult:
     services = session.services
     _set_session_state(services, session.record, STATE_ACTIVE)
     base = session.context.assembler_base
@@ -1042,6 +1097,7 @@ def run_turn(session: AgentSession, message: str, *, on_delta=None, on_tool=None
     budget = BudgetMeter(TurnBudgetLimits(), clock=services.ctx.clock)
     loop = LoopDetector()
     turn_index = _turn_index(services, session.record.id)
+    validation_before = _validation_ids(session)
     try:
         result = session.loop.turn(
             session.context,
@@ -1069,8 +1125,14 @@ def run_turn(session: AgentSession, message: str, *, on_delta=None, on_tool=None
     _persist_new_messages(services, session.record, new_msgs)
     if result.kind != "cancelled" and session.record.kind == "CHAT":
         _maybe_promote(session)
-    if result.kind in ("answer", "truncated", "budget", "loop") and result.tool_calls > 0:
-        result = _finalize_turn(session, result)
+    read_only = session.context.tool_ctx.profile is PermissionProfile.READ_ONLY
+    should_finalize = _turn_requested_mutation(session, turn_index) or _claims_completion(
+        result.content
+    )
+    finalizable_kind = result.kind in ("answer", "truncated", "budget", "loop")
+    if finalizable_kind and not read_only and should_finalize:
+        validation_after = _validation_ids(session)
+        result = _finalize_turn(session, result, validation_after - validation_before)
     if session.context.compacted:
         session.context.compacted = False
         result = replace(result, compacted=True)
@@ -1108,7 +1170,9 @@ def _new_history(context: AgentContext, before: int, dropped_before: int) -> lis
     return context.history[-min(new_count, len(context.history)) :]
 
 
-def _finalize_turn(session: AgentSession, result: TurnResult) -> TurnResult:
+def _finalize_turn(
+    session: AgentSession, result: TurnResult, validation_ids: set[str]
+) -> TurnResult:
     """Finalize transition (phase 3): evaluate the completion gate from
     persisted validation evidence and make the outcome observable.
 
@@ -1123,7 +1187,7 @@ def _finalize_turn(session: AgentSession, result: TurnResult) -> TurnResult:
     if not root.is_dir():
         return result
     try:
-        decision = services.verification.evaluate(root)
+        decision = services.verification.evaluate(root, record_ids=validation_ids)
     except RinariError:
         return result
     payload = decision.to_dict()

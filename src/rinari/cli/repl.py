@@ -32,7 +32,7 @@ def _on_delta(delta: str) -> None:
     sys.stdout.flush()
 
 
-def _on_tool(
+def render_tool_event(
     console: Console,
     phase: str,
     name: str,
@@ -63,7 +63,7 @@ def _on_tool(
         label = render.tool_label(name, detail)
         state["label"] = label
         active = render.symbol(render.SYMBOL_ACTIVE, ascii_=ascii_)
-        console.print(Text(f"{active} {label}", style="bold"), highlight=False)
+        console.print(Text(f"{active} {label}", style=render.tool_style(name)), highlight=False)
     else:
         from rinari.tools.definition import ToolResult
 
@@ -74,10 +74,11 @@ def _on_tool(
             sym = render.symbol(glyph, ascii_=ascii_)
             style = "yellow" if retryable else "red"
             tail = f" · {elapsed():.0f}s" if not retryable else ""
+            message = detail.error.message.strip().replace("\n", " ")[:160]
             console.print(
                 Text(
                     f"  {sym} {label}  {detail.error.code.value}{tail}  "
-                    f"({detail.duration_ms:.0f}ms)",
+                    f"({detail.duration_ms:.0f}ms) · {message}",
                     style=style,
                 ),
                 highlight=False,
@@ -85,10 +86,9 @@ def _on_tool(
         else:
             sym = render.symbol(render.SYMBOL_OK, ascii_=ascii_)
             ms = f" ({detail.duration_ms:.0f}ms)" if isinstance(detail, ToolResult) else ""
-            console.print(
-                Text(f"  {sym} {label} · {elapsed():.0f}s{ms}", style="dim"),
-                highlight=False,
-            )
+            line = Text(f"  {sym} ", style="green")
+            line.append(f"{label} · {elapsed():.0f}s{ms}", style="dim")
+            console.print(line, highlight=False)
 
 
 def run_repl(
@@ -108,7 +108,7 @@ def run_repl(
         interactive=True, json_flag=json_flag, env=None
     )
     console = render.make_console(mode, no_color)
-    json_mode = mode is render.RendererMode.JSON_STREAM
+    json_mode = mode in (render.RendererMode.JSON, render.RendererMode.JSON_STREAM)
     ascii_ = mode is not render.RendererMode.RICH
 
     if not no_banner and banner_allowed:
@@ -123,7 +123,8 @@ def run_repl(
     while True:
         session.token.reset()
         interrupted_this_turn = False
-        if prompt is not None:
+        initial_message = prompt is not None
+        if initial_message:
             message = prompt
             prompt = None
         else:
@@ -156,26 +157,57 @@ def run_repl(
 
         if not json_mode:
             typer.echo()
-            console.print(Text(f"you > {message}", style="bold"))
-        streamed = {"any": False}
+            # typer.prompt already echoed interactive input. Only commands that
+            # supplied an initial prompt need an explicit user transcript line.
+            if initial_message:
+                user_line = Text("YOU  ", style="bold bright_magenta")
+                user_line.append(message)
+                console.print(user_line)
+        streamed = {"any": False, "segment_open": False, "ends_newline": True}
         turn_started = time.monotonic()
-        status = render.thinking_status(console)
-        status_clear = {"any": not (not json_mode and not no_progress)}
+        status_state = {"live": None}
 
-        def _stop_status(status=status, status_clear=status_clear) -> None:
-            if not status_clear["any"]:
-                status_clear["any"] = True
-                status.stop()
+        def _start_status(
+            label: str = "rinari thinking…",
+            status_state=status_state,
+            json_mode=json_mode,
+            no_progress=no_progress,
+        ) -> None:
+            if json_mode or no_progress or status_state["live"] is not None:
+                return
+            live = render.thinking_status(console, label=label)
+            status_state["live"] = live
+            live.start()
+
+        def _stop_status(status_state=status_state) -> None:
+            live = status_state["live"]
+            if live is not None:
+                live.stop()
+                status_state["live"] = None
+
+        def _close_segment(streamed=streamed) -> None:
+            if not streamed["segment_open"]:
+                return
+            if not streamed["ends_newline"]:
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+            streamed["segment_open"] = False
 
         def _delta(delta, streamed=streamed, stop=_stop_status) -> None:
             if json_mode:
                 print(render.json_stream_event("token", text=delta), flush=True)
             else:
-                if not streamed["any"]:
+                if not streamed["segment_open"]:
                     streamed["any"] = True
+                    streamed["segment_open"] = True
                     stop()
-                    console.print(Text("rinari > ", style="bold"), end="", highlight=False)
+                    console.print(
+                        Text("RINARI  ", style="bold bright_magenta"),
+                        end="",
+                        highlight=False,
+                    )
                 _on_delta(delta)
+                streamed["ends_newline"] = delta.endswith(("\n", "\r"))
 
         def _elapsed(turn_started=turn_started) -> float:
             return time.monotonic() - turn_started
@@ -185,7 +217,10 @@ def run_repl(
         def _tool(phase: str, name: str, detail: object, tool_state=tool_state) -> None:
             if no_progress and not json_mode:
                 return
-            _on_tool(
+            if phase == "start" and not json_mode:
+                _stop_status()
+                _close_segment()
+            render_tool_event(
                 console,
                 phase,
                 name,
@@ -195,9 +230,10 @@ def run_repl(
                 state=tool_state,
                 elapsed=_elapsed,
             )
+            if phase == "end" and not json_mode:
+                _start_status("rinari evaluating results…")
 
-        if not status_clear["any"]:
-            status.start()
+        _start_status()
         try:
             result = agent_runtime.run_turn(session, message, on_delta=_delta, on_tool=_tool)
         except KeyboardInterrupt:
@@ -219,6 +255,7 @@ def run_repl(
             continue
         finally:
             _stop_status()
+            _close_segment()
 
         if json_mode:
             print(
@@ -231,11 +268,11 @@ def run_repl(
         elif result.kind not in ("answer", "truncated"):
             console.print(Text(result.content, style="yellow"))
         else:
-            typer.echo()
             # Non-streaming providers deliver the answer only in the result.
             if not streamed["any"] and result.content:
                 from rich.markdown import Markdown
 
+                console.print(Text("RINARI", style="bold bright_magenta"))
                 console.print(Markdown(result.content))
             if result.kind == "truncated":
                 typer.echo("(output stopped at the model's max tokens)", err=True)
@@ -281,4 +318,4 @@ def _turn_payload(result, session) -> dict:
     return payload
 
 
-__all__ = ["run_repl"]
+__all__ = ["render_tool_event", "run_repl"]

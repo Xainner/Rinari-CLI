@@ -136,6 +136,7 @@ class VerificationService:
         blocked_reason: str | None = None,
         task_ids: list[str] | None = None,
         require_evidence: bool = True,
+        record_ids: set[str] | None = None,
     ) -> GateDecision:
         project_root = str(self._root(path))
         tasks = None
@@ -152,6 +153,8 @@ class VerificationService:
                 report["id"] = task["id"]
                 tasks.append(report)
         records = self._ctx.validation_repo.list(project_root, limit=200)
+        if record_ids is not None:
+            records = [record for record in records if record.get("id") in record_ids]
         return evaluate_gate(
             records=records,
             required_kinds=tuple(required_kinds),

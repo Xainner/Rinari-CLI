@@ -4,6 +4,8 @@ model lanes, judge, and failure surfacing (never a false success).
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from rinari.cli.agent_runtime import run_turn
@@ -12,6 +14,7 @@ from rinari.evals.judge import JudgeOutcome, Rule, RuleJudge, parse_judge_json
 from rinari.evals.runner import run_case
 from rinari.evals.scripted import ScriptedModel, ScriptExhaustedError, answer, calls
 from rinari.evals.spec import AssertionOutcome, EvalCase
+from rinari.policy.engine import PermissionProfile
 
 
 @pytest.fixture
@@ -61,9 +64,75 @@ def test_turn_and_tool_span_fields(workspace, tmp_path):
         e for e in fixture.events() if e.type == "ToolCompleted" and "tool_call_id" in e.payload
     ]
     assert len(tools) == 2
+    assert len([e for e in fixture.events() if e.type == "ToolCompleted"]) == 2
     first, second = tools
     assert first.payload["turn_index"] == 0 and first.payload["tool_seq"] == 1
     assert second.payload["turn_index"] == 1 and second.payload["tool_seq"] == 1
+    fixture.close()
+
+
+def test_read_only_turn_does_not_inherit_old_completion_evidence(workspace, tmp_path):
+    case = EvalCase(
+        case_id="tmp.readonly_gate",
+        suite="tmp",
+        name="readonly gate",
+        description="read-only work has no completion badge",
+        prompt="audit the prior fix",
+        project=True,
+        setup=lambda f: [f.file("a.txt", "a\n")],
+        script=lambda f: [calls(("fs.read", {"path": "a.txt"})), answer("Tests passed before.")],
+    )
+    base = tmp_path / "readonly-gate"
+    base.mkdir()
+    fixture = EvalFixture(case=case, base_dir=base).build()
+    fixture.services.verification.record(
+        fixture.work,
+        kind="test",
+        result="passed",
+        summary="old evidence",
+        session_ref=fixture.record.id,
+    )
+    fixture.session.context.tool_ctx = replace(
+        fixture.session.context.tool_ctx, profile=PermissionProfile.READ_ONLY
+    )
+
+    turn = run_turn(fixture.session, case.prompt)
+
+    assert turn.completion is None
+    assert "CompletionGateEvaluated" not in [e.type for e in fixture.events()]
+    fixture.close()
+
+
+def test_mutating_turn_requires_fresh_validation_evidence(workspace, tmp_path):
+    case = EvalCase(
+        case_id="tmp.fresh_gate",
+        suite="tmp",
+        name="fresh gate",
+        description="old evidence cannot verify a new change",
+        prompt="change the file",
+        project=True,
+        setup=lambda f: [f.file("a.txt", "a\n")],
+        script=lambda f: [
+            calls(("fs.write", {"path": "a.txt", "content": "b\n"})),
+            answer("Fixed and tests passed."),
+        ],
+    )
+    base = tmp_path / "fresh-gate"
+    base.mkdir()
+    fixture = EvalFixture(case=case, base_dir=base).build()
+    fixture.services.verification.record(
+        fixture.work,
+        kind="test",
+        result="passed",
+        summary="old evidence",
+        session_ref=fixture.record.id,
+    )
+
+    turn = run_turn(fixture.session, case.prompt)
+
+    assert turn.completion is not None
+    assert turn.completion["outcome"] == "IMPLEMENTED_UNVERIFIED"
+    assert turn.completion["evidence"] == []
     fixture.close()
 
 

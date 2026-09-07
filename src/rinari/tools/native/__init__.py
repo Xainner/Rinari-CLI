@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from rinari.tools.definition import ToolDefinition
+from rinari.tools.native.artifact import artifact_tools
 from rinari.tools.native.browse import browse_tools
 from rinari.tools.native.context import context_tools
 from rinari.tools.native.fs import filesystem_tools
@@ -22,6 +23,7 @@ __all__ = ["all_native_tools"]
 
 def all_native_tools() -> list[ToolDefinition]:
     return [
+        *artifact_tools(),
         *filesystem_tools(),
         *search_tools(),
         *shell_tools(),

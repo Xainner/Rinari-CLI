@@ -106,6 +106,11 @@ class _SubagentRunner:
             cfg.policy,
             ApprovalEngine(prompt=None),  # subagents never prompt; ASK -> deny
             clock=cfg.parent_session_ctx.clock,
+            event_sink=(
+                (lambda event, payload: cfg.event_sink(spec.session_id, event, payload))
+                if cfg.event_sink is not None
+                else None
+            ),
         )
         # The policy scope is derived from tool_ctx (policy is enforced at
         # runtime, not by prompt text): profile here is the isolation key.
@@ -252,7 +257,7 @@ class _SubagentRunner:
             profile=PermissionProfile.READ_ONLY if read_only else PermissionProfile.WORKSPACE,
             sandbox=sandbox,
             limits=ProcessLimits(timeout_s=60, max_output_bytes=128 * 1024),
-            artifact_root=parent_ctx.artifact_root / f"subagents/{spec.agent_id}",
+            artifact_root=parent_ctx.artifact_root,
             clock=parent_ctx.clock,
             cancellation=token,
             processes=ProcessRegistry(),

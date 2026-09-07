@@ -87,24 +87,30 @@ class ToolRuntime:
         ctx: ToolContext,
         *,
         tool_call_id: str = "",
+        trace: dict[str, Any] | None = None,
     ) -> ToolResult:
         started = time.monotonic()
         started_at = now_iso(self._ctx_clock())
-        self._event(
-            "ToolRequested",
-            {"tool": tool_name, "arguments": self._redact_payload(arguments)},
-        )
+        requested = {"tool": tool_name, "arguments": self._redact_payload(arguments)}
+        if tool_call_id:
+            requested["tool_call_id"] = tool_call_id
+        requested.update(trace or {})
+        self._event("ToolRequested", requested)
         result = self._execute_inner(tool_name, arguments, ctx, tool_call_id)
         duration_ms = (time.monotonic() - started) * 1000.0
-        self._event(
-            "ToolCompleted" if result.ok else "ToolFailed",
-            {
-                "tool": tool_name,
-                "ok": result.ok,
-                "duration_ms": round(duration_ms, 1),
-                "error_code": result.error.code.value if result.error else None,
-            },
-        )
+        completed = {
+            "tool": tool_name,
+            "name": tool_name,
+            "ok": result.ok,
+            "duration_ms": round(duration_ms, 1),
+            "error_code": result.error.code.value if result.error else None,
+            "truncated": result.truncated,
+            "artifacts": [artifact.uri for artifact in result.artifacts],
+        }
+        if tool_call_id:
+            completed["tool_call_id"] = tool_call_id
+        completed.update(trace or {})
+        self._event("ToolCompleted" if result.ok else "ToolFailed", completed)
         return dataclasses.replace(
             result,
             tool_call_id=tool_call_id or result.tool_call_id,
@@ -272,7 +278,15 @@ class ToolRuntime:
             if isinstance(text, str) and len(text.encode("utf-8")) > self.spill_threshold_bytes:
                 spill_ref = self._spill(tool_call_id or "tool", text, ctx)
                 truncated = True
-                data["text"] = f"[{len(text)} bytes spilled to {spill_ref.uri}] " + text[:512]
+                # Keep metadata out of the literal preview. Otherwise a model
+                # can feed the spill marker back into an exact-text edit.
+                data.pop("text", None)
+                data["artifact"] = spill_ref.uri
+                data["spill_guidance"] = (
+                    "Use artifact.read with start_byte/max_bytes, or use "
+                    "fs.read_lines on the source file, before editing."
+                )
+                data["text_preview"] = text[:1536]
         if spill_ref is not None and not isinstance(data, dict):
             data = {
                 "summary": (
@@ -289,15 +303,20 @@ class ToolRuntime:
         )
 
     def _spill(self, tool_call_id: str, payload: str | bytes, ctx: ToolContext) -> ArtifactRef:
-        directory = ctx.artifact_root / ctx.session_id
+        directory = ctx.artifact_root / ctx.session_id / "runtime"
         directory.mkdir(parents=True, exist_ok=True)
         safe_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in tool_call_id) or "result"
-        path = directory / f"{safe_id}.txt"
+        suffix = ".bin" if isinstance(payload, bytes) else ".txt"
+        path = directory / f"{safe_id}{suffix}"
         if isinstance(payload, bytes):
             path.write_bytes(payload)
         else:
             path.write_text(payload, encoding="utf-8")
-        return ArtifactRef(uri=f"file://{path}", name=path.name, kind="tool-output")
+        return ArtifactRef(
+            uri=f"artifact://{ctx.session_id}/runtime/{path.name}",
+            name=path.name,
+            kind="tool-output",
+        )
 
     # ------------------------------------------------------------------
 

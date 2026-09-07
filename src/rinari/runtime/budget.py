@@ -47,8 +47,10 @@ DEFAULT_NETWORK_NAMESPACES = frozenset({"web", "http", "browser"})
 
 @dataclass(frozen=True, slots=True)
 class TurnBudgetLimits:
-    max_model_calls: int = 8
-    max_tool_calls: int = 32
+    # Real coding turns need several inspect/edit/verify cycles. The previous
+    # defaults stopped ordinary repository work before it could synthesize.
+    max_model_calls: int = 16
+    max_tool_calls: int = 64
     max_network_calls: int = 32
     max_wall_time_s: float = 600.0
     # None = no cost limit. Pricing is per-million tokens; None = unknown
