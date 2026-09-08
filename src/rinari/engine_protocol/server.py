@@ -24,6 +24,7 @@ from rinari.engine_protocol.snapshots import (
     session_to_dict,
 )
 from rinari.engine_protocol.turns import TurnManager
+from rinari.engine_protocol.workspace import InvalidGitError, git_diff, git_files
 
 
 class EngineServer:
@@ -42,6 +43,15 @@ class EngineServer:
         self._dispatcher.register("session.turn.start", self._turn_start)
         self._dispatcher.register("session.turn.cancel", self._turn_cancel)
         self._dispatcher.register("approval.resolve", self._approval_resolve)
+        self._dispatcher.register("task.tree", self._task_tree)
+        self._dispatcher.register("task.get", self._task_get)
+        self._dispatcher.register("verification.latest", self._verification_latest)
+        self._dispatcher.register("verification.plan", self._verification_plan)
+        self._dispatcher.register("checkpoint.list", self._checkpoint_list)
+        self._dispatcher.register("checkpoint.show", self._checkpoint_show)
+        self._dispatcher.register("checkpoint.restore", self._checkpoint_restore)
+        self._dispatcher.register("project.changes", self._project_changes)
+        self._dispatcher.register("project.diff", self._project_diff)
         self._dispatcher.register("provider.list", self._provider_list)
         self._dispatcher.register("provider.create", self._provider_create)
         self._dispatcher.register("provider.get", self._provider_get)
@@ -164,6 +174,126 @@ class EngineServer:
             event("session.mode.changed", {"session_id": record.id, "mode": record.mode})
         )
         return {"session": session_to_dict(record)}
+
+    # -- tasks / verification / checkpoints / working tree --------------------
+
+    @staticmethod
+    def _need_path(params: dict[str, Any]) -> str:
+        path = params.get("path")
+        if not isinstance(path, str) or not path:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'path' must be a non-empty string.")
+        return path
+
+    def _task_tree(self, params: dict[str, Any]) -> dict[str, Any]:
+        tree = self._services.tasks.tree(self._need_path(params))
+        return {"tasks": tree["tasks"], "depths": tree["depths"]}
+
+    def _task_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        task_id = params.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'task_id' must be a non-empty string.")
+        return {"task": self._services.tasks.show(self._need_path(params), task_id)}
+
+    def _verification_latest(self, params: dict[str, Any]) -> dict[str, Any]:
+        kinds = params.get("kinds")
+        if kinds is not None and (
+            not isinstance(kinds, list) or not all(isinstance(k, str) for k in kinds)
+        ):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'kinds' must be a list of strings.")
+        limit = params.get("limit", 50)
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 500:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'limit' must be an int in 1..500.")
+        rows = self._services.verification.latest(
+            self._need_path(params),
+            kinds=tuple(kinds) if kinds is not None else None,
+            limit=limit,
+        )
+        return {"records": rows}
+
+    def _verification_plan(self, params: dict[str, Any]) -> dict[str, Any]:
+        changed = params.get("changed_files", [])
+        if not isinstance(changed, list) or not all(isinstance(f, str) for f in changed):
+            raise EngineProtocolError(
+                INVALID_PARAMS, "Param 'changed_files' must be a list of strings."
+            )
+        plan = self._services.verification.plan(self._need_path(params), changed)
+        return {
+            "plan": {
+                "changed": list(plan.changed),
+                "sources": list(plan.sources),
+                "tests": list(plan.tests),
+                "targeted": list(plan.targeted),
+                "adjacent": list(plan.adjacent),
+                "broader": list(plan.broader),
+                "test_commands": list(plan.test_commands),
+                "lint_commands": list(plan.lint_commands),
+                "typecheck_commands": list(plan.typecheck_commands),
+                "build_commands": list(plan.build_commands),
+                "risk": plan.risk,
+                "reasons": list(plan.reasons),
+            }
+        }
+
+    def _checkpoint_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        path = params.get("path")
+        if path is not None and (not isinstance(path, str) or not path):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'path' must be a non-empty string.")
+        return {"checkpoints": self._services.checkpoints.list(path)}
+
+    def _checkpoint_show(self, params: dict[str, Any]) -> dict[str, Any]:
+        checkpoint_id = params.get("checkpoint_id")
+        if not isinstance(checkpoint_id, str) or not checkpoint_id:
+            raise EngineProtocolError(
+                INVALID_PARAMS, "Param 'checkpoint_id' must be a non-empty string."
+            )
+        return {"checkpoint": self._services.checkpoints.show(checkpoint_id)}
+
+    def _checkpoint_restore(self, params: dict[str, Any]) -> dict[str, Any]:
+        checkpoint_id = params.get("checkpoint_id")
+        if checkpoint_id is not None and not isinstance(checkpoint_id, str):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'checkpoint_id' must be a string.")
+        preview = params.get("preview", False)
+        if not isinstance(preview, bool):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'preview' must be a boolean.")
+        allow_mixed = params.get("allow_mixed", False)
+        if not isinstance(allow_mixed, bool):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'allow_mixed' must be a boolean.")
+        result = self._services.checkpoints.restore(
+            self._need_path(params),
+            checkpoint_id=checkpoint_id,
+            preview=preview,
+            allow_mixed=allow_mixed,
+        )
+        return {"result": result}
+
+    def _project_changes(self, params: dict[str, Any]) -> dict[str, Any]:
+        status = git_files(Path(self._need_path(params)))
+        return {
+            "available": status.available,
+            "branch": status.branch,
+            "head": status.head,
+            "dirty": status.dirty,
+            "files": list(status.files),
+        }
+
+    def _project_diff(self, params: dict[str, Any]) -> dict[str, Any]:
+        file = params.get("file")
+        if file is not None and (not isinstance(file, str) or not file):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'file' must be a non-empty string.")
+        max_chars = params.get("max_chars", 200_000)
+        if (
+            not isinstance(max_chars, int)
+            or isinstance(max_chars, bool)
+            or not 1_000 <= max_chars <= 1_000_000
+        ):
+            raise EngineProtocolError(
+                INVALID_PARAMS, "Param 'max_chars' must be an int in 1000..1000000."
+            )
+        try:
+            result = git_diff(Path(self._need_path(params)), file, max_chars)
+        except InvalidGitError as err:
+            raise EngineProtocolError(INVALID_PARAMS, f"Cannot diff: {err}") from err
+        return result
 
     # -- turns ------------------------------------------------------------
 

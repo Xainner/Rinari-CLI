@@ -851,6 +851,10 @@ Slice 5a adds `session.mode.set` (`ref`, `mode` plan/build/review):
 PLAN/REVIEW turns run under a READ_ONLY policy profile, BUILD under
 WORKSPACE; legacy modes keep workspace behavior. Emits
 `session.mode.changed`; the mode switch keeps session, tasks and context.
+Slice 6a adds project workspace reads: `task.tree/get`,
+`verification.latest/plan`, `checkpoint.list/show/restore`,
+`project.changes` (porcelain files + branch/head/dirty, `available:false`
+outside a repo), `project.diff` (unified, truncated, binary-safe).
 The envelope contract is unchanged across slices.
 
 ---
