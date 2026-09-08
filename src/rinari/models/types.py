@@ -83,12 +83,30 @@ class Usage:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelItem:
+    """One provider response item (P0.6/Etapa D).
+
+    Typed blocks (text/function_call/tool_use/...) carry parsed data;
+    anything else is preserved opaque in ``data`` so protocol-required
+    blocks (e.g. Anthropic thinking tied to tool use) survive round-trips.
+    """
+
+    type: str
+    id: str | None = None
+    data: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
 class ModelResponse:
     content: str
     tool_calls: tuple[ToolCall, ...] = ()
     usage: Usage = Usage()
     stop_reason: StopReason = StopReason.END_TURN
     raw: dict[str, Any] | None = None
+    items: tuple[ModelItem, ...] = ()
+    provider_state: dict[str, Any] | None = None
+    """Transport metadata (e.g. response id for chained calls). Never the
+    source of truth: Rinari session history stays canonical."""
 
     @property
     def has_tool_calls(self) -> bool:

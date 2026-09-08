@@ -203,7 +203,7 @@ class AgentLoop:
             if exposure_metrics is not None:
                 before_model_payload["exposure"] = exposure_metrics.metrics(self._tools.registry)
             self._emit_hook("BeforeModel", before_model_payload)
-            response = self._invoke(ctx, request, on_delta)
+            response = self._invoke(ctx, request, self._guarded_delta(ctx, on_delta))
             total_usage = _merge_usage(total_usage, response.usage)
             self._emit_hook(
                 "AfterModel",
@@ -466,6 +466,25 @@ class AgentLoop:
         if on_delta is not None and getattr(capabilities, "streaming", False):
             return self._provider.invoke_stream(request, on_delta)
         return self._provider.invoke(request)
+
+    def _guarded_delta(self, ctx: AgentContext, on_delta: DeltaFn | None) -> DeltaFn | None:
+        """Abort a live stream promptly on cancel (§8/Etapa D).
+
+        The guard raises inside the adapter's stream loop, which unwinds
+        through the httpx stream context (closed on exception) instead of
+        waiting for the network timeout.
+        """
+        if on_delta is None:
+            return None
+        cancellation = getattr(getattr(ctx, "tool_ctx", None), "cancellation", None)
+        if cancellation is None:
+            return on_delta
+
+        def guarded(text: str) -> None:
+            cancellation.throw_if_cancelled()
+            on_delta(text)
+
+        return guarded
 
     def _call_is_network(self, name: str, arguments: Any) -> bool:
         """Ground-truth network classification for budget dimensions.

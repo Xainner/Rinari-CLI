@@ -20,6 +20,7 @@ from rinari.providers.adapters.http import (
     sanitize_tool_name,
 )
 from rinari.providers.catalog import OPENCODE_RESPONSES_MODELS
+from rinari.providers.errors import invoke_with_retry
 from rinari.providers.registry import adapter_for
 from rinari.shared.errors import InvalidUsageError
 
@@ -165,10 +166,16 @@ class ModelRouter:
         tool_aliases: dict[str, str] | None = None,
     ) -> ModelResponse:
         adapter = self.adapter(provider)
-        return adapter.invoke(
-            request,
-            self._providers.resolve_secret(provider),
-            provider.endpoint,
-            transport=transport,
-            tool_aliases=tool_aliases,
+        secret = self._providers.resolve_secret(provider)
+        # §6.4: transient model-call failures retry with backoff. Streaming
+        # deliberately does NOT retry: partial deltas already delivered make
+        # the response ambiguous.
+        return invoke_with_retry(
+            lambda: adapter.invoke(
+                request,
+                secret,
+                provider.endpoint,
+                transport=transport,
+                tool_aliases=tool_aliases,
+            )
         )

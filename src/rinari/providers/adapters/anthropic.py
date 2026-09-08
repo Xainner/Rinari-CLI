@@ -12,6 +12,7 @@ from rinari.models.types import (
     ROLE_SYSTEM,
     ROLE_TOOL,
     ChatMessage,
+    ModelItem,
     ModelRequest,
     ModelResponse,
     ProviderCapabilities,
@@ -25,7 +26,6 @@ from rinari.providers.adapters.http import (
     auth_failure,
     decode_json,
     provider_error,
-    provider_error_detail,
     send_request,
     session_affinity_headers,
 )
@@ -121,9 +121,9 @@ class AnthropicAdapter(ProviderAdapter):
             timeout=MODEL_CALL_TIMEOUT,
         )
         if response.status_code in (401, 403):
-            raise auth_failure(response, url)
+            raise auth_failure(response, url, model=request.model)
         if response.status_code >= 400:
-            raise ProviderModelError(provider_error_detail(response, url))
+            raise provider_error(response, url, model=request.model)
         return _response_from_anthropic(decode_json(response, url), url)
 
     def invoke_stream(
@@ -156,9 +156,9 @@ class AnthropicAdapter(ProviderAdapter):
                 timeout=MODEL_CALL_TIMEOUT,
             ) as response:
                 if response.status_code in (401, 403):
-                    raise auth_failure(response, url)
+                    raise auth_failure(response, url, model=request.model)
                 if response.status_code >= 400:
-                    raise ProviderModelError(provider_error_detail(response, url))
+                    raise provider_error(response, url, model=request.model)
                 for line in response.iter_lines():
                     if not line:
                         continue
@@ -339,12 +339,24 @@ def _response_from_anthropic(data: Any, url: str) -> ModelResponse:
         for b in blocks
         if isinstance(b, dict) and b.get("type") == "tool_use"
     )
+    # Every block is preserved as an item; unknown kinds (thinking, ...)
+    # stay opaque in data so protocol-required blocks survive round-trips.
+    items = tuple(
+        ModelItem(
+            type=str(b.get("type") or "unknown"),
+            id=b.get("id") if isinstance(b.get("id"), str) else None,
+            data={k: v for k, v in b.items() if k not in ("type", "id")},
+        )
+        for b in blocks
+        if isinstance(b, dict)
+    )
     return ModelResponse(
         content="".join(text_parts),
         tool_calls=tool_calls,
         usage=_usage_from_anthropic(data.get("usage")),
         stop_reason=_stop_reason_from_anthropic(data.get("stop_reason")),
         raw=data,
+        items=items,
     )
 
 

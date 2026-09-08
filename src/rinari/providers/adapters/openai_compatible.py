@@ -11,6 +11,7 @@ import httpx
 from rinari.models.types import (
     ROLE_TOOL,
     ChatMessage,
+    ModelItem,
     ModelRequest,
     ModelResponse,
     ProviderCapabilities,
@@ -24,7 +25,6 @@ from rinari.providers.adapters.http import (
     auth_failure,
     decode_json,
     provider_error,
-    provider_error_detail,
     sanitize_tool_name,
     send_request,
     session_affinity_headers,
@@ -176,9 +176,9 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             timeout=MODEL_CALL_TIMEOUT,
         )
         if response.status_code in (401, 403):
-            raise auth_failure(response, url)
+            raise auth_failure(response, url, model=request.model)
         if response.status_code >= 400:
-            raise ProviderModelError(provider_error_detail(response, url))
+            raise provider_error(response, url, model=request.model)
         return _response_from_openai(decode_json(response, url), url)
 
     def invoke_stream(
@@ -208,9 +208,9 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                 timeout=MODEL_CALL_TIMEOUT,
             ) as response:
                 if response.status_code in (401, 403):
-                    raise auth_failure(response, url)
+                    raise auth_failure(response, url, model=request.model)
                 if response.status_code >= 400:
-                    raise ProviderModelError(provider_error_detail(response, url))
+                    raise provider_error(response, url, model=request.model)
                 for line in response.iter_lines():
                     if not line or not line.startswith("data:"):
                         continue
@@ -295,9 +295,9 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             timeout=MODEL_CALL_TIMEOUT,
         )
         if response.status_code in (401, 403):
-            raise auth_failure(response, url)
+            raise auth_failure(response, url, model=request.model)
         if response.status_code >= 400:
-            raise ProviderModelError(provider_error_detail(response, url))
+            raise provider_error(response, url, model=request.model)
         return _response_from_responses(decode_json(response, url), url)
 
     def _invoke_stream_responses(
@@ -320,9 +320,9 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                 timeout=MODEL_CALL_TIMEOUT,
             ) as response:
                 if response.status_code in (401, 403):
-                    raise auth_failure(response, url)
+                    raise auth_failure(response, url, model=request.model)
                 if response.status_code >= 400:
-                    raise ProviderModelError(provider_error_detail(response, url))
+                    raise provider_error(response, url, model=request.model)
                 for line in response.iter_lines():
                     if not line or not line.startswith("data:"):
                         continue
@@ -468,9 +468,17 @@ def _response_from_responses(data: Any, url: str) -> ModelResponse:
         raise ProviderModelError(f"Unexpected responses payload from {url}")
     content_parts: list[str] = []
     tool_calls: list[ToolCall] = []
+    items: list[ModelItem] = []
     for item in output:
         if not isinstance(item, dict):
             continue
+        items.append(
+            ModelItem(
+                type=str(item.get("type") or "unknown"),
+                id=item.get("id") if isinstance(item.get("id"), str) else None,
+                data={k: v for k, v in item.items() if k not in ("type", "id")},
+            )
+        )
         if item.get("type") == "message":
             for block in item.get("content") or []:
                 if isinstance(block, dict) and block.get("type") == "output_text":
@@ -487,12 +495,17 @@ def _response_from_responses(data: Any, url: str) -> ModelResponse:
         stop_reason = StopReason.TOOL_CALLS
     else:
         stop_reason = StopReason.END_TURN
+    provider_state: dict[str, Any] | None = None
+    if isinstance(data.get("id"), str):
+        provider_state = {"response_id": data["id"]}
     return ModelResponse(
         content="".join(content_parts),
         tool_calls=tuple(tool_calls),
         usage=_usage_from_responses(data.get("usage")),
         stop_reason=stop_reason,
         raw=data,
+        items=tuple(items),
+        provider_state=provider_state,
     )
 
 
@@ -537,6 +550,23 @@ def _response_from_openai(data: Any, url: str) -> ModelResponse:
         content = ""
     elif not isinstance(content, str):
         content = str(content)
+    items: list[ModelItem] = []
+    if content:
+        items.append(ModelItem(type="text", data={"text": content}))
+    for tc in message.get("tool_calls") or []:
+        if not isinstance(tc, dict):
+            continue
+        function = tc.get("function") or {}
+        items.append(
+            ModelItem(
+                type="function_call",
+                id=str(tc.get("id") or "") or None,
+                data={
+                    "name": str(function.get("name") or ""),
+                    "arguments": function.get("arguments"),
+                },
+            )
+        )
     return ModelResponse(
         content=content,
         tool_calls=tool_calls,
@@ -545,6 +575,7 @@ def _response_from_openai(data: Any, url: str) -> ModelResponse:
             choice.get("finish_reason"), has_tool_calls=bool(tool_calls)
         ),
         raw=data if isinstance(data, dict) else None,
+        items=tuple(items),
     )
 
 

@@ -101,15 +101,35 @@ def provider_error_detail(response: httpx.Response, url: str) -> str:
     return f"Provider returned HTTP {response.status_code} for {url}"
 
 
-def auth_failure(response: httpx.Response, url: str) -> ProviderModelError:
-    return ProviderModelError(
+def auth_failure(
+    response: httpx.Response,
+    url: str,
+    *,
+    provider: str | None = None,
+    model: str | None = None,
+) -> ProviderModelError:
+    from rinari.providers.errors import ProviderError, ProviderErrorCode
+
+    return ProviderError(
         f"Authentication failed (HTTP {response.status_code}) for {url}",
+        code=ProviderErrorCode.AUTH,
+        retryable=False,
+        provider=provider,
+        model=model,
         hint="Check the provider credential: `rinari providers auth <alias>`.",
     )
 
 
-def provider_error(response: httpx.Response, url: str) -> ProviderModelError:
-    return ProviderModelError(f"Provider returned HTTP {response.status_code} for {url}")
+def provider_error(
+    response: httpx.Response,
+    url: str,
+    *,
+    provider: str | None = None,
+    model: str | None = None,
+) -> ProviderModelError:
+    from rinari.providers.errors import classify_http_error
+
+    return classify_http_error(response, url, provider=provider, model=model)
 
 
 def decode_json(response: httpx.Response, url: str):
