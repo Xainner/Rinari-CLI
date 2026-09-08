@@ -870,6 +870,12 @@ Slice 9 adds the ecosystem surface: `mcp.list/get/create/remove/enable/disable/t
 (doctor merged into list), `tool.list` (native registry), `policy.get`
 (mode→profile mapping; souls/profiles never relax it). No engine-level
 browser session is tracked in v1 (browser runs per-turn).
+Slice 10 adds observability: `artifact.list/read` (URI-addressed, bounded,
+truncated flag, no internal paths leak), `context.get` (compaction state +
+counts from CompactState, no invented pressure %), `usage.get` (model calls
++ tokens + tool calls aggregated from persisted events; cost always null —
+pricing unknown). No `pty.*` in v1: PTY handles live inside tool calls, the
+desktop terminal reports the engine limitation instead (per DoD).
 The envelope contract is unchanged across slices.
 
 ---

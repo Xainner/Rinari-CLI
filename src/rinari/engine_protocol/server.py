@@ -18,6 +18,11 @@ from rinari.engine_protocol.dispatcher import EngineDispatcher
 from rinari.engine_protocol.ecosystem import mcp_row_view, plugin_row_view, tool_row_view
 from rinari.engine_protocol.errors import INVALID_PARAMS, EngineProtocolError
 from rinari.engine_protocol.messages import event, hello
+from rinari.engine_protocol.observability import (
+    clamp_read_bytes,
+    context_view,
+    usage_from_events,
+)
 from rinari.engine_protocol.snapshots import (
     build_snapshot,
     message_to_dict,
@@ -80,6 +85,10 @@ class EngineServer:
         self._dispatcher.register("plugin.diagnostics", self._plugin_diagnostics)
         self._dispatcher.register("tool.list", self._tool_list)
         self._dispatcher.register("policy.get", self._policy_get)
+        self._dispatcher.register("artifact.list", self._artifact_list)
+        self._dispatcher.register("artifact.read", self._artifact_read)
+        self._dispatcher.register("context.get", self._context_get)
+        self._dispatcher.register("usage.get", self._usage_get)
         self._dispatcher.register("provider.list", self._provider_list)
         self._dispatcher.register("provider.create", self._provider_create)
         self._dispatcher.register("provider.get", self._provider_get)
@@ -632,6 +641,56 @@ class EngineServer:
             },
             "note": "Profiles and souls never relax this mapping; PLAN/REVIEW stay read-only.",
         }
+
+    # -- observability (Phase 10) -------------------------------------------------
+
+    def _artifact_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        params = params or {}
+        session_id = params.get("session_id")
+        limit = params.get("limit", 50)
+        try:
+            limit = max(1, min(int(limit), 200))
+        except (TypeError, ValueError):
+            limit = 50
+        records = self._services.artifacts.list(
+            session_id=session_id if isinstance(session_id, str) else None,
+            limit=limit,
+        )
+        return {"artifacts": [r.to_dict() for r in records]}
+
+    def _artifact_read(self, params: dict[str, Any]) -> dict[str, Any]:
+        params = params or {}
+        uri = params.get("uri", "")
+        if not isinstance(uri, str) or not uri:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'uri' is required.")
+        max_bytes = clamp_read_bytes(params.get("max_bytes"))
+        try:
+            record = self._services.artifacts.meta(uri)
+        except NotFoundError as exc:
+            raise NotFoundError(f"Artifact not found: {uri}") from exc
+        text, truncated = self._services.artifacts.read_text(uri, max_bytes=max_bytes)
+        return {
+            "artifact": record.to_dict(),
+            "text": text,
+            "truncated": truncated,
+            "max_bytes": max_bytes,
+        }
+
+    def _context_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        record = self._services.sessions.show((params or {}).get("ref", ""))
+        return {"context": context_view(record.id, record.compact_state)}
+
+    def _usage_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        params = params or {}
+        ref = params.get("ref")
+        if ref:
+            record = self._services.sessions.show(ref)
+            events = self._services.ctx.event_repo.list(record.id)
+            return {"usage": {**usage_from_events(events), "session_id": record.id}}
+        events = []
+        for session in self._services.ctx.session_repo.list():
+            events.extend(self._services.ctx.event_repo.list(session.id))
+        return {"usage": {**usage_from_events(events), "session_id": None}}
 
     # -- turns ------------------------------------------------------------
 
