@@ -217,8 +217,6 @@ salida) está en [docs/commands.md](docs/commands.md).
 - [docs/skills.md](docs/skills.md) — catálogo y contrato de skills
 - [docs/harness.md](docs/harness.md) — blueprint completo del runtime
 - [docs/troubleshooting.md](docs/troubleshooting.md) — resolución de problemas
-- [RINARI_HARNESS_PRODUCTIZATION_REVIEW.md](RINARI_HARNESS_PRODUCTIZATION_REVIEW.md) —
-  review de productización (referencia histórica)
 
 ## Desarrollo
 
