@@ -3,7 +3,9 @@
 **Tu asistente personal de IA en la terminal.**
 
 > **Estado: fases 0-7 + core de fase 8 completas (2026-08-20); Fase 9
-> release prep en curso.**
+> avanzada (2026-09-07): CI Linux/Windows + release gate, hardening del
+> harness (Etapas A–E) completo. Pendiente: CI macOS y publicación del
+> release en GitHub.**
 > Producto: CLI funcional (setup, config, providers/models, sesiones
 > CHAT/PROJECT, Soul/Constitution, doctor/status/version), agent + tool
 > runtime con seguridad base (fase 2), trust/index/validation/checkpoints
@@ -347,10 +349,32 @@ subcomandos con `--help` y `--json` con un mismo contract + exit codes):
    (queda en el backup). Packaging verificado en Windows: clean install /
    clean upgrade con `uv`, `rinari completion` (bash/zsh/fish/powershell/
    pwsh), version/build manifest, `uv build` (sdist + wheel instalable en
-   venv limpio); LICENSE MIT. Release pendiente: CI Linux/macOS y
+   venv limpio); LICENSE MIT. CI Linux (3.11/3.12) + Windows y release
+   gate en tag ya en `.github/workflows/ci.yml`; pendiente CI macOS y
    publicacion del artifact como GitHub release.
+- Hardening del loop y tools (Etapas A–C, 2026-09-07, ver
+  `RINARI_HARNESS_PRODUCTIZATION_REVIEW.md`): presupuestos del turno con
+  techo `>=` y ledger jerárquico (el gasto de subagentes agrega al turno
+  padre); switches de provider/modelo en sesión sin reconstruir el loop;
+  observaciones con envelope estructurado acotado + spill a artifacts;
+  tool calls con argumentos inválidos nunca ejecutan ni gastan budget;
+  exposición dinámica por request (core + activadas + recientes, budget 96
+  schemas/~32k tokens) con `capability.search` siempre visible y
+  `capability.activate`/`deactivate` (`turn` con TTL / `session`);
+  contratos enforced (`output_schema` → `VALIDATION_FAILED` sin retry,
+  retry solo idempotente con `NETWORK_ERROR`/`RATE_LIMITED`, `TIMEOUT`
+  nunca, `deadline_at` cooperativo, plan por grupos trazado como
+  `execution_plan`).
+- Providers v2 + verificación (Etapas D–E): taxonomía `ProviderError` con
+  retry y backoff; adapter `/responses` dedicado y transporte por modelo
+  (`rinari models add --transport chat|responses`; OpenCode Go usa
+  `/responses` automáticamente para Muse Spark, Grok y Luna);
+  capabilities por modelo y `outputSchema` MCP preservado; 8 E2E
+  herméticos (`tests/e2e/`, sin red) y CI con smoke en venv limpio
+  (`--version`/`--help`/`doctor`) y gate de release. Suite verde: 956
+  passed, 3 skipped en la última corrida full.
 
-## Docs
+ ## Docs
 
 - [TODO.md](TODO.md) — fases 0-9, fuentes de verdad, invariantes del producto,
   registro de decisiones
@@ -370,3 +394,6 @@ subcomandos con `--help` y `--json` con un mismo contract + exit codes):
   implementación
 - [docs/troubleshooting.md](docs/troubleshooting.md) — resolución de
   problemas (config legacy, trust, providers, network, sesiones, estado)
+- [RINARI_HARNESS_PRODUCTIZATION_REVIEW.md](RINARI_HARNESS_PRODUCTIZATION_REVIEW.md) —
+  review de productización del harness (Etapas A–E, ya implementado);
+  referencia histórica
