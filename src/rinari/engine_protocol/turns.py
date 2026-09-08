@@ -12,6 +12,7 @@ policy exactly (deny/allow_once/allow_session).
 
 from __future__ import annotations
 
+import collections
 import contextlib
 import json
 import queue
@@ -34,6 +35,8 @@ APPROVAL_TIMEOUT_S = 600.0
 APPROVAL_POLL_S = 0.05
 MAX_DELTA_CHARS = 8000
 MAX_DETAIL_CHARS = 2000
+MAX_QUEUE_DEPTH = 20
+MAX_QUEUE_MESSAGE_CHARS = 32768
 DECISIONS = ("deny", "allow_once", "allow_session")
 _DECISION_TO_ANSWER = {"deny": "n", "allow_once": "y", "allow_session": "s"}
 
@@ -76,6 +79,7 @@ class TurnManager:
         self._turns: dict[str, _ActiveTurn] = {}
         self._threads: dict[str, threading.Thread] = {}
         self._approvals: dict[str, _PendingApproval] = {}
+        self._queue: dict[str, collections.deque[str]] = {}
         self._lock = threading.Lock()
         self._local = threading.local()
 
@@ -238,6 +242,77 @@ class TurnManager:
             turn.session.end()
             self._local.turn_id = None
             self._local.token = None
+            self._start_next_queued(turn.session_id)
+
+    # -- prompt queue ------------------------------------------------------
+    # Queued messages run FIFO after the live turn ends, preserving normal
+    # turn boundaries and approvals. Bounded; engine-process memory only.
+
+    def queue_add(self, session_id: str, message: str) -> dict[str, Any]:
+        record = self._services.sessions.show(session_id)
+        text = (message or "").strip()
+        if not text:
+            raise EngineProtocolError(errors.INVALID_PARAMS, "Queued message is empty.")
+        if len(text) > MAX_QUEUE_MESSAGE_CHARS:
+            raise EngineProtocolError(
+                errors.INVALID_PARAMS,
+                f"Queued message exceeds {MAX_QUEUE_MESSAGE_CHARS} chars.",
+            )
+        with self._lock:
+            pending = self._queue.setdefault(record.id, collections.deque())
+            if len(pending) >= MAX_QUEUE_DEPTH:
+                raise EngineProtocolError(
+                    errors.INVALID_PARAMS,
+                    f"Queue full ({MAX_QUEUE_DEPTH} pending).",
+                )
+            pending.append(text)
+            position = len(pending)
+        self._emit(
+            event(
+                "session.queue.updated",
+                {"session_id": record.id, "pending": position},
+            )
+        )
+        return {"session_id": record.id, "position": position, "pending": position}
+
+    def queue_list(self, session_id: str) -> dict[str, Any]:
+        record = self._services.sessions.show(session_id)
+        with self._lock:
+            pending = list(self._queue.get(record.id, ()))
+        return {"session_id": record.id, "queue": pending, "pending": len(pending)}
+
+    def queue_clear(self, session_id: str) -> dict[str, Any]:
+        record = self._services.sessions.show(session_id)
+        with self._lock:
+            removed = len(self._queue.pop(record.id, ()))
+        self._emit(event("session.queue.updated", {"session_id": record.id, "pending": 0}))
+        return {"session_id": record.id, "removed": removed}
+
+    def _start_next_queued(self, session_id: str) -> None:
+        with self._lock:
+            pending = self._queue.get(session_id)
+            if not pending:
+                return
+            if any(
+                not turn.done.is_set() and turn.session_id == session_id
+                for turn in self._turns.values()
+            ):
+                return
+            message = pending.popleft()
+            remaining = len(pending)
+            if not pending:
+                self._queue.pop(session_id, None)
+        self._emit(
+            event(
+                "session.queue.updated",
+                {"session_id": session_id, "pending": remaining},
+            )
+        )
+        try:
+            self.start_turn(session_id, message)
+        except EngineProtocolError:
+            with self._lock:
+                self._queue.setdefault(session_id, collections.deque()).appendleft(message)
 
     # -- streaming callbacks (worker thread) --------------------------------
 

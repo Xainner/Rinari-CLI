@@ -876,6 +876,13 @@ counts from CompactState, no invented pressure %), `usage.get` (model calls
 + tokens + tool calls aggregated from persisted events; cost always null —
 pricing unknown). No `pty.*` in v1: PTY handles live inside tool calls, the
 desktop terminal reports the engine limitation instead (per DoD).
+Slice 11 adds workflow: `session.queue.add/list/clear` (bounded FIFO,
+auto-runs after the live turn with normal turn boundaries + approvals,
+`session.queue.updated` events), `profile_bundle.list/get/create/apply/remove`
+(soul + mode + per-agent models applied through the existing setters with
+an applied-report; no policy invention), and `rinari code [path] [--session]`
+handoff (binary via RINARI_CODE_BIN/PATH, explicit --project/--session args
+for single-instance routing).
 The envelope contract is unchanged across slices.
 
 ---

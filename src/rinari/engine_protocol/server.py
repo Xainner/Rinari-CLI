@@ -89,6 +89,14 @@ class EngineServer:
         self._dispatcher.register("artifact.read", self._artifact_read)
         self._dispatcher.register("context.get", self._context_get)
         self._dispatcher.register("usage.get", self._usage_get)
+        self._dispatcher.register("session.queue.add", self._queue_add)
+        self._dispatcher.register("session.queue.list", self._queue_list)
+        self._dispatcher.register("session.queue.clear", self._queue_clear)
+        self._dispatcher.register("profile_bundle.list", self._bundle_list)
+        self._dispatcher.register("profile_bundle.get", self._bundle_get)
+        self._dispatcher.register("profile_bundle.create", self._bundle_create)
+        self._dispatcher.register("profile_bundle.remove", self._bundle_remove)
+        self._dispatcher.register("profile_bundle.apply", self._bundle_apply)
         self._dispatcher.register("provider.list", self._provider_list)
         self._dispatcher.register("provider.create", self._provider_create)
         self._dispatcher.register("provider.get", self._provider_get)
@@ -691,6 +699,82 @@ class EngineServer:
         for session in self._services.ctx.session_repo.list():
             events.extend(self._services.ctx.event_repo.list(session.id))
         return {"usage": {**usage_from_events(events), "session_id": None}}
+
+    # -- prompt queue (Phase 11) --------------------------------------------------
+
+    def _queue_add(self, params: dict[str, Any]) -> dict[str, Any]:
+        params = params or {}
+        return self._turns.queue_add(params.get("session_id", ""), params.get("message", ""))
+
+    def _queue_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._turns.queue_list((params or {}).get("session_id", ""))
+
+    def _queue_clear(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._turns.queue_clear((params or {}).get("session_id", ""))
+
+    # -- profile bundles (Phase 11) -----------------------------------------------
+
+    def _bundles(self):  # ProfileBundleStore bound to the engine home.
+        from rinari.engine_protocol.profile_bundles import ProfileBundleStore
+
+        return ProfileBundleStore(self._services.ctx.home)
+
+    def _bundle_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        return {"profiles": [b.to_summary() for b in self._bundles().list()]}
+
+    def _bundle_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        return {"profile": self._bundles().get((params or {}).get("id", "")).to_summary()}
+
+    def _bundle_create(self, params: dict[str, Any]) -> dict[str, Any]:
+        params = params or {}
+        bundle = self._bundles().create(
+            params.get("id", ""),
+            name=params.get("name", ""),
+            description=params.get("description") or "",
+            soul_id=params.get("soul_id"),
+            mode=params.get("mode"),
+            agents=params.get("agents") or {},
+        )
+        return {"profile": bundle.to_summary()}
+
+    def _bundle_remove(self, params: dict[str, Any]) -> dict[str, Any]:
+        bundle_id = (params or {}).get("id", "")
+        self._bundles().remove(bundle_id)
+        return {"removed": {"id": bundle_id}}
+
+    def _bundle_apply(self, params: dict[str, Any]) -> dict[str, Any]:
+        from rinari.soul.store import SoulStore
+
+        params = params or {}
+        bundle = self._bundles().get(params.get("id", ""))
+        applied: dict[str, Any] = {"profile_id": bundle.id}
+        if bundle.soul_id:
+            SoulStore(self._services.ctx.home).activate(bundle.soul_id)
+            applied["soul_id"] = bundle.soul_id
+        if bundle.agents:
+            definitions = self._services.agents.list()
+            for agent, assignment in bundle.agents.items():
+                if agent not in definitions:
+                    raise NotFoundError(f"Unknown agent: {agent}.")
+                model = (assignment or {}).get("model")
+                fallback = (assignment or {}).get("fallback")
+                if model:
+                    self._check_agent_model(model)
+                if fallback:
+                    self._check_agent_model(fallback)
+                self._services.agent_configs.set(
+                    agent, model=model or None, fallback=fallback or None
+                )
+            applied["agents"] = sorted(bundle.agents)
+        session_ref = params.get("session_ref")
+        if bundle.mode and session_ref:
+            record = self._services.sessions.set_mode(session_ref, bundle.mode)
+            applied["mode"] = record.mode
+            applied["session_id"] = record.id
+        elif bundle.mode:
+            applied["mode"] = bundle.mode
+            applied["session_id"] = None
+        return {"applied": applied}
 
     # -- turns ------------------------------------------------------------
 
