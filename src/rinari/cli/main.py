@@ -11,8 +11,10 @@ from rinari.cli.commands import approvals as approvals_cmd
 from rinari.cli.commands import artifacts as artifacts_cmd
 from rinari.cli.commands import cache as cache_cmd
 from rinari.cli.commands import checkpoint as checkpoint_cmd
+from rinari.cli.commands import code as code_cmd
 from rinari.cli.commands import config as config_cmd
 from rinari.cli.commands import context as context_cmd
+from rinari.cli.commands import engine as engine_cmd
 from rinari.cli.commands import evals_cmd
 from rinari.cli.commands import export_import as export_import_cmd
 from rinari.cli.commands import hooks as hooks_cmd
@@ -80,6 +82,8 @@ app.add_typer(approvals_cmd.app, name="approvals")
 app.add_typer(sandbox_cmd.app, name="sandbox")
 app.add_typer(secrets_cmd.app, name="secrets")
 app.add_typer(tools_cmd.app, name="tools")
+app.command("engine", help="Machine transport for desktop clients.")(engine_cmd.engine)
+app.command("code", help="Open this project in Rinari Code (desktop).")(code_cmd.code)
 app.command("trace", help="Inspect a session's event trace.")(trace_cmd.trace)
 app.add_typer(logs_cmd.app, name="logs")
 app.add_typer(metrics_cmd.app, name="metrics")

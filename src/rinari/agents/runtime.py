@@ -90,6 +90,7 @@ class SubagentRuntimeConfig:
     hook_sink: Any = None
     project_instructions: Any = ()
     parent_profile: str = "workspace"
+    caller_for: Any = None  # (agent_name) -> ModelCaller | None; None = inherit
 
 
 class _SubagentRunner:
@@ -114,8 +115,17 @@ class _SubagentRunner:
         )
         # The policy scope is derived from tool_ctx (policy is enforced at
         # runtime, not by prompt text): profile here is the isolation key.
+        # Per-agent model override (Phase 7): assigned caller wins, None inherits.
+        caller = cfg.caller
+        if cfg.caller_for is not None:
+            try:
+                override = cfg.caller_for(spec.agent)
+            except Exception:
+                override = None
+            if override is not None:
+                caller = override
         loop = AgentLoop(
-            cfg.caller,
+            caller,
             runtime,
             _make_assembler(),
             event_sink=cfg.event_sink,

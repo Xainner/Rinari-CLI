@@ -815,6 +815,78 @@ Runs the verification planner and records structured validation results.
 
 ---
 
+## `engine`
+
+Machine transport for desktop clients (Rinari Code Engine Protocol v1).
+
+```bash
+rinari engine --stdio
+```
+
+- stdin receives NDJSON requests, stdout emits NDJSON responses/events.
+- stdout is protocol-only: no banners, no ANSI formatting.
+- stderr carries diagnostics and log lines only.
+- The first stdout line is the `hello` handshake (`rinari-engine`, protocol version, engine version, capabilities).
+- Every request carries an `id`; every response echoes it.
+- Unknown methods, duplicate request ids, malformed input, and broken frames return stable error envelopes without breaking the stream.
+
+Slice 1 methods: `engine.info`, `session.list`, `session.get`,
+`session.create`, `session.open`, `runtime.snapshot.get`.
+Slice 2 adds live turns and reads: `session.turn.start`,
+`session.turn.cancel`, `approval.resolve`, `provider.list`, `model.list`,
+with `turn.*`, `model.content.delta`, `tool.*`, and `approval.*` events.
+Slice 3 adds provider/model management: `provider.create`, `provider.get`,
+`provider.update`, `provider.remove`, `provider.test`, `provider.discover`,
+`provider.use`, `model.get`, `model.add`, `model.alias`, `model.remove`,
+`model.use`, `model.discover`, `model.refresh`, `model.test`.
+Provider views are redacted by construction (`has_credential` only, never
+secret material); new secrets are stored via the credential backend
+(`env://`, `keyring://` when an OS store is functional, `file://`
+fallback) and request params are never logged.
+Slice 4a adds `session.history` (`ref`, `limit` 1..500 default 200):
+persisted conversation rows (`seq`, `role`, `content`, `tool_calls`),
+tail window with `total`/`has_more`. Protocol turns persist through the
+same `run_turn` path as the terminal, so history covers desktop turns.
+Slice 5a adds `session.mode.set` (`ref`, `mode` plan/build/review):
+PLAN/REVIEW turns run under a READ_ONLY policy profile, BUILD under
+WORKSPACE; legacy modes keep workspace behavior. Emits
+`session.mode.changed`; the mode switch keeps session, tasks and context.
+Slice 6a adds project workspace reads: `task.tree/get`,
+`verification.latest/plan`, `checkpoint.list/show/restore`,
+`project.changes` (porcelain files + branch/head/dirty, `available:false`
+outside a repo), `project.diff` (unified, truncated, binary-safe).
+Slice 7a adds agent routing: `agent.list` (definitions + assignments),
+`agent.config.get/set` (model/fallback/enabled per agent, `clear` to reset;
+aliases must resolve and support tool calls), `session.events` (persisted
+lifecycle incl. SubagentStart/Stop). Spawn resolves assigned model →
+fallback → parent caller; effort overrides stay out (no model-layer
+plumbing — see debt log).
+Slice 8a adds Soul 3.0: `soul.list/get/create/update/remove/activate`,
+`~/souls/<id>/{soul.toml,identity.md}` store, bundled `rinari-default` 3.0,
+global activation; legacy `~/soul.md` keeps working (active > legacy >
+bundled). Main-agent prompt uses the active soul; subagents stay functional.
+Slice 9 adds the ecosystem surface: `mcp.list/get/create/remove/enable/disable/test`
+(plain secrets rejected, test failures reported not raised), `plugin.list/get/enable/disable/diagnostics`
+(doctor merged into list), `tool.list` (native registry), `policy.get`
+(mode→profile mapping; souls/profiles never relax it). No engine-level
+browser session is tracked in v1 (browser runs per-turn).
+Slice 10 adds observability: `artifact.list/read` (URI-addressed, bounded,
+truncated flag, no internal paths leak), `context.get` (compaction state +
+counts from CompactState, no invented pressure %), `usage.get` (model calls
++ tokens + tool calls aggregated from persisted events; cost always null —
+pricing unknown). No `pty.*` in v1: PTY handles live inside tool calls, the
+desktop terminal reports the engine limitation instead (per DoD).
+Slice 11 adds workflow: `session.queue.add/list/clear` (bounded FIFO,
+auto-runs after the live turn with normal turn boundaries + approvals,
+`session.queue.updated` events), `profile_bundle.list/get/create/apply/remove`
+(soul + mode + per-agent models applied through the existing setters with
+an applied-report; no policy invention), and `rinari code [path] [--session]`
+handoff (binary via RINARI_CODE_BIN/PATH, explicit --project/--session args
+for single-instance routing).
+The envelope contract is unchanged across slices.
+
+---
+
 
 # Session Context Resolution Contract
 

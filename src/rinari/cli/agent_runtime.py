@@ -25,7 +25,7 @@ from rinari.application.services import ServiceContainer
 from rinari.instructions.resolver import provenance_for, resolve_project_instructions
 from rinari.models.router import ModelRouter
 from rinari.models.types import ChatMessage, ToolCall
-from rinari.policy.approvals import ApprovalEngine
+from rinari.policy.approvals import AnswerPrompt, ApprovalEngine
 from rinari.policy.engine import PermissionProfile, PolicyEngine
 from rinari.policy.network import NetworkGuard, NetworkPolicy
 from rinari.policy.sandbox import FilesystemSandbox, ProcessLimits
@@ -36,7 +36,7 @@ from rinari.prompts.soul_sections import split_soul
 from rinari.runtime.agent import AgentContext, AgentLoop, TurnResult
 from rinari.runtime.budget import BudgetMeter, TurnBudgetLimits
 from rinari.runtime.cancellation import CancellationToken
-from rinari.runtime.identity import load_constitution, load_soul
+from rinari.runtime.identity import load_active_soul, load_constitution
 from rinari.runtime.loopdetection import LoopDetector
 from rinari.runtime.model_caller import ModelCaller, SessionModelGateway
 from rinari.shared.clock import now_iso
@@ -134,7 +134,7 @@ def build_assembler_context(services: ServiceContainer, record: SessionRecord) -
     # Canonical assets through the identity loader (user override supported,
     # harness.md 37; version/sha256 traced by the build manifest).
     constitution = load_constitution(services.ctx.home).text
-    soul = load_soul(services.ctx.home).text
+    soul = load_active_soul(services.ctx.home).text
     canonical, extended = split_soul(soul)
     root = Path(record.project_root_snapshot) if record.project_root_snapshot else None
     environment: dict = {"cwd": record.current_cwd, "version": __version__}
@@ -367,6 +367,7 @@ def build_agent_session(
     user_home: Path | None = None,
     profile: PermissionProfile = PermissionProfile.WORKSPACE,
     model_caller: ModelCaller | None = None,
+    approval_prompt: AnswerPrompt | None = None,
 ) -> AgentSession:
     root = Path(record.project_root_snapshot) if record.project_root_snapshot else None
     cwd = Path(record.current_cwd)
@@ -415,6 +416,7 @@ def build_agent_session(
         record,
         interactive=interactive,
         token=token,
+        approval_prompt=approval_prompt,
         network_policy=network_policy,
         root=root,
         hook_engine=hook_engine,
@@ -516,6 +518,7 @@ def _build_orchestrator(
 
     config = SubagentRuntimeConfig(
         caller=caller,
+        caller_for=lambda name: caller_for_agent(services, record, name),
         base_registry=None,  # runner filters all_native_tools by the allowlist
         parent_token=token,
         policy=policy,
@@ -596,6 +599,7 @@ def _build_tools(
     hook_engine=None,
     policy: PolicyEngine | None = None,
     orchestrator=None,
+    approval_prompt: AnswerPrompt | None = None,
 ) -> ToolRuntime:
     registry = ToolRegistry()
     registry.register_all(all_native_tools())
@@ -628,6 +632,8 @@ def _build_tools(
     registry.register_all(capability_activation_tools(registry))
 
     def ask(request) -> str:
+        if approval_prompt is not None:
+            return approval_prompt(request)
         if hook_engine is not None:
             hook_engine.emit(
                 "PermissionRequest",
@@ -718,6 +724,34 @@ def _caller_for(services: ServiceContainer, record: SessionRecord) -> ModelCalle
         provider=services.providers.get(record.provider_id),
         model_id=record.model_id,
     )
+
+
+def caller_for_agent(
+    services: ServiceContainer, record: SessionRecord, agent_name: str
+) -> ModelCaller | None:
+    """Per-agent model override (Phase 7). None = inherit the parent caller.
+
+    Chain: assigned model → fallback → parent. Entries that do not resolve
+    or whose merged capabilities lack tool calls are skipped: a stale
+    assignment degrades to the working default instead of breaking turns.
+    """
+    assignment = services.agent_configs.get(agent_name)
+    if not assignment.enabled:
+        return None
+    router = ModelRouter(services.providers, services.models)
+    for alias in (assignment.model, assignment.fallback):
+        if not alias:
+            continue
+        try:
+            model = services.models.resolve(alias)
+            provider = services.providers.get(model.provider_id)
+            capable = router.capabilities(provider, model.id).tool_calls
+        except RinariError:
+            continue
+        if not capable:
+            continue
+        return _caller_for(services, replace(record, provider_id=provider.id, model_id=model.id))
+    return None
 
 
 # ---------------------------------------------------------------------------
