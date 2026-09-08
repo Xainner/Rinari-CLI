@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import pytest
@@ -30,6 +30,7 @@ from rinari.shared.clock import FakeClock
 from rinari.shared.errors import CancelledError
 from rinari.shared.redaction import Redactor
 from rinari.tools.definition import ToolContext
+from rinari.tools.exposure import ToolExposure
 from rinari.tools.native import all_native_tools
 from rinari.tools.registry import ToolRegistry
 from rinari.tools.runtime import ToolRuntime
@@ -195,6 +196,25 @@ def test_request_carries_session_id(env) -> None:
     loop = AgentLoop(model, env["runtime"], env["assembler"])
     loop.turn(env["ctx"], "hello")
     assert model.requests[0].session_id == "s1"
+
+
+def test_exposure_view_limits_lazy_tools(env) -> None:
+    # With a session exposure, the request carries core tools only...
+    exposure = ToolExposure()
+    env["ctx"].tool_ctx = replace(env["ctx"].tool_ctx, exposure=exposure)
+    model = FakeModel(scripted=[ModelResponse(content="done")])
+    loop = AgentLoop(model, env["runtime"], env["assembler"])
+    loop.turn(env["ctx"], "hello")
+    names = {t.name for t in model.requests[0].tools}
+    assert "fs.read" in names
+    assert not any(n.startswith("browser.") for n in names)
+    # ...until the model activates what it needs.
+    exposure.activate(["browser.open"], reason="need page", scope="session")
+    model2 = FakeModel(scripted=[ModelResponse(content="done")])
+    loop2 = AgentLoop(model2, env["runtime"], env["assembler"])
+    loop2.turn(env["ctx"], "hello again")
+    names2 = {t.name for t in model2.requests[0].tools}
+    assert "browser.open" in names2
 
 
 def test_gateway_switch_changes_provider_mid_session(env) -> None:

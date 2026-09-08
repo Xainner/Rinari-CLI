@@ -49,6 +49,7 @@ from rinari.storage.records import (
     WorktreeBaselineRecord,
 )
 from rinari.tools.definition import ToolContext
+from rinari.tools.exposure import ToolExposure
 from rinari.tools.native import all_native_tools
 from rinari.tools.native.process import ProcessRegistry
 from rinari.tools.registry import ToolRegistry
@@ -406,6 +407,7 @@ def build_agent_session(
         credentials=services.credentials,
         browser=_build_browser_manager(record.id, home),
         mcp=services.mcp,
+        exposure=ToolExposure(),
     )
     orchestrator = _build_orchestrator(services, record, root, token, tool_ctx, policy, gateway)
     tools = _build_tools(
@@ -552,7 +554,9 @@ def _plugin_tools(services: ServiceContainer, root: Path | None) -> list:
         if not loaded.ok():
             continue
         for tool in loaded.tools:
-            collected.append(tool)
+            # Nivel C (Etapa B): plugin tools are on-demand, discovered via
+            # capability.search and exposed via capability.activate.
+            collected.append(replace(tool, always_loaded=False))
     return collected
 
 
@@ -618,9 +622,10 @@ def _build_tools(
             registry.register_all(agent_tools(AgentToolHost(orchestrator=orchestrator)))
     # Unified capability search sees whatever is registered above it, so it
     # is added last (harness.md: search across native/plugin/MCP/OpenAPI/browser).
-    from rinari.capability_search import capability_search_tool
+    from rinari.capability_search import capability_activation_tools, capability_search_tool
 
     registry.register(capability_search_tool(registry))
+    registry.register_all(capability_activation_tools(registry))
 
     def ask(request) -> str:
         if hook_engine is not None:

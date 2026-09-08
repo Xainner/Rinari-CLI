@@ -209,6 +209,9 @@ class ToolContext:
     # Application-level McpService (rinari.mcp): dynamic mcp.* tools resolve a
     # connected client through it. None in test/CHAT contexts without MCP.
     mcp: Any = None
+    # Session-scoped ToolExposure (rinari.tools.exposure): dynamic tool
+    # exposure (core + activated + recent). None keeps the full registry view.
+    exposure: Any = None
     # Parent turn's BudgetMeter for the hierarchical ledger (P0.10): the
     # agent.spawn tool path attaches subagent cost to the spawning turn.
     # None when no parent meter is active (budget-less turns, unit tests).

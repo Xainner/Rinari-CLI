@@ -88,9 +88,7 @@ class BudgetMeter:
     def __post_init__(self) -> None:
         self.started_at = self.clock.now()
 
-    def spawn_child(
-        self, limits: TurnBudgetLimits | None = None, *, depth: int = 1
-    ) -> BudgetMeter:
+    def spawn_child(self, limits: TurnBudgetLimits | None = None, *, depth: int = 1) -> BudgetMeter:
         """Create a bounded child ledger attached to this meter.
 
         Counts the spawn itself (with the child's depth) and returns a

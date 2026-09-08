@@ -193,14 +193,15 @@ class AgentLoop:
                     )
                 budget.note_model_call()
             request = self._build_request(ctx)
-            self._emit_hook(
-                "BeforeModel",
-                {
-                    "model": ctx.model_ref,
-                    "messages": len(request.messages),
-                    "tools": len(request.tools),
-                },
-            )
+            before_model_payload: dict = {
+                "model": ctx.model_ref,
+                "messages": len(request.messages),
+                "tools": len(request.tools),
+            }
+            exposure_metrics = getattr(ctx.tool_ctx, "exposure", None)
+            if exposure_metrics is not None:
+                before_model_payload["exposure"] = exposure_metrics.metrics(self._tools.registry)
+            self._emit_hook("BeforeModel", before_model_payload)
             response = self._invoke(ctx, request, on_delta)
             total_usage = _merge_usage(total_usage, response.usage)
             self._emit_hook(
@@ -299,6 +300,10 @@ class AgentLoop:
                     tool_calls_executed += 1
                     if budget is not None:
                         budget.note_tool_call(call.name, is_network=network)
+                    exposure_used = getattr(ctx.tool_ctx, "exposure", None)
+                    if exposure_used is not None:
+                        # Executed tools stay visible for continuity (Etapa B).
+                        exposure_used.note_used(call.name)
                     self._emit_hook(
                         "PreToolUse",
                         {"tool": call.name, "arguments": call.arguments, "tool_call_id": call.id},
@@ -418,10 +423,18 @@ class AgentLoop:
         if bundle.system_prompt:
             messages.append(ChatMessage.system(bundle.system_prompt))
         messages.extend(ctx.history)
+        exposure = getattr(ctx.tool_ctx, "exposure", None)
+        if exposure is not None:
+            # Dynamic exposure (Etapa B): core + activated + recent, pruned
+            # once per model request so turn-scoped activations decay.
+            exposure.prune()
+            wire_tools = exposure.for_model(self._tools.registry)
+        else:
+            wire_tools = self._tools.registry.for_model()
         return ModelRequest(
             model=ctx.model_ref,
             messages=tuple(messages),
-            tools=self._tools.registry.for_model(),
+            tools=wire_tools,
             session_id=ctx.session_id,
         )
 

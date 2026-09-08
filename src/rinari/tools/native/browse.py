@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -628,7 +629,9 @@ def browse_tools() -> list[ToolDefinition]:
         "properties": {"target_id": {"type": "string"}},
         "required": ["target_id"],
     }
-    return [
+    # Nivel C (Etapa B): browser tools are on-demand, discovered via
+    # capability.search and exposed via capability.activate.
+    tools = [
         ToolDefinition(
             name="browser.status",
             description=(
@@ -1063,6 +1066,7 @@ def browse_tools() -> list[ToolDefinition]:
             capabilities=("browser.mutate",),
         ),
     ]
+    return [replace(tool, always_loaded=False) for tool in tools]
 
 
 __all__ = ["browse_tools"]

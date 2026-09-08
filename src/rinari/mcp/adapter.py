@@ -55,6 +55,8 @@ def mcp_tool_definitions(server: str, tools: list[McpToolInfo]) -> list[ToolDefi
                 timeout_ms=60_000,
                 namespace=f"mcp.{_safe_tool_name(server)}",
                 manifest={"source": "mcp", "server": server, "raw_name": info.name},
+                # Nivel C (Etapa B): MCP tools are on-demand.
+                always_loaded=False,
                 classify=lambda _i, c=capability, s=server: ClassifiedAction(c, s),
                 handler=_make_handler(server, info.name),
             )

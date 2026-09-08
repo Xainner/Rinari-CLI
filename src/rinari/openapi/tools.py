@@ -175,6 +175,8 @@ def spec_tool_definitions(
                 "operation_id": operation.operation_id,
                 "auth": auth,
             },
+            # Nivel C (Etapa B): OpenAPI tools are on-demand.
+            always_loaded=False,
             handler=(make_handler(spec_name, operation) if make_handler is not None else None),
         )
         definitions.append(definition)
