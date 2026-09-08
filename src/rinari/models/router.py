@@ -14,7 +14,12 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from rinari.providers.adapters.http import needs_tool_aliasing, sanitize_tool_name
+from rinari.providers.adapters.http import (
+    is_opencode_endpoint,
+    needs_tool_aliasing,
+    sanitize_tool_name,
+)
+from rinari.providers.catalog import OPENCODE_RESPONSES_MODELS
 from rinari.providers.registry import adapter_for
 from rinari.shared.errors import InvalidUsageError
 
@@ -25,17 +30,36 @@ if TYPE_CHECKING:
     from rinari.storage.records import ProviderRecord
 
 
-def _alias_request_tools(
-    endpoint: str | None, request: ModelRequest
-) -> tuple[ModelRequest, dict[str, str] | None]:
-    """Rewrite tool names for vendors with strict function-name patterns.
+def _resolve_transport(provider, model) -> str:
+    """chat (/chat/completions) vs responses (/responses) wire transport.
 
-    Returns the (possibly rewritten) request plus an alias->real map for
-    the way back. Off-vendor or tool-less requests pass through untouched
-    (map None), so every other provider sees byte-identical payloads.
+    An explicit per-model setting wins; otherwise OpenCode catalog IDs on
+    OpenCode endpoints default to responses; everything else is chat.
+    """
+    transport = (model.settings or {}).get("transport")
+    if transport is None:
+        if (
+            is_opencode_endpoint(provider.endpoint)
+            and model.provider_model_id in OPENCODE_RESPONSES_MODELS
+        ):
+            return "responses"
+        return "chat"
+    if transport not in ("chat", "responses"):
+        raise InvalidUsageError(
+            f"unknown transport {transport!r} on model {model.alias!r}",
+            hint="Expected one of: chat, responses.",
+        )
+    return transport
+
+
+def _alias_map_for_request(endpoint: str | None, request: ModelRequest) -> dict[str, str] | None:
+    """Alias->real tool-name map for vendors with strict name patterns.
+
+    None off-vendor (or tool-less): adapters then pass names through
+    untouched. The router applies the same map back on the way in.
     """
     if not request.tools or not needs_tool_aliasing(endpoint):
-        return request, None
+        return None
     real_by_alias: dict[str, str] = {}
     for tool in sorted(request.tools, key=lambda t: t.name):
         base = sanitize_tool_name(tool.name)
@@ -44,11 +68,7 @@ def _alias_request_tools(
             alias = f"{base}__{n}"
             n += 1
         real_by_alias[alias] = tool.name
-    alias_of = {real: alias for alias, real in real_by_alias.items()}
-    return (
-        replace(request, tools=tuple(replace(t, name=alias_of[t.name]) for t in request.tools)),
-        real_by_alias,
-    )
+    return real_by_alias
 
 
 def _unalias_response(
@@ -109,8 +129,11 @@ class ModelRouter:
     ) -> ModelResponse:
         model = self._resolve_model(provider, model_id)
         request = replace(request, model=model.provider_model_id)
-        request, real_by_alias = _alias_request_tools(provider.endpoint, request)
-        return _unalias_response(self._adapter_invoke(provider, request), real_by_alias)
+        real_by_alias = _alias_map_for_request(provider.endpoint, request)
+        transport = _resolve_transport(provider, model)
+        return _unalias_response(
+            self._adapter_invoke(provider, request, transport, real_by_alias), real_by_alias
+        )
 
     def invoke_stream(
         self,
@@ -121,13 +144,31 @@ class ModelRouter:
     ) -> ModelResponse:
         model = self._resolve_model(provider, model_id)
         request = replace(request, model=model.provider_model_id)
-        request, real_by_alias = _alias_request_tools(provider.endpoint, request)
+        real_by_alias = _alias_map_for_request(provider.endpoint, request)
+        transport = _resolve_transport(provider, model)
         adapter = self.adapter(provider)
         response = adapter.invoke_stream(
-            request, self._providers.resolve_secret(provider), provider.endpoint, on_delta
+            request,
+            self._providers.resolve_secret(provider),
+            provider.endpoint,
+            on_delta,
+            transport=transport,
+            tool_aliases=real_by_alias,
         )
         return _unalias_response(response, real_by_alias)
 
-    def _adapter_invoke(self, provider: ProviderRecord, request: ModelRequest) -> ModelResponse:
+    def _adapter_invoke(
+        self,
+        provider: ProviderRecord,
+        request: ModelRequest,
+        transport: str = "chat",
+        tool_aliases: dict[str, str] | None = None,
+    ) -> ModelResponse:
         adapter = self.adapter(provider)
-        return adapter.invoke(request, self._providers.resolve_secret(provider), provider.endpoint)
+        return adapter.invoke(
+            request,
+            self._providers.resolve_secret(provider),
+            provider.endpoint,
+            transport=transport,
+            tool_aliases=tool_aliases,
+        )

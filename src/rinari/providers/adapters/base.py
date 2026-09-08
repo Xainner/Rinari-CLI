@@ -92,8 +92,20 @@ class ProviderAdapter:
         return ProviderCapabilities()
 
     def invoke(
-        self, request: ModelRequest, secret: str | None, endpoint: str | None = None
+        self,
+        request: ModelRequest,
+        secret: str | None,
+        endpoint: str | None = None,
+        *,
+        transport: str = "chat",
+        tool_aliases: dict[str, str] | None = None,
     ) -> ModelResponse:
+        """Run one model call.
+
+        transport selects the wire API ("chat" or "responses");
+        tool_aliases maps wire tool names back to registry names for
+        history rendering (None = no aliasing active).
+        """
         raise NotImplementedError
 
     def invoke_stream(
@@ -102,5 +114,8 @@ class ProviderAdapter:
         secret: str | None,
         endpoint: str | None,
         on_delta: Callable[[str], None],
+        *,
+        transport: str = "chat",
+        tool_aliases: dict[str, str] | None = None,
     ) -> ModelResponse:
         raise NotImplementedError

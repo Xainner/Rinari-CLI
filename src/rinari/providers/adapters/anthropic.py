@@ -29,7 +29,7 @@ from rinari.providers.adapters.http import (
     send_request,
     session_affinity_headers,
 )
-from rinari.shared.errors import NetworkError, ProviderModelError
+from rinari.shared.errors import InvalidUsageError, NetworkError, ProviderModelError
 
 DEFAULT_BASE_URL = "https://api.anthropic.com"
 API_VERSION = "2023-06-01"
@@ -97,8 +97,19 @@ class AnthropicAdapter(ProviderAdapter):
         return f"{self.base_url(endpoint, None)}/v1/messages"
 
     def invoke(
-        self, request: ModelRequest, secret: str | None, endpoint: str | None = None
+        self,
+        request: ModelRequest,
+        secret: str | None,
+        endpoint: str | None = None,
+        *,
+        transport: str = "chat",
+        tool_aliases: dict[str, str] | None = None,
     ) -> ModelResponse:
+        if transport != "chat":
+            raise InvalidUsageError(
+                f"transport {transport!r} is not supported by the anthropic adapter",
+                hint="Use an OpenAI-compatible provider for the responses transport.",
+            )
         url = self._messages_url(endpoint)
         headers = {**self._headers(secret), **session_affinity_headers(url, request.session_id)}
         response = send_request(
@@ -121,7 +132,15 @@ class AnthropicAdapter(ProviderAdapter):
         secret: str | None,
         endpoint: str | None,
         on_delta: Callable[[str], None],
+        *,
+        transport: str = "chat",
+        tool_aliases: dict[str, str] | None = None,
     ) -> ModelResponse:
+        if transport != "chat":
+            raise InvalidUsageError(
+                f"transport {transport!r} is not supported by the anthropic adapter",
+                hint="Use an OpenAI-compatible provider for the responses transport.",
+            )
         url = self._messages_url(endpoint)
         content_parts: list[str] = []
         calls = _ToolCallBlockAccumulator()

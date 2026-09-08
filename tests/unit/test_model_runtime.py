@@ -10,6 +10,7 @@ from rinari.models.types import (
     ModelRequest,
     ProviderCapabilities,
     StopReason,
+    ToolCall,
     ToolSchema,
     Usage,
 )
@@ -624,6 +625,286 @@ def test_router_stream_unaliases_tool_names(monkeypatch, tmp_path) -> None:
         wire = json.loads(seen[-1].content)
         assert wire["tools"][0]["function"]["name"] == "fs_read"
         assert response.tool_calls[0].name == "fs.read"
+    finally:
+        ctx.close()
+
+
+# -- Responses transport (OpenAI Responses API) ----------------------------------
+
+RESPONSES_GO = "https://opencode.ai/zen/go/v1"
+
+
+def _responses_ok(body_calls: list | None = None) -> dict:
+    output: list = [
+        {
+            "type": "message",
+            "id": "rs_1",
+            "content": [{"type": "output_text", "text": "hola"}],
+        }
+    ]
+    output.extend(body_calls or [])
+    return {
+        "id": "resp_1",
+        "status": "completed",
+        "model": "muse-spark-1.3-contributor",
+        "output": output,
+        "usage": {"input_tokens": 5, "output_tokens": 7},
+    }
+
+
+def test_responses_invoke_text() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=_responses_ok())
+
+    adapter = OpenAICompatibleAdapter(RESPONSES_GO, client=_client(handler))
+    response = adapter.invoke(_request(session_id="ses_1"), "sk-test", None, transport="responses")
+    assert str(seen[0].url).endswith("/responses")
+    assert seen[0].headers["x-opencode-session"] == "ses_1"
+    wire = json.loads(seen[-1].content)
+    assert wire["model"] == "model-x"
+    assert wire["input"][0] == {"role": "system", "content": "sys"}
+    assert wire["input"][1] == {"role": "user", "content": "hola"}
+    assert "tools" not in wire
+    assert response.content == "hola"
+    assert response.tool_calls == ()
+    assert response.stop_reason is StopReason.END_TURN
+    assert (response.usage.input_tokens, response.usage.output_tokens) == (5, 7)
+
+
+def test_responses_invoke_tool_calls() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(
+            200,
+            json=_responses_ok(
+                [
+                    {
+                        "type": "function_call",
+                        "id": "fc_1",
+                        "call_id": "c1",
+                        "name": "fs_read",
+                        "arguments": '{"p": "x"}',
+                    }
+                ]
+            ),
+        )
+
+    adapter = OpenAICompatibleAdapter(RESPONSES_GO, client=_client(handler))
+    req = _request(tools=(ToolSchema(name="fs.read", description="read", parameters={}),))
+    response = adapter.invoke(
+        req, "sk-test", None, transport="responses", tool_aliases={"fs_read": "fs.read"}
+    )
+    wire = json.loads(seen[-1].content)
+    assert wire["tools"] == [
+        {"type": "function", "name": "fs_read", "description": "read", "parameters": {}}
+    ]
+    (call,) = response.tool_calls
+    assert (call.id, call.name, call.arguments) == ("c1", "fs_read", {"p": "x"})
+    assert response.stop_reason is StopReason.TOOL_CALLS
+
+
+def test_responses_history_roundtrip() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=_responses_ok())
+
+    adapter = OpenAICompatibleAdapter(RESPONSES_GO, client=_client(handler))
+    req = ModelRequest(
+        model="m",
+        messages=(
+            ChatMessage.user("do it"),
+            ChatMessage.assistant(
+                "", tool_calls=(ToolCall(id="c1", name="fs.read", arguments={"p": "x"}),)
+            ),
+            ChatMessage.tool_result("c1", "fs.read", '{"ok": true}'),
+        ),
+    )
+    adapter.invoke(req, "sk-test", None, transport="responses", tool_aliases={"fs_read": "fs.read"})
+    wire = json.loads(seen[-1].content)
+    assert wire["input"] == [
+        {"role": "user", "content": "do it"},
+        {
+            "type": "function_call",
+            "call_id": "c1",
+            "name": "fs_read",
+            "arguments": '{"p": "x"}',
+        },
+        {"type": "function_call_output", "call_id": "c1", "output": '{"ok": true}'},
+    ]
+
+
+def test_responses_stream() -> None:
+    seen: list[httpx.Request] = []
+
+    def sse(payload: dict) -> str:
+        return "data: " + json.dumps(payload) + "\n"
+
+    body = (
+        sse({"type": "response.output_text.delta", "delta": "ho"})
+        + sse({"type": "response.output_text.delta", "delta": "la"})
+        + sse(
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": "fc_1",
+                "delta": '{"p": ',
+            }
+        )
+        + sse(
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": "fc_1",
+                "delta": '"x"}',
+            }
+        )
+        + sse(
+            {
+                "type": "response.completed",
+                "response": {
+                    "status": "completed",
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [{"type": "output_text", "text": "hola"}],
+                        },
+                        {
+                            "type": "function_call",
+                            "id": "fc_1",
+                            "call_id": "c1",
+                            "name": "fs_read",
+                            "arguments": '{"p": "x"}',
+                        },
+                    ],
+                    "usage": {"input_tokens": 5, "output_tokens": 7},
+                },
+            }
+        )
+        + "data: [DONE]\n"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, content=body.encode())
+
+    adapter = OpenAICompatibleAdapter(RESPONSES_GO, client=_client(handler))
+    deltas: list[str] = []
+    response = adapter.invoke_stream(
+        _request(), "sk-test", None, deltas.append, transport="responses"
+    )
+    assert str(seen[0].url).endswith("/responses")
+    wire = json.loads(seen[-1].content)
+    assert wire["stream"] is True
+    assert deltas == ["ho", "la"]
+    assert response.content == "hola"
+    (call,) = response.tool_calls
+    assert (call.id, call.name, call.arguments) == ("c1", "fs_read", {"p": "x"})
+    assert (response.usage.input_tokens, response.usage.output_tokens) == (5, 7)
+
+
+def test_responses_rejects_unknown_transport() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={})
+
+    adapter = OpenAICompatibleAdapter("https://api.test/v1", client=_client(handler))
+    with pytest.raises(InvalidUsageError):
+        adapter.invoke(_request(), "sk-test", None, transport="carrier-pigeon")
+
+
+def test_anthropic_rejects_responses_transport() -> None:
+    adapter = AnthropicAdapter(client=_client(lambda r: httpx.Response(200, json={})))
+    with pytest.raises(InvalidUsageError):
+        adapter.invoke(_request(), "key", None, transport="responses")
+
+
+def test_router_resolves_catalog_transport(monkeypatch, tmp_path) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=_responses_ok())
+
+    ctx, services = _app_and_services(handler, monkeypatch, tmp_path)
+    try:
+        provider = services.providers.add(_add_custom_input("go", OPENCODE_GO_URL))
+        model = services.models.add(provider.alias, "muse-spark-1.3-contributor", "muse13")
+        router = ModelRouter(services.providers, services.models, http_client=_client(handler))
+        response = router.invoke(provider, model.id, _request())
+        assert str(seen[-1].url).endswith("/responses")
+        assert response.content == "hola"
+    finally:
+        ctx.close()
+
+
+def test_router_explicit_transport_wins(monkeypatch, tmp_path) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=_chat_ok())
+
+    ctx, services = _app_and_services(handler, monkeypatch, tmp_path)
+    try:
+        provider = services.providers.add(_add_custom_input("go", OPENCODE_GO_URL))
+        model = services.models.add(
+            provider.alias,
+            "muse-spark-1.3-contributor",
+            "muse13",
+            settings={"transport": "chat"},
+        )
+        router = ModelRouter(services.providers, services.models, http_client=_client(handler))
+        router.invoke(provider, model.id, _request())
+        assert str(seen[-1].url).endswith("/chat/completions")
+    finally:
+        ctx.close()
+
+
+def test_router_rejects_unknown_transport_setting(monkeypatch, tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from rinari.models.router import _resolve_transport
+
+    provider = SimpleNamespace(endpoint=OPENCODE_GO_URL)
+    model = SimpleNamespace(
+        alias="mx", provider_model_id="m-x", settings={"transport": "telepathy"}
+    )
+    with pytest.raises(InvalidUsageError):
+        _resolve_transport(provider, model)
+
+
+def test_model_add_persists_transport_settings(monkeypatch, tmp_path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": []})
+
+    ctx, services = _app_and_services(handler, monkeypatch, tmp_path)
+    try:
+        provider = services.providers.add(_add_custom_input("go", OPENCODE_GO_URL))
+        model = services.models.add(
+            provider.alias, "m-x", "mx", settings={"transport": "responses"}
+        )
+        assert services.models.resolve(model.id).settings == {"transport": "responses"}
+    finally:
+        ctx.close()
+
+
+def test_pick_saves_responses_transport_for_catalog_id(monkeypatch, tmp_path) -> None:
+    from rinari.cli.commands.models import _save_and_activate
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": []})
+
+    ctx, services = _app_and_services(handler, monkeypatch, tmp_path)
+    try:
+        record = services.providers.add(_add_custom_input("go", OPENCODE_GO_URL))
+        chosen = _save_and_activate(services, record, "muse-spark-1.3-contributor", None)
+        assert chosen.settings.get("transport") == "responses"
+        other = _save_and_activate(services, record, "deepseek-v4-flash", None)
+        assert "transport" not in other.settings
     finally:
         ctx.close()
 

@@ -91,3 +91,18 @@ PROVIDER_CATALOG: tuple[ProviderPreset, ...] = (
     ),
     ProviderPreset("custom", "Custom endpoint", "custom"),
 )
+
+
+# Model IDs on OpenCode endpoints that live on the OpenAI Responses API
+# (/responses) instead of /chat/completions. Vendor catalog snapshot from
+# https://opencode.ai/docs/go/ (per-model endpoint table): chat calls to
+# these IDs fail with a bare HTTP 500. Default transport for matching saved
+# models; an explicit per-model setting always wins.
+OPENCODE_RESPONSES_MODELS: frozenset[str] = frozenset(
+    {
+        "grok-4.5",
+        "gpt-5.6-luna",
+        "muse-spark-1.3-contributor",
+        "muse-spark-1.2-contributor",
+    }
+)

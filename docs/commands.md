@@ -1376,6 +1376,21 @@ rinari models add \
   --name qwen
 ```
 
+Wire transport (`chat` = `/chat/completions`, `responses` = `/responses`):
+
+```bash
+rinari models add \
+  --provider opencode-go \
+  --model muse-spark-1.3-contributor \
+  --name muse13 \
+  --transport responses
+```
+
+`models pick` sets `--transport responses` automatically for the OpenCode
+models that live on `/responses` (Muse Spark contributors, Grok 4.5,
+GPT 5.6 Luna); everywhere else the default is `chat`. An explicit
+per-model setting always wins.
+
 ---
 
 ## `models alias`

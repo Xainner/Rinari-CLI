@@ -12,6 +12,8 @@ from rich.text import Text
 from rinari.cli.deps import fail, is_json, services, with_error_handling
 from rinari.cli.output import emit_json, success_envelope
 from rinari.cli.serializers import discovered_model_dict, model_dict
+from rinari.providers.adapters.http import is_opencode_endpoint
+from rinari.providers.catalog import OPENCODE_RESPONSES_MODELS
 from rinari.shared.errors import InvalidUsageError, ProviderModelError
 
 app = typer.Typer(help="Manage the model registry.", no_args_is_help=True)
@@ -310,7 +312,10 @@ def _save_and_activate(s, record, model_id: str, model_name: str | None):
     if existing is not None:
         s.models.use(existing.id, record.alias)
         return existing
-    created = s.models.add(record.alias, model_id, model_name or model_id)
+    settings: dict = {}
+    if is_opencode_endpoint(record.endpoint) and model_id in OPENCODE_RESPONSES_MODELS:
+        settings["transport"] = "responses"
+    created = s.models.add(record.alias, model_id, model_name or model_id, settings=settings)
     s.models.use(created.id, record.alias)
     return created
 
@@ -354,10 +359,22 @@ def models_add(
     provider: str = typer.Option(..., "--provider", help="Provider the model belongs to."),
     model: str = typer.Option(..., "--model", help="Provider-side model ID (e.g. gpt-4o)."),
     name: str = typer.Option(..., "--name", help="Local alias for the model."),
+    transport: str = typer.Option(
+        None,
+        "--transport",
+        help="Wire transport: chat (/chat/completions) or responses (/responses).",
+    ),
 ) -> None:
     """Save a model under a local alias for a provider."""
+    if transport is not None and transport not in ("chat", "responses"):
+        raise InvalidUsageError(
+            f"unknown transport {transport!r}",
+            hint="Expected one of: chat, responses.",
+        )
     with services(ctx) as s:
-        record = s.models.add(provider, model, name)
+        record = s.models.add(
+            provider, model, name, settings={"transport": transport} if transport else {}
+        )
         data = model_dict(record, provider_alias=s.providers.get(provider).alias)
         if is_json(ctx):
             emit_json(success_envelope("models.add", data))

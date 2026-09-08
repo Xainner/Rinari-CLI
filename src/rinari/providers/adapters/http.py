@@ -52,6 +52,11 @@ def sanitize_tool_name(name: str) -> str:
     return _TOOL_NAME_UNSAFE.sub("_", name)
 
 
+def is_opencode_endpoint(url: str | None) -> bool:
+    """Whether this URL belongs to the vendor's own API hosts."""
+    return _is_opencode_host(url)
+
+
 def needs_tool_aliasing(endpoint: str | None) -> bool:
     """Whether tool names must be sanitized for this endpoint."""
     return _is_opencode_host(endpoint)

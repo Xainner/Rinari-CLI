@@ -25,10 +25,11 @@ from rinari.providers.adapters.http import (
     decode_json,
     provider_error,
     provider_error_detail,
+    sanitize_tool_name,
     send_request,
     session_affinity_headers,
 )
-from rinari.shared.errors import NetworkError, ProviderModelError
+from rinari.shared.errors import InvalidUsageError, NetworkError, ProviderModelError
 
 
 class OpenAICompatibleAdapter(ProviderAdapter):
@@ -107,10 +108,27 @@ class OpenAICompatibleAdapter(ProviderAdapter):
     def _chat_url(self, endpoint: str | None) -> str:
         return f"{self.base_url(endpoint, None)}/chat/completions"
 
-    def _payload(self, request: ModelRequest, *, stream: bool) -> dict[str, Any]:
+    def _responses_url(self, endpoint: str | None) -> str:
+        return f"{self.base_url(endpoint, None)}/responses"
+
+    @staticmethod
+    def _check_transport(transport: str) -> None:
+        if transport not in ("chat", "responses"):
+            raise InvalidUsageError(
+                f"unknown transport {transport!r}",
+                hint="Expected one of: chat, responses.",
+            )
+
+    def _payload(
+        self,
+        request: ModelRequest,
+        *,
+        stream: bool,
+        tool_aliases: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": request.model,
-            "messages": [_message_to_openai(m) for m in request.messages],
+            "messages": [_message_to_openai(m, tool_aliases) for m in request.messages],
             "stream": stream,
         }
         if request.tools:
@@ -118,7 +136,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                 {
                     "type": "function",
                     "function": {
-                        "name": tool.name,
+                        "name": _wire_tool_name(tool.name, tool_aliases),
                         "description": tool.description,
                         "parameters": tool.parameters,
                     },
@@ -136,8 +154,17 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         return payload
 
     def invoke(
-        self, request: ModelRequest, secret: str | None, endpoint: str | None = None
+        self,
+        request: ModelRequest,
+        secret: str | None,
+        endpoint: str | None = None,
+        *,
+        transport: str = "chat",
+        tool_aliases: dict[str, str] | None = None,
     ) -> ModelResponse:
+        self._check_transport(transport)
+        if transport == "responses":
+            return self._invoke_responses(request, secret, endpoint, tool_aliases)
         url = self._chat_url(endpoint)
         headers = {**self._headers(secret), **session_affinity_headers(url, request.session_id)}
         response = send_request(
@@ -145,7 +172,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             "POST",
             url,
             headers=headers,
-            json_body=self._payload(request, stream=False),
+            json_body=self._payload(request, stream=False, tool_aliases=tool_aliases),
             timeout=MODEL_CALL_TIMEOUT,
         )
         if response.status_code in (401, 403):
@@ -160,7 +187,13 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         secret: str | None,
         endpoint: str | None,
         on_delta: Callable[[str], None],
+        *,
+        transport: str = "chat",
+        tool_aliases: dict[str, str] | None = None,
     ) -> ModelResponse:
+        self._check_transport(transport)
+        if transport == "responses":
+            return self._invoke_stream_responses(request, secret, endpoint, on_delta, tool_aliases)
         url = self._chat_url(endpoint)
         content_parts: list[str] = []
         calls = _ToolCallAccumulator()
@@ -170,7 +203,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             with self.client().stream(
                 "POST",
                 url,
-                json=self._payload(request, stream=True),
+                json=self._payload(request, stream=True, tool_aliases=tool_aliases),
                 headers=headers,
                 timeout=MODEL_CALL_TIMEOUT,
             ) as response:
@@ -208,11 +241,121 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             stop_reason=stop_reason,
         )
 
+    # -- Responses API (/responses) -------------------------------------------
+
+    def _responses_payload(
+        self,
+        request: ModelRequest,
+        *,
+        stream: bool,
+        tool_aliases: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": request.model,
+            "input": [
+                item for m in request.messages for item in _message_to_responses(m, tool_aliases)
+            ],
+            "stream": stream,
+        }
+        if request.tools:
+            payload["tools"] = [
+                {
+                    "type": "function",
+                    "name": _wire_tool_name(tool.name, tool_aliases),
+                    "description": tool.description,
+                    "parameters": tool.parameters,
+                }
+                for tool in request.tools
+            ]
+        if request.temperature is not None:
+            payload["temperature"] = request.temperature
+        if request.max_tokens is not None:
+            payload["max_output_tokens"] = request.max_tokens
+        if request.reasoning_effort:
+            payload["reasoning"] = {"effort": request.reasoning_effort}
+        if request.json_response:
+            payload["text"] = {"format": {"type": "json_object"}}
+        return payload
+
+    def _invoke_responses(
+        self,
+        request: ModelRequest,
+        secret: str | None,
+        endpoint: str | None,
+        tool_aliases: dict[str, str] | None,
+    ) -> ModelResponse:
+        url = self._responses_url(endpoint)
+        headers = {**self._headers(secret), **session_affinity_headers(url, request.session_id)}
+        response = send_request(
+            self.client(),
+            "POST",
+            url,
+            headers=headers,
+            json_body=self._responses_payload(request, stream=False, tool_aliases=tool_aliases),
+            timeout=MODEL_CALL_TIMEOUT,
+        )
+        if response.status_code in (401, 403):
+            raise auth_failure(response, url)
+        if response.status_code >= 400:
+            raise ProviderModelError(provider_error_detail(response, url))
+        return _response_from_responses(decode_json(response, url), url)
+
+    def _invoke_stream_responses(
+        self,
+        request: ModelRequest,
+        secret: str | None,
+        endpoint: str | None,
+        on_delta: Callable[[str], None],
+        tool_aliases: dict[str, str] | None,
+    ) -> ModelResponse:
+        url = self._responses_url(endpoint)
+        headers = {**self._headers(secret), **session_affinity_headers(url, request.session_id)}
+        acc = _ResponsesStreamAccumulator()
+        try:
+            with self.client().stream(
+                "POST",
+                url,
+                json=self._responses_payload(request, stream=True, tool_aliases=tool_aliases),
+                headers=headers,
+                timeout=MODEL_CALL_TIMEOUT,
+            ) as response:
+                if response.status_code in (401, 403):
+                    raise auth_failure(response, url)
+                if response.status_code >= 400:
+                    raise ProviderModelError(provider_error_detail(response, url))
+                for line in response.iter_lines():
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    acc.update(_parse_sse_payload(data, url), on_delta)
+        except httpx.TimeoutException as exc:
+            raise NetworkError(f"Timed out streaming from {url}") from exc
+        except httpx.TransportError as exc:
+            raise NetworkError(f"Stream interrupted: {exc.__class__.__name__}") from exc
+        return acc.finalize(url)
+
 
 # -- helpers -----------------------------------------------------------------
 
 
-def _message_to_openai(message: ChatMessage) -> dict[str, Any]:
+def _wire_tool_name(name: str, tool_aliases: dict[str, str] | None) -> str:
+    """Registry name -> wire name.
+
+    With an alias map (aliasing active) unknown names fall back to the
+    strict-pattern rewrite; without a map names pass through untouched so
+    off-vendor payloads stay byte-identical.
+    """
+    if tool_aliases is None:
+        return name
+    alias_of = {real: alias for alias, real in tool_aliases.items()}
+    return alias_of.get(name, sanitize_tool_name(name))
+
+
+def _message_to_openai(
+    message: ChatMessage, tool_aliases: dict[str, str] | None = None
+) -> dict[str, Any]:
     msg: dict[str, Any] = {"role": message.role}
     if message.content is not None:
         msg["content"] = message.content
@@ -222,7 +365,7 @@ def _message_to_openai(message: ChatMessage) -> dict[str, Any]:
                 "id": tc.id,
                 "type": "function",
                 "function": {
-                    "name": tc.name,
+                    "name": _wire_tool_name(tc.name, tool_aliases),
                     "arguments": json.dumps(tc.arguments, sort_keys=True),
                 },
             }
@@ -243,6 +386,134 @@ def _parse_sse_payload(data: str, url: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ProviderModelError(f"Unexpected streaming payload for {url}")
     return value
+
+
+def _message_to_responses(
+    message: ChatMessage, tool_aliases: dict[str, str] | None
+) -> list[dict[str, Any]]:
+    """Chat history -> Responses input items (tool calls keep wire names)."""
+    if message.role == ROLE_TOOL:
+        return [
+            {
+                "type": "function_call_output",
+                "call_id": message.tool_call_id,
+                "output": message.content or "",
+            }
+        ]
+    items: list[dict[str, Any]] = []
+    if message.content:
+        allowed = ("system", "developer", "user", "assistant")
+        items.append(
+            {
+                "role": message.role if message.role in allowed else "user",
+                "content": message.content,
+            }
+        )
+    for tc in message.tool_calls:
+        items.append(
+            {
+                "type": "function_call",
+                "call_id": tc.id,
+                "name": _wire_tool_name(tc.name, tool_aliases),
+                "arguments": json.dumps(tc.arguments, sort_keys=True),
+            }
+        )
+    return items
+
+
+def _function_call_from_responses(raw: Any) -> ToolCall | None:
+    if not isinstance(raw, dict) or raw.get("type") != "function_call":
+        return None
+    arguments_raw = raw.get("arguments") or "{}"
+    try:
+        arguments = json.loads(arguments_raw) if isinstance(arguments_raw, str) else arguments_raw
+    except json.JSONDecodeError:
+        arguments = {}
+    if not isinstance(arguments, dict):
+        arguments = {}
+    call_id = raw.get("call_id") or raw.get("id") or ""
+    return ToolCall(id=str(call_id), name=str(raw.get("name") or ""), arguments=arguments)
+
+
+def _usage_from_responses(raw: Any) -> Usage:
+    if not isinstance(raw, dict):
+        return Usage()
+    return Usage(
+        input_tokens=_optional_int(raw.get("input_tokens")),
+        output_tokens=_optional_int(raw.get("output_tokens")),
+    )
+
+
+def _response_from_responses(data: Any, url: str) -> ModelResponse:
+    if not isinstance(data, dict):
+        raise ProviderModelError(f"Unexpected responses payload from {url}")
+    if data.get("status") == "failed":
+        err = data.get("error") or {}
+        detail = err.get("message") if isinstance(err, dict) else None
+        raise ProviderModelError(
+            f"Provider returned an errored response for {url}"
+            + (f": {str(detail)[:300]}" if detail else "")
+        )
+    output = data.get("output")
+    if not isinstance(output, list):
+        raise ProviderModelError(f"Unexpected responses payload from {url}")
+    content_parts: list[str] = []
+    tool_calls: list[ToolCall] = []
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "message":
+            for block in item.get("content") or []:
+                if isinstance(block, dict) and block.get("type") == "output_text":
+                    content_parts.append(str(block.get("text") or ""))
+        else:
+            call = _function_call_from_responses(item)
+            if call is not None and call.name:
+                tool_calls.append(call)
+    status = data.get("status")
+    incomplete = data.get("incomplete_details") or {}
+    if status == "incomplete" and incomplete.get("reason") == "max_output_tokens":
+        stop_reason = StopReason.MAX_TOKENS
+    elif tool_calls:
+        stop_reason = StopReason.TOOL_CALLS
+    else:
+        stop_reason = StopReason.END_TURN
+    return ModelResponse(
+        content="".join(content_parts),
+        tool_calls=tuple(tool_calls),
+        usage=_usage_from_responses(data.get("usage")),
+        stop_reason=stop_reason,
+        raw=data,
+    )
+
+
+class _ResponsesStreamAccumulator:
+    """Reassembles a Responses API SSE stream.
+
+    Text deltas go live to on_delta; the terminal response.completed event
+    is authoritative for content, tool calls, and usage.
+    """
+
+    def __init__(self) -> None:
+        self._text_parts: list[str] = []
+        self._completed: dict[str, Any] | None = None
+
+    def update(self, event: dict[str, Any], on_delta: Callable[[str], None]) -> None:
+        event_type = event.get("type")
+        if event_type == "response.output_text.delta":
+            delta = event.get("delta")
+            if isinstance(delta, str) and delta:
+                self._text_parts.append(delta)
+                on_delta(delta)
+        elif event_type == "response.completed":
+            response = event.get("response")
+            if isinstance(response, dict):
+                self._completed = response
+
+    def finalize(self, url: str) -> ModelResponse:
+        if self._completed is None:
+            return ModelResponse(content="".join(self._text_parts), tool_calls=())
+        return _response_from_responses(self._completed, url)
 
 
 def _response_from_openai(data: Any, url: str) -> ModelResponse:

@@ -134,8 +134,15 @@ class ModelService:
         provider_model_id: str,
         alias: str,
         capabilities: dict[str, Any] | None = None,
+        settings: dict[str, Any] | None = None,
     ) -> ModelRecord:
         provider = self._providers.get(provider_ref)
+        transport = (settings or {}).get("transport")
+        if transport is not None and transport not in ("chat", "responses"):
+            raise InvalidUsageError(
+                f"unknown transport {transport!r}",
+                hint="Expected one of: chat, responses.",
+            )
         existing = self._ctx.model_repo.get_by_provider_model_id(provider.id, provider_model_id)
         if existing is not None:
             raise ConflictError(
@@ -150,7 +157,7 @@ class ModelService:
             alias=alias,
             provider_id=provider.id,
             provider_model_id=provider_model_id,
-            settings={},
+            settings=dict(settings or {}),
             capabilities=capabilities,
             availability="unknown",
             created_at=now,
