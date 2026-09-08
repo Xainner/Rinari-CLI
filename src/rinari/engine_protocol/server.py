@@ -17,7 +17,12 @@ from rinari.engine_protocol import protocol
 from rinari.engine_protocol.dispatcher import EngineDispatcher
 from rinari.engine_protocol.errors import INVALID_PARAMS, EngineProtocolError
 from rinari.engine_protocol.messages import hello
-from rinari.engine_protocol.snapshots import build_snapshot, provider_to_dict, session_to_dict
+from rinari.engine_protocol.snapshots import (
+    build_snapshot,
+    message_to_dict,
+    provider_to_dict,
+    session_to_dict,
+)
 from rinari.engine_protocol.turns import TurnManager
 
 
@@ -32,6 +37,7 @@ class EngineServer:
         self._dispatcher.register("session.get", self._session_get)
         self._dispatcher.register("session.create", self._session_create)
         self._dispatcher.register("session.open", self._session_open)
+        self._dispatcher.register("session.history", self._session_history)
         self._dispatcher.register("session.turn.start", self._turn_start)
         self._dispatcher.register("session.turn.cancel", self._turn_cancel)
         self._dispatcher.register("approval.resolve", self._approval_resolve)
@@ -125,6 +131,24 @@ class EngineServer:
             "session": session_to_dict(started.session),
             "created": started.created,
             "warnings": list(started.warnings),
+        }
+
+    def _session_history(self, params: dict[str, Any]) -> dict[str, Any]:
+        ref = params.get("ref")
+        if not isinstance(ref, str) or not ref:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'ref' must be a non-empty string.")
+        limit = params.get("limit", 200)
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 500:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'limit' must be an int in 1..500.")
+        record = self._services.sessions.show(ref)
+        stored = self._services.ctx.message_repo.list(record.id)
+        total = len(stored)
+        window = stored[-limit:] if total > limit else stored
+        return {
+            "session_id": record.id,
+            "messages": [message_to_dict(item) for item in window],
+            "total": total,
+            "has_more": total > len(window),
         }
 
     # -- turns ------------------------------------------------------------

@@ -843,6 +843,10 @@ Provider views are redacted by construction (`has_credential` only, never
 secret material); new secrets are stored via the credential backend
 (`env://`, `keyring://` when an OS store is functional, `file://`
 fallback) and request params are never logged.
+Slice 4a adds `session.history` (`ref`, `limit` 1..500 default 200):
+persisted conversation rows (`seq`, `role`, `content`, `tool_calls`),
+tail window with `total`/`has_more`. Protocol turns persist through the
+same `run_turn` path as the terminal, so history covers desktop turns.
 The envelope contract is unchanged across slices.
 
 ---
