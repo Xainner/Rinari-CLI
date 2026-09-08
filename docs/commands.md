@@ -855,6 +855,12 @@ Slice 6a adds project workspace reads: `task.tree/get`,
 `verification.latest/plan`, `checkpoint.list/show/restore`,
 `project.changes` (porcelain files + branch/head/dirty, `available:false`
 outside a repo), `project.diff` (unified, truncated, binary-safe).
+Slice 7a adds agent routing: `agent.list` (definitions + assignments),
+`agent.config.get/set` (model/fallback/enabled per agent, `clear` to reset;
+aliases must resolve and support tool calls), `session.events` (persisted
+lifecycle incl. SubagentStart/Stop). Spawn resolves assigned model →
+fallback → parent caller; effort overrides stay out (no model-layer
+plumbing — see debt log).
 The envelope contract is unchanged across slices.
 
 ---

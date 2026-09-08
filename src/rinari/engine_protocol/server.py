@@ -25,6 +25,8 @@ from rinari.engine_protocol.snapshots import (
 )
 from rinari.engine_protocol.turns import TurnManager
 from rinari.engine_protocol.workspace import InvalidGitError, git_diff, git_files
+from rinari.models.router import ModelRouter
+from rinari.shared.errors import NotFoundError
 
 
 class EngineServer:
@@ -52,6 +54,10 @@ class EngineServer:
         self._dispatcher.register("checkpoint.restore", self._checkpoint_restore)
         self._dispatcher.register("project.changes", self._project_changes)
         self._dispatcher.register("project.diff", self._project_diff)
+        self._dispatcher.register("agent.list", self._agent_list)
+        self._dispatcher.register("agent.config.get", self._agent_config_get)
+        self._dispatcher.register("agent.config.set", self._agent_config_set)
+        self._dispatcher.register("session.events", self._session_events)
         self._dispatcher.register("provider.list", self._provider_list)
         self._dispatcher.register("provider.create", self._provider_create)
         self._dispatcher.register("provider.get", self._provider_get)
@@ -294,6 +300,123 @@ class EngineServer:
         except InvalidGitError as err:
             raise EngineProtocolError(INVALID_PARAMS, f"Cannot diff: {err}") from err
         return result
+
+    # -- agents ---------------------------------------------------------------
+
+    def _agent_definitions(self) -> dict[str, Any]:
+        return self._services.agents.list()
+
+    def _agent_view(self, name: str, definition: Any) -> dict[str, Any]:
+        assignment = self._services.agent_configs.get(name)
+        return {
+            "name": definition.name,
+            "description": definition.description,
+            "profile": definition.profile,
+            "provenance": definition.provenance,
+            "tool_allowlist": list(definition.tool_allowlist),
+            "budget": {
+                "max_model_calls": definition.budget.max_model_calls,
+                "max_tool_calls": definition.budget.max_tool_calls,
+                "max_wall_time_s": definition.budget.max_wall_time_s,
+            },
+            "assignment": {
+                "model": assignment.model,
+                "fallback": assignment.fallback,
+                "enabled": assignment.enabled,
+            },
+        }
+
+    def _agent_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        _ = params
+        definitions = self._agent_definitions()
+        return {
+            "agents": [
+                self._agent_view(name, definition)
+                for name, definition in sorted(definitions.items())
+            ]
+        }
+
+    def _require_agent(self, agent: Any) -> Any:
+        if not isinstance(agent, str) or not agent:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'agent' must be a non-empty string.")
+        definitions = self._agent_definitions()
+        if agent not in definitions:
+            raise NotFoundError(f"Unknown agent: {agent}")
+        return definitions[agent]
+
+    def _agent_config_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        definition = self._require_agent(params.get("agent"))
+        return {"agent": self._agent_view(definition.name, definition)}
+
+    def _agent_config_set(self, params: dict[str, Any]) -> dict[str, Any]:
+        definition = self._require_agent(params.get("agent"))
+        if params.get("clear", False) is True:
+            self._services.agent_configs.clear(definition.name)
+            return {"agent": self._agent_view(definition.name, definition)}
+        model = params.get("model")
+        fallback = params.get("fallback")
+        enabled = params.get("enabled")
+        if model is not None and not isinstance(model, str):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'model' must be a string.")
+        if fallback is not None and not isinstance(fallback, str):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'fallback' must be a string.")
+        if enabled is not None and not isinstance(enabled, bool):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'enabled' must be a boolean.")
+        # Strict at config time: no dangling aliases, no tool-less models.
+        # (Spawn time stays lenient so stale assignments degrade, never break.)
+        for alias in (model, fallback):
+            if alias:
+                self._check_agent_model(alias)
+        assignment = self._services.agent_configs.set(
+            definition.name, model=model, fallback=fallback, enabled=enabled
+        )
+        return {
+            "agent": {
+                **self._agent_view(definition.name, definition),
+                "assignment": {
+                    "model": assignment.model,
+                    "fallback": assignment.fallback,
+                    "enabled": assignment.enabled,
+                },
+            }
+        }
+
+    def _check_agent_model(self, alias: str) -> None:
+        models = self._services.models
+        record = models.resolve(alias)
+        provider = self._services.providers.get(record.provider_id)
+        router = ModelRouter(self._services.providers, models)
+        if not router.capabilities(provider, record.id).tool_calls:
+            raise EngineProtocolError(
+                INVALID_PARAMS,
+                f"Model {alias!r} does not support tool calls and cannot run subagents.",
+            )
+
+    def _session_events(self, params: dict[str, Any]) -> dict[str, Any]:
+        ref = params.get("ref")
+        if not isinstance(ref, str) or not ref:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'ref' must be a non-empty string.")
+        after_seq = params.get("after_seq")
+        if after_seq is not None and (
+            not isinstance(after_seq, int) or isinstance(after_seq, bool) or after_seq < 0
+        ):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'after_seq' must be an int >= 0.")
+        limit = params.get("limit", 200)
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 500:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'limit' must be an int in 1..500.")
+        record = self._services.sessions.show(ref)
+        rows = self._services.ctx.event_repo.list(record.id, after_seq, limit)
+        events = [
+            {
+                "id": row.id,
+                "seq": row.seq,
+                "type": row.type,
+                "payload": row.payload,
+                "created_at": row.created_at,
+            }
+            for row in rows
+        ]
+        return {"session_id": record.id, "events": events, "has_more": len(events) == limit}
 
     # -- turns ------------------------------------------------------------
 

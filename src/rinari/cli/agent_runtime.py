@@ -518,6 +518,7 @@ def _build_orchestrator(
 
     config = SubagentRuntimeConfig(
         caller=caller,
+        caller_for=lambda name: caller_for_agent(services, record, name),
         base_registry=None,  # runner filters all_native_tools by the allowlist
         parent_token=token,
         policy=policy,
@@ -723,6 +724,34 @@ def _caller_for(services: ServiceContainer, record: SessionRecord) -> ModelCalle
         provider=services.providers.get(record.provider_id),
         model_id=record.model_id,
     )
+
+
+def caller_for_agent(
+    services: ServiceContainer, record: SessionRecord, agent_name: str
+) -> ModelCaller | None:
+    """Per-agent model override (Phase 7). None = inherit the parent caller.
+
+    Chain: assigned model → fallback → parent. Entries that do not resolve
+    or whose merged capabilities lack tool calls are skipped: a stale
+    assignment degrades to the working default instead of breaking turns.
+    """
+    assignment = services.agent_configs.get(agent_name)
+    if not assignment.enabled:
+        return None
+    router = ModelRouter(services.providers, services.models)
+    for alias in (assignment.model, assignment.fallback):
+        if not alias:
+            continue
+        try:
+            model = services.models.resolve(alias)
+            provider = services.providers.get(model.provider_id)
+            capable = router.capabilities(provider, model.id).tool_calls
+        except RinariError:
+            continue
+        if not capable:
+            continue
+        return _caller_for(services, replace(record, provider_id=provider.id, model_id=model.id))
+    return None
 
 
 # ---------------------------------------------------------------------------

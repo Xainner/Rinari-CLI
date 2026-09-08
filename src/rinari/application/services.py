@@ -7,6 +7,7 @@ from pathlib import Path
 
 import httpx
 
+from rinari.agents.config import AgentConfigStore
 from rinari.agents.registry import AgentRegistry
 from rinari.application.context import AppContext
 from rinari.application.credentials import CredentialStore
@@ -55,6 +56,7 @@ class ServiceContainer:
     hooks: HookService
     skills: SkillService
     agents: AgentRegistry
+    agent_configs: AgentConfigStore
 
 
 def build_services(
@@ -83,6 +85,7 @@ def build_services(
     hooks = HookService(ctx, trust)
     skills = SkillService(ctx, trust)
     agents = AgentRegistry(trust)
+    agent_configs = AgentConfigStore(ctx.layout.root)
     return ServiceContainer(
         ctx=ctx,
         credentials=credentials,
@@ -106,4 +109,5 @@ def build_services(
         hooks=hooks,
         skills=skills,
         agents=agents,
+        agent_configs=agent_configs,
     )
