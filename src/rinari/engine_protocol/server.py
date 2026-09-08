@@ -27,6 +27,7 @@ from rinari.engine_protocol.turns import TurnManager
 from rinari.engine_protocol.workspace import InvalidGitError, git_diff, git_files
 from rinari.models.router import ModelRouter
 from rinari.shared.errors import NotFoundError
+from rinari.soul.store import SoulStore
 
 
 class EngineServer:
@@ -58,6 +59,12 @@ class EngineServer:
         self._dispatcher.register("agent.config.get", self._agent_config_get)
         self._dispatcher.register("agent.config.set", self._agent_config_set)
         self._dispatcher.register("session.events", self._session_events)
+        self._dispatcher.register("soul.list", self._soul_list)
+        self._dispatcher.register("soul.get", self._soul_get)
+        self._dispatcher.register("soul.create", self._soul_create)
+        self._dispatcher.register("soul.update", self._soul_update)
+        self._dispatcher.register("soul.remove", self._soul_remove)
+        self._dispatcher.register("soul.activate", self._soul_activate)
         self._dispatcher.register("provider.list", self._provider_list)
         self._dispatcher.register("provider.create", self._provider_create)
         self._dispatcher.register("provider.get", self._provider_get)
@@ -417,6 +424,84 @@ class EngineServer:
             for row in rows
         ]
         return {"session_id": record.id, "events": events, "has_more": len(events) == limit}
+
+    # -- souls ----------------------------------------------------------------
+
+    def _soul_store(self) -> SoulStore:
+        return SoulStore(self._services.ctx.home)
+
+    @staticmethod
+    def _soul_view(definition: Any) -> dict[str, Any]:
+        return {
+            "id": definition.id,
+            "name": definition.name,
+            "version": definition.version,
+            "description": definition.description,
+            "source": definition.source,
+        }
+
+    def _soul_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        _ = params
+        store = self._soul_store()
+        return {
+            "souls": [self._soul_view(d) for d in store.list()],
+            "active_id": store.active_id(),
+        }
+
+    def _soul_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        soul_id = params.get("id")
+        if not isinstance(soul_id, str) or not soul_id:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'id' must be a non-empty string.")
+        definition = self._soul_store().get(soul_id)
+        return {"soul": {**self._soul_view(definition), "identity": definition.identity}}
+
+    def _soul_create(self, params: dict[str, Any]) -> dict[str, Any]:
+        soul_id = params.get("id")
+        name = params.get("name")
+        identity = params.get("identity")
+        if not isinstance(soul_id, str) or not soul_id:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'id' must be a non-empty string.")
+        if not isinstance(name, str) or not name:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'name' must be a non-empty string.")
+        if not isinstance(identity, str) or not identity:
+            raise EngineProtocolError(
+                INVALID_PARAMS, "Param 'identity' must be a non-empty string."
+            )
+        description = params.get("description", "")
+        version = params.get("version", "1.0")
+        if not isinstance(description, str) or not isinstance(version, str):
+            raise EngineProtocolError(
+                INVALID_PARAMS, "Params 'description'/'version' must be strings."
+            )
+        definition = self._soul_store().create(
+            soul_id, name=name, identity=identity, description=description, version=version
+        )
+        return {"soul": {**self._soul_view(definition), "identity": definition.identity}}
+
+    def _soul_update(self, params: dict[str, Any]) -> dict[str, Any]:
+        soul_id = params.get("id")
+        if not isinstance(soul_id, str) or not soul_id:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'id' must be a non-empty string.")
+        fields: dict[str, Any] = {}
+        for key in ("name", "identity", "description", "version"):
+            if params.get(key) is not None:
+                fields[key] = params[key]
+        definition = self._soul_store().update(soul_id, **fields)
+        return {"soul": {**self._soul_view(definition), "identity": definition.identity}}
+
+    def _soul_remove(self, params: dict[str, Any]) -> dict[str, Any]:
+        soul_id = params.get("id")
+        if not isinstance(soul_id, str) or not soul_id:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'id' must be a non-empty string.")
+        self._soul_store().remove(soul_id)
+        return {"removed": {"id": soul_id}}
+
+    def _soul_activate(self, params: dict[str, Any]) -> dict[str, Any]:
+        soul_id = params.get("id")
+        if not isinstance(soul_id, str) or not soul_id:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'id' must be a non-empty string.")
+        definition = self._soul_store().activate(soul_id)
+        return {"soul": self._soul_view(definition)}
 
     # -- turns ------------------------------------------------------------
 

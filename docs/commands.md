@@ -861,6 +861,10 @@ aliases must resolve and support tool calls), `session.events` (persisted
 lifecycle incl. SubagentStart/Stop). Spawn resolves assigned model →
 fallback → parent caller; effort overrides stay out (no model-layer
 plumbing — see debt log).
+Slice 8a adds Soul 3.0: `soul.list/get/create/update/remove/activate`,
+`~/souls/<id>/{soul.toml,identity.md}` store, bundled `rinari-default` 3.0,
+global activation; legacy `~/soul.md` keeps working (active > legacy >
+bundled). Main-agent prompt uses the active soul; subagents stay functional.
 The envelope contract is unchanged across slices.
 
 ---

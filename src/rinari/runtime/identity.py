@@ -22,6 +22,7 @@ from importlib.resources import files
 from pathlib import Path
 
 from rinari.shared.errors import ConfigurationError
+from rinari.soul.store import SoulDefinition
 
 _ASSET_HEADER = re.compile(
     r"<!--\s*rinari-asset\s*:\s*id=(?P<id>[a-z0-9_-]+)\s+version=(?P<version>[\w.\-]+)\s*-->"
@@ -43,6 +44,53 @@ class IdentityAsset:
 
 def load_soul(home: str | Path) -> IdentityAsset:
     return _load("soul", Path(home))
+
+
+def load_active_soul(home: str | Path) -> IdentityAsset:
+    """Soul 3.0 resolution: active custom soul → legacy ~/soul.md → bundled default.
+
+    An explicit legacy `soul.md` override keeps working untouched (migration
+    compatibility): it wins over the bundled default but loses to an explicit
+    activation. Nothing is moved or rewritten silently.
+    """
+    from rinari.soul.store import DEFAULT_SOUL_ID, SoulStore
+
+    home_path = Path(home)
+    store = SoulStore(home_path)
+    active = store.active_id()
+    if active is not None:
+        try:
+            definition = store.get(active)
+        except Exception:
+            definition = None
+        if definition is not None:
+            return _from_definition(definition, home_path)
+    legacy = home_path / "soul.md"
+    if legacy.is_file():
+        asset = _load("soul", home_path)
+        return asset
+    try:
+        definition = store.get(DEFAULT_SOUL_ID)
+    except Exception:
+        return _load("soul", home_path)
+    return _from_definition(definition, home_path)
+
+
+def _from_definition(definition: SoulDefinition, home: Path) -> IdentityAsset:
+    if definition.source == "custom":
+        source = SOURCE_USER
+        path = home / "souls" / definition.id / "identity.md"
+    else:
+        source = SOURCE_PACKAGED
+        path = Path(str(files("rinari").joinpath(f"assets/souls/{definition.id}/identity.md")))
+    return IdentityAsset(
+        name=f"soul:{definition.id}",
+        version=definition.version,
+        sha256=hashlib.sha256(definition.identity.encode("utf-8")).hexdigest(),
+        source=source,
+        path=path,
+        text=definition.identity,
+    )
 
 
 def load_constitution(home: str | Path) -> IdentityAsset:
