@@ -216,6 +216,11 @@ class ToolContext:
     # agent.spawn tool path attaches subagent cost to the spawning turn.
     # None when no parent meter is active (budget-less turns, unit tests).
     parent_budget: Any = None
+    # Cooperative execution deadline as wall-clock seconds (P0.5/Etapa C):
+    # tool adapters with I/O (HTTP/MCP/browser/subprocess/LSP) must respect
+    # it. Sync handlers cannot be preempted; the runtime narrows this per
+    # call from ToolDefinition.timeout_ms. None means no deadline.
+    deadline_at: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

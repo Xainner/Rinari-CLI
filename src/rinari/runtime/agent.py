@@ -39,6 +39,7 @@ from rinari.runtime.loopdetection import LoopDetector
 from rinari.shared.errors import CancelledError
 from rinari.tools.definition import ToolContext, ToolErrorCode, ToolErrorInfo, ToolResult
 from rinari.tools.runtime import ToolRuntime
+from rinari.tools.scheduler import schedule
 
 # Event names persist verbatim into session_events (trace base, phase 2).
 EVENT_TURN_STARTED = "AgentTurnStarted"
@@ -221,6 +222,11 @@ class AgentLoop:
                     "stop_reason": response.stop_reason.value,
                     "tool_calls": [{"id": tc.id, "name": tc.name} for tc in response.tool_calls],
                     "usage": _usage_dict(response.usage),
+                    # Etapa C: execution plan groups (serial baseline; the
+                    # plan is traced so a concurrent executor can adopt it).
+                    "execution_plan": schedule(
+                        [tc.name for tc in response.tool_calls], self._tools.registry
+                    ),
                 },
             )
             self._check_pressure(ctx, response)

@@ -103,6 +103,9 @@ class ToolRuntime:
             "name": tool_name,
             "ok": result.ok,
             "duration_ms": round(duration_ms, 1),
+            # §5.2 determinism metadata: stable ordering anchors per call.
+            "started_at": started_at,
+            "completed_at": now_iso(self._ctx_clock()),
             "error_code": result.error.code.value if result.error else None,
             "truncated": result.truncated,
             "artifacts": [artifact.uri for artifact in result.artifacts],
@@ -184,8 +187,74 @@ class ToolRuntime:
         if cancellation is not None:
             cancellation.throw_if_cancelled()
 
+        call_ctx = self._deadline_ctx(ctx, tool)
+        attempts = 2 if tool.idempotent else 1
+        attempt = 0
+        while True:
+            attempt += 1
+            result = self._invoke_handler(tool, arguments, call_ctx, ctx, tool_call_id)
+            if result.ok and tool.output_schema:
+                # P0.5: the contract is enforced, not decorative — dynamic
+                # sources (plugins/MCP/OpenAPI) must honor their schema.
+                output_errors = validate_against(tool.output_schema, result.data)
+                if output_errors:
+                    return self._error(
+                        ctx,
+                        ToolErrorCode.VALIDATION_FAILED,
+                        f"tool {tool_name} output violates its output_schema: "
+                        + "; ".join(output_errors[:5]),
+                    )
+            if result.ok or attempt >= attempts or not self._retryable_result(tool, result):
+                break
+            if cancellation is not None:
+                cancellation.throw_if_cancelled()
+        return self._postprocess(result, ctx, tool_call_id, tool)
+
+    # NEVER auto-retry an ambiguous result for these: a duplicate send is
+    # worse than surfacing the failure (P0.5).
+    _NO_RETRY_SIDE_EFFECTS = frozenset(
+        {"communication", "financial", "credential"},
+    )
+    # Only clearly-transient failures are retried. TIMEOUT is deliberately
+    # excluded: the attempt already consumed its full budget (and wait-style
+    # tools change state between attempts), so retrying doubles the wait and
+    # masks the real error.
+    _RETRYABLE_CODES = frozenset(
+        {ToolErrorCode.NETWORK_ERROR, ToolErrorCode.RATE_LIMITED},
+    )
+
+    def _retryable_result(self, tool: ToolDefinition, result: ToolResult) -> bool:
+        if not tool.idempotent:
+            return False
+        if tool.side_effects in self._NO_RETRY_SIDE_EFFECTS:
+            return False
+        return (
+            result.error is not None
+            and result.error.retryable
+            and result.error.code in self._RETRYABLE_CODES
+        )
+
+    def _deadline_ctx(self, ctx: ToolContext, tool: ToolDefinition) -> ToolContext:
+        """Narrow the context deadline to the tool's own timeout (P0.5).
+
+        Sync Python handlers cannot be preempted safely; the deadline is a
+        cooperative contract that HTTP/MCP/browser/subprocess/LSP adapters
+        must respect, and the remaining enforcement surface.
+        """
+        if not tool.timeout_ms:
+            return ctx
+        return dataclasses.replace(ctx, deadline_at=time.time() + tool.timeout_ms / 1000.0)
+
+    def _invoke_handler(
+        self,
+        tool: ToolDefinition,
+        arguments: dict,
+        call_ctx: ToolContext,
+        ctx: ToolContext,
+        tool_call_id: str,
+    ) -> ToolResult:
         try:
-            result = tool.handler(arguments, ctx)
+            result = tool.handler(arguments, call_ctx)
         except CancelledError:
             return self._error(ctx, ToolErrorCode.CANCELLED, "Tool execution cancelled")
         except SandboxViolationError as exc:
@@ -212,7 +281,7 @@ class ToolRuntime:
 
         if not isinstance(result, ToolResult):
             result = ToolResult(ok=True, data=result)
-        return self._postprocess(result, ctx, tool_call_id)
+        return result
 
     # ------------------------------------------------------------------
 
@@ -261,21 +330,31 @@ class ToolRuntime:
 
     # ------------------------------------------------------------------
 
-    def _postprocess(self, result: ToolResult, ctx: ToolContext, tool_call_id: str) -> ToolResult:
+    def _postprocess(
+        self,
+        result: ToolResult,
+        ctx: ToolContext,
+        tool_call_id: str,
+        tool: ToolDefinition | None = None,
+    ) -> ToolResult:
         truncated = False
         data = result.data
         spill_ref = None
+        # P0.5: per-tool cap wins over the global spill threshold.
+        cap = self.spill_threshold_bytes
+        if tool is not None and tool.max_output_bytes:
+            cap = min(cap, tool.max_output_bytes)
         if isinstance(data, (str, bytes)):
             payload = self._redactor.redact(data) if isinstance(data, str) else data
             size = len(payload if isinstance(payload, bytes) else payload.encode("utf-8"))
-            if size > self.spill_threshold_bytes:
+            if size > cap:
                 spill_ref = self._spill(tool_call_id or "tool", payload, ctx)
                 truncated = True
             data = payload
         elif isinstance(data, dict):
             data = self._redact_payload(data)
             text = data.get("text") if isinstance(data, dict) else None
-            if isinstance(text, str) and len(text.encode("utf-8")) > self.spill_threshold_bytes:
+            if isinstance(text, str) and len(text.encode("utf-8")) > cap:
                 spill_ref = self._spill(tool_call_id or "tool", text, ctx)
                 truncated = True
                 # Keep metadata out of the literal preview. Otherwise a model
@@ -289,9 +368,7 @@ class ToolRuntime:
                 data["text_preview"] = text[:1536]
         if spill_ref is not None and not isinstance(data, dict):
             data = {
-                "summary": (
-                    f"output exceeded {self.spill_threshold_bytes} bytes; spilled to artifact"
-                ),
+                "summary": (f"output exceeded {cap} bytes; spilled to artifact"),
                 "artifact": spill_ref.uri,
             }
         artifacts = (*result.artifacts, spill_ref) if spill_ref else result.artifacts
