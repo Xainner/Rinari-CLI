@@ -15,6 +15,7 @@ from rinari.application.services import ServiceContainer
 from rinari.cli.serializers import model_dict
 from rinari.engine_protocol import protocol
 from rinari.engine_protocol.dispatcher import EngineDispatcher
+from rinari.engine_protocol.ecosystem import mcp_row_view, plugin_row_view, tool_row_view
 from rinari.engine_protocol.errors import INVALID_PARAMS, EngineProtocolError
 from rinari.engine_protocol.messages import event, hello
 from rinari.engine_protocol.snapshots import (
@@ -65,6 +66,20 @@ class EngineServer:
         self._dispatcher.register("soul.update", self._soul_update)
         self._dispatcher.register("soul.remove", self._soul_remove)
         self._dispatcher.register("soul.activate", self._soul_activate)
+        self._dispatcher.register("mcp.list", self._mcp_list)
+        self._dispatcher.register("mcp.get", self._mcp_get)
+        self._dispatcher.register("mcp.create", self._mcp_create)
+        self._dispatcher.register("mcp.remove", self._mcp_remove)
+        self._dispatcher.register("mcp.enable", self._mcp_enable)
+        self._dispatcher.register("mcp.disable", self._mcp_disable)
+        self._dispatcher.register("mcp.test", self._mcp_test)
+        self._dispatcher.register("plugin.list", self._plugin_list)
+        self._dispatcher.register("plugin.get", self._plugin_get)
+        self._dispatcher.register("plugin.enable", self._plugin_enable)
+        self._dispatcher.register("plugin.disable", self._plugin_disable)
+        self._dispatcher.register("plugin.diagnostics", self._plugin_diagnostics)
+        self._dispatcher.register("tool.list", self._tool_list)
+        self._dispatcher.register("policy.get", self._policy_get)
         self._dispatcher.register("provider.list", self._provider_list)
         self._dispatcher.register("provider.create", self._provider_create)
         self._dispatcher.register("provider.get", self._provider_get)
@@ -467,8 +482,8 @@ class EngineServer:
             raise EngineProtocolError(
                 INVALID_PARAMS, "Param 'identity' must be a non-empty string."
             )
-        description = params.get("description", "")
-        version = params.get("version", "1.0")
+        description = params.get("description") or ""
+        version = params.get("version") or "1.0"
         if not isinstance(description, str) or not isinstance(version, str):
             raise EngineProtocolError(
                 INVALID_PARAMS, "Params 'description'/'version' must be strings."
@@ -502,6 +517,121 @@ class EngineServer:
             raise EngineProtocolError(INVALID_PARAMS, "Param 'id' must be a non-empty string.")
         definition = self._soul_store().activate(soul_id)
         return {"soul": self._soul_view(definition)}
+
+    # -- ecosystem (Phase 9) ----------------------------------------------------
+
+    def _mcp_connected(self, name: str) -> bool:
+        client = self._services.mcp._clients.get(name)
+        return bool(client is not None and client.connected)
+
+    def _mcp_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        scope = (params or {}).get("scope")
+        rows = self._services.mcp.list(scope if isinstance(scope, str) else None)
+        return {"servers": [mcp_row_view(r, self._mcp_connected(r["name"])) for r in rows]}
+
+    def _mcp_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        name = (params or {}).get("name", "")
+        row = self._services.mcp.show(name)
+        if row is None:
+            raise NotFoundError(f"Unknown MCP server: {name}.")
+        return {"server": mcp_row_view(row, self._mcp_connected(name))}
+
+    def _mcp_create(self, params: dict[str, Any]) -> dict[str, Any]:
+        params = params or {}
+        name = params.get("name", "")
+        command = params.get("command", [])
+        if not isinstance(name, str) or not name:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'name' is required.")
+        if not isinstance(command, list) or not all(isinstance(c, str) for c in command):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'command' must be a string array.")
+        env_refs = params.get("env_refs") or {}
+        if not isinstance(env_refs, dict):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'env_refs' must be an object.")
+        try:
+            row = self._services.mcp.add(name, command, scope="global", env_refs=dict(env_refs))
+        except ValueError as exc:
+            raise EngineProtocolError(INVALID_PARAMS, str(exc)) from exc
+        return {"server": mcp_row_view(row, False)}
+
+    def _mcp_remove(self, params: dict[str, Any]) -> dict[str, Any]:
+        name = (params or {}).get("name", "")
+        if not self._services.mcp.remove(name):
+            raise NotFoundError(f"Unknown MCP server: {name}.")
+        return {"removed": {"name": name}}
+
+    def _mcp_enable(self, params: dict[str, Any]) -> dict[str, Any]:
+        name = (params or {}).get("name", "")
+        row = self._services.mcp.enable(name)
+        if row is None:
+            raise NotFoundError(f"Unknown MCP server: {name}.")
+        return {"server": mcp_row_view(row, self._mcp_connected(name))}
+
+    def _mcp_disable(self, params: dict[str, Any]) -> dict[str, Any]:
+        name = (params or {}).get("name", "")
+        row = self._services.mcp.disable(name)
+        if row is None:
+            raise NotFoundError(f"Unknown MCP server: {name}.")
+        return {"server": mcp_row_view(row, False)}
+
+    def _mcp_test(self, params: dict[str, Any]) -> dict[str, Any]:
+        from rinari.mcp.client import McpError
+
+        name = (params or {}).get("name", "")
+        try:
+            return {"test": self._services.mcp.test(name)}
+        except McpError as exc:
+            raise EngineProtocolError(exc.code, exc.message) from exc
+
+    def _plugin_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        diags = {r["name"]: r["diagnostics"] for r in self._services.plugins.doctor()}
+        rows = self._services.plugins.list()
+        return {
+            "plugins": [
+                plugin_row_view(r, diags.get(r["name"], [{"code": "OK", "message": ""}]))
+                for r in rows
+            ]
+        }
+
+    def _plugin_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        params = params or {}
+        row = self._services.plugins.show(params.get("name", ""), params.get("source") or "user")
+        if row is None:
+            raise NotFoundError("Unknown plugin.")
+        diags = self._services.plugins.doctor()
+        diag = next((r["diagnostics"] for r in diags if r["name"] == row["name"]), [])
+        return {"plugin": plugin_row_view(row, diag)}
+
+    def _plugin_enable(self, params: dict[str, Any]) -> dict[str, Any]:
+        params = params or {}
+        row = self._services.plugins.enable(params.get("name", ""), params.get("source") or "user")
+        if row is None:
+            raise NotFoundError("Unknown plugin.")
+        return {"plugin": plugin_row_view(row)}
+
+    def _plugin_disable(self, params: dict[str, Any]) -> dict[str, Any]:
+        params = params or {}
+        row = self._services.plugins.disable(params.get("name", ""), params.get("source") or "user")
+        if row is None:
+            raise NotFoundError("Unknown plugin.")
+        return {"plugin": plugin_row_view(row)}
+
+    def _plugin_diagnostics(self, params: dict[str, Any]) -> dict[str, Any]:
+        return {"reports": self._services.plugins.doctor()}
+
+    def _tool_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        from rinari.tools.native import all_native_tools
+
+        return {"tools": [tool_row_view(t) for t in all_native_tools()]}
+
+    def _policy_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        from rinari.application.session_service import profile_for_mode
+
+        return {
+            "mode_profile": {
+                mode: str(profile_for_mode(mode)) for mode in ("plan", "build", "review")
+            },
+            "note": "Profiles and souls never relax this mapping; PLAN/REVIEW stay read-only.",
+        }
 
     # -- turns ------------------------------------------------------------
 

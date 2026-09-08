@@ -865,6 +865,11 @@ Slice 8a adds Soul 3.0: `soul.list/get/create/update/remove/activate`,
 `~/souls/<id>/{soul.toml,identity.md}` store, bundled `rinari-default` 3.0,
 global activation; legacy `~/soul.md` keeps working (active > legacy >
 bundled). Main-agent prompt uses the active soul; subagents stay functional.
+Slice 9 adds the ecosystem surface: `mcp.list/get/create/remove/enable/disable/test`
+(plain secrets rejected, test failures reported not raised), `plugin.list/get/enable/disable/diagnostics`
+(doctor merged into list), `tool.list` (native registry), `policy.get`
+(mode→profile mapping; souls/profiles never relax it). No engine-level
+browser session is tracked in v1 (browser runs per-turn).
 The envelope contract is unchanged across slices.
 
 ---
