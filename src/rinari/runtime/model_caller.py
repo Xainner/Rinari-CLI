@@ -24,7 +24,7 @@ class ModelCaller:
     model_id: str | None
 
     def capabilities(self) -> ProviderCapabilities:
-        return self.router.capabilities(self.provider)
+        return self.router.capabilities(self.provider, self.model_id)
 
     def invoke(self, request: ModelRequest) -> ModelResponse:
         return self.router.invoke(self.provider, self.model_id, request)

@@ -74,6 +74,9 @@ class Usage:
     output_tokens: int | None = None
     cached_input_tokens: int | None = None
     reasoning_tokens: int | None = None
+    # Provenance of the numbers (§6.2): "complete" (authoritative payload),
+    # "partial" (accumulated deltas), "unavailable" (endpoint sent nothing).
+    source: str = "complete"
 
     @property
     def total_tokens(self) -> int | None:

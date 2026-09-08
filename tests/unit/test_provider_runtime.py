@@ -9,8 +9,8 @@ from rinari.models.types import ModelResponse
 from rinari.providers.adapters.anthropic import _response_from_anthropic
 from rinari.providers.adapters.openai_compatible import (
     _response_from_openai,
-    _response_from_responses,
 )
+from rinari.providers.adapters.responses import _response_from_responses
 from rinari.providers.errors import (
     ProviderError,
     ProviderErrorCode,
@@ -19,6 +19,10 @@ from rinari.providers.errors import (
 )
 from rinari.runtime.cancellation import CancellationToken
 from rinari.shared.errors import ProviderModelError
+
+
+def _mock_client(handler) -> httpx.Client:
+    return httpx.Client(transport=httpx.MockTransport(handler))
 
 
 def _resp(status: int, **kwargs) -> httpx.Response:
@@ -182,3 +186,148 @@ def test_cancel_fires_callbacks_and_suppresses_their_errors() -> None:
     token.cancel()
     assert seen == ["a", "b"]
     assert token.cancelled
+
+
+# -- streaming usage (§6.2) -------------------------------------------------------------
+
+
+def _sse_client(lines: list[str], seen: list) -> httpx.Client:
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        body = "".join(f"data: {line}\n\n" for line in lines) + "data: [DONE]\n\n"
+        return httpx.Response(200, text=body)
+
+    return _mock_client(handler)
+
+
+def _chat_request():
+    from rinari.models.types import ModelRequest
+
+    return ModelRequest(model="mx", messages=())
+
+
+def test_chat_stream_captures_usage_chunk() -> None:
+    from rinari.providers.adapters.openai_compatible import OpenAICompatibleAdapter
+
+    seen: list = []
+    client = _sse_client(
+        [
+            '{"choices": [{"delta": {"content": "hi"}}]}',
+            '{"choices": [{"delta": {}, "finish_reason": "stop"}],'
+            ' "usage": {"prompt_tokens": 5, "completion_tokens": 7}}',
+        ],
+        seen,
+    )
+    adapter = OpenAICompatibleAdapter(client=client)
+    response = adapter.invoke_stream(_chat_request(), "k", "https://api.test/v1", lambda d: None)
+    assert response.content == "hi"
+    assert response.usage.input_tokens == 5
+    assert response.usage.output_tokens == 7
+    assert response.usage.source == "complete"
+
+
+def test_chat_stream_without_usage_marks_unavailable() -> None:
+    from rinari.providers.adapters.openai_compatible import OpenAICompatibleAdapter
+
+    seen: list = []
+    client = _sse_client(
+        ['{"choices": [{"delta": {"content": "hi"}, "finish_reason": "stop"}]}'], seen
+    )
+    adapter = OpenAICompatibleAdapter(client=client)
+    response = adapter.invoke_stream(_chat_request(), "k", "https://api.test/v1", lambda d: None)
+    assert response.usage.input_tokens is None
+    assert response.usage.source == "unavailable"
+
+
+# -- per-model capabilities (§6.1) --------------------------------------------------------
+
+
+def test_model_capabilities_override_adapter(monkeypatch, tmp_path) -> None:
+    from rinari.application.context import build_app_context
+    from rinari.application.provider_service import AddProviderInput
+    from rinari.application.services import build_services
+    from rinari.models.router import ModelRouter
+    from rinari.shared.clock import FakeClock
+    from rinari.shared.paths import ENV_HOME
+
+    home = tmp_path / "home"
+    monkeypatch.setenv(ENV_HOME, str(home))
+    ctx = build_app_context(home=str(home), clock=FakeClock(start=1_700_000_000.0, step=1.0))
+    services = build_services(ctx, http_client=_mock_client(lambda r: httpx.Response(200)))
+    try:
+        provider = services.providers.add(
+            AddProviderInput(
+                alias="go",
+                provider_type="custom",
+                auth_method="api-key",
+                endpoint="https://api.test/v1",
+                secret="sk-test-key",
+            )
+        )
+        plain = services.models.add(provider.alias, "m-x", "mx")
+        boosted = services.models.add(
+            provider.alias, "m-y", "my", capabilities={"max_context_tokens": 12345}
+        )
+        router = ModelRouter(services.providers, services.models)
+        assert router.capabilities(provider, plain.id).max_context_tokens is None
+        assert router.capabilities(provider, boosted.id).max_context_tokens == 12345
+    finally:
+        ctx.close()
+
+
+# -- MCP structured output (§7) -------------------------------------------------------------
+
+
+def test_mcp_output_schema_preserved() -> None:
+    from rinari.mcp.client import McpToolInfo
+
+    info = McpToolInfo.from_raw(
+        {
+            "name": "t",
+            "description": "d",
+            "inputSchema": {"type": "object", "properties": {}},
+            "outputSchema": {
+                "type": "object",
+                "properties": {"v": {"type": "string"}},
+                "required": ["v"],
+            },
+        }
+    )
+    assert info.output_schema is not None
+    assert info.output_schema["required"] == ["v"]
+
+
+def test_mcp_definitions_carry_output_schema() -> None:
+    from rinari.mcp.adapter import mcp_tool_definitions
+    from rinari.mcp.client import McpToolInfo
+
+    info = McpToolInfo.from_raw(
+        {
+            "name": "t",
+            "description": "d",
+            "inputSchema": {"type": "object", "properties": {}},
+            "outputSchema": {"type": "object", "properties": {}},
+        }
+    )
+    (definition,) = mcp_tool_definitions("srv", [info])
+    assert definition.output_schema == {"type": "object", "properties": {}}
+
+
+def test_mcp_invoke_keeps_scalar_structured_content() -> None:
+    from rinari.mcp.service import McpService
+
+    seen: dict = {}
+
+    class FakeClient:
+        def call_tool(self, tool, arguments):
+            seen["tool"] = tool
+            return {"content": [], "structuredContent": 42}
+
+    class FakeService(McpService):
+        def _client(self, name, project=None):
+            return FakeClient()
+
+    service = FakeService.__new__(FakeService)
+    payload = McpService.invoke(service, "srv", "t", {})
+    assert payload["structuredContent"] == 42
+    assert seen["tool"] == "t"

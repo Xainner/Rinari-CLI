@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -72,6 +72,33 @@ def _alias_map_for_request(endpoint: str | None, request: ModelRequest) -> dict[
     return real_by_alias
 
 
+def _merge_capabilities(
+    base: ProviderCapabilities, override: dict[str, Any] | None
+) -> ProviderCapabilities:
+    """Per-model capability matrix (§6.1): record overrides adapter defaults.
+
+    Unknown keys are ignored; mistyped values fall back to the adapter
+    value instead of crashing capability resolution.
+    """
+    if not override:
+        return base
+    fields = {
+        "streaming": bool,
+        "tool_calls": bool,
+        "structured_output": bool,
+        "max_context_tokens": int,
+        "reasoning_effort": bool,
+    }
+    changes: dict[str, Any] = {}
+    for key, kind in fields.items():
+        if key not in override:
+            continue
+        value = override[key]
+        if value is None or isinstance(value, kind):
+            changes[key] = value
+    return replace(base, **changes) if changes else base
+
+
 def _unalias_response(
     response: ModelResponse, real_by_alias: dict[str, str] | None
 ) -> ModelResponse:
@@ -104,8 +131,19 @@ class ModelRouter:
     def adapter(self, provider: ProviderRecord):
         return adapter_for(provider, self._client)
 
-    def capabilities(self, provider: ProviderRecord) -> ProviderCapabilities:
-        return self.adapter(provider).capabilities()
+    def capabilities(
+        self, provider: ProviderRecord, model_id: str | None = None
+    ) -> ProviderCapabilities:
+        base = self.adapter(provider).capabilities()
+        if model_id is None:
+            return base
+        try:
+            model = self._models.resolve(model_id)
+        except Exception:
+            return base
+        if model.provider_id != provider.id:
+            return base
+        return _merge_capabilities(base, model.capabilities)
 
     def _resolve_model(self, provider: ProviderRecord, model_id: str | None):
         if model_id is None:

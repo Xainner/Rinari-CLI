@@ -196,7 +196,9 @@ class McpService:
         client = self._client(name, project)
         result = client.call_tool(tool, arguments)
         payload: dict = {"content": _content_summary(result.get("content"))}
-        if isinstance(result.get("structuredContent"), (dict, list)):
+        # Structured output is any JSON value the negotiated version allows;
+        # never restrict it artificially to dict/list (§7).
+        if "structuredContent" in result and result["structuredContent"] is not None:
             payload["structuredContent"] = result["structuredContent"]
         return payload
 

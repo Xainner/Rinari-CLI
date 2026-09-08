@@ -43,6 +43,7 @@ class McpToolInfo:
     description: str
     input_schema: dict[str, Any]
     annotations: dict[str, Any]
+    output_schema: dict[str, Any] | None = None
 
     @staticmethod
     def from_raw(raw: dict[str, Any]) -> McpToolInfo:
@@ -52,11 +53,15 @@ class McpToolInfo:
         annotations = raw.get("annotations") or {}
         if not isinstance(annotations, dict):
             annotations = {}
+        output_schema = raw.get("outputSchema")
+        if not isinstance(output_schema, dict):
+            output_schema = None
         return McpToolInfo(
             name=str(raw.get("name") or ""),
             description=str(raw.get("description") or ""),
             input_schema=schema,
             annotations=annotations,
+            output_schema=output_schema,
         )
 
 

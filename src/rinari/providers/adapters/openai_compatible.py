@@ -151,6 +151,10 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             payload["reasoning_effort"] = request.reasoning_effort
         if request.json_response:
             payload["response_format"] = {"type": "json_object"}
+        if stream:
+            # Ask for authoritative usage in the terminal chunk (§6.2); when
+            # the endpoint stays silent the response is marked unavailable.
+            payload["stream_options"] = {"include_usage": True}
         return payload
 
     def invoke(
@@ -164,7 +168,9 @@ class OpenAICompatibleAdapter(ProviderAdapter):
     ) -> ModelResponse:
         self._check_transport(transport)
         if transport == "responses":
-            return self._invoke_responses(request, secret, endpoint, tool_aliases)
+            return self._responses_adapter().invoke(
+                request, secret, endpoint, tool_aliases=tool_aliases
+            )
         url = self._chat_url(endpoint)
         headers = {**self._headers(secret), **session_affinity_headers(url, request.session_id)}
         response = send_request(
@@ -193,11 +199,14 @@ class OpenAICompatibleAdapter(ProviderAdapter):
     ) -> ModelResponse:
         self._check_transport(transport)
         if transport == "responses":
-            return self._invoke_stream_responses(request, secret, endpoint, on_delta, tool_aliases)
+            return self._responses_adapter().invoke_stream(
+                request, secret, endpoint, on_delta, tool_aliases=tool_aliases
+            )
         url = self._chat_url(endpoint)
         content_parts: list[str] = []
         calls = _ToolCallAccumulator()
         stop_reason = StopReason.END_TURN
+        stream_usage: dict[str, Any] | None = None
         headers = {**self._headers(secret), **session_affinity_headers(url, request.session_id)}
         try:
             with self.client().stream(
@@ -218,6 +227,8 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                     if data == "[DONE]":
                         break
                     chunk = _parse_sse_payload(data, url)
+                    if isinstance(chunk.get("usage"), dict):
+                        stream_usage = chunk["usage"]
                     choice = (chunk.get("choices") or [{}])[0]
                     delta = choice.get("delta") or {}
                     if delta.get("content"):
@@ -234,107 +245,24 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         tool_calls = calls.finalize()
         if tool_calls and stop_reason is not StopReason.MAX_TOKENS:
             stop_reason = StopReason.TOOL_CALLS
+        # §6.2: captured chunk usage is authoritative; silence is marked,
+        # never zero-filled.
+        usage = _usage_from_openai(stream_usage) if stream_usage else Usage(source="unavailable")
         return ModelResponse(
             content="".join(content_parts),
             tool_calls=tool_calls,
-            usage=Usage(),
+            usage=usage,
             stop_reason=stop_reason,
         )
 
+    def _responses_adapter(self):  # OpenAIResponsesAdapter (P0.7 split)
+        from rinari.providers.adapters.responses import OpenAIResponsesAdapter
+
+        return OpenAIResponsesAdapter(default_base_url=self.default_base_url, client=self.client())
+
     # -- Responses API (/responses) -------------------------------------------
-
-    def _responses_payload(
-        self,
-        request: ModelRequest,
-        *,
-        stream: bool,
-        tool_aliases: dict[str, str] | None = None,
-    ) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "model": request.model,
-            "input": [
-                item for m in request.messages for item in _message_to_responses(m, tool_aliases)
-            ],
-            "stream": stream,
-        }
-        if request.tools:
-            payload["tools"] = [
-                {
-                    "type": "function",
-                    "name": _wire_tool_name(tool.name, tool_aliases),
-                    "description": tool.description,
-                    "parameters": tool.parameters,
-                }
-                for tool in request.tools
-            ]
-        if request.temperature is not None:
-            payload["temperature"] = request.temperature
-        if request.max_tokens is not None:
-            payload["max_output_tokens"] = request.max_tokens
-        if request.reasoning_effort:
-            payload["reasoning"] = {"effort": request.reasoning_effort}
-        if request.json_response:
-            payload["text"] = {"format": {"type": "json_object"}}
-        return payload
-
-    def _invoke_responses(
-        self,
-        request: ModelRequest,
-        secret: str | None,
-        endpoint: str | None,
-        tool_aliases: dict[str, str] | None,
-    ) -> ModelResponse:
-        url = self._responses_url(endpoint)
-        headers = {**self._headers(secret), **session_affinity_headers(url, request.session_id)}
-        response = send_request(
-            self.client(),
-            "POST",
-            url,
-            headers=headers,
-            json_body=self._responses_payload(request, stream=False, tool_aliases=tool_aliases),
-            timeout=MODEL_CALL_TIMEOUT,
-        )
-        if response.status_code in (401, 403):
-            raise auth_failure(response, url, model=request.model)
-        if response.status_code >= 400:
-            raise provider_error(response, url, model=request.model)
-        return _response_from_responses(decode_json(response, url), url)
-
-    def _invoke_stream_responses(
-        self,
-        request: ModelRequest,
-        secret: str | None,
-        endpoint: str | None,
-        on_delta: Callable[[str], None],
-        tool_aliases: dict[str, str] | None,
-    ) -> ModelResponse:
-        url = self._responses_url(endpoint)
-        headers = {**self._headers(secret), **session_affinity_headers(url, request.session_id)}
-        acc = _ResponsesStreamAccumulator()
-        try:
-            with self.client().stream(
-                "POST",
-                url,
-                json=self._responses_payload(request, stream=True, tool_aliases=tool_aliases),
-                headers=headers,
-                timeout=MODEL_CALL_TIMEOUT,
-            ) as response:
-                if response.status_code in (401, 403):
-                    raise auth_failure(response, url, model=request.model)
-                if response.status_code >= 400:
-                    raise provider_error(response, url, model=request.model)
-                for line in response.iter_lines():
-                    if not line or not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if data == "[DONE]":
-                        break
-                    acc.update(_parse_sse_payload(data, url), on_delta)
-        except httpx.TimeoutException as exc:
-            raise NetworkError(f"Timed out streaming from {url}") from exc
-        except httpx.TransportError as exc:
-            raise NetworkError(f"Stream interrupted: {exc.__class__.__name__}") from exc
-        return acc.finalize(url)
+    # Implemented by OpenAIResponsesAdapter; this class only delegates so
+    # adapter selection (registry.py) is unchanged.
 
 
 # -- helpers -----------------------------------------------------------------
@@ -386,156 +314,6 @@ def _parse_sse_payload(data: str, url: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ProviderModelError(f"Unexpected streaming payload for {url}")
     return value
-
-
-def _message_to_responses(
-    message: ChatMessage, tool_aliases: dict[str, str] | None
-) -> list[dict[str, Any]]:
-    """Chat history -> Responses input items (tool calls keep wire names)."""
-    if message.role == ROLE_TOOL:
-        return [
-            {
-                "type": "function_call_output",
-                "call_id": message.tool_call_id,
-                "output": message.content or "",
-            }
-        ]
-    items: list[dict[str, Any]] = []
-    if message.content:
-        allowed = ("system", "developer", "user", "assistant")
-        items.append(
-            {
-                "role": message.role if message.role in allowed else "user",
-                "content": message.content,
-            }
-        )
-    for tc in message.tool_calls:
-        items.append(
-            {
-                "type": "function_call",
-                "call_id": tc.id,
-                "name": _wire_tool_name(tc.name, tool_aliases),
-                "arguments": json.dumps(tc.arguments, sort_keys=True),
-            }
-        )
-    return items
-
-
-def _function_call_from_responses(raw: Any) -> ToolCall | None:
-    if not isinstance(raw, dict) or raw.get("type") != "function_call":
-        return None
-    arguments_raw = raw.get("arguments") or "{}"
-    invalid = False
-    try:
-        arguments = json.loads(arguments_raw) if isinstance(arguments_raw, str) else arguments_raw
-    except json.JSONDecodeError:
-        arguments = {}
-        invalid = True
-    if not isinstance(arguments, dict):
-        arguments = {}
-        invalid = True
-    call_id = raw.get("call_id") or raw.get("id") or ""
-    return ToolCall(
-        id=str(call_id),
-        name=str(raw.get("name") or ""),
-        arguments=arguments,
-        raw_arguments=arguments_raw if isinstance(arguments_raw, str) else None,
-        arguments_invalid=invalid,
-    )
-
-
-def _usage_from_responses(raw: Any) -> Usage:
-    if not isinstance(raw, dict):
-        return Usage()
-    return Usage(
-        input_tokens=_optional_int(raw.get("input_tokens")),
-        output_tokens=_optional_int(raw.get("output_tokens")),
-    )
-
-
-def _response_from_responses(data: Any, url: str) -> ModelResponse:
-    if not isinstance(data, dict):
-        raise ProviderModelError(f"Unexpected responses payload from {url}")
-    if data.get("status") == "failed":
-        err = data.get("error") or {}
-        detail = err.get("message") if isinstance(err, dict) else None
-        raise ProviderModelError(
-            f"Provider returned an errored response for {url}"
-            + (f": {str(detail)[:300]}" if detail else "")
-        )
-    output = data.get("output")
-    if not isinstance(output, list):
-        raise ProviderModelError(f"Unexpected responses payload from {url}")
-    content_parts: list[str] = []
-    tool_calls: list[ToolCall] = []
-    items: list[ModelItem] = []
-    for item in output:
-        if not isinstance(item, dict):
-            continue
-        items.append(
-            ModelItem(
-                type=str(item.get("type") or "unknown"),
-                id=item.get("id") if isinstance(item.get("id"), str) else None,
-                data={k: v for k, v in item.items() if k not in ("type", "id")},
-            )
-        )
-        if item.get("type") == "message":
-            for block in item.get("content") or []:
-                if isinstance(block, dict) and block.get("type") == "output_text":
-                    content_parts.append(str(block.get("text") or ""))
-        else:
-            call = _function_call_from_responses(item)
-            if call is not None and call.name:
-                tool_calls.append(call)
-    status = data.get("status")
-    incomplete = data.get("incomplete_details") or {}
-    if status == "incomplete" and incomplete.get("reason") == "max_output_tokens":
-        stop_reason = StopReason.MAX_TOKENS
-    elif tool_calls:
-        stop_reason = StopReason.TOOL_CALLS
-    else:
-        stop_reason = StopReason.END_TURN
-    provider_state: dict[str, Any] | None = None
-    if isinstance(data.get("id"), str):
-        provider_state = {"response_id": data["id"]}
-    return ModelResponse(
-        content="".join(content_parts),
-        tool_calls=tuple(tool_calls),
-        usage=_usage_from_responses(data.get("usage")),
-        stop_reason=stop_reason,
-        raw=data,
-        items=tuple(items),
-        provider_state=provider_state,
-    )
-
-
-class _ResponsesStreamAccumulator:
-    """Reassembles a Responses API SSE stream.
-
-    Text deltas go live to on_delta; the terminal response.completed event
-    is authoritative for content, tool calls, and usage.
-    """
-
-    def __init__(self) -> None:
-        self._text_parts: list[str] = []
-        self._completed: dict[str, Any] | None = None
-
-    def update(self, event: dict[str, Any], on_delta: Callable[[str], None]) -> None:
-        event_type = event.get("type")
-        if event_type == "response.output_text.delta":
-            delta = event.get("delta")
-            if isinstance(delta, str) and delta:
-                self._text_parts.append(delta)
-                on_delta(delta)
-        elif event_type == "response.completed":
-            response = event.get("response")
-            if isinstance(response, dict):
-                self._completed = response
-
-    def finalize(self, url: str) -> ModelResponse:
-        if self._completed is None:
-            return ModelResponse(content="".join(self._text_parts), tool_calls=())
-        return _response_from_responses(self._completed, url)
 
 
 def _response_from_openai(data: Any, url: str) -> ModelResponse:

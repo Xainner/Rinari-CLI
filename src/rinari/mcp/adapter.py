@@ -48,6 +48,7 @@ def mcp_tool_definitions(server: str, tools: list[McpToolInfo]) -> list[ToolDefi
                 name=tool_name(server, info.name),
                 description=(info.description or f"MCP tool {info.name} (server {server})").strip(),
                 input_schema=info.input_schema or {"type": "object", "properties": {}},
+                output_schema=info.output_schema,
                 capabilities=(capability,),
                 risk=risk,
                 side_effects=side_effects,
