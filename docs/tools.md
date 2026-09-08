@@ -1656,7 +1656,21 @@ type ToolDefinition = {
 
   timeoutMs?: number
   retryPolicy?: RetryPolicy
+  maxOutputBytes?: number
 }
+```
+
+Enforcement (runtime contract, not decoration):
+
+```text
+outputSchema, when declared, is enforced: a violating result returns
+VALIDATION_FAILED with no retry — a contract bug, not a transient
+failure. Retries (at most 2 attempts) apply only to idempotent tools
+whose sideEffects are not communication / financial / credential, and
+only for NETWORK_ERROR / RATE_LIMITED errors flagged retryable;
+TIMEOUT is never retried. timeoutMs narrows a cooperative deadline_at
+for the call (sync handlers cannot be preempted). A per-tool
+maxOutputBytes caps the observation before the global bound applies.
 ```
 
 ---
@@ -1689,6 +1703,13 @@ type ToolResult<T> = {
 }
 ```
 
+What the model actually receives (`to_model_text`) is this envelope
+serialized as bounded JSON: `{ok, tool?, data | error{code, message,
+retryable, details?}, artifacts[] (URIs), truncated?, duration_ms?}`,
+cut at ~2KB inline with an `[output truncated]` mark. Large outputs
+spill to artifacts upstream; continue reading them with
+`artifact.read`.
+
 ---
 
 ## 62. Standard Error Classes
@@ -1708,29 +1729,59 @@ type ToolResult<T> = {
 - `SANDBOX_VIOLATION`
 - `POLICY_DENIED`
 - `APPROVAL_REQUIRED`
+- `APPROVAL_DENIED`
 - `CANCELLED`
 - `PARTIAL_FAILURE`
+- `VALIDATION_FAILED`
+- `TOOL_NOT_FOUND`
 - `UNKNOWN`
 
 ---
 
 ## 63. Recommended Tool Loading Strategy
 
-### Always Loaded
+Implemented as budgeted per-request exposure: each model request
+carries core tools + explicitly activated tools + recently used tools
+(last 16, for continuity) — never the whole registry. The schema
+budget is 96 tool schemas / ~32.000 estimated schema tokens. Core and
+activated tools are never dropped to fit (metrics flag `over_budget`
+instead); only the recent-tools tail is cut. `capability.search` is
+always exposed so the model can always recover the on-demand
+ecosystem. The intended flow is search, then activate exactly what the
+task needs:
+
+- `capability.search` — rank capabilities across native, plugin, MCP,
+  OpenAPI and the browser fallback (typed connector first, browser
+  DOM last; exact name matches win outright).
+- `capability.activate` — expose tools by exact name, scope `turn`
+  (decays after ~4 model rounds, `ttl_rounds` 1–32) or `session`.
+- `capability.deactivate` — drop previously activated tools.
+
+### Per-turn execution plan
+
+Each turn's tool calls are planned into ordered groups: consecutive
+read-only + idempotent + non-network calls may share a group, every
+other call runs alone, and groups always run in order with
+observations reported back in the original call order. Execution is
+still serial (policy/approval/event ordering); the plan is computed
+and traced as `execution_plan` on the model-invoked event, ready for
+a concurrent executor.
+
+### Always Loaded (core)
 - `fs.*`
 - `shell.*`
 - `search.*`
 - `artifact.*`
-- `tools.search`
-- `tools.describe`
-- `tools.load`
+- `capability.search`
+- `capability.activate`
+- `capability.deactivate`
 - `user.*`
 - `context.*`
 - `budget.*`
 - `cancel.*`
 
-### On Demand
-- browser
+### On Demand (lazy until activated)
+- browser (`browser.*`)
 - web
 - git
 - GitHub / GitLab
@@ -1741,10 +1792,11 @@ type ToolResult<T> = {
 - multimedia
 - communication
 - productivity
+- MCP servers (`mcp.*`)
+- OpenAPI services (`api.*`)
+- plugins (`plugin.*`)
 
 ### Dynamic
-- MCP servers
-- OpenAPI services
 - project-specific plugins
 - user plugins
 - temporary composed tools
