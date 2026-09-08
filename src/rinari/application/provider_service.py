@@ -154,6 +154,43 @@ class ProviderService:
             self._ctx.provider_repo.update(record)
         return record
 
+    def update(
+        self,
+        ref: str,
+        *,
+        endpoint: str | None = None,
+        settings: dict[str, Any] | None = None,
+        account_hint: str | None = None,
+    ) -> ProviderRecord:
+        """Edit connection fields in place (endpoint/settings/hint).
+
+        Renames and credential rotation stay in `rename`/`set_auth`.
+        Changing the endpoint invalidates the last health check.
+        """
+        record = self.get(ref)
+        changed = False
+        if endpoint is not None:
+            if not endpoint.strip():
+                raise InvalidUsageError("Endpoint must be a non-empty string")
+            record.endpoint = endpoint.strip()
+            record.status_connected = None
+            record.status_checked_at = None
+            changed = True
+        if settings is not None:
+            if not isinstance(settings, dict):
+                raise InvalidUsageError("Settings must be an object")
+            record.settings = dict(settings)
+            changed = True
+        if account_hint is not None:
+            if not isinstance(account_hint, str):
+                raise InvalidUsageError("Account hint must be a string")
+            record.account_hint = account_hint
+            changed = True
+        if changed:
+            record.updated_at = self._now()
+            self._ctx.provider_repo.update(record)
+        return record
+
     def remove(
         self, ref: str, switch_to: str | None = None, keep_credentials: bool = False
     ) -> ProviderRecord:

@@ -835,6 +835,14 @@ Slice 1 methods: `engine.info`, `session.list`, `session.get`,
 Slice 2 adds live turns and reads: `session.turn.start`,
 `session.turn.cancel`, `approval.resolve`, `provider.list`, `model.list`,
 with `turn.*`, `model.content.delta`, `tool.*`, and `approval.*` events.
+Slice 3 adds provider/model management: `provider.create`, `provider.get`,
+`provider.update`, `provider.remove`, `provider.test`, `provider.discover`,
+`provider.use`, `model.get`, `model.add`, `model.alias`, `model.remove`,
+`model.use`, `model.discover`, `model.refresh`, `model.test`.
+Provider views are redacted by construction (`has_credential` only, never
+secret material); new secrets are stored via the credential backend
+(`env://`, `keyring://` when an OS store is functional, `file://`
+fallback) and request params are never logged.
 The envelope contract is unchanged across slices.
 
 ---
