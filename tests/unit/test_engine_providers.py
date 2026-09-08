@@ -120,6 +120,26 @@ def test_provider_create_with_secret_never_echoed(server, services) -> None:
     assert services.providers.resolve_secret(record) == "sk-test-value-123"
 
 
+def test_provider_create_null_auth_method_defaults(server) -> None:
+    # Desktop bridges send explicit nulls for unset optionals.
+    provider = _ok(
+        _call(
+            server,
+            "provider.create",
+            {
+                "alias": "local",
+                "type": "custom",
+                "auth_method": None,
+                "secret": "sk-test-null-default",
+                "endpoint": "http://x:9/v1",
+            },
+            tag="null",
+        )
+    )["provider"]
+    assert provider["auth_method"] == "api-key"
+    assert provider["has_credential"] is True
+
+
 def test_provider_create_duplicate_alias_conflicts(server) -> None:
     _create_local(server)
     error = _err(_call(server, "provider.create", {"alias": "ollama", "type": "custom"}, tag="dup"))

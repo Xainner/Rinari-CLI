@@ -244,7 +244,7 @@ class EngineServer:
     def _provider_create(self, params: dict[str, Any]) -> dict[str, Any]:
         alias = self._need_str(params, "alias")
         provider_type = self._need_str(params, "type")
-        auth_method = params.get("auth_method", "api-key")
+        auth_method = params.get("auth_method") or "api-key"
         if not isinstance(auth_method, str) or not auth_method:
             raise EngineProtocolError(
                 INVALID_PARAMS, "Param 'auth_method' must be a non-empty string."
