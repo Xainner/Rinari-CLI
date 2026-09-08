@@ -14,6 +14,7 @@ from rinari.application.context import AppContext
 from rinari.application.project_service import ProjectService
 from rinari.application.provider_service import ProviderService
 from rinari.application.reconcile import Finding, ResumeReconciler, trust_warning
+from rinari.policy.engine import PermissionProfile
 from rinari.projects.detector import ProjectDetection, detect_project
 from rinari.shared.clock import now_iso
 from rinari.shared.errors import (
@@ -38,6 +39,18 @@ EVENT_USER_PROMPT = "UserPrompt"
 SESSION_KIND_CHAT = "CHAT"
 SESSION_KIND_PROJECT = "PROJECT"
 SESSION_STATE_ACTIVE = "active"
+
+SESSION_MODE_PLAN = "plan"
+SESSION_MODE_BUILD = "build"
+SESSION_MODE_REVIEW = "review"
+SESSION_MODES = (SESSION_MODE_PLAN, SESSION_MODE_BUILD, SESSION_MODE_REVIEW)
+
+
+def profile_for_mode(mode: str | None) -> PermissionProfile:
+    """Mode → execution policy. Legacy/unknown modes keep full workspace rights."""
+    if mode in (SESSION_MODE_PLAN, SESSION_MODE_REVIEW):
+        return PermissionProfile.READ_ONLY
+    return PermissionProfile.WORKSPACE
 
 
 @dataclass(frozen=True, slots=True)
@@ -358,6 +371,20 @@ class SessionService:
 
     def show(self, ref: str) -> SessionRecord:
         return self._resolve(ref)
+
+    def set_mode(self, ref: str, mode: str) -> SessionRecord:
+        """Switch PLAN/BUILD/REVIEW. Same session, task graph and context kept."""
+        record = self._resolve(ref)
+        normalized = (mode or "").strip().lower()
+        if normalized not in SESSION_MODES:
+            raise InvalidUsageError(
+                f"Unknown session mode: {mode!r}. Valid modes: plan, build, review."
+            )
+        if record.mode != normalized:
+            record.mode = normalized
+            record.updated_at = self._now()
+            self._ctx.session_repo.update(record)
+        return record
 
     def _resolve(self, ref: str) -> SessionRecord:
         record = self._ctx.session_repo.get(ref)

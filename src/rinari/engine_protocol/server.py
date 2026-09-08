@@ -16,7 +16,7 @@ from rinari.cli.serializers import model_dict
 from rinari.engine_protocol import protocol
 from rinari.engine_protocol.dispatcher import EngineDispatcher
 from rinari.engine_protocol.errors import INVALID_PARAMS, EngineProtocolError
-from rinari.engine_protocol.messages import hello
+from rinari.engine_protocol.messages import event, hello
 from rinari.engine_protocol.snapshots import (
     build_snapshot,
     message_to_dict,
@@ -38,6 +38,7 @@ class EngineServer:
         self._dispatcher.register("session.create", self._session_create)
         self._dispatcher.register("session.open", self._session_open)
         self._dispatcher.register("session.history", self._session_history)
+        self._dispatcher.register("session.mode.set", self._session_mode_set)
         self._dispatcher.register("session.turn.start", self._turn_start)
         self._dispatcher.register("session.turn.cancel", self._turn_cancel)
         self._dispatcher.register("approval.resolve", self._approval_resolve)
@@ -150,6 +151,19 @@ class EngineServer:
             "total": total,
             "has_more": total > len(window),
         }
+
+    def _session_mode_set(self, params: dict[str, Any]) -> dict[str, Any]:
+        ref = params.get("ref")
+        if not isinstance(ref, str) or not ref:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'ref' must be a non-empty string.")
+        mode = params.get("mode")
+        if not isinstance(mode, str) or not mode:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'mode' must be a non-empty string.")
+        record = self._services.sessions.set_mode(ref, mode)
+        self._turns.emit_external(
+            event("session.mode.changed", {"session_id": record.id, "mode": record.mode})
+        )
+        return {"session": session_to_dict(record)}
 
     # -- turns ------------------------------------------------------------
 

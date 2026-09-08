@@ -847,6 +847,10 @@ Slice 4a adds `session.history` (`ref`, `limit` 1..500 default 200):
 persisted conversation rows (`seq`, `role`, `content`, `tool_calls`),
 tail window with `total`/`has_more`. Protocol turns persist through the
 same `run_turn` path as the terminal, so history covers desktop turns.
+Slice 5a adds `session.mode.set` (`ref`, `mode` plan/build/review):
+PLAN/REVIEW turns run under a READ_ONLY policy profile, BUILD under
+WORKSPACE; legacy modes keep workspace behavior. Emits
+`session.mode.changed`; the mode switch keeps session, tasks and context.
 The envelope contract is unchanged across slices.
 
 ---

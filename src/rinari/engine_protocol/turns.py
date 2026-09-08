@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from rinari.application.services import ServiceContainer
+from rinari.application.session_service import profile_for_mode
 from rinari.cli.agent_runtime import build_agent_session, run_turn
 from rinari.engine_protocol import errors
 from rinari.engine_protocol.errors import EngineProtocolError
@@ -91,6 +92,10 @@ class TurnManager:
     def _emit(self, payload: dict[str, Any]) -> None:
         self._events.put(payload)
 
+    def emit_external(self, payload: dict[str, Any]) -> None:
+        """Server-side events (e.g. mode changes) on the same ordered queue."""
+        self._events.put(payload)
+
     # -- state ------------------------------------------------------------
 
     def has_active_turns(self) -> bool:
@@ -106,6 +111,7 @@ class TurnManager:
             record,
             interactive=False,
             user_home=self._user_home,
+            profile=profile_for_mode(record.mode),
             approval_prompt=self._prompt_for_current_turn,
         )
         turn_id = self._services.ctx.ids.new("turn")
