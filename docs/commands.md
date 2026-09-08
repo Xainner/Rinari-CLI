@@ -815,6 +815,28 @@ Runs the verification planner and records structured validation results.
 
 ---
 
+## `engine`
+
+Machine transport for desktop clients (Rinari Code Engine Protocol v1).
+
+```bash
+rinari engine --stdio
+```
+
+- stdin receives NDJSON requests, stdout emits NDJSON responses/events.
+- stdout is protocol-only: no banners, no ANSI formatting.
+- stderr carries diagnostics and log lines only.
+- The first stdout line is the `hello` handshake (`rinari-engine`, protocol version, engine version, capabilities).
+- Every request carries an `id`; every response echoes it.
+- Unknown methods, duplicate request ids, malformed input, and broken frames return stable error envelopes without breaking the stream.
+
+Slice 1 methods: `engine.info`, `session.list`, `session.get`,
+`session.create`, `session.open`, `runtime.snapshot.get`.
+Turn execution, approvals, and live events arrive in the next slice
+without changing this envelope contract.
+
+---
+
 
 # Session Context Resolution Contract
 
