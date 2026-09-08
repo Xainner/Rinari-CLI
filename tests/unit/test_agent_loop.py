@@ -24,6 +24,7 @@ from rinari.policy.engine import (
 from rinari.policy.sandbox import FilesystemSandbox, ProcessLimits
 from rinari.prompts.assembler import AssemblerContext, PromptAssembler
 from rinari.runtime.agent import AgentContext, AgentLoop
+from rinari.runtime.budget import BudgetMeter, TurnBudgetLimits
 from rinari.runtime.cancellation import CancellationToken
 from rinari.shared.clock import FakeClock
 from rinari.shared.errors import CancelledError
@@ -174,7 +175,7 @@ def test_tool_call_roundtrip(env) -> None:
     assert tool_msg.tool_call_id == "tc1"
     import json as _json
 
-    assert _json.loads(tool_msg.content)["path"].endswith("out.txt")
+    assert _json.loads(tool_msg.content)["data"]["path"].endswith("out.txt")
     assert ("start", "fs.write") in tool_events and ("end", "fs.write") in tool_events
 
 
@@ -194,6 +195,47 @@ def test_request_carries_session_id(env) -> None:
     loop = AgentLoop(model, env["runtime"], env["assembler"])
     loop.turn(env["ctx"], "hello")
     assert model.requests[0].session_id == "s1"
+
+
+def test_gateway_switch_changes_provider_mid_session(env) -> None:
+    from rinari.runtime.model_caller import SessionModelGateway
+
+    first = FakeModel(scripted=[ModelResponse(content="from-A")])
+    second = FakeModel(scripted=[ModelResponse(content="from-B")])
+    gateway = SessionModelGateway(first)  # type: ignore[arg-type]
+    loop = AgentLoop(gateway, env["runtime"], env["assembler"])
+    assert loop.turn(env["ctx"], "hi").content == "from-A"
+    assert len(first.requests) == 1
+    gateway.switch(second)  # type: ignore[arg-type]
+    assert loop.turn(env["ctx"], "again").content == "from-B"
+    assert len(first.requests) == 1
+    assert len(second.requests) == 1
+    # History is provider-independent and preserved across the switch.
+    assert [m.role for m in env["ctx"].history] == ["user", "assistant", "user", "assistant"]
+
+
+def test_malformed_tool_arguments_never_execute(env) -> None:
+    bad = ToolCall(
+        id="tc1", name="fs.write", arguments={}, raw_arguments='{"path": ', arguments_invalid=True
+    )
+    model = FakeModel(
+        scripted=[
+            ModelResponse(content="", tool_calls=(bad,), stop_reason=StopReason.TOOL_CALLS),
+            ModelResponse(content="recovered"),
+        ]
+    )
+    loop = AgentLoop(model, env["runtime"], env["assembler"])
+    budget = BudgetMeter(TurnBudgetLimits(), FakeClock())
+    result = loop.turn(env["ctx"], "write it", budget=budget)
+    assert result.kind == "answer"
+    assert result.content == "recovered"
+    # Never executed: no file, no budget charge, no executed count.
+    assert not (env["root"] / "out.txt").exists()
+    assert budget.tool_calls == 0
+    assert result.tool_calls == 0
+    tools_msgs = [m for m in env["ctx"].history if m.role == "tool"]
+    assert len(tools_msgs) == 1
+    assert "INVALID_ARGUMENT" in tools_msgs[0].content
 
 
 def test_max_tokens_truncation(env) -> None:

@@ -115,9 +115,9 @@ def _read_call(n: int) -> ToolCall:
 def test_model_calls_exhaustion() -> None:
     meter = BudgetMeter(TurnBudgetLimits(max_model_calls=2), FakeClock())
     meter.note_model_call()
+    assert meter.exhausted() == ()
     meter.note_model_call()
-    assert meter.exhausted() == ()  # at the ceiling is gate-controlled by the loop
-    meter.note_model_call()
+    # Gate (>=) and exhausted() agree: at the ceiling the dimension reports.
     assert meter.first_exhausted() == "model-calls"
 
 
@@ -127,8 +127,80 @@ def test_tool_gate_and_exhaustion() -> None:
     meter.note_tool_call("fs.read")
     assert meter.allows_tool("fs.read")
     meter.note_tool_call("fs.read")
-    assert meter.allows_tool("fs.read") is False  # gate uses >=; exhausted() uses >
-    assert meter.exhausted() == ()
+    assert meter.allows_tool("fs.read") is False
+    assert meter.exhausted() == ("tool-calls",)
+
+
+def test_tool_budget_boundary_with_meter(env) -> None:
+    """With a meter present it is authoritative: N execute, N+1 rejected."""
+    from rinari.runtime.agent import AgentLoop
+
+    calls = tuple(
+        ToolCall(id=f"tc{i}", name="fs.stat", arguments={"path": f"f{i}.txt"}) for i in range(5)
+    )
+    model = FakeModel(
+        scripted=[
+            ModelResponse(content="", tool_calls=calls, stop_reason=StopReason.TOOL_CALLS),
+            ModelResponse(content="done"),
+        ]
+    )
+    loop = AgentLoop(model, env["runtime"], env["assembler"])
+    budget = BudgetMeter(TurnBudgetLimits(max_tool_calls=3), env["clock"])
+    result = loop.turn(env["ctx"], "go", budget=budget)
+    assert result.kind == "answer"
+    assert result.tool_calls == 3
+    assert budget.tool_calls == 3
+    tools_msgs = [m for m in env["ctx"].history if m.role == "tool"]
+    assert len(tools_msgs) == 5
+    # Rejected calls become budget-exhausted observations, never executions.
+    # (P0.4 will also carry the machine-readable RESOURCE_EXHAUSTED code.)
+    assert "per-turn tool budget exhausted" in tools_msgs[3].content
+    assert "per-turn tool budget exhausted" in tools_msgs[4].content
+    assert "per-turn tool budget exhausted" not in tools_msgs[2].content
+
+
+def test_default_tool_boundary_sixty_four(env) -> None:
+    """Default limits: 64 tool calls execute, the 65th is rejected."""
+    from rinari.runtime.agent import AgentLoop
+
+    calls = tuple(
+        ToolCall(id=f"tc{i}", name="fs.stat", arguments={"path": f"g{i}.txt"}) for i in range(65)
+    )
+    model = FakeModel(
+        scripted=[
+            ModelResponse(content="", tool_calls=calls, stop_reason=StopReason.TOOL_CALLS),
+            ModelResponse(content="done"),
+        ]
+    )
+    loop = AgentLoop(model, env["runtime"], env["assembler"])
+    budget = BudgetMeter(TurnBudgetLimits(), FakeClock())
+    result = loop.turn(env["ctx"], "go", budget=budget)
+    assert result.kind == "answer"
+    assert result.tool_calls == 64
+    assert budget.tool_calls == 64
+    tools_msgs = [m for m in env["ctx"].history if m.role == "tool"]
+    assert len(tools_msgs) == 65
+    assert "per-turn tool budget exhausted" in tools_msgs[64].content
+    assert "per-turn tool budget exhausted" not in tools_msgs[63].content
+
+
+def test_fallback_tool_boundary_without_meter(env) -> None:
+    """Without a meter the loop's own defensive fallback (32) applies."""
+    from rinari.runtime.agent import AgentLoop
+
+    calls = tuple(
+        ToolCall(id=f"tc{i}", name="fs.stat", arguments={"path": f"h{i}.txt"}) for i in range(33)
+    )
+    model = FakeModel(
+        scripted=[
+            ModelResponse(content="", tool_calls=calls, stop_reason=StopReason.TOOL_CALLS),
+            ModelResponse(content="done"),
+        ]
+    )
+    loop = AgentLoop(model, env["runtime"], env["assembler"])
+    result = loop.turn(env["ctx"], "go", budget=None)
+    assert result.kind == "answer"
+    assert result.tool_calls == 32
 
 
 def test_network_dimension_counts_only_network_namespaces() -> None:
@@ -172,13 +244,43 @@ def test_cost_exhausted_with_pricing() -> None:
 
 def test_subagent_and_recursion_dimensions() -> None:
     meter = BudgetMeter(
-        TurnBudgetLimits(max_subagent_calls=1, max_recursion_depth=2),
+        TurnBudgetLimits(max_subagent_calls=2, max_recursion_depth=2),
         FakeClock(),
     )
     meter.note_subagent(depth=3)
     assert meter.exhausted() == ("recursion-depth",)
     meter.note_subagent(depth=1)
     assert meter.first_exhausted() == "subagents"
+
+
+def test_spawn_child_ledger() -> None:
+    parent = BudgetMeter(TurnBudgetLimits(max_tool_calls=64), FakeClock())
+    child = parent.spawn_child(TurnBudgetLimits(max_tool_calls=4))
+    assert parent.subagent_calls == 1
+    assert child.limits.max_tool_calls == 4
+    child.note_model_call()
+    child.note_tool_call("fs.read")
+    child.note_usage(Usage(input_tokens=10, output_tokens=5))
+    # The parent ledger reflects the child's real cost.
+    assert parent.model_calls == 1
+    assert parent.tool_calls == 1
+    assert parent.input_tokens == 10
+    assert parent.output_tokens == 5
+    # The child's own gates still apply to the child alone.
+    assert child.allows_tool("fs.read")
+    for _ in range(3):
+        child.note_tool_call("fs.read")
+    assert child.allows_tool("fs.read") is False
+    assert parent.tool_calls == 4
+
+
+def test_spawn_child_depth_relativized() -> None:
+    parent = BudgetMeter(TurnBudgetLimits(), FakeClock())
+    child = parent.spawn_child(depth=2)
+    assert parent.max_recursion_depth == 2
+    child.spawn_child(depth=2)
+    assert child.max_recursion_depth == 2
+    assert parent.max_recursion_depth == 3
 
 
 def test_snapshot_shape_and_priority_order() -> None:

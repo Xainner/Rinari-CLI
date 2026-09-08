@@ -626,6 +626,47 @@ class _NoopAssembler:
         return PromptBundle(system_prompt="system", history=history)
 
 
+def test_subagent_run_attaches_parent_ledger(tmp_path, monkeypatch, git_repo):
+    """End-to-end: a subagent run forwards model/tool spend to the parent."""
+    from rinari.agents.definition import BUILTIN_AGENTS
+    from rinari.agents.orchestrator import SubagentRunSpec
+    from rinari.agents.runtime import SubagentRuntimeConfig, make_subagent_runner
+    from rinari.policy.engine import PolicyEngine
+    from rinari.policy.sandbox import FilesystemSandbox
+    from rinari.runtime.budget import BudgetMeter, TurnBudgetLimits
+    from rinari.runtime.cancellation import CancellationToken
+
+    clock = FakeClock(start=1_700_000_000.0, step=0.05)
+
+    def sandbox_factory(profile, cwd, write_roots):
+        return FilesystemSandbox(read_root=git_repo, write_roots=tuple(write_roots))
+
+    config = SubagentRuntimeConfig(
+        caller=_AnswerModel("fs.read", {"path": str(git_repo / "app.py")}, "read it"),
+        base_registry=None,
+        parent_token=CancellationToken(),
+        policy=PolicyEngine(),
+        sandbox_factory=sandbox_factory,
+        parent_session_ctx=_ParentCtx(git_repo, clock),
+        worktrees=None,
+    )
+    parent = BudgetMeter(TurnBudgetLimits(), clock)
+    spec = SubagentRunSpec(
+        agent_id="agt_ledger",
+        definition=BUILTIN_AGENTS["reviewer"],
+        objective=BUILTIN_AGENTS["reviewer"].objective,
+        project_root=git_repo,
+        session_id="parent",
+        parent_budget=parent,
+    )
+    monkeypatch.setattr("rinari.agents.runtime._make_assembler", lambda: _NoopAssembler())
+    result = make_subagent_runner(config).run(spec)
+    assert result.status == "completed"
+    assert parent.subagent_calls == 1
+    assert parent.model_calls >= 1
+    assert parent.tool_calls == 1
+
+
 def test_read_only_subagent_denied_write(tmp_path, monkeypatch, git_repo):
     from rinari.agents.definition import BUILTIN_AGENTS
 

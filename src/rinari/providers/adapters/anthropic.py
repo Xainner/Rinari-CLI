@@ -311,6 +311,22 @@ def _event_message(event: dict[str, Any]) -> dict[str, Any]:
     return message if isinstance(message, dict) else {}
 
 
+def _tool_call_from_anthropic_block(b: dict) -> ToolCall:
+    """tool_use block -> ToolCall, flagging non-object input as invalid."""
+    raw_input = b.get("input")
+    if raw_input is None:
+        return ToolCall(id=str(b.get("id", "")), name=str(b.get("name", "")), arguments={})
+    if isinstance(raw_input, dict):
+        return ToolCall(id=str(b.get("id", "")), name=str(b.get("name", "")), arguments=raw_input)
+    return ToolCall(
+        id=str(b.get("id", "")),
+        name=str(b.get("name", "")),
+        arguments={},
+        raw_arguments=str(raw_input),
+        arguments_invalid=True,
+    )
+
+
 def _response_from_anthropic(data: Any, url: str) -> ModelResponse:
     if not isinstance(data, dict):
         raise ProviderModelError(f"Unexpected messages payload from {url}")
@@ -319,11 +335,7 @@ def _response_from_anthropic(data: Any, url: str) -> ModelResponse:
         b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text"
     ]
     tool_calls = tuple(
-        ToolCall(
-            id=str(b.get("id", "")),
-            name=str(b.get("name", "")),
-            arguments=(b.get("input") if isinstance(b.get("input"), dict) else {}),
-        )
+        _tool_call_from_anthropic_block(b)
         for b in blocks
         if isinstance(b, dict) and b.get("type") == "tool_use"
     )
@@ -386,11 +398,23 @@ class _ToolCallBlockAccumulator:
             block = self._blocks[key]
             if not block["name"]:
                 continue
+            raw = block["json"] or "{}"
+            invalid = False
             try:
-                arguments = json.loads(block["json"] or "{}")
+                arguments = json.loads(raw)
             except json.JSONDecodeError:
                 arguments = {}
+                invalid = True
             if not isinstance(arguments, dict):
                 arguments = {}
-            result.append(ToolCall(id=block["id"], name=block["name"], arguments=arguments))
+                invalid = True
+            result.append(
+                ToolCall(
+                    id=block["id"],
+                    name=block["name"],
+                    arguments=arguments,
+                    raw_arguments=raw,
+                    arguments_invalid=invalid,
+                )
+            )
         return tuple(result)

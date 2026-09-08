@@ -468,6 +468,39 @@ def test_anthropic_stream() -> None:
 # -- capabilities --------------------------------------------------------------
 
 
+def test_openai_marks_malformed_tool_arguments() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "c1",
+                                    "type": "function",
+                                    "function": {"name": "fs.read", "arguments": '{"path": '},
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+            },
+        )
+
+    adapter = OpenAICompatibleAdapter("https://api.test/v1", client=_client(handler))
+    response = adapter.invoke(_request(), "sk-test", None)
+    (call,) = response.tool_calls
+    assert call.arguments == {}
+    assert call.arguments_invalid is True
+    assert call.raw_arguments == '{"path": '
+    assert response.stop_reason is StopReason.TOOL_CALLS
+
+
 def test_capabilities() -> None:
     openai = OpenAICompatibleAdapter("https://api.test/v1")
     assert openai.capabilities() == ProviderCapabilities(

@@ -274,6 +274,33 @@ def test_to_model_text_truncation() -> None:
     assert "[output truncated]" in text
 
 
+def test_to_model_text_error_envelope() -> None:
+    from rinari.tools.definition import ToolErrorCode, ToolErrorInfo
+
+    result = ToolResult(
+        ok=False,
+        error=ToolErrorInfo(
+            code=ToolErrorCode.TIMEOUT, message="request timed out", retryable=True
+        ),
+        tool_call_id="t9",
+    )
+    import json as _json
+
+    envelope = _json.loads(result.to_model_text("web.fetch"))
+    assert envelope["ok"] is False
+    assert envelope["tool"] == "web.fetch"
+    assert envelope["error"] == {
+        "code": "TIMEOUT",
+        "message": "request timed out",
+        "retryable": True,
+    }
+    assert "truncated" not in envelope
+
+    ok_result = ToolResult(ok=True, data={"path": "a.txt"}, tool_call_id="t1")
+    ok_envelope = _json.loads(ok_result.to_model_text("fs.stat"))
+    assert ok_envelope == {"ok": True, "tool": "fs.stat", "data": {"path": "a.txt"}}
+
+
 # -- fs tools ---------------------------------------------------------------------
 
 

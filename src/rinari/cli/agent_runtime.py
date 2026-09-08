@@ -38,7 +38,7 @@ from rinari.runtime.budget import BudgetMeter, TurnBudgetLimits
 from rinari.runtime.cancellation import CancellationToken
 from rinari.runtime.identity import load_constitution, load_soul
 from rinari.runtime.loopdetection import LoopDetector
-from rinari.runtime.model_caller import ModelCaller
+from rinari.runtime.model_caller import ModelCaller, SessionModelGateway
 from rinari.shared.clock import now_iso
 from rinari.shared.errors import CancelledError, InvalidUsageError, RinariError
 from rinari.shared.redaction import Redactor
@@ -67,6 +67,8 @@ class AgentSession:
     caller: ModelCaller
     loop: AgentLoop
     context: AgentContext
+    # Stable indirection the loop holds; switches swap its current caller.
+    gateway: SessionModelGateway | None = None
     token: CancellationToken = field(default_factory=CancellationToken)
     user_home: Path | None = None
     # Set after an in-session CHAT -> PROJECT promotion; the host (REPL)
@@ -375,6 +377,9 @@ def build_agent_session(
     # model_caller is the eval seam: a scripted/caller-equivalent object that
     # satisfies invoke/invoke_stream/capabilities. Production never passes it.
     caller = model_caller if model_caller is not None else _caller_for(services, record)
+    # Stable indirection: the loop (and subagent runs) hold the gateway so
+    # in-session provider/model switches take effect on the next turn.
+    gateway = caller if isinstance(caller, SessionModelGateway) else SessionModelGateway(caller)
     policy = PolicyEngine(network=network_policy)
     tool_ctx = ToolContext(
         session_id=record.id,
@@ -402,7 +407,7 @@ def build_agent_session(
         browser=_build_browser_manager(record.id, home),
         mcp=services.mcp,
     )
-    orchestrator = _build_orchestrator(services, record, root, token, tool_ctx, policy, caller)
+    orchestrator = _build_orchestrator(services, record, root, token, tool_ctx, policy, gateway)
     tools = _build_tools(
         services,
         record,
@@ -415,7 +420,7 @@ def build_agent_session(
         orchestrator=orchestrator,
     )
     loop = AgentLoop(
-        caller,
+        gateway,
         tools,
         PromptAssembler(),
         event_sink=lambda sid, t, p: _persist_event(services, sid, t, p),
@@ -476,6 +481,7 @@ def build_agent_session(
         caller=caller,
         loop=loop,
         context=context,
+        gateway=gateway,
         token=token,
         user_home=home,
     )
@@ -756,6 +762,10 @@ def _apply_session(
 ) -> ProviderSwitchResult:
     session.record = records_get(services, record.id)
     session.caller = _caller_for(services, session.record)
+    if session.gateway is None:
+        session.gateway = SessionModelGateway(session.caller)
+    else:
+        session.gateway.switch(session.caller)
     session.context.model_ref = session.record.model_id or ""
     model_id = session.record.model_id
     model = services.ctx.model_repo.get(model_id) if model_id else None

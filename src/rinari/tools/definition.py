@@ -85,18 +85,50 @@ class ToolResult:
     truncated: bool = False
     origin: str = "native"
 
-    def to_model_text(self) -> str:
-        """Bounded, model-visible rendering of the result."""
+    # Inline budget for the serialized observation envelope. Large outputs
+    # should already have spilled to artifacts upstream; this is the last
+    # bound before text reaches the model.
+    OBSERVATION_INLINE_BUDGET = 2048
+
+    def to_model_text(self, tool: str | None = None) -> str:
+        """Bounded, model-visible structured observation.
+
+        Always serializes the envelope (ok/error code/retryability/
+        artifacts/truncation) so the model can retry, fall back, and
+        recover instead of guessing from a bare string.
+        """
         import json
 
+        envelope: dict[str, Any] = {"ok": self.ok}
+        if tool is not None:
+            envelope["tool"] = tool
+        if self.ok:
+            envelope["data"] = self.data
+        else:
+            err = self.error
+            envelope["error"] = {
+                "code": err.code.value if err is not None else "UNKNOWN",
+                "message": err.message if err is not None else "unknown error",
+                "retryable": bool(err.retryable) if err is not None else False,
+            }
+            if err is not None and err.details is not None:
+                envelope["error"]["details"] = err.details
+        if self.artifacts:
+            envelope["artifacts"] = [a.uri for a in self.artifacts]
+        if self.truncated:
+            envelope["truncated"] = True
+        if self.duration_ms:
+            envelope["duration_ms"] = round(self.duration_ms, 1)
         try:
-            payload: Any = self.data if self.ok else (self.error.message if self.error else None)
-            text = json.dumps(payload, ensure_ascii=False, default=str)
+            text = json.dumps(envelope, ensure_ascii=False, default=str)
         except (TypeError, ValueError):
-            text = str(self.data)
-        if len(text) <= len(self.truncation_mark()) + 2048:
+            text = (
+                '{"ok": false, "error": {"code": "UNKNOWN", '
+                '"message": "unserializable result", "retryable": false}}'
+            )
+        if len(text) <= len(self.truncation_mark()) + self.OBSERVATION_INLINE_BUDGET:
             return text
-        return text[:2048] + self.truncation_mark()
+        return text[: self.OBSERVATION_INLINE_BUDGET] + self.truncation_mark()
 
     @staticmethod
     def truncation_mark() -> str:
@@ -177,6 +209,10 @@ class ToolContext:
     # Application-level McpService (rinari.mcp): dynamic mcp.* tools resolve a
     # connected client through it. None in test/CHAT contexts without MCP.
     mcp: Any = None
+    # Parent turn's BudgetMeter for the hierarchical ledger (P0.10): the
+    # agent.spawn tool path attaches subagent cost to the spawning turn.
+    # None when no parent meter is active (budget-less turns, unit tests).
+    parent_budget: Any = None
 
 
 @dataclass(frozen=True, slots=True)

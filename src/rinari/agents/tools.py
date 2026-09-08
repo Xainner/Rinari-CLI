@@ -63,6 +63,7 @@ def _agent_tools(host: AgentToolHost):
                 objective,
                 context={str(k): str(v) for k, v in context.items()},
                 use_worktree=use_worktree,
+                parent_budget=getattr(ctx, "parent_budget", None),
             )
         except Exception as exc:
             return _err(getattr(exc, "code", ""), str(exc))

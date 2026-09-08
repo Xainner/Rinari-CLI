@@ -128,15 +128,29 @@ class _SubagentRunner:
             tool_ctx=tool_ctx,
             assembler_base=base,
         )
-        budget = BudgetMeter(
-            TurnBudgetLimits(
-                max_model_calls=definition.budget.max_model_calls,
-                max_tool_calls=definition.budget.max_tool_calls,
-                max_network_calls=definition.budget.max_tool_calls,
-                max_wall_time_s=definition.budget.max_wall_time_s,
-            ),
-            clock=cfg.parent_session_ctx.clock,
-        )
+        parent_budget = getattr(spec, "parent_budget", None)
+        if parent_budget is not None:
+            # Hierarchical ledger (P0.10): the child's spend forwards to
+            # the spawning turn; the spawn itself is counted with depth.
+            budget = parent_budget.spawn_child(
+                TurnBudgetLimits(
+                    max_model_calls=definition.budget.max_model_calls,
+                    max_tool_calls=definition.budget.max_tool_calls,
+                    max_network_calls=definition.budget.max_tool_calls,
+                    max_wall_time_s=definition.budget.max_wall_time_s,
+                ),
+                depth=spec.depth,
+            )
+        else:
+            budget = BudgetMeter(
+                TurnBudgetLimits(
+                    max_model_calls=definition.budget.max_model_calls,
+                    max_tool_calls=definition.budget.max_tool_calls,
+                    max_network_calls=definition.budget.max_tool_calls,
+                    max_wall_time_s=definition.budget.max_wall_time_s,
+                ),
+                clock=cfg.parent_session_ctx.clock,
+            )
         # Cancellation propagation: this subagent token reflects both the
         # orchestrator token (agent.cancel) and the parent session token
         # (session `rinari stop` / Ctrl+C), and cancel flows both ways.

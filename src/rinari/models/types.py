@@ -35,6 +35,10 @@ class ToolCall:
     id: str
     name: str
     arguments: dict[str, Any] = field(default_factory=dict)
+    # Set when the wire arguments were not valid JSON (or not an object):
+    # arguments stays {} and the tool must NOT execute.
+    raw_arguments: str | None = None
+    arguments_invalid: bool = False
 
 
 @dataclass(frozen=True, slots=True)

@@ -71,6 +71,11 @@ class BudgetMeter:
     limits: TurnBudgetLimits
     clock: Clock
     is_network: Callable[[str], bool] | None = None
+    # Hierarchical ledger (P0.10): a child meter forwards every note to its
+    # parent, so the spawning turn's snapshot reflects real aggregate cost
+    # instead of main-agent-only spend. Gates always apply to the local
+    # counters; the parent's own gates see the forwarded totals.
+    parent: BudgetMeter | None = None
     model_calls: int = 0
     tool_calls: int = 0
     network_calls: int = 0
@@ -83,6 +88,23 @@ class BudgetMeter:
     def __post_init__(self) -> None:
         self.started_at = self.clock.now()
 
+    def spawn_child(
+        self, limits: TurnBudgetLimits | None = None, *, depth: int = 1
+    ) -> BudgetMeter:
+        """Create a bounded child ledger attached to this meter.
+
+        Counts the spawn itself (with the child's depth) and returns a
+        meter whose notes forward upward with relativized depth.
+        """
+        child = BudgetMeter(
+            limits or self.limits,
+            clock=self.clock,
+            is_network=self.is_network,
+            parent=self,
+        )
+        self.note_subagent(depth)
+        return child
+
     @property
     def _net(self) -> Callable[[str], bool]:
         return self.is_network or _default_is_network
@@ -91,11 +113,16 @@ class BudgetMeter:
 
     def note_model_call(self) -> None:
         self.model_calls += 1
+        if self.parent is not None:
+            self.parent.note_model_call()
 
-    def note_tool_call(self, name: str) -> None:
+    def note_tool_call(self, name: str, *, is_network: bool | None = None) -> None:
         self.tool_calls += 1
-        if self._net(name):
+        network = is_network if is_network is not None else self._net(name)
+        if network:
             self.network_calls += 1
+        if self.parent is not None:
+            self.parent.note_tool_call(name, is_network=network)
 
     def note_usage(self, usage: Usage | None) -> None:
         if usage is None:
@@ -104,17 +131,26 @@ class BudgetMeter:
             self.input_tokens += usage.input_tokens
         if usage.output_tokens:
             self.output_tokens += usage.output_tokens
+        if self.parent is not None:
+            self.parent.note_usage(usage)
 
     def note_subagent(self, depth: int = 1) -> None:
         self.subagent_calls += 1
         self.max_recursion_depth = max(self.max_recursion_depth, depth)
+        if self.parent is not None:
+            self.parent.note_subagent(depth + 1)
 
-    def allows_tool(self, name: str) -> bool:
+    def allows_tool(self, name: str, *, is_network: bool | None = None) -> bool:
         """Per-dimension gate before executing a tool (model-call gating
-        happens in the loop itself, not here)."""
+        happens in the loop itself, not here).
+
+        is_network overrides the name-prefix heuristic with ground truth
+        from tool classification; the loop always passes it.
+        """
         if self.tool_calls >= self.limits.max_tool_calls:
             return False
-        if self._net(name):
+        network = is_network if is_network is not None else self._net(name)
+        if network:
             return self.network_calls < self.limits.max_network_calls
         return True
 
@@ -136,15 +172,18 @@ class BudgetMeter:
 
     def exhausted(self) -> tuple[str, ...]:
         hits: list[str] = []
-        if self.model_calls > self.limits.max_model_calls:
+        # Count dimensions report at the ceiling (>=): the gates block new
+        # work exactly there, so the snapshot must agree. Wall-time and cost
+        # stay strict (>) — no exact-boundary gate exists for them.
+        if self.model_calls >= self.limits.max_model_calls:
             hits.append(MODEL_CALLS)
-        if self.tool_calls > self.limits.max_tool_calls:
+        if self.tool_calls >= self.limits.max_tool_calls:
             hits.append(TOOL_CALLS)
-        if self.network_calls > self.limits.max_network_calls:
+        if self.network_calls >= self.limits.max_network_calls:
             hits.append(NETWORK_CALLS)
-        if self.subagent_calls > self.limits.max_subagent_calls:
+        if self.subagent_calls >= self.limits.max_subagent_calls:
             hits.append(SUBAGENTS)
-        if self.max_recursion_depth > self.limits.max_recursion_depth:
+        if self.max_recursion_depth >= self.limits.max_recursion_depth:
             hits.append(RECURSION_DEPTH)
         cost = self.estimated_cost()
         if self.limits.max_cost is not None and cost is not None and cost > self.limits.max_cost:
@@ -154,8 +193,15 @@ class BudgetMeter:
         ordered = [name for name in PRIORITY if name in hits]
         return tuple(ordered)
 
-    def first_exhausted(self) -> str | None:
-        hits = self.exhausted()
+    def first_exhausted(self, *, ignore: tuple[str, ...] = ()) -> str | None:
+        """First exhausted dimension, optionally skipping some.
+
+        The loop ignores tool/network exhaustion mid-turn: per-call gating
+        already blocks execution and the model must still observe the
+        rejection and answer. Termination then comes from the model-call
+        ceiling, loop detection, or a final answer.
+        """
+        hits = [name for name in self.exhausted() if name not in ignore]
         return hits[0] if hits else None
 
     def snapshot(self) -> dict[str, Any]:

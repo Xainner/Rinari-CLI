@@ -31,11 +31,13 @@ from rinari.context.tokens import (
 )
 from rinari.models.types import ChatMessage, ModelRequest, StopReason, Usage
 from rinari.prompts.assembler import AssemblerContext, PromptAssembler
+from rinari.runtime.budget import NETWORK_CALLS as NETWORK_CALLS_DIM
+from rinari.runtime.budget import TOOL_CALLS as TOOL_CALLS_DIM
 from rinari.runtime.budget import BudgetMeter
 from rinari.runtime.cancellation import CancellationToken
 from rinari.runtime.loopdetection import LoopDetector
 from rinari.shared.errors import CancelledError
-from rinari.tools.definition import ToolErrorCode, ToolErrorInfo, ToolResult
+from rinari.tools.definition import ToolContext, ToolErrorCode, ToolErrorInfo, ToolResult
 from rinari.tools.runtime import ToolRuntime
 
 # Event names persist verbatim into session_events (trace base, phase 2).
@@ -144,36 +146,50 @@ class AgentLoop:
             started_payload["turn_index"] = turn_index
         self._emit(ctx.session_id, EVENT_TURN_STARTED, started_payload)
         ctx.history.append(ChatMessage.user(user_message))
-        tool_calls_made = 0
+        # Hierarchical ledger (P0.10): the turn's meter becomes the parent
+        # budget visible to agent.spawn, so subagent cost aggregates here.
+        if (
+            budget is not None
+            and isinstance(ctx.tool_ctx, ToolContext)
+            and ctx.tool_ctx.parent_budget is not budget
+        ):
+            ctx.tool_ctx = replace(ctx.tool_ctx, parent_budget=budget)
+        tool_calls_requested = 0
+        tool_calls_executed = 0
+        tool_calls_rejected = 0
         tool_seq = 0
         total_usage: Usage | None = None
 
-        max_iters = self._max_model_calls
-        if budget is not None:
-            max_iters = max(max_iters, budget.limits.max_model_calls)
+        # A present meter is authoritative for model-call iterations; the
+        # loop's own cap is only a defensive fallback without one.
+        max_iters = budget.limits.max_model_calls if budget is not None else self._max_model_calls
         for _ in range(max_iters):
             cancel.throw_if_cancelled()
             if budget is not None:
-                hit = budget.first_exhausted()
+                hit = budget.first_exhausted(ignore=(TOOL_CALLS_DIM, NETWORK_CALLS_DIM))
                 if hit is not None:
                     return self._stop(
                         ctx.session_id,
                         "budget",
-                        f"Stopped: turn budget exhausted ({_budget_reason(hit)}).",
-                        tool_calls_made,
+                        f"Stopped: turn budget exhausted ({hit}: {_budget_reason(hit)}).",
+                        tool_calls_executed,
                         total_usage,
                         budget,
                         turn_index,
+                        requested=tool_calls_requested,
+                        rejected=tool_calls_rejected,
                     )
                 if budget.model_calls >= budget.limits.max_model_calls:
                     return self._stop(
                         ctx.session_id,
                         "budget",
                         "Stopped: turn budget exhausted (model-calls).",
-                        tool_calls_made,
+                        tool_calls_executed,
                         total_usage,
                         budget,
                         turn_index,
+                        requested=tool_calls_requested,
+                        rejected=tool_calls_rejected,
                     )
                 budget.note_model_call()
             request = self._build_request(ctx)
@@ -217,12 +233,19 @@ class AgentLoop:
                 self._emit(
                     ctx.session_id,
                     EVENT_TURN_COMPLETED,
-                    _turn_completed_payload(kind, tool_calls_made, budget, turn_index),
+                    _turn_completed_payload(
+                        kind,
+                        tool_calls_executed,
+                        budget,
+                        turn_index,
+                        requested=tool_calls_requested,
+                        rejected=tool_calls_rejected,
+                    ),
                 )
                 return TurnResult(
                     kind=kind,
                     content=response.content or "",
-                    tool_calls=tool_calls_made,
+                    tool_calls=tool_calls_executed,
                     usage=total_usage,
                     budget=budget.snapshot() if budget is not None else None,
                 )
@@ -231,9 +254,38 @@ class AgentLoop:
             ctx.history.append(ChatMessage.assistant(response.content or "", response.tool_calls))
             for call in response.tool_calls:
                 cancel.throw_if_cancelled()
-                allowed = budget is None or budget.allows_tool(call.name)
+                tool_calls_requested += 1
+                network = self._call_is_network(call.name, call.arguments)
+                if budget is not None:
+                    allowed = budget.allows_tool(call.name, is_network=network)
+                else:
+                    allowed = tool_calls_executed < self._max_tool_calls
                 executed = False
-                if tool_calls_made >= self._max_tool_calls or not allowed:
+                if call.arguments_invalid:
+                    # Malformed wire arguments are never executed and never
+                    # charged: the model gets a retryable observation instead.
+                    result = ToolResult(
+                        ok=False,
+                        error=ToolErrorInfo(
+                            code=ToolErrorCode.INVALID_ARGUMENT,
+                            message=(
+                                f"Model emitted invalid JSON for arguments of "
+                                f"{call.name!r}; fix the arguments and retry"
+                            ),
+                            retryable=True,
+                        ),
+                    )
+                    self._emit_hook(
+                        "ToolError",
+                        {
+                            "tool": call.name,
+                            "tool_call_id": call.id,
+                            "code": result.error.code.value,
+                            "message": result.error.message,
+                        },
+                    )
+                elif not allowed:
+                    tool_calls_rejected += 1
                     result = ToolResult(
                         ok=False,
                         error=ToolErrorInfo(
@@ -244,8 +296,9 @@ class AgentLoop:
                     )
                 else:
                     executed = True
+                    tool_calls_executed += 1
                     if budget is not None:
-                        budget.note_tool_call(call.name)
+                        budget.note_tool_call(call.name, is_network=network)
                     self._emit_hook(
                         "PreToolUse",
                         {"tool": call.name, "arguments": call.arguments, "tool_call_id": call.id},
@@ -282,10 +335,9 @@ class AgentLoop:
                             },
                         )
                     _hook(on_tool, "end", call.name, result)
-                tool_calls_made += 1
                 tool_seq += 1
                 ctx.history.append(
-                    ChatMessage.tool_result(call.id, call.name, result.to_model_text())
+                    ChatMessage.tool_result(call.id, call.name, result.to_model_text(call.name))
                 )
                 if not executed:
                     tool_completed_payload: dict = {
@@ -316,24 +368,28 @@ class AgentLoop:
                             ctx.session_id,
                             "loop",
                             f"Stopped: loop detected ({signal.kind} — {signal.detail}).",
-                            tool_calls_made,
+                            tool_calls_executed,
                             total_usage,
                             budget,
                             turn_index,
+                            requested=tool_calls_requested,
+                            rejected=tool_calls_rejected,
                         )
                     ctx.history.append(ChatMessage.user(loop.nudge_text(signal)))
 
             if budget is not None:
-                hit = budget.first_exhausted()
+                hit = budget.first_exhausted(ignore=(TOOL_CALLS_DIM, NETWORK_CALLS_DIM))
                 if hit is not None:
                     return self._stop(
                         ctx.session_id,
                         "budget",
-                        f"Stopped: turn budget exhausted ({_budget_reason(hit)}).",
-                        tool_calls_made,
+                        f"Stopped: turn budget exhausted ({hit}: {_budget_reason(hit)}).",
+                        tool_calls_executed,
                         total_usage,
                         budget,
                         turn_index,
+                        requested=tool_calls_requested,
+                        rejected=tool_calls_rejected,
                     )
 
         return self._stop(
@@ -341,10 +397,12 @@ class AgentLoop:
             "budget",
             "Stopped: exceeded the per-turn model-call limit while the model kept "
             "requesting tools.",
-            tool_calls_made,
+            tool_calls_executed,
             total_usage,
             budget,
             turn_index,
+            requested=tool_calls_requested,
+            rejected=tool_calls_rejected,
         )
 
     # -- internals ------------------------------------------------------------
@@ -390,6 +448,24 @@ class AgentLoop:
             return self._provider.invoke_stream(request, on_delta)
         return self._provider.invoke(request)
 
+    def _call_is_network(self, name: str, arguments: Any) -> bool:
+        """Ground-truth network classification for budget dimensions.
+
+        Uses the tool registry + declared capabilities, never the name
+        prefix. Unknown tools and classification failures are not network.
+        """
+        try:
+            definition = self._tools.registry.get(name)
+        except Exception:
+            return False
+        if definition is None:
+            return False
+        try:
+            args = arguments if isinstance(arguments, dict) else {}
+            return definition.classify_action(args).capability == "network.outbound"
+        except Exception:
+            return False
+
     def _stop(
         self,
         session_id: str,
@@ -399,11 +475,16 @@ class AgentLoop:
         usage: Usage | None,
         budget: BudgetMeter | None = None,
         turn_index: int | None = None,
+        *,
+        requested: int = 0,
+        rejected: int = 0,
     ) -> TurnResult:
         self._emit(
             session_id,
             EVENT_TURN_COMPLETED,
-            _turn_completed_payload(kind, tool_calls, budget, turn_index),
+            _turn_completed_payload(
+                kind, tool_calls, budget, turn_index, requested=requested, rejected=rejected
+            ),
         )
         return TurnResult(
             kind=kind,
@@ -429,9 +510,20 @@ class AgentLoop:
 
 
 def _turn_completed_payload(
-    kind: str, tool_calls: int, budget: BudgetMeter | None, turn_index: int | None = None
+    kind: str,
+    tool_calls: int,
+    budget: BudgetMeter | None,
+    turn_index: int | None = None,
+    *,
+    requested: int = 0,
+    rejected: int = 0,
 ) -> dict:
-    payload = {"kind": kind, "tool_calls": tool_calls}
+    payload = {
+        "kind": kind,
+        "tool_calls": tool_calls,
+        "tool_calls_requested": requested,
+        "tool_calls_rejected": rejected,
+    }
     if budget is not None:
         payload["budget"] = budget.snapshot()
     if turn_index is not None:

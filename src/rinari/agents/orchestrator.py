@@ -82,6 +82,9 @@ class SubagentRunSpec:
     token: CancellationToken = field(default_factory=CancellationToken)
     worktree: Any | None = None  # WorktreeInfo | None (writers only)
     messages: queue.Queue[str] = field(default_factory=queue.Queue)
+    # Spawning turn's BudgetMeter for the hierarchical ledger (P0.10);
+    # None keeps the legacy standalone meter.
+    parent_budget: Any | None = None
 
 
 class SubagentRunner(Protocol):
@@ -181,6 +184,7 @@ class AgentOrchestrator:
         use_worktree: bool = False,
         depth: int = 1,
         timeout_s: float = 600.0,
+        parent_budget: Any | None = None,
     ) -> str:
         with self._lock:
             if self._spawned_total >= self.max_total:
@@ -216,6 +220,7 @@ class AgentOrchestrator:
             budget=definition.budget,
             token=token,
             worktree=self._prepare_worktree(definition, agent_id, use_worktree),
+            parent_budget=parent_budget,
         )
         state = {
             "id": agent_id,

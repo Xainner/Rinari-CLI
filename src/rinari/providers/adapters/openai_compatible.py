@@ -425,14 +425,23 @@ def _function_call_from_responses(raw: Any) -> ToolCall | None:
     if not isinstance(raw, dict) or raw.get("type") != "function_call":
         return None
     arguments_raw = raw.get("arguments") or "{}"
+    invalid = False
     try:
         arguments = json.loads(arguments_raw) if isinstance(arguments_raw, str) else arguments_raw
     except json.JSONDecodeError:
         arguments = {}
+        invalid = True
     if not isinstance(arguments, dict):
         arguments = {}
+        invalid = True
     call_id = raw.get("call_id") or raw.get("id") or ""
-    return ToolCall(id=str(call_id), name=str(raw.get("name") or ""), arguments=arguments)
+    return ToolCall(
+        id=str(call_id),
+        name=str(raw.get("name") or ""),
+        arguments=arguments,
+        raw_arguments=arguments_raw if isinstance(arguments_raw, str) else None,
+        arguments_invalid=invalid,
+    )
 
 
 def _usage_from_responses(raw: Any) -> Usage:
@@ -542,16 +551,21 @@ def _response_from_openai(data: Any, url: str) -> ModelResponse:
 def _tool_call_from_openai(raw: Any) -> ToolCall:
     function = (raw or {}).get("function") or {}
     arguments_raw = function.get("arguments") or "{}"
+    invalid = False
     try:
         arguments = json.loads(arguments_raw) if isinstance(arguments_raw, str) else arguments_raw
     except json.JSONDecodeError:
         arguments = {}
+        invalid = True
     if not isinstance(arguments, dict):
         arguments = {}
+        invalid = True
     return ToolCall(
         id=str((raw or {}).get("id") or ""),
         name=str(function.get("name") or ""),
         arguments=arguments,
+        raw_arguments=arguments_raw if isinstance(arguments_raw, str) else None,
+        arguments_invalid=invalid,
     )
 
 
@@ -607,11 +621,23 @@ class _ToolCallAccumulator:
             slot = self._by_index[index]
             if not slot["name"]:
                 continue
+            raw = slot["arguments"] or "{}"
+            invalid = False
             try:
-                arguments = json.loads(slot["arguments"] or "{}")
+                arguments = json.loads(raw)
             except json.JSONDecodeError:
                 arguments = {}
+                invalid = True
             if not isinstance(arguments, dict):
                 arguments = {}
-            result.append(ToolCall(id=slot["id"], name=slot["name"], arguments=arguments))
+                invalid = True
+            result.append(
+                ToolCall(
+                    id=slot["id"],
+                    name=slot["name"],
+                    arguments=arguments,
+                    raw_arguments=raw,
+                    arguments_invalid=invalid,
+                )
+            )
         return tuple(result)
