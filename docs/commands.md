@@ -832,8 +832,10 @@ rinari engine --stdio
 
 Slice 1 methods: `engine.info`, `session.list`, `session.get`,
 `session.create`, `session.open`, `runtime.snapshot.get`.
-Turn execution, approvals, and live events arrive in the next slice
-without changing this envelope contract.
+Slice 2 adds live turns and reads: `session.turn.start`,
+`session.turn.cancel`, `approval.resolve`, `provider.list`, `model.list`,
+with `turn.*`, `model.content.delta`, `tool.*`, and `approval.*` events.
+The envelope contract is unchanged across slices.
 
 ---
 

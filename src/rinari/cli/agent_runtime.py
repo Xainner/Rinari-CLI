@@ -25,7 +25,7 @@ from rinari.application.services import ServiceContainer
 from rinari.instructions.resolver import provenance_for, resolve_project_instructions
 from rinari.models.router import ModelRouter
 from rinari.models.types import ChatMessage, ToolCall
-from rinari.policy.approvals import ApprovalEngine
+from rinari.policy.approvals import AnswerPrompt, ApprovalEngine
 from rinari.policy.engine import PermissionProfile, PolicyEngine
 from rinari.policy.network import NetworkGuard, NetworkPolicy
 from rinari.policy.sandbox import FilesystemSandbox, ProcessLimits
@@ -367,6 +367,7 @@ def build_agent_session(
     user_home: Path | None = None,
     profile: PermissionProfile = PermissionProfile.WORKSPACE,
     model_caller: ModelCaller | None = None,
+    approval_prompt: AnswerPrompt | None = None,
 ) -> AgentSession:
     root = Path(record.project_root_snapshot) if record.project_root_snapshot else None
     cwd = Path(record.current_cwd)
@@ -415,6 +416,7 @@ def build_agent_session(
         record,
         interactive=interactive,
         token=token,
+        approval_prompt=approval_prompt,
         network_policy=network_policy,
         root=root,
         hook_engine=hook_engine,
@@ -596,6 +598,7 @@ def _build_tools(
     hook_engine=None,
     policy: PolicyEngine | None = None,
     orchestrator=None,
+    approval_prompt: AnswerPrompt | None = None,
 ) -> ToolRuntime:
     registry = ToolRegistry()
     registry.register_all(all_native_tools())
@@ -628,6 +631,8 @@ def _build_tools(
     registry.register_all(capability_activation_tools(registry))
 
     def ask(request) -> str:
+        if approval_prompt is not None:
+            return approval_prompt(request)
         if hook_engine is not None:
             hook_engine.emit(
                 "PermissionRequest",

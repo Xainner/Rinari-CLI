@@ -1,57 +1,28 @@
-"""Presentation-safe serializers and the RuntimeSnapshot builder."""
+"""Presentation-safe serializers and the RuntimeSnapshot builder.
+
+Session/model shapes reuse the canonical CLI serializers so the desktop and
+the terminal never disagree on field names. Provider views are redacted:
+identity and status only, never secret material.
+"""
 
 from __future__ import annotations
 
 from typing import Any
 
 from rinari.application.services import ServiceContainer
+from rinari.cli.serializers import provider_dict, session_dict
 from rinari.engine_protocol import protocol
 from rinari.storage.records import ProviderRecord, SessionRecord
 
 
 def session_to_dict(record: SessionRecord) -> dict[str, Any]:
-    skills = None
-    if record.active_skills is not None:
-        skills = [[name, version] for name, version in record.active_skills]
-    return {
-        "id": record.id,
-        "kind": record.kind,
-        "title": record.title,
-        "project_id": record.project_id,
-        "project_root": record.project_root_snapshot,
-        "created_cwd": record.created_cwd,
-        "current_cwd": record.current_cwd,
-        "provider_id": record.provider_id,
-        "model_id": record.model_id,
-        "profile_id": record.profile_id,
-        "mode": record.mode,
-        "state": record.state,
-        "git_branch": record.git_branch,
-        "forked_from": record.forked_from,
-        "active_skills": skills,
-        "created_at": record.created_at,
-        "updated_at": record.updated_at,
-        "last_active_at": record.last_active_at,
-    }
+    return session_dict(record)
 
 
 def provider_to_dict(record: ProviderRecord, has_credential: bool) -> dict[str, Any]:
-    """Redacted provider view: identity and status only, never secret material."""
-    return {
-        "id": record.id,
-        "alias": record.alias,
-        "type": record.type,
-        "auth_method": record.auth_method,
-        "account_hint": record.account_hint,
-        "endpoint": record.endpoint,
-        "default_model_id": record.default_model_id,
-        "last_used_model_id": record.last_used_model_id,
-        "status_connected": record.status_connected,
-        "status_checked_at": record.status_checked_at,
-        "has_credential": bool(has_credential),
-        "created_at": record.created_at,
-        "updated_at": record.updated_at,
-    }
+    view = provider_dict(record, active=False, credential_ref=None)
+    view["has_credential"] = bool(has_credential)
+    return view
 
 
 def build_snapshot(services: ServiceContainer) -> dict[str, Any]:
