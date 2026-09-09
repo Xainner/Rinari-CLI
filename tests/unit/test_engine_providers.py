@@ -8,6 +8,7 @@ injected fakes).
 """
 
 import json
+import time
 
 import httpx
 import pytest
@@ -210,6 +211,23 @@ def test_model_discover_lists_without_saving(live_server) -> None:
     assert [m["provider_model_id"] for m in found["providers"]["ollama"]] == ["mx-1", "mx-2"]
     models = _ok(_call(live_server, "model.list", {"provider": "ollama"}, tag="l"))["models"]
     assert models == []
+
+
+def test_model_discovery_job_returns_before_network_work_completes(live_server) -> None:
+    _create_local(live_server)
+    started = time.monotonic()
+    job = _ok(_call(live_server, "model.discovery.start", {"provider": "ollama"}, tag="job"))
+    assert time.monotonic() - started < 0.5
+    assert job["status"] in {"running", "completed"}
+    deadline = time.monotonic() + 2
+    events = []
+    while time.monotonic() < deadline:
+        events.extend(live_server.drain_events())
+        if any(item.get("event") == "model.discovery.completed" for item in events):
+            break
+        time.sleep(0.01)
+    completed = next(item for item in events if item.get("event") == "model.discovery.completed")
+    assert completed["payload"]["job_id"] == job["job_id"]
 
 
 def test_provider_discover_env_candidate(server, monkeypatch) -> None:

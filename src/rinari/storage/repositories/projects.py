@@ -12,8 +12,9 @@ class ProjectRepository:
         self._db.execute(
             """
             INSERT INTO projects (
-                id, canonical_root, git_fingerprint, metadata_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                id, canonical_root, git_fingerprint, metadata_json, created_at, updated_at,
+                name, description, pinned, archived, last_opened_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 rec.id,
@@ -22,6 +23,11 @@ class ProjectRepository:
                 json.dumps(rec.metadata, sort_keys=True),
                 rec.created_at,
                 rec.updated_at,
+                rec.name,
+                rec.description,
+                int(rec.pinned),
+                int(rec.archived),
+                rec.last_opened_at,
             ),
         )
 
@@ -35,20 +41,32 @@ class ProjectRepository:
         )
         return _row_to_record(row) if row else None
 
-    def list(self) -> list[ProjectRecord]:
-        rows = self._db.query("SELECT * FROM projects ORDER BY created_at")
+    def list(self, *, include_archived: bool = True) -> list[ProjectRecord]:
+        sql = "SELECT * FROM projects"
+        params: tuple[object, ...] = ()
+        if not include_archived:
+            sql += " WHERE archived = ?"
+            params = (0,)
+        sql += " ORDER BY pinned DESC, last_opened_at DESC, name COLLATE NOCASE"
+        rows = self._db.query(sql, params)
         return [_row_to_record(r) for r in rows]
 
     def update(self, rec: ProjectRecord) -> None:
         self._db.execute(
             """
-            UPDATE projects SET git_fingerprint = ?, metadata_json = ?, updated_at = ?
+            UPDATE projects SET git_fingerprint = ?, metadata_json = ?, updated_at = ?,
+                name = ?, description = ?, pinned = ?, archived = ?, last_opened_at = ?
             WHERE id = ?
             """,
             (
                 rec.git_fingerprint,
                 json.dumps(rec.metadata, sort_keys=True),
                 rec.updated_at,
+                rec.name,
+                rec.description,
+                int(rec.pinned),
+                int(rec.archived),
+                rec.last_opened_at,
                 rec.id,
             ),
         )
@@ -62,4 +80,9 @@ def _row_to_record(row: dict) -> ProjectRecord:
         metadata=json.loads(row["metadata_json"]) if row["metadata_json"] else {},
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        name=row["name"],
+        description=row["description"],
+        pinned=bool(row["pinned"]),
+        archived=bool(row["archived"]),
+        last_opened_at=row["last_opened_at"],
     )

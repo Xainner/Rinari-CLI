@@ -8,12 +8,18 @@ roundtrips, provider/model reads. Envelope contract is unchanged.
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
 from rinari.application.provider_service import AddProviderInput
 from rinari.application.services import ServiceContainer
-from rinari.application.session_service import EVENT_SESSION_FORKED, SESSION_STATE_CLOSED
+from rinari.application.session_service import (
+    EVENT_SESSION_FORKED,
+    SESSION_STATE_ARCHIVED,
+    SESSION_STATE_CLOSED,
+)
 from rinari.cli.serializers import model_dict
 from rinari.engine_protocol import protocol
 from rinari.engine_protocol.dispatcher import EngineDispatcher
@@ -24,12 +30,12 @@ from rinari.engine_protocol.errors import (
     EngineProtocolError,
 )
 from rinari.engine_protocol.messages import event, hello
-from rinari.engine_protocol.pty import EnginePtyService
 from rinari.engine_protocol.observability import (
     clamp_read_bytes,
     context_view,
     usage_from_events,
 )
+from rinari.engine_protocol.pty import EnginePtyService
 from rinari.engine_protocol.snapshots import (
     build_snapshot,
     message_to_dict,
@@ -106,14 +112,20 @@ class EngineServer:
             resolve_session=self._services.sessions.show,
         )
         self._dispatcher = EngineDispatcher()
+        self._model_jobs: dict[str, dict[str, Any]] = {}
+        self._model_jobs_lock = threading.Lock()
         self._dispatcher.register("engine.info", self._engine_info)
         self._dispatcher.register("session.list", self._session_list)
         self._dispatcher.register("session.get", self._session_get)
         self._dispatcher.register("session.create", self._session_create)
         self._dispatcher.register("session.open", self._session_open)
+        self._dispatcher.register("session.rename", self._session_rename)
+        self._dispatcher.register("session.archive", self._session_archive)
+        self._dispatcher.register("session.restore", self._session_restore)
         self._dispatcher.register("session.close", self._session_close)
         self._dispatcher.register("session.delete", self._session_delete)
         self._dispatcher.register("session.branch", self._session_branch)
+        self._dispatcher.register("session.fork", self._session_branch)
         self._dispatcher.register("session.history", self._session_history)
         self._dispatcher.register("session.mode.set", self._session_mode_set)
         self._dispatcher.register("session.model.set", self._session_model_set)
@@ -132,6 +144,11 @@ class EngineServer:
         self._dispatcher.register("project.changes", self._project_changes)
         self._dispatcher.register("project.diff", self._project_diff)
         self._dispatcher.register("project.list_recent", self._project_list_recent)
+        self._dispatcher.register("project.list", self._project_list)
+        self._dispatcher.register("project.get", self._project_get)
+        self._dispatcher.register("project.add", self._project_add)
+        self._dispatcher.register("project.update", self._project_update)
+        self._dispatcher.register("project.remove", self._project_remove)
         self._dispatcher.register("project.open", self._project_open)
         self._dispatcher.register("project.status", self._project_status)
         self._dispatcher.register("project.intelligence", self._project_intelligence)
@@ -198,6 +215,7 @@ class EngineServer:
         self._dispatcher.register("model.remove", self._model_remove)
         self._dispatcher.register("model.use", self._model_use)
         self._dispatcher.register("model.discover", self._model_discover)
+        self._dispatcher.register("model.discovery.start", self._model_discovery_start)
         self._dispatcher.register("model.refresh", self._model_refresh)
         self._dispatcher.register("model.test", self._model_test)
         self._dispatcher.register("runtime.snapshot.get", self._snapshot_get)
@@ -245,9 +263,24 @@ class EngineServer:
         limit = params.get("limit", 50)
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 500:
             raise EngineProtocolError(INVALID_PARAMS, "Param 'limit' must be an int in 1..500.")
-        records = self._services.sessions.list(kind=kind, limit=limit)
-        if not params.get("include_closed", False):
-            records = [r for r in records if r.state != SESSION_STATE_CLOSED]
+        project_id = params.get("project_id")
+        state = params.get("state")
+        if project_id is not None and (not isinstance(project_id, str) or not project_id):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'project_id' must be a string.")
+        if state is not None and (not isinstance(state, str) or not state):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'state' must be a string.")
+        records = self._services.sessions.list(
+            kind=kind,
+            project_id=project_id,
+            state=state,
+            limit=limit,
+        )
+        if not params.get("include_closed", False) and state is None:
+            records = [
+                r
+                for r in records
+                if r.state not in {SESSION_STATE_CLOSED, SESSION_STATE_ARCHIVED}
+            ]
         return {"sessions": [session_to_dict(record) for record in records]}
 
     def _session_get(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -255,6 +288,26 @@ class EngineServer:
         if not isinstance(ref, str) or not ref:
             raise EngineProtocolError(INVALID_PARAMS, "Param 'ref' must be a non-empty string.")
         return {"session": session_to_dict(self._services.sessions.show(ref))}
+
+    def _session_rename(self, params: dict[str, Any]) -> dict[str, Any]:
+        ref = self._need_str(params, "ref")
+        title = self._need_str(params, "title")
+        return {"session": session_to_dict(self._services.sessions.rename(ref, title))}
+
+    def _session_archive(self, params: dict[str, Any]) -> dict[str, Any]:
+        ref = self._need_str(params, "ref")
+        record = self._services.sessions.show(ref)
+        if self._turns.has_active_turn(record.id):
+            raise EngineProtocolError(
+                TURN_RUNNING,
+                f"Session {record.id} has a running turn; cancel it before archiving.",
+                details={"session_id": record.id},
+            )
+        return {"session": session_to_dict(self._services.sessions.archive(ref))}
+
+    def _session_restore(self, params: dict[str, Any]) -> dict[str, Any]:
+        ref = self._need_str(params, "ref")
+        return {"session": session_to_dict(self._services.sessions.restore(ref))}
 
     def _session_close(self, params: dict[str, Any]) -> dict[str, Any]:
         ref = params.get("ref")
@@ -364,8 +417,23 @@ class EngineServer:
         title = params.get("title")
         if title is not None and not isinstance(title, str):
             raise EngineProtocolError(INVALID_PARAMS, "Param 'title' must be a string.")
-        cwd = self._resolve_cwd(params.get("cwd"))
-        mode = params.get("mode", "ask")
+        project_id = params.get("project_id")
+        if project_id is not None and (not isinstance(project_id, str) or not project_id):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'project_id' must be a string.")
+        if project_id is not None and chat:
+            raise EngineProtocolError(
+                INVALID_PARAMS,
+                "Params 'project_id' and 'chat=true' are mutually exclusive.",
+            )
+        project = self._services.projects.get(project_id) if project_id is not None else None
+        if project is not None and project.archived:
+            raise EngineProtocolError(INVALID_PARAMS, f"Project is archived: {project.id}")
+        cwd = (
+            Path(project.canonical_root)
+            if project is not None
+            else self._resolve_cwd(params.get("cwd"))
+        )
+        mode = params.get("mode", "build")
         permission_profile = params.get("permission_profile", "workspace")
         if not isinstance(mode, str) or not isinstance(permission_profile, str):
             raise EngineProtocolError(
@@ -379,6 +447,8 @@ class EngineServer:
             mode=mode,
             permission_profile=permission_profile,
         )
+        if project is not None and record.kind != "PROJECT":
+            record = self._services.sessions.promote(record.id, Path(project.canonical_root))
         return {"session": session_to_dict(record), "created": True}
 
     def _session_open(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -595,6 +665,115 @@ class EngineServer:
             raise EngineProtocolError(INVALID_PARAMS, "Param 'limit' must be an int in 1..100.")
         return {"projects": self._services.projects.list_recent(limit=limit)}
 
+    @staticmethod
+    def _project_view(project: Any) -> dict[str, Any]:
+        root = Path(project.canonical_root)
+        return {
+            "id": project.id,
+            "name": project.name or root.name or project.canonical_root,
+            "description": project.description,
+            "canonical_root": project.canonical_root,
+            "root": project.canonical_root,
+            "git_fingerprint": project.git_fingerprint,
+            "pinned": project.pinned,
+            "archived": project.archived,
+            "created_at": project.created_at,
+            "updated_at": project.updated_at,
+            "last_opened_at": project.last_opened_at or project.updated_at,
+        }
+
+    def _project_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        include_archived = params.get("include_archived", False)
+        if not isinstance(include_archived, bool):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'include_archived' must be boolean.")
+        projects = self._services.projects.list(include_archived=include_archived)
+        return {"projects": [self._project_view(project) for project in projects]}
+
+    def _project_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        project = self._services.projects.get(self._need_str(params, "project_id"))
+        view = self._project_view(project)
+        root = Path(project.canonical_root)
+        view.update(
+            {
+                "exists": root.is_dir(),
+                "rinari_initialized": (root / ".rinari" / "project.toml").is_file(),
+                "trusted": root.is_dir()
+                and self._services.trust.status(root).state == "trusted",
+            }
+        )
+        return {"project": view}
+
+    def _project_add(self, params: dict[str, Any]) -> dict[str, Any]:
+        root = self._openable_root(params)
+        if is_home_root(root, self._services.ctx.home):
+            raise PermissionDeniedError("$HOME is never an implicit project workspace")
+        name = self._opt_str(params, "name")
+        description = self._opt_str(params, "description") or ""
+        project, created = self._services.projects.add(
+            root,
+            name=name,
+            description=description,
+        )
+        return {"project": self._project_view(project), "created": created}
+
+    def _project_update(self, params: dict[str, Any]) -> dict[str, Any]:
+        project_id = self._need_str(params, "project_id")
+        name = params.get("name")
+        description = params.get("description")
+        pinned = params.get("pinned")
+        archived = params.get("archived")
+        if name is not None and not isinstance(name, str):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'name' must be a string.")
+        if description is not None and not isinstance(description, str):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'description' must be a string.")
+        if pinned is not None and not isinstance(pinned, bool):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'pinned' must be boolean.")
+        if archived is not None and not isinstance(archived, bool):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'archived' must be boolean.")
+        project = self._services.projects.update(
+            project_id,
+            name=name,
+            description=description,
+            pinned=pinned,
+            archived=archived,
+        )
+        return {"project": self._project_view(project)}
+
+    def _project_remove(self, params: dict[str, Any]) -> dict[str, Any]:
+        project_id = self._need_str(params, "project_id")
+        policy = params.get("session_policy", "archive")
+        if policy not in ("keep", "archive", "delete"):
+            raise EngineProtocolError(
+                INVALID_PARAMS,
+                "Param 'session_policy' must be keep, archive, or delete.",
+            )
+        project = self._services.projects.get(project_id)
+        sessions = self._services.sessions.list(project_id=project.id, limit=500)
+        if policy != "keep":
+            active = [record.id for record in sessions if self._turns.has_active_turn(record.id)]
+            if active:
+                raise EngineProtocolError(
+                    TURN_RUNNING,
+                    "A project session has a running turn; cancel it before removal.",
+                    details={"session_ids": active},
+                )
+        affected = 0
+        if policy == "archive":
+            for record in sessions:
+                self._services.sessions.archive(record.id)
+                affected += 1
+        elif policy == "delete":
+            for record in sessions:
+                self._session_delete({"ref": record.id, "cascade": True})
+                affected += 1
+        project = self._services.projects.archive(project.id)
+        return {
+            "project": self._project_view(project),
+            "session_policy": policy,
+            "sessions_affected": affected,
+            "filesystem_deleted": False,
+        }
+
     def _project_open(self, params: dict[str, Any]) -> dict[str, Any]:
         """Upsert a project root and return it with its recommended session.
 
@@ -620,29 +799,73 @@ class EngineServer:
         else:
             record = self._services.sessions.touch(existing.id)
         return {
-            "project": {
-                "id": project.id,
-                "root": project.canonical_root,
-                "git_fingerprint": project.git_fingerprint,
-            },
+            "project": self._project_view(project),
             "session": session_to_dict(record),
             "created": created,
         }
 
     def _project_status(self, params: dict[str, Any]) -> dict[str, Any]:
         """Git truth plus session binding: the dashboard header source."""
-        root = self._openable_root(params)
+        project_id = params.get("project_id")
+        project = None
+        if project_id is not None:
+            if not isinstance(project_id, str) or not project_id:
+                raise EngineProtocolError(INVALID_PARAMS, "Param 'project_id' must be a string.")
+            project = self._services.projects.get(project_id)
+            root = Path(project.canonical_root)
+        else:
+            raw_path = self._need_str(params, "path")
+            root = Path(raw_path).expanduser().resolve()
+            project = self._services.ctx.project_repo.get_by_root(str(root))
+        if not root.is_dir():
+            unavailable = {
+                "available": False,
+                "branch": None,
+                "head": None,
+                "dirty": False,
+                "files": [],
+                "detached": False,
+                "ahead": 0,
+                "behind": 0,
+                "error": {
+                    "code": "PROJECT_PATH_MISSING",
+                    "message": f"Project folder is missing: {root}",
+                    "retryable": True,
+                },
+            }
+            return {
+                "project_id": project.id if project is not None else None,
+                "project": {"root": str(root)},
+                "root": str(root),
+                "exists": False,
+                "git": unavailable,
+                "status": unavailable,
+                "stale": False,
+                "active_session_id": None,
+            }
         status = git_files(root)
         bound = self._services.sessions.latest_for_root(root)
+        git = {
+            "available": status.available,
+            "is_repo": (root / ".git").exists(),
+            "branch": status.branch,
+            "head": status.head,
+            "dirty": status.dirty,
+            "files": list(status.files),
+            "changed_files": len(status.files),
+            "detached": status.detached,
+            "ahead": status.ahead,
+            "behind": status.behind,
+            "error": status.error,
+        }
         return {
+            "project_id": project.id if project is not None else None,
             "project": {"root": str(root)},
-            "status": {
-                "available": status.available,
-                "branch": status.branch,
-                "head": status.head,
-                "dirty": status.dirty,
-                "files": list(status.files),
-            },
+            "root": str(root),
+            "exists": True,
+            "git": git,
+            "status": git,
+            "stale": status.error is not None,
             "active_session_id": bound.id if bound is not None else None,
         }
 
@@ -1663,6 +1886,85 @@ class EngineServer:
             }
         }
 
+    def _model_discovery_start(self, params: dict[str, Any]) -> dict[str, Any]:
+        provider = self._opt_str(params, "provider")
+        cache_key = provider or "*"
+        now = time.time()
+        with self._model_jobs_lock:
+            cached = next(
+                (
+                    job
+                    for job in reversed(list(self._model_jobs.values()))
+                    if job.get("cache_key") == cache_key
+                    and job.get("status") == "completed"
+                    and now - float(job.get("finished_at") or 0) < 300
+                ),
+                None,
+            )
+            if cached is not None:
+                return {
+                    "job_id": cached["job_id"],
+                    "status": "completed",
+                    "cached": True,
+                    "providers": cached.get("result", {}).get("providers", {}),
+                }
+            running = next(
+                (
+                    job
+                    for job in self._model_jobs.values()
+                    if job.get("cache_key") == cache_key and job.get("status") == "running"
+                ),
+                None,
+            )
+            if running is not None:
+                return {"job_id": running["job_id"], "status": "running", "cached": False}
+            job_id = self._services.ctx.ids.new("job")
+            self._model_jobs[job_id] = {
+                "job_id": job_id,
+                "cache_key": cache_key,
+                "provider": provider,
+                "status": "running",
+                "started_at": now,
+            }
+
+        def discover() -> None:
+            try:
+                result = self._model_discover({"provider": provider})
+                payload = {
+                    "job_id": job_id,
+                    "provider": provider,
+                    "providers": result["providers"],
+                    "cached": False,
+                }
+                with self._model_jobs_lock:
+                    self._model_jobs[job_id].update(
+                        status="completed",
+                        finished_at=time.time(),
+                        result=result,
+                    )
+                self._turns.emit_external(event("model.discovery.completed", payload))
+            except Exception as exc:
+                error = {"code": "MODEL_DISCOVERY_FAILED", "message": str(exc), "retryable": True}
+                with self._model_jobs_lock:
+                    self._model_jobs[job_id].update(
+                        status="failed",
+                        finished_at=time.time(),
+                        error=error,
+                    )
+                self._turns.emit_external(
+                    event(
+                        "model.discovery.failed",
+                        {"job_id": job_id, "provider": provider, "error": error},
+                    )
+                )
+
+        threading.Thread(
+            target=discover,
+            name=f"rinari-model-discovery-{job_id}",
+            daemon=True,
+        ).start()
+        return {"job_id": job_id, "status": "running", "cached": False}
+
     def _model_refresh(self, params: dict[str, Any]) -> dict[str, Any]:
         results = self._services.models.refresh(self._opt_str(params, "provider"))
         providers: dict[str, Any] = {}
@@ -1692,6 +1994,16 @@ class EngineServer:
         _ = params
         snapshot = build_snapshot(self._services)
         snapshot.update(self._turns.runtime_state())
+        with self._model_jobs_lock:
+            snapshot["model_discovery_jobs"] = [
+                {
+                    key: value
+                    for key, value in job.items()
+                    if key not in ("cache_key", "result")
+                }
+                for job in self._model_jobs.values()
+                if job.get("status") == "running"
+            ]
         return {"snapshot": snapshot}
 
     # -- helpers ----------------------------------------------------------

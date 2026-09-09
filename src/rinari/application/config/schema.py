@@ -25,6 +25,34 @@ class AgentSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeSafeguardsSettings:
+    loop_detection: bool = True
+    progress_detection: bool = True
+    context_compaction: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeEmergencySettings:
+    max_runtime_minutes: int = 120
+    max_model_calls: int = 500
+    max_tool_calls: int = 5000
+    max_subagent_calls: int = 100
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeCostSettings:
+    max_turn_cost: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeSettings:
+    execution: str = "automatic"
+    safeguards: RuntimeSafeguardsSettings = field(default_factory=RuntimeSafeguardsSettings)
+    emergency: RuntimeEmergencySettings = field(default_factory=RuntimeEmergencySettings)
+    cost: RuntimeCostSettings = field(default_factory=RuntimeCostSettings)
+
+
+@dataclass(frozen=True, slots=True)
 class ContextSettings:
     compact_at_percent: int = 80
     artifact_output_threshold_kb: int = 64
@@ -78,6 +106,7 @@ class Config:
     model: str = ""
     profile: str = "workspace"
     agent: AgentSettings = field(default_factory=AgentSettings)
+    runtime: RuntimeSettings = field(default_factory=RuntimeSettings)
     context: ContextSettings = field(default_factory=ContextSettings)
     agents: AgentsSettings = field(default_factory=AgentsSettings)
     permissions: PermissionsSettings = field(default_factory=PermissionsSettings)
@@ -89,6 +118,10 @@ class Config:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Config:
         _validate(data)
+        runtime = _section(data, "runtime", "runtime")
+        safeguards = _nested_table(runtime, "safeguards", "runtime.safeguards")
+        emergency = _nested_table(runtime, "emergency", "runtime.emergency")
+        cost = _nested_table(runtime, "cost", "runtime.cost")
         return cls(
             user_name=_str(data, "user_name", "str"),
             language=_str(data, "language", "str"),
@@ -101,6 +134,61 @@ class Config:
                 max_turns=_int(data, "agent", "max_turns", 1, 10_000),
                 max_tool_calls=_int(data, "agent", "max_tool_calls", 1, 100_000),
                 max_runtime_minutes=_int(data, "agent", "max_runtime_minutes", 1, 1440),
+            ),
+            runtime=RuntimeSettings(
+                execution=_plain_enum(
+                    runtime, "execution", "runtime.execution", ("automatic",)
+                ),
+                safeguards=RuntimeSafeguardsSettings(
+                    loop_detection=_plain_bool(
+                        safeguards, "loop_detection", "runtime.safeguards.loop_detection"
+                    ),
+                    progress_detection=_plain_bool(
+                        safeguards,
+                        "progress_detection",
+                        "runtime.safeguards.progress_detection",
+                    ),
+                    context_compaction=_plain_bool(
+                        safeguards,
+                        "context_compaction",
+                        "runtime.safeguards.context_compaction",
+                    ),
+                ),
+                emergency=RuntimeEmergencySettings(
+                    max_runtime_minutes=_plain_int(
+                        emergency,
+                        "max_runtime_minutes",
+                        "runtime.emergency.max_runtime_minutes",
+                        1,
+                        1440,
+                    ),
+                    max_model_calls=_plain_int(
+                        emergency,
+                        "max_model_calls",
+                        "runtime.emergency.max_model_calls",
+                        1,
+                        100_000,
+                    ),
+                    max_tool_calls=_plain_int(
+                        emergency,
+                        "max_tool_calls",
+                        "runtime.emergency.max_tool_calls",
+                        1,
+                        1_000_000,
+                    ),
+                    max_subagent_calls=_plain_int(
+                        emergency,
+                        "max_subagent_calls",
+                        "runtime.emergency.max_subagent_calls",
+                        1,
+                        10_000,
+                    ),
+                ),
+                cost=RuntimeCostSettings(
+                    max_turn_cost=_plain_number(
+                        cost, "max_turn_cost", "runtime.cost.max_turn_cost", 0.0
+                    )
+                ),
             ),
             context=ContextSettings(
                 compact_at_percent=_int(data, "context", "compact_at_percent", 1, 100),
@@ -143,6 +231,21 @@ class Config:
                 "max_tool_calls": self.agent.max_tool_calls,
                 "max_runtime_minutes": self.agent.max_runtime_minutes,
             },
+            "runtime": {
+                "execution": self.runtime.execution,
+                "safeguards": {
+                    "loop_detection": self.runtime.safeguards.loop_detection,
+                    "progress_detection": self.runtime.safeguards.progress_detection,
+                    "context_compaction": self.runtime.safeguards.context_compaction,
+                },
+                "emergency": {
+                    "max_runtime_minutes": self.runtime.emergency.max_runtime_minutes,
+                    "max_model_calls": self.runtime.emergency.max_model_calls,
+                    "max_tool_calls": self.runtime.emergency.max_tool_calls,
+                    "max_subagent_calls": self.runtime.emergency.max_subagent_calls,
+                },
+                "cost": {"max_turn_cost": self.runtime.cost.max_turn_cost},
+            },
             "context": {
                 "compact_at_percent": self.context.compact_at_percent,
                 "artifact_output_threshold_kb": self.context.artifact_output_threshold_kb,
@@ -175,6 +278,7 @@ class Config:
     def sections(self) -> tuple[str, ...]:
         return (
             "agent",
+            "runtime",
             "context",
             "agents",
             "permissions",
@@ -188,6 +292,7 @@ class Config:
 def _section_keys(section: str) -> list[str]:
     return {
         "agent": ["max_turns", "max_tool_calls", "max_runtime_minutes"],
+        "runtime": ["execution", "safeguards", "emergency", "cost"],
         "context": ["compact_at_percent", "artifact_output_threshold_kb"],
         "agents": ["enabled", "max_concurrent", "max_depth", "max_total"],
         "permissions": ["profile", "approval_policy"],
@@ -201,6 +306,21 @@ def _section_keys(section: str) -> list[str]:
 def leaf_keys() -> list[str]:
     keys = ["user_name", "language", "model", "profile"]
     for section in Config().sections():
+        if section == "runtime":
+            keys.extend(
+                [
+                    "runtime.execution",
+                    "runtime.safeguards.loop_detection",
+                    "runtime.safeguards.progress_detection",
+                    "runtime.safeguards.context_compaction",
+                    "runtime.emergency.max_runtime_minutes",
+                    "runtime.emergency.max_model_calls",
+                    "runtime.emergency.max_tool_calls",
+                    "runtime.emergency.max_subagent_calls",
+                    "runtime.cost.max_turn_cost",
+                ]
+            )
+            continue
         keys.extend(f"{section}.{k}" for k in _section_keys(section))
     return keys
 
@@ -218,6 +338,20 @@ def key_type(dotted: str) -> str:
                 f"'{dotted}' is a section, not a value", hint="Use a dotted key."
             )
         raise ConfigurationError(f"Unknown config key: {dotted}")
+    if len(parts) == 3 and parts[0] == "runtime":
+        nested_types = {
+            "runtime.safeguards.loop_detection": "bool",
+            "runtime.safeguards.progress_detection": "bool",
+            "runtime.safeguards.context_compaction": "bool",
+            "runtime.emergency.max_runtime_minutes": "int",
+            "runtime.emergency.max_model_calls": "int",
+            "runtime.emergency.max_tool_calls": "int",
+            "runtime.emergency.max_subagent_calls": "int",
+            "runtime.cost.max_turn_cost": "float",
+        }
+        if dotted not in nested_types:
+            raise ConfigurationError(f"Unknown config key: {dotted}")
+        return nested_types[dotted]
     if len(parts) != 2:
         raise ConfigurationError(f"Invalid config key: {dotted}")
     section, key = parts
@@ -229,6 +363,7 @@ def key_type(dotted: str) -> str:
         ("agent", "max_turns"): "int",
         ("agent", "max_tool_calls"): "int",
         ("agent", "max_runtime_minutes"): "int",
+        ("runtime", "execution"): "str",
         ("context", "compact_at_percent"): "int",
         ("context", "artifact_output_threshold_kb"): "int",
         ("agents", "enabled"): "bool",
@@ -262,6 +397,49 @@ def _section(data: dict[str, Any], name: str, dotted: str) -> dict[str, Any]:
         return {}
     if not isinstance(value, dict):
         _fail(dotted, f"must be a table, got {type(value).__name__}")
+    return value
+
+
+def _nested_table(data: dict[str, Any], name: str, dotted: str) -> dict[str, Any]:
+    value = data.get(name)
+    if not isinstance(value, dict):
+        _fail(dotted, "must be a table")
+    return value
+
+
+def _plain_bool(data: dict[str, Any], key: str, dotted: str) -> bool:
+    value = data.get(key)
+    if not isinstance(value, bool):
+        _fail(dotted, "must be a boolean")
+    return value
+
+
+def _plain_int(
+    data: dict[str, Any], key: str, dotted: str, minimum: int, maximum: int
+) -> int:
+    value = data.get(key)
+    if not isinstance(value, int) or isinstance(value, bool):
+        _fail(dotted, "must be an integer")
+    if not minimum <= value <= maximum:
+        _fail(dotted, f"must be between {minimum} and {maximum}, got {value}")
+    return value
+
+
+def _plain_number(data: dict[str, Any], key: str, dotted: str, minimum: float) -> float:
+    value = data.get(key)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        _fail(dotted, "must be a number")
+    if float(value) < minimum:
+        _fail(dotted, f"must be at least {minimum}, got {value}")
+    return float(value)
+
+
+def _plain_enum(
+    data: dict[str, Any], key: str, dotted: str, allowed: tuple[str, ...]
+) -> str:
+    value = data.get(key)
+    if not isinstance(value, str) or value not in allowed:
+        _fail(dotted, f"must be one of {', '.join(allowed)}")
     return value
 
 
@@ -337,6 +515,27 @@ def _validate(data: dict[str, Any]) -> None:
             stray = set(data[section]) - allowed
             if stray:
                 _fail(f"{section}.", f"unknown key(s): {', '.join(sorted(stray))}")
+    runtime = data.get("runtime")
+    if isinstance(runtime, dict):
+        nested_allowed = {
+            "safeguards": {"loop_detection", "progress_detection", "context_compaction"},
+            "emergency": {
+                "max_runtime_minutes",
+                "max_model_calls",
+                "max_tool_calls",
+                "max_subagent_calls",
+            },
+            "cost": {"max_turn_cost"},
+        }
+        for table, allowed in nested_allowed.items():
+            value = runtime.get(table)
+            if isinstance(value, dict):
+                stray = set(value) - allowed
+                if stray:
+                    _fail(
+                        f"runtime.{table}.",
+                        f"unknown key(s): {', '.join(sorted(stray))}",
+                    )
 
 
 def _fail(where: str, problem: str) -> None:

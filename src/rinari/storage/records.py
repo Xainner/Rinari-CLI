@@ -56,6 +56,11 @@ class ProjectRecord:
     metadata: dict[str, Any]
     created_at: str
     updated_at: str
+    name: str = ""
+    description: str = ""
+    pinned: bool = False
+    archived: bool = False
+    last_opened_at: str | None = None
 
 
 @dataclass(slots=True)

@@ -23,7 +23,11 @@ from pathlib import Path
 from typing import Any
 
 from rinari.application.services import ServiceContainer
-from rinari.application.session_service import SESSION_STATE_CLOSED, profile_for_session
+from rinari.application.session_service import (
+    SESSION_STATE_ARCHIVED,
+    SESSION_STATE_CLOSED,
+    profile_for_session,
+)
 from rinari.cli.agent_runtime import build_agent_session, run_turn
 from rinari.engine_protocol import errors
 from rinari.engine_protocol.errors import EngineProtocolError
@@ -54,6 +58,9 @@ class _ActiveTurn:
     status: str = "running"
     preparation_stage: str | None = None
     activities: dict[str, dict[str, Any]] = field(default_factory=dict)
+    governor: dict[str, Any] = field(
+        default_factory=lambda: {"execution": "automatic", "status": "healthy"}
+    )
 
 
 @dataclass
@@ -136,6 +143,7 @@ class TurnManager:
                     "preparation_stage": turn.preparation_stage,
                     "started_at": turn.started_at,
                     "activities": list(turn.activities.values()),
+                    "governor": dict(turn.governor),
                 }
                 for turn in self._turns.values()
                 if not turn.done.is_set()
@@ -161,7 +169,7 @@ class TurnManager:
         self, session_id: str, message: str, reasoning_effort: str | None = None
     ) -> dict[str, Any]:
         record = self._services.sessions.show(session_id)
-        if record.state == SESSION_STATE_CLOSED:
+        if record.state in {SESSION_STATE_CLOSED, SESSION_STATE_ARCHIVED}:
             raise EngineProtocolError(
                 errors.SESSION_CLOSED,
                 f"Session {record.id} is closed; resume it before starting turns.",
@@ -269,6 +277,23 @@ class TurnManager:
                 self._cancel_running_activities(turn)
                 self._emit(
                     event("turn.cancelled", {"turn_id": turn_id, "session_id": turn.session_id})
+                )
+            elif result.stop_reason is not None:
+                self._emit(
+                    event(
+                        "turn.stopped",
+                        {
+                            "turn_id": turn_id,
+                            "session_id": turn.session_id,
+                            "reason": result.stop_reason,
+                            "recoverable": result.recoverable,
+                            "details": {
+                                "content": result.content,
+                                "governor": result.governor,
+                            },
+                            "usage": result.budget,
+                        },
+                    )
                 )
             else:
                 self._emit(
@@ -535,6 +560,8 @@ class TurnManager:
             with self._lock:
                 if event_name == "turn.preparing":
                     turn.preparation_stage = str(safe.get("stage") or "") or None
+                if event_name.startswith("governor."):
+                    turn.governor = {**turn.governor, **safe, "event": event_name}
                 if activity_id:
                     current = turn.activities.get(activity_id, {})
                     turn.activities[activity_id] = {**current, **safe, "event": event_name}

@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rinari.dev/schemas/engine-protocol/v1.json",
+  "title": "Rinari Engine Protocol v1",
+  "type": "object",
+  "$defs": {
+    "request": {
+      "type": "object",
+      "required": ["id", "method"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "method": { "$ref": "#/$defs/method" },
+        "params": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "method": {
+      "type": "string",
+      "enum": [
+        "engine.info", "runtime.snapshot.get",
+        "session.list", "session.get", "session.create", "session.open",
+        "session.rename", "session.archive", "session.restore", "session.delete",
+        "session.fork", "session.history", "session.mode.set", "session.model.set",
+        "session.permission.get", "session.permission.set", "session.turn.start",
+        "session.turn.cancel", "session.events", "approval.resolve",
+        "project.list", "project.get", "project.add", "project.update",
+        "project.remove", "project.list_recent", "project.open", "project.status",
+        "project.intelligence", "project.changes", "project.diff",
+        "provider.list", "provider.get", "provider.create", "provider.update",
+        "provider.remove", "provider.test", "provider.discover", "provider.use",
+        "model.list", "model.get", "model.add", "model.alias", "model.remove",
+        "model.use", "model.discover", "model.discovery.start", "model.refresh",
+        "model.test", "model.capabilities", "agent.list", "agent.config.get",
+        "agent.config.set", "soul.list", "soul.get", "soul.create", "soul.update",
+        "soul.remove", "soul.activate", "soul.get_effective", "session.soul.set",
+        "session.soul.clear", "mcp.list", "mcp.get", "mcp.create", "mcp.remove",
+        "mcp.enable", "mcp.disable", "mcp.test", "plugin.list", "plugin.get",
+        "plugin.enable", "plugin.disable", "plugin.diagnostics", "tool.list",
+        "policy.get", "task.tree", "task.get", "verification.latest",
+        "verification.plan", "checkpoint.list", "checkpoint.show", "checkpoint.restore",
+        "pty.start", "pty.write", "pty.resize", "pty.read", "pty.list", "pty.terminate",
+        "profile_bundle.list", "profile_bundle.get", "profile_bundle.create",
+        "profile_bundle.remove", "profile_bundle.apply", "session.queue.add",
+        "session.queue.list", "session.queue.clear", "session.branch",
+        "workspace.file.search", "artifact.list", "artifact.read", "artifact.export",
+        "context.get", "usage.get", "session.close"
+      ]
+    },
+    "event": {
+      "type": "string",
+      "enum": [
+        "turn.started", "turn.completed", "turn.failed", "turn.cancelled", "turn.stopped",
+        "model.started", "model.content.delta", "model.content.completed",
+        "model.completed", "model.failed", "tool.requested", "tool.started",
+        "tool.output.delta", "tool.completed", "tool.failed", "tool.cancelled",
+        "approval.requested", "approval.resolved", "approval.expired",
+        "governor.progress", "governor.nudge", "governor.compact",
+        "governor.consolidate", "governor.stop", "usage.updated",
+        "model.discovery.completed", "model.discovery.failed"
+      ]
+    },
+    "attachment": {
+      "type": "object",
+      "required": ["id", "path", "name", "source"],
+      "properties": {
+        "id": { "type": "string" }, "path": { "type": "string" },
+        "name": { "type": "string" }, "mime_type": { "type": ["string", "null"] },
+        "size": { "type": ["integer", "null"], "minimum": 0 },
+        "source": { "enum": ["native", "workspace"] }
+      }
+    }
+  }
+}

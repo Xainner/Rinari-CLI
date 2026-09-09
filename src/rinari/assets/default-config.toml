@@ -11,6 +11,23 @@ max_turns = 200
 max_tool_calls = 500
 max_runtime_minutes = 120
 
+[runtime]
+execution = "automatic"
+
+[runtime.safeguards]
+loop_detection = true
+progress_detection = true
+context_compaction = true
+
+[runtime.emergency]
+max_runtime_minutes = 120
+max_model_calls = 500
+max_tool_calls = 5000
+max_subagent_calls = 100
+
+[runtime.cost]
+max_turn_cost = 0
+
 [context]
 compact_at_percent = 80
 artifact_output_threshold_kb = 64

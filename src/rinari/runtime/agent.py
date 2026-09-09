@@ -38,6 +38,7 @@ from rinari.runtime.budget import NETWORK_CALLS as NETWORK_CALLS_DIM
 from rinari.runtime.budget import TOOL_CALLS as TOOL_CALLS_DIM
 from rinari.runtime.budget import BudgetMeter
 from rinari.runtime.cancellation import CancellationToken
+from rinari.runtime.governor import RECOVERY_PROMPTS, GovernorAction, TurnGovernor
 from rinari.runtime.loopdetection import LoopDetector
 from rinari.shared.errors import CancelledError
 from rinari.tools.definition import ToolContext, ToolErrorCode, ToolErrorInfo, ToolResult
@@ -51,8 +52,8 @@ EVENT_TOOL_COMPLETED = "ToolCompleted"
 EVENT_TURN_COMPLETED = "AgentTurnCompleted"
 EVENT_LOOP_DETECTED = "LoopDetected"
 
-DEFAULT_MAX_MODEL_CALLS = 8
-DEFAULT_MAX_TOOL_CALLS = 32
+DEFAULT_MAX_MODEL_CALLS = 500
+DEFAULT_MAX_TOOL_CALLS = 5000
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +71,9 @@ class TurnResult:
     compacted: bool = False
     # Turn budgets (phase 4): final meter snapshot when a budget was active.
     budget: dict | None = None
+    governor: dict | None = None
+    stop_reason: str | None = None
+    recoverable: bool = False
 
 
 # `model_provider` exposes: capabilities() -> ProviderCapabilities,
@@ -146,10 +150,12 @@ class AgentLoop:
         cancel: CancellationToken | None = None,
         budget: BudgetMeter | None = None,
         loop: LoopDetector | None = None,
+        governor: TurnGovernor | None = None,
         turn_index: int | None = None,
     ) -> TurnResult:
         cancel = cancel if cancel is not None else CancellationToken()
         loop = loop if loop is not None else LoopDetector()
+        governor = governor if governor is not None else TurnGovernor()
         started_payload: dict = {"preview": user_message[:200]}
         if turn_index is not None:
             started_payload["turn_index"] = turn_index
@@ -171,7 +177,11 @@ class AgentLoop:
 
         # A present meter is authoritative for model-call iterations; the
         # loop's own cap is only a defensive fallback without one.
-        max_iters = budget.limits.max_model_calls if budget is not None else self._max_model_calls
+        max_iters = (
+            budget.limits.max_model_calls
+            if budget is not None and budget.limits.max_model_calls is not None
+            else self._max_model_calls
+        )
         for model_index in range(max_iters):
             cancel.throw_if_cancelled()
             if budget is not None:
@@ -187,8 +197,12 @@ class AgentLoop:
                         turn_index,
                         requested=tool_calls_requested,
                         rejected=tool_calls_rejected,
+                        governor=governor,
                     )
-                if budget.model_calls >= budget.limits.max_model_calls:
+                if (
+                    budget.limits.max_model_calls is not None
+                    and budget.model_calls >= budget.limits.max_model_calls
+                ):
                     return self._stop(
                         ctx.session_id,
                         "budget",
@@ -199,6 +213,7 @@ class AgentLoop:
                         turn_index,
                         requested=tool_calls_requested,
                         rejected=tool_calls_rejected,
+                        governor=governor,
                     )
                 budget.note_model_call()
             request = self._build_request(ctx)
@@ -288,10 +303,12 @@ class AgentLoop:
                     tool_calls=tool_calls_executed,
                     usage=total_usage,
                     budget=budget.snapshot() if budget is not None else None,
+                    governor=governor.snapshot(),
                 )
 
             # EXECUTE: run every requested tool, feed results back as tool msgs.
             ctx.history.append(ChatMessage.assistant(response.content or "", response.tool_calls))
+            looping_detected = False
             for call in response.tool_calls:
                 cancel.throw_if_cancelled()
                 self._emit_activity(
@@ -426,6 +443,12 @@ class AgentLoop:
                 ctx.history.append(
                     ChatMessage.tool_result(call.id, call.name, result.to_model_text(call.name))
                 )
+                governor.after_tool(
+                    call.name,
+                    call.arguments,
+                    result.to_model_text(call.name),
+                    ok=result.ok,
+                )
                 if not executed:
                     self._emit_activity(
                         "tool.failed",
@@ -469,18 +492,65 @@ class AgentLoop:
                         {"kind": signal.kind, "detail": signal.detail, "action": signal.action},
                     )
                     if signal.action == "stop":
+                        looping_detected = True
+                        self._emit_activity(
+                            "governor.stop",
+                            {"reason": "loop", "recoverable": True, "detail": signal.detail},
+                        )
                         return self._stop(
                             ctx.session_id,
                             "loop",
-                            f"Stopped: loop detected ({signal.kind} — {signal.detail}).",
+                            f"Stopped: persistent loop detected ({signal.kind} — {signal.detail}).",
                             tool_calls_executed,
                             total_usage,
                             budget,
                             turn_index,
                             requested=tool_calls_requested,
                             rejected=tool_calls_rejected,
+                            governor=governor,
                         )
-                    ctx.history.append(ChatMessage.user(loop.nudge_text(signal)))
+                    else:
+                        self._emit_activity(
+                            "governor.nudge",
+                            {"reason": signal.kind, "detail": signal.detail},
+                        )
+                        ctx.history.append(ChatMessage.user(loop.nudge_text(signal)))
+
+            decision = governor.after_cycle(looping=looping_detected)
+            self._emit_activity(
+                "governor.progress",
+                {
+                    "action": decision.action.value,
+                    "progress": decision.progress.value,
+                    "stagnant_cycles": decision.stagnant_cycles,
+                    "recovery_attempts": decision.recovery_attempts,
+                    "usage": budget.snapshot() if budget is not None else None,
+                },
+            )
+            if decision.action in RECOVERY_PROMPTS:
+                self._emit_activity(
+                    f"governor.{decision.action.value}",
+                    {"reason": decision.reason, "recovery_attempts": decision.recovery_attempts},
+                )
+                ctx.history.append(ChatMessage.user(RECOVERY_PROMPTS[decision.action]))
+            elif decision.action is GovernorAction.STOP:
+                reason = "loop" if looping_detected else "stagnation"
+                self._emit_activity(
+                    "governor.stop",
+                    {"reason": reason, "recoverable": True},
+                )
+                return self._stop(
+                    ctx.session_id,
+                    reason,
+                    "Stopped by the automatic governor after recovery produced no new evidence.",
+                    tool_calls_executed,
+                    total_usage,
+                    budget,
+                    turn_index,
+                    requested=tool_calls_requested,
+                    rejected=tool_calls_rejected,
+                    governor=governor,
+                )
 
             if budget is not None:
                 hit = budget.first_exhausted(ignore=(TOOL_CALLS_DIM, NETWORK_CALLS_DIM))
@@ -495,6 +565,7 @@ class AgentLoop:
                         turn_index,
                         requested=tool_calls_requested,
                         rejected=tool_calls_rejected,
+                        governor=governor,
                     )
 
         return self._stop(
@@ -508,6 +579,7 @@ class AgentLoop:
             turn_index,
             requested=tool_calls_requested,
             rejected=tool_calls_rejected,
+            governor=governor,
         )
 
     # -- internals ------------------------------------------------------------
@@ -645,6 +717,7 @@ class AgentLoop:
         *,
         requested: int = 0,
         rejected: int = 0,
+        governor: TurnGovernor | None = None,
     ) -> TurnResult:
         self._emit(
             session_id,
@@ -659,6 +732,9 @@ class AgentLoop:
             tool_calls=tool_calls,
             usage=usage,
             budget=budget.snapshot() if budget is not None else None,
+            governor=governor.snapshot() if governor is not None else None,
+            stop_reason=("emergency_limit" if kind == "budget" else kind),
+            recoverable=kind in ("budget", "loop", "stagnation"),
         )
 
     def _emit(self, session_id: str, event_type: str, payload: dict) -> None:

@@ -36,6 +36,7 @@ from rinari.prompts.soul_sections import split_soul
 from rinari.runtime.agent import AgentContext, AgentLoop, TurnResult
 from rinari.runtime.budget import BudgetMeter, TurnBudgetLimits
 from rinari.runtime.cancellation import CancellationToken
+from rinari.runtime.governor import TurnGovernor
 from rinari.runtime.identity import load_active_soul, load_constitution, load_named_soul
 from rinari.runtime.loopdetection import LoopDetector
 from rinari.runtime.model_caller import ModelCaller, SessionModelGateway
@@ -1178,8 +1179,21 @@ def _run_turn_unlocked(
         session.context.assembler_base = base
     before = len(session.context.history)
     dropped_before = session.context.dropped_total
-    budget = BudgetMeter(TurnBudgetLimits(), clock=services.ctx.clock)
-    loop = LoopDetector()
+    runtime = services.ctx.config.config.runtime
+    emergency = runtime.emergency
+    budget = BudgetMeter(
+        TurnBudgetLimits(
+            max_model_calls=emergency.max_model_calls,
+            max_tool_calls=emergency.max_tool_calls,
+            max_network_calls=None,
+            max_wall_time_s=float(emergency.max_runtime_minutes * 60),
+            max_cost=runtime.cost.max_turn_cost or None,
+            max_subagent_calls=emergency.max_subagent_calls,
+        ),
+        clock=services.ctx.clock,
+    )
+    loop = LoopDetector() if runtime.safeguards.loop_detection else LoopDetector(repeats=1_000_000)
+    governor = TurnGovernor(max_recovery_attempts=3)
     turn_index = _turn_index(services, session.record.id)
     validation_before = _validation_ids(session)
     try:
@@ -1191,6 +1205,7 @@ def _run_turn_unlocked(
             cancel=session.token,
             budget=budget,
             loop=loop,
+            governor=governor,
             turn_index=turn_index,
         )
     except CancelledError:

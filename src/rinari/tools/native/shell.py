@@ -58,10 +58,17 @@ def _drain(stream, buffer: _BoundedBuffer, name: str, sink=None) -> None:
 
 def _kill_tree(process: subprocess.Popen) -> None:
     if sys.platform == "win32":
-        subprocess.run(
-            ["taskkill", "/F", "/T", "/PID", str(process.pid)],
-            capture_output=True,
-        )
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=1.0,
+                check=False,
+            )
+        with contextlib.suppress(OSError):
+            process.kill()
     else:
         import signal
 
@@ -185,7 +192,8 @@ def shell_exec(input: dict, ctx: ToolContext) -> ToolResult:
         except subprocess.TimeoutExpired:
             timed_out = True
             _kill_tree(process)
-            process.wait()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=1)
     finally:
         if remove_cancel_callback is not None:
             remove_cancel_callback()
@@ -193,9 +201,9 @@ def shell_exec(input: dict, ctx: ToolContext) -> ToolResult:
         if process.poll() is None:
             _kill_tree(process)
             with contextlib.suppress(subprocess.TimeoutExpired):
-                process.wait(timeout=5)
+                process.wait(timeout=1)
         for reader in readers:
-            reader.join(timeout=5)
+            reader.join(timeout=1)
 
     exit_code = process.returncode if process.returncode is not None else -1
     data = {

@@ -99,6 +99,7 @@ class SessionRepository:
         self,
         kind: str | None = None,
         project_id: str | None = None,
+        state: str | None = None,
         limit: int | None = None,
     ) -> list[SessionRecord]:
         sql = "SELECT * FROM sessions WHERE 1=1"
@@ -109,6 +110,9 @@ class SessionRepository:
         if project_id is not None:
             sql += " AND project_id = ?"
             params.append(project_id)
+        if state is not None:
+            sql += " AND state = ?"
+            params.append(state)
         sql += " ORDER BY last_active_at DESC"
         if limit is not None:
             sql += " LIMIT ?"

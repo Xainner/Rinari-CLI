@@ -16,7 +16,9 @@ import pytest
 
 from rinari.application.provider_service import AddProviderInput
 from rinari.application.services import build_services
+from rinari.engine_protocol import workspace
 from rinari.engine_protocol.server import EngineServer
+from rinari.projects._git_process import GitCommandResult
 
 
 @pytest.fixture
@@ -184,6 +186,23 @@ def test_status_git_repo_matches_git_truth_with_binding(server, tmp_path) -> Non
     assert after["active_session_id"] == opened["session"]["id"]
 
 
+def test_status_reports_structured_git_timeout(server, tmp_path, monkeypatch) -> None:
+    repo = _git_repo(tmp_path)
+    monkeypatch.setattr(
+        workspace,
+        "run_git",
+        lambda *args, **kwargs: GitCommandResult("", None, timed_out=True, error="slow git"),
+    )
+    result = _ok(server.handle_line(_req("timeout", "project.status", {"path": str(repo)})))
+    assert result["exists"] is True
+    assert result["stale"] is True
+    assert result["git"]["error"] == {
+        "code": "GIT_TIMEOUT",
+        "message": "slow git",
+        "retryable": True,
+    }
+
+
 def test_intelligence_reports_real_repo_signals(services, server, tmp_path) -> None:
     repo = _git_repo(tmp_path)
     (repo / "RINARI.md").write_text("# conventions\n")
@@ -211,3 +230,75 @@ def test_intelligence_rejects_non_directory(server, tmp_path) -> None:
         server.handle_line(_req("i2", "project.intelligence", {"path": str(tmp_path / "nope")}))
     )
     assert err["code"] == "INVALID_PARAMS"
+
+
+def test_project_crud_is_metadata_only_and_missing_folder_stays_visible(server, tmp_path) -> None:
+    root = tmp_path / "registered"
+    root.mkdir()
+    added = _ok(
+        server.handle_line(
+            _req(
+                "p1",
+                "project.add",
+                {"path": str(root), "name": "Registered", "description": "Desktop project"},
+            )
+        )
+    )
+    project = added["project"]
+    assert added["created"] is True
+    assert project["name"] == "Registered"
+    assert not (root / ".rinari").exists()
+
+    updated = _ok(
+        server.handle_line(
+            _req("p2", "project.update", {"project_id": project["id"], "pinned": True})
+        )
+    )["project"]
+    assert updated["pinned"] is True
+    listed = _ok(server.handle_line(_req("p3", "project.list", {})))["projects"]
+    assert listed[0]["id"] == project["id"]
+
+    root.rename(tmp_path / "moved-away")
+    status = _ok(
+        server.handle_line(_req("p4", "project.status", {"project_id": project["id"]}))
+    )
+    assert status["exists"] is False
+    assert status["git"]["error"]["code"] == "PROJECT_PATH_MISSING"
+
+
+def test_session_rename_archive_restore_and_filters(server, tmp_path) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    project = _ok(
+        server.handle_line(_req("a1", "project.add", {"path": str(root)}))
+    )["project"]
+    created = _ok(
+        server.handle_line(
+            _req("a2", "session.create", {"project_id": project["id"], "mode": "build"})
+        )
+    )["session"]
+    assert created["kind"] == "PROJECT"
+    renamed = _ok(
+        server.handle_line(
+            _req("a3", "session.rename", {"ref": created["id"], "title": "New title"})
+        )
+    )["session"]
+    assert renamed["title"] == "New title"
+    archived = _ok(
+        server.handle_line(_req("a4", "session.archive", {"ref": created["id"]}))
+    )["session"]
+    assert archived["state"] == "archived"
+    filtered = _ok(
+        server.handle_line(
+            _req(
+                "a5",
+                "session.list",
+                {"project_id": project["id"], "state": "archived", "include_closed": True},
+            )
+        )
+    )["sessions"]
+    assert [row["id"] for row in filtered] == [created["id"]]
+    restored = _ok(
+        server.handle_line(_req("a6", "session.restore", {"ref": created["id"]}))
+    )["session"]
+    assert restored["state"] == "active"

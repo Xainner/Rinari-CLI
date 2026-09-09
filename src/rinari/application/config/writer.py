@@ -59,33 +59,36 @@ def _ordered(data: dict[str, Any]) -> dict[str, Any]:
 def set_dotted(user: dict[str, Any], dotted: str, value: Any) -> dict[str, Any]:
     updated = dict(user)
     parts = dotted.split(".")
-    if len(parts) == 1:
-        updated[parts[0]] = value
-        return updated
-    section, key = parts
-    table = dict(updated.get(section) or {})
-    table[key] = value
-    updated[section] = table
+    cursor = updated
+    for part in parts[:-1]:
+        table = dict(cursor.get(part) or {})
+        cursor[part] = table
+        cursor = table
+    cursor[parts[-1]] = value
     return updated
 
 
 def unset_dotted(user: dict[str, Any], dotted: str) -> tuple[dict[str, Any], bool]:
     updated = dict(user)
     parts = dotted.split(".")
-    if len(parts) == 1:
-        if parts[0] not in updated:
+    cursor = updated
+    parents: list[tuple[dict[str, Any], str]] = []
+    for part in parts[:-1]:
+        raw = cursor.get(part)
+        if not isinstance(raw, dict):
             return updated, False
-        del updated[parts[0]]
-        return updated, True
-    section, key = parts
-    table = dict(updated.get(section) or {})
-    if key not in table:
+        table = dict(raw)
+        cursor[part] = table
+        parents.append((cursor, part))
+        cursor = table
+    key = parts[-1]
+    if key not in cursor:
         return updated, False
-    del table[key]
-    if table:
-        updated[section] = table
-    else:
-        updated.pop(section, None)
+    del cursor[key]
+    for parent, part in reversed(parents):
+        if parent[part]:
+            break
+        del parent[part]
     return updated, True
 
 

@@ -47,19 +47,19 @@ DEFAULT_NETWORK_NAMESPACES = frozenset({"web", "http", "browser"})
 
 @dataclass(frozen=True, slots=True)
 class TurnBudgetLimits:
-    # Real coding turns need several inspect/edit/verify cycles. The previous
-    # defaults stopped ordinary repository work before it could synthesize.
-    max_model_calls: int = 16
-    max_tool_calls: int = 64
-    max_network_calls: int = 32
-    max_wall_time_s: float = 600.0
+    # None means no ordinary task budget. The large defaults that remain are
+    # emergency circuit breakers, not a target amount of work.
+    max_model_calls: int | None = 500
+    max_tool_calls: int | None = 5000
+    max_network_calls: int | None = None
+    max_wall_time_s: float | None = 7200.0
     # None = no cost limit. Pricing is per-million tokens; None = unknown
     # (then cost is unmeasured and can never exhaust the budget).
     max_cost: float | None = None
     input_price_per_mtok: float | None = None
     output_price_per_mtok: float | None = None
-    max_subagent_calls: int = 4
-    max_recursion_depth: int = 3
+    max_subagent_calls: int | None = 100
+    max_recursion_depth: int | None = 8
 
 
 def _default_is_network(name: str) -> bool:
@@ -145,11 +145,17 @@ class BudgetMeter:
         is_network overrides the name-prefix heuristic with ground truth
         from tool classification; the loop always passes it.
         """
-        if self.tool_calls >= self.limits.max_tool_calls:
+        if (
+            self.limits.max_tool_calls is not None
+            and self.tool_calls >= self.limits.max_tool_calls
+        ):
             return False
         network = is_network if is_network is not None else self._net(name)
         if network:
-            return self.network_calls < self.limits.max_network_calls
+            return (
+                self.limits.max_network_calls is None
+                or self.network_calls < self.limits.max_network_calls
+            )
         return True
 
     # -- state ---------------------------------------------------------------
@@ -173,20 +179,38 @@ class BudgetMeter:
         # Count dimensions report at the ceiling (>=): the gates block new
         # work exactly there, so the snapshot must agree. Wall-time and cost
         # stay strict (>) — no exact-boundary gate exists for them.
-        if self.model_calls >= self.limits.max_model_calls:
+        if (
+            self.limits.max_model_calls is not None
+            and self.model_calls >= self.limits.max_model_calls
+        ):
             hits.append(MODEL_CALLS)
-        if self.tool_calls >= self.limits.max_tool_calls:
+        if (
+            self.limits.max_tool_calls is not None
+            and self.tool_calls >= self.limits.max_tool_calls
+        ):
             hits.append(TOOL_CALLS)
-        if self.network_calls >= self.limits.max_network_calls:
+        if (
+            self.limits.max_network_calls is not None
+            and self.network_calls >= self.limits.max_network_calls
+        ):
             hits.append(NETWORK_CALLS)
-        if self.subagent_calls >= self.limits.max_subagent_calls:
+        if (
+            self.limits.max_subagent_calls is not None
+            and self.subagent_calls >= self.limits.max_subagent_calls
+        ):
             hits.append(SUBAGENTS)
-        if self.max_recursion_depth >= self.limits.max_recursion_depth:
+        if (
+            self.limits.max_recursion_depth is not None
+            and self.max_recursion_depth >= self.limits.max_recursion_depth
+        ):
             hits.append(RECURSION_DEPTH)
         cost = self.estimated_cost()
         if self.limits.max_cost is not None and cost is not None and cost > self.limits.max_cost:
             hits.append(COST)
-        if self.elapsed_s() > self.limits.max_wall_time_s:
+        if (
+            self.limits.max_wall_time_s is not None
+            and self.elapsed_s() > self.limits.max_wall_time_s
+        ):
             hits.append(WALL_TIME)
         ordered = [name for name in PRIORITY if name in hits]
         return tuple(ordered)

@@ -35,12 +35,16 @@ EVENT_SESSION_STARTED = "SessionStarted"
 EVENT_SESSION_PROMOTED = "SessionPromotedToProject"
 EVENT_SESSION_FORKED = "SessionForked"
 EVENT_SESSION_CLOSED = "SessionClosed"
+EVENT_SESSION_RENAMED = "SessionRenamed"
+EVENT_SESSION_ARCHIVED = "SessionArchived"
+EVENT_SESSION_RESTORED = "SessionRestored"
 EVENT_USER_PROMPT = "UserPrompt"
 
 SESSION_KIND_CHAT = "CHAT"
 SESSION_KIND_PROJECT = "PROJECT"
 SESSION_STATE_ACTIVE = "active"
 SESSION_STATE_CLOSED = "closed"
+SESSION_STATE_ARCHIVED = "archived"
 
 SESSION_MODE_PLAN = "plan"
 SESSION_MODE_BUILD = "build"
@@ -389,8 +393,20 @@ class SessionService:
 
     # -- queries --------------------------------------------------------------
 
-    def list(self, kind: str | None = None, limit: int = 50) -> list[SessionRecord]:
-        return self._ctx.session_repo.list(kind=kind, limit=limit)
+    def list(
+        self,
+        kind: str | None = None,
+        *,
+        project_id: str | None = None,
+        state: str | None = None,
+        limit: int = 50,
+    ) -> list[SessionRecord]:
+        return self._ctx.session_repo.list(
+            kind=kind,
+            project_id=project_id,
+            state=state,
+            limit=limit,
+        )
 
     def show(self, ref: str) -> SessionRecord:
         return self._resolve(ref)
@@ -413,6 +429,46 @@ class SessionService:
             self._append_event(record.id, EVENT_SESSION_CLOSED, {})
         return record
 
+    def rename(self, ref: str, title: str) -> SessionRecord:
+        record = self._resolve(ref)
+        clean = (title or "").strip()
+        if not clean:
+            raise InvalidUsageError("Session title must not be empty.")
+        if len(clean) > 160:
+            raise InvalidUsageError("Session title must be at most 160 characters.")
+        record.title = clean
+        record.updated_at = self._now()
+        with self._ctx.db.transaction():
+            self._ctx.session_repo.update(record)
+            self._append_event(record.id, EVENT_SESSION_RENAMED, {"title": clean})
+        return record
+
+    def archive(self, ref: str) -> SessionRecord:
+        record = self._resolve(ref)
+        if record.state == SESSION_STATE_ARCHIVED:
+            return record
+        record.state = SESSION_STATE_ARCHIVED
+        now = self._now()
+        record.updated_at = now
+        record.last_active_at = now
+        with self._ctx.db.transaction():
+            self._ctx.session_repo.update(record)
+            self._append_event(record.id, EVENT_SESSION_ARCHIVED, {})
+        return record
+
+    def restore(self, ref: str) -> SessionRecord:
+        record = self._resolve(ref)
+        if record.state == SESSION_STATE_ACTIVE:
+            return record
+        record.state = SESSION_STATE_ACTIVE
+        now = self._now()
+        record.updated_at = now
+        record.last_active_at = now
+        with self._ctx.db.transaction():
+            self._ctx.session_repo.update(record)
+            self._append_event(record.id, EVENT_SESSION_RESTORED, {})
+        return record
+
     def delete(self, ref: str) -> str:
         """Delete a session and its messages/events (irreversible).
 
@@ -428,10 +484,10 @@ class SessionService:
         return record.id
 
     def latest_for_root(self, root: str | Path) -> SessionRecord | None:
-        """Latest non-closed session bound to a project root (or None)."""
+        """Latest active session bound to a project root (or None)."""
         canonical = str(Path(root).expanduser().resolve())
         for session in self._ctx.session_repo.list(limit=500):
-            if session.project_root_snapshot == canonical and session.state != SESSION_STATE_CLOSED:
+            if session.project_root_snapshot == canonical and session.state == SESSION_STATE_ACTIVE:
                 return session
         return None
 

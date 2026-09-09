@@ -9,7 +9,12 @@ from rinari.application.context import AppContext
 from rinari.projects.detector import is_home_root
 from rinari.projects.git import git_fingerprint
 from rinari.shared.clock import now_iso
-from rinari.shared.errors import ConflictError, PermissionDeniedError
+from rinari.shared.errors import (
+    ConflictError,
+    InvalidUsageError,
+    NotFoundError,
+    PermissionDeniedError,
+)
 from rinari.storage.records import ProjectRecord
 
 PROJECT_TOML_HEADER = "# Rinari project marker.\n"
@@ -40,6 +45,9 @@ class ProjectService:
         if existing is not None:
             existing.git_fingerprint = git_fingerprint(Path(canonical))
             existing.updated_at = now
+            existing.last_opened_at = now
+            if not existing.name or existing.name == existing.canonical_root:
+                existing.name = Path(canonical).name or canonical
             self._ctx.project_repo.update(existing)
             return existing
         record = ProjectRecord(
@@ -49,9 +57,92 @@ class ProjectService:
             metadata={},
             created_at=now,
             updated_at=now,
+            name=Path(canonical).name or canonical,
+            last_opened_at=now,
         )
         self._ctx.project_repo.insert(record)
         return record
+
+    def get(self, project_id: str) -> ProjectRecord:
+        record = self._ctx.project_repo.get(project_id)
+        if record is None:
+            raise NotFoundError(f"Project not found: {project_id}")
+        return self._normalize(record)
+
+    def list(self, *, include_archived: bool = False) -> list[ProjectRecord]:
+        return [
+            self._normalize(record)
+            for record in self._ctx.project_repo.list(include_archived=include_archived)
+        ]
+
+    def add(
+        self,
+        root: Path,
+        *,
+        name: str | None = None,
+        description: str = "",
+    ) -> tuple[ProjectRecord, bool]:
+        canonical = Path(root).expanduser().resolve()
+        if not canonical.is_dir():
+            raise NotFoundError(f"Project folder not found: {canonical}")
+        existing = self._ctx.project_repo.get_by_root(str(canonical))
+        record = self.upsert(canonical)
+        changed = False
+        if name is not None:
+            clean_name = name.strip()
+            if not clean_name:
+                raise InvalidUsageError("Project name must not be empty.")
+            record.name = clean_name[:120]
+            changed = True
+        if description:
+            record.description = description.strip()[:500]
+            changed = True
+        if record.archived:
+            record.archived = False
+            changed = True
+        if changed:
+            record.updated_at = self._now()
+            self._ctx.project_repo.update(record)
+        return record, existing is None
+
+    def update(
+        self,
+        project_id: str,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        pinned: bool | None = None,
+        archived: bool | None = None,
+    ) -> ProjectRecord:
+        record = self.get(project_id)
+        if name is not None:
+            clean_name = name.strip()
+            if not clean_name:
+                raise InvalidUsageError("Project name must not be empty.")
+            record.name = clean_name[:120]
+        if description is not None:
+            record.description = description.strip()[:500]
+        if pinned is not None:
+            record.pinned = pinned
+        if archived is not None:
+            record.archived = archived
+        record.updated_at = self._now()
+        self._ctx.project_repo.update(record)
+        return record
+
+    def archive(self, project_id: str) -> ProjectRecord:
+        return self.update(project_id, archived=True, pinned=False)
+
+    def _normalize(self, record: ProjectRecord) -> ProjectRecord:
+        if record.name and record.name != record.canonical_root:
+            return record
+        record.name = Path(record.canonical_root).name or record.canonical_root
+        record.last_opened_at = record.last_opened_at or record.updated_at
+        self._ctx.project_repo.update(record)
+        return record
+
+    def _now(self) -> str:
+        return now_iso(self._ctx.clock)
 
     def init(
         self, path: Path, user_home: Path, force: bool = False
@@ -106,7 +197,7 @@ class ProjectService:
         ISO-8601 from the same clock, so string order is chronological.
         """
         # Deferred import: session_service imports this module.
-        from rinari.application.session_service import SESSION_STATE_CLOSED
+        from rinari.application.session_service import SESSION_STATE_ACTIVE
 
         limit = max(1, min(int(limit), 100))
         activity: dict[str, str] = {}
@@ -116,10 +207,10 @@ class ProjectService:
             if not root:
                 continue
             activity.setdefault(root, session.last_active_at)
-            if session.state != SESSION_STATE_CLOSED and root not in bound:
+            if session.state == SESSION_STATE_ACTIVE and root not in bound:
                 bound[root] = session.id
         ranked = sorted(
-            self._ctx.project_repo.list(),
+            self.list(include_archived=False),
             key=lambda p: activity.get(p.canonical_root, p.updated_at),
             reverse=True,
         )
@@ -127,8 +218,15 @@ class ProjectService:
             {
                 "id": project.id,
                 "root": project.canonical_root,
+                "name": project.name,
+                "description": project.description,
+                "pinned": project.pinned,
+                "archived": project.archived,
                 "git_fingerprint": project.git_fingerprint,
-                "last_opened_at": activity.get(project.canonical_root, project.updated_at),
+                "last_opened_at": activity.get(
+                    project.canonical_root,
+                    project.last_opened_at or project.updated_at,
+                ),
                 "active_session_id": bound.get(project.canonical_root),
             }
             for project in ranked[:limit]

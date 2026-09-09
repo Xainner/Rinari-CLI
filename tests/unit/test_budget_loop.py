@@ -159,8 +159,8 @@ def test_tool_budget_boundary_with_meter(env) -> None:
     assert "per-turn tool budget exhausted" not in tools_msgs[2].content
 
 
-def test_default_tool_boundary_sixty_four(env) -> None:
-    """Default limits: 64 tool calls execute, the 65th is rejected."""
+def test_default_emergency_budget_does_not_stop_useful_sixty_five_calls(env) -> None:
+    """Normal work is not stopped by the former 64-call task budget."""
     from rinari.runtime.agent import AgentLoop
 
     calls = tuple(
@@ -176,16 +176,16 @@ def test_default_tool_boundary_sixty_four(env) -> None:
     budget = BudgetMeter(TurnBudgetLimits(), FakeClock())
     result = loop.turn(env["ctx"], "go", budget=budget)
     assert result.kind == "answer"
-    assert result.tool_calls == 64
-    assert budget.tool_calls == 64
+    assert result.tool_calls == 65
+    assert budget.tool_calls == 65
     tools_msgs = [m for m in env["ctx"].history if m.role == "tool"]
     assert len(tools_msgs) == 65
-    assert "per-turn tool budget exhausted" in tools_msgs[64].content
+    assert "per-turn tool budget exhausted" not in tools_msgs[64].content
     assert "per-turn tool budget exhausted" not in tools_msgs[63].content
 
 
-def test_fallback_tool_boundary_without_meter(env) -> None:
-    """Without a meter the loop's own defensive fallback (32) applies."""
+def test_fallback_does_not_reintroduce_small_tool_budget(env) -> None:
+    """Without a meter the defensive fallback is still an emergency limit."""
     from rinari.runtime.agent import AgentLoop
 
     calls = tuple(
@@ -200,7 +200,7 @@ def test_fallback_tool_boundary_without_meter(env) -> None:
     loop = AgentLoop(model, env["runtime"], env["assembler"])
     result = loop.turn(env["ctx"], "go", budget=None)
     assert result.kind == "answer"
-    assert result.tool_calls == 32
+    assert result.tool_calls == 33
 
 
 def test_network_dimension_counts_only_network_namespaces() -> None:
