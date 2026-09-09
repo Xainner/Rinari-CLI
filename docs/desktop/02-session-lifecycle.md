@@ -28,13 +28,15 @@ New states: `closed` (hidden from lists, restorable), `archived`
 ```text
 session.close    { ref } → marks closed; active turns must finish/cancel first
 session.archive  { ref } → marks archived; rejects new turns
-session.delete   { ref, cascade: bool } → removes record
+session.delete   { ref, cascade: false } → removes record
 ```
 
 Cascade semantics (engine-owned, explicit):
 
 ```text
-tasks        → deleted with the session, listed in the response
+tasks        → NEVER deleted here: tasks are project-scoped and shared
+               across sessions (deviation from the first draft, pinned in
+               tests/unit/test_engine_session_lifecycle.py)
 checkpoints  → kept (addressable by id) unless cascade: true
 artifacts    → kept (store is content-addressed) unless cascade: true
 context      → deleted with the session

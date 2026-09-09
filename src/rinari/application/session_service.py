@@ -34,11 +34,13 @@ from rinari.trust import TrustService
 EVENT_SESSION_STARTED = "SessionStarted"
 EVENT_SESSION_PROMOTED = "SessionPromotedToProject"
 EVENT_SESSION_FORKED = "SessionForked"
+EVENT_SESSION_CLOSED = "SessionClosed"
 EVENT_USER_PROMPT = "UserPrompt"
 
 SESSION_KIND_CHAT = "CHAT"
 SESSION_KIND_PROJECT = "PROJECT"
 SESSION_STATE_ACTIVE = "active"
+SESSION_STATE_CLOSED = "closed"
 
 SESSION_MODE_PLAN = "plan"
 SESSION_MODE_BUILD = "build"
@@ -392,6 +394,40 @@ class SessionService:
 
     def show(self, ref: str) -> SessionRecord:
         return self._resolve(ref)
+
+    def close(self, ref: str) -> SessionRecord:
+        """Mark a session closed: hidden from default lists, restorable.
+
+        Idempotent: closing a closed session returns it unchanged.
+        `resume` re-activates a closed session (existing behavior).
+        """
+        record = self._resolve(ref)
+        if record.state == SESSION_STATE_CLOSED:
+            return record
+        record.state = SESSION_STATE_CLOSED
+        now = self._now()
+        record.updated_at = now
+        record.last_active_at = now
+        with self._ctx.db.transaction():
+            self._ctx.session_repo.update(record)
+            self._append_event(record.id, EVENT_SESSION_CLOSED, {})
+        return record
+
+    def delete(self, ref: str) -> str:
+        """Delete a session and its messages/events (irreversible).
+
+        Same record scope as the CLI `session delete`: checkpoints,
+        artifacts, tasks and the turn queue are owned by their own
+        surfaces (see the engine `session.delete` cascade accounting).
+        """
+        record = self._resolve(ref)
+        with self._ctx.db.transaction():
+            self._ctx.db.execute("DELETE FROM session_events WHERE session_id = ?", (record.id,))
+            self._ctx.db.execute(
+                "DELETE FROM session_messages WHERE session_id = ?", (record.id,)
+            )
+            self._ctx.db.execute("DELETE FROM sessions WHERE id = ?", (record.id,))
+        return record.id
 
     def set_mode(self, ref: str, mode: str) -> SessionRecord:
         """Switch PLAN/BUILD/REVIEW. Same session, task graph and context kept."""

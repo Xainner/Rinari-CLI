@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from rinari.application.services import ServiceContainer
-from rinari.application.session_service import profile_for_session
+from rinari.application.session_service import SESSION_STATE_CLOSED, profile_for_session
 from rinari.cli.agent_runtime import build_agent_session, run_turn
 from rinari.engine_protocol import errors
 from rinari.engine_protocol.errors import EngineProtocolError
@@ -118,6 +118,13 @@ class TurnManager:
         with self._lock:
             return any(not turn.done.is_set() for turn in self._turns.values())
 
+    def has_active_turn(self, session_id: str) -> bool:
+        with self._lock:
+            return any(
+                not turn.done.is_set() and turn.session_id == session_id
+                for turn in self._turns.values()
+            )
+
     def runtime_state(self) -> dict[str, Any]:
         """Presentation-safe live state used to recover after a UI reload."""
         with self._lock:
@@ -154,6 +161,12 @@ class TurnManager:
         self, session_id: str, message: str, reasoning_effort: str | None = None
     ) -> dict[str, Any]:
         record = self._services.sessions.show(session_id)
+        if record.state == SESSION_STATE_CLOSED:
+            raise EngineProtocolError(
+                errors.SESSION_CLOSED,
+                f"Session {record.id} is closed; resume it before starting turns.",
+                details={"session_id": record.id},
+            )
         turn_id = self._services.ctx.ids.new("turn")
         turn = _ActiveTurn(
             turn_id=turn_id,

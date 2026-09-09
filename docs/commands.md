@@ -885,6 +885,14 @@ auto-runs after the live turn with normal turn boundaries + approvals,
 an applied-report; no policy invention), and `rinari code [path] [--session]`
 handoff (binary via RINARI_CODE_BIN/PATH, explicit --project/--session args
 for single-instance routing).
+Post-v1 lifecycle: `session.close` (`ref` → state `closed`: hidden from
+default `session.list` unless `include_closed`, restorable via resume,
+rejects new turns with `SESSION_CLOSED`; rejected with `TURN_RUNNING`
+while a turn runs) and `session.delete` (`ref`, `cascade` default false;
+running turn → `TURN_RUNNING`; always drains the turn queue and reports
+`queue_dropped` + `checkpoints_removed/kept` + `artifacts_removed/kept`;
+cascade also removes the session's checkpoints and session-retention
+artifacts; tasks are project-scoped and never deleted with a session).
 The envelope contract is unchanged across slices.
 
 ---

@@ -77,6 +77,13 @@ class CheckpointService:
         self.repo.insert_files(checkpoint["id"], entries)
         return {**checkpoint, "files": [e.to_dict() for e in entries]}
 
+    def ids_for_session(self, session_id: str) -> list[str]:
+        rows = self._ctx.db.query(
+            "SELECT id FROM checkpoints WHERE session_ref = ? ORDER BY created_at DESC, id DESC",
+            (session_id,),
+        )
+        return [row["id"] for row in rows]
+
     def list(self, path: str | Path | None = None) -> list[dict]:
         root = str(self._root(path)) if path else None
         if root is not None:

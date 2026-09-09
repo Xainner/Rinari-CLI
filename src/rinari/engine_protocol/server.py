@@ -13,11 +13,16 @@ from typing import Any
 
 from rinari.application.provider_service import AddProviderInput
 from rinari.application.services import ServiceContainer
+from rinari.application.session_service import SESSION_STATE_CLOSED
 from rinari.cli.serializers import model_dict
 from rinari.engine_protocol import protocol
 from rinari.engine_protocol.dispatcher import EngineDispatcher
 from rinari.engine_protocol.ecosystem import mcp_row_view, plugin_row_view, tool_row_view
-from rinari.engine_protocol.errors import INVALID_PARAMS, EngineProtocolError
+from rinari.engine_protocol.errors import (
+    INVALID_PARAMS,
+    TURN_RUNNING,
+    EngineProtocolError,
+)
 from rinari.engine_protocol.messages import event, hello
 from rinari.engine_protocol.observability import (
     clamp_read_bytes,
@@ -98,6 +103,8 @@ class EngineServer:
         self._dispatcher.register("session.get", self._session_get)
         self._dispatcher.register("session.create", self._session_create)
         self._dispatcher.register("session.open", self._session_open)
+        self._dispatcher.register("session.close", self._session_close)
+        self._dispatcher.register("session.delete", self._session_delete)
         self._dispatcher.register("session.history", self._session_history)
         self._dispatcher.register("session.mode.set", self._session_mode_set)
         self._dispatcher.register("session.model.set", self._session_model_set)
@@ -215,6 +222,8 @@ class EngineServer:
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 500:
             raise EngineProtocolError(INVALID_PARAMS, "Param 'limit' must be an int in 1..500.")
         records = self._services.sessions.list(kind=kind, limit=limit)
+        if not params.get("include_closed", False):
+            records = [r for r in records if r.state != SESSION_STATE_CLOSED]
         return {"sessions": [session_to_dict(record) for record in records]}
 
     def _session_get(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -222,6 +231,65 @@ class EngineServer:
         if not isinstance(ref, str) or not ref:
             raise EngineProtocolError(INVALID_PARAMS, "Param 'ref' must be a non-empty string.")
         return {"session": session_to_dict(self._services.sessions.show(ref))}
+
+    def _session_close(self, params: dict[str, Any]) -> dict[str, Any]:
+        ref = params.get("ref")
+        if not isinstance(ref, str) or not ref:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'ref' must be a non-empty string.")
+        record = self._services.sessions.show(ref)
+        if self._turns.has_active_turn(record.id):
+            raise EngineProtocolError(
+                TURN_RUNNING,
+                f"Session {record.id} has a running turn; cancel it before closing.",
+                details={"session_id": record.id},
+            )
+        return {"session": session_to_dict(self._services.sessions.close(ref))}
+
+    def _session_delete(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Delete a session with explicit cascade accounting.
+
+        Tasks are project-scoped (shared across sessions) and are never
+        deleted here. Checkpoints and session-retention artifacts are kept
+        unless cascade is true; the live turn queue is always drained.
+        """
+        ref = params.get("ref")
+        if not isinstance(ref, str) or not ref:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'ref' must be a non-empty string.")
+        cascade = params.get("cascade", False)
+        if not isinstance(cascade, bool):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'cascade' must be a boolean.")
+        record = self._services.sessions.show(ref)
+        if self._turns.has_active_turn(record.id):
+            raise EngineProtocolError(
+                TURN_RUNNING,
+                f"Session {record.id} has a running turn; cancel it before deleting.",
+                details={"session_id": record.id},
+            )
+        drained = self._turns.queue_clear(record.id)["removed"]
+        checkpoint_ids = self._services.checkpoints.ids_for_session(record.id)
+        if cascade:
+            for checkpoint_id in checkpoint_ids:
+                self._services.checkpoints.remove(checkpoint_id)
+            checkpoints_removed, checkpoints_kept = len(checkpoint_ids), 0
+        else:
+            checkpoints_removed, checkpoints_kept = 0, len(checkpoint_ids)
+        sid = self._services.sessions.delete(record.id)
+        if cascade:
+            artifacts_removed = self._services.artifacts.gc(session_id=sid)
+            artifacts_kept = 0
+        else:
+            artifacts_removed = 0
+            artifacts_kept = len(self._services.artifacts.list(session_id=sid))
+        return {
+            "deleted": {"id": sid},
+            "cascade": {
+                "queue_dropped": drained,
+                "checkpoints_removed": checkpoints_removed,
+                "checkpoints_kept": checkpoints_kept,
+                "artifacts_removed": artifacts_removed,
+                "artifacts_kept": artifacts_kept,
+            },
+        }
 
     def _session_create(self, params: dict[str, Any]) -> dict[str, Any]:
         chat = params.get("chat", False)
