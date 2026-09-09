@@ -19,6 +19,7 @@ protocol.
 4. `04-soul-scopes.md` — project/session Soul overrides.
 5. `05-runtime-surfaces.md` — PTY registry, artifact export, snapshot and
    cancellation contracts.
+6. `06-turn-governor.md` — stop/progress events and snapshot usage block.
 
 ## Priority (Code's view)
 
