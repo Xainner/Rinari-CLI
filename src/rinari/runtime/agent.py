@@ -530,6 +530,7 @@ class AgentLoop:
                     "stagnant_cycles": decision.stagnant_cycles,
                     "recovery_attempts": decision.recovery_attempts,
                     "usage": budget.snapshot() if budget is not None else None,
+                    "governor": governor.snapshot(),
                 },
             )
             if decision.action in RECOVERY_PROMPTS:
@@ -659,6 +660,8 @@ class AgentLoop:
                         "pressure": round(pressure_value, 3),
                         "history_size": history_size,
                         "status": "completed" if ctx.compacted else "skipped",
+                        "compactions": governor.compactions,
+                        "governor": governor.snapshot(),
                     },
                 )
         except Exception:

@@ -59,7 +59,14 @@ class _ActiveTurn:
     preparation_stage: str | None = None
     activities: dict[str, dict[str, Any]] = field(default_factory=dict)
     governor: dict[str, Any] = field(
-        default_factory=lambda: {"execution": "automatic", "status": "healthy"}
+        default_factory=lambda: {
+            "execution": "automatic",
+            "status": "healthy",
+            "recovery_attempts": 0,
+            "max_recovery_attempts": 3,
+            "compactions": 0,
+            "context_pressure": None,
+        }
     )
 
 
@@ -575,7 +582,11 @@ class TurnManager:
                 if event_name == "turn.preparing":
                     turn.preparation_stage = str(safe.get("stage") or "") or None
                 if event_name.startswith("governor."):
-                    turn.governor = {**turn.governor, **safe, "event": event_name}
+                    snapshot = safe.get("governor")
+                    if isinstance(snapshot, dict):
+                        turn.governor = {**turn.governor, **snapshot, "event": event_name}
+                    else:
+                        turn.governor = {**turn.governor, **safe, "event": event_name}
                 if activity_id:
                     current = turn.activities.get(activity_id, {})
                     turn.activities[activity_id] = {**current, **safe, "event": event_name}

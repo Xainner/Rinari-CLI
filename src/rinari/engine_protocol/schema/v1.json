@@ -3,6 +3,10 @@
   "$id": "https://rinari.dev/schemas/engine-protocol/v1.json",
   "title": "Rinari Engine Protocol v1",
   "type": "object",
+  "x-codegen-definitions": [
+    "attachment", "sessionSummary", "projectSummary", "usageSnapshot",
+    "governorSnapshot", "protocolError"
+  ],
   "$defs": {
     "request": {
       "type": "object",
@@ -67,7 +71,105 @@
         "name": { "type": "string" }, "mime_type": { "type": ["string", "null"] },
         "size": { "type": ["integer", "null"], "minimum": 0 },
         "source": { "enum": ["native", "workspace"] }
-      }
+      },
+      "additionalProperties": false
+    },
+    "sessionSummary": {
+      "type": "object",
+      "required": [
+        "id", "kind", "title", "mode", "state", "updated_at", "project_id",
+        "project_root", "current_cwd", "git_branch", "last_active_at",
+        "provider_id", "model_id", "permission_profile",
+        "effective_permission_profile"
+      ],
+      "properties": {
+        "id": { "type": "string" },
+        "kind": { "enum": ["CHAT", "PROJECT"] },
+        "title": { "type": ["string", "null"] },
+        "mode": { "enum": ["plan", "build", "review"] },
+        "state": { "enum": ["active", "closed", "archived"] },
+        "updated_at": { "type": "string" },
+        "project_id": { "type": ["string", "null"] },
+        "project_root": { "type": ["string", "null"] },
+        "current_cwd": { "type": ["string", "null"] },
+        "git_branch": { "type": ["string", "null"] },
+        "last_active_at": { "type": "string" },
+        "provider_id": { "type": "string" },
+        "model_id": { "type": "string" },
+        "permission_profile": { "enum": ["read-only", "workspace", "full-access"] },
+        "effective_permission_profile": { "enum": ["read-only", "workspace", "full-access"] }
+      },
+      "additionalProperties": true
+    },
+    "projectSummary": {
+      "type": "object",
+      "required": [
+        "id", "root", "canonical_root", "name", "description", "pinned",
+        "archived", "git_fingerprint", "created_at", "updated_at", "last_opened_at"
+      ],
+      "properties": {
+        "id": { "type": "string" },
+        "root": { "type": "string" },
+        "canonical_root": { "type": "string" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "pinned": { "type": "boolean" },
+        "archived": { "type": "boolean" },
+        "git_fingerprint": { "type": ["string", "null"] },
+        "created_at": { "type": "string" },
+        "updated_at": { "type": "string" },
+        "last_opened_at": { "type": "string" },
+        "active_session_id": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "usageSnapshot": {
+      "type": "object",
+      "required": [
+        "model_calls", "tool_calls", "network_calls", "subagent_calls",
+        "max_recursion_depth", "input_tokens", "output_tokens", "wall_time_s", "exhausted"
+      ],
+      "properties": {
+        "model_calls": { "type": "integer" },
+        "tool_calls": { "type": "integer" },
+        "network_calls": { "type": "integer" },
+        "subagent_calls": { "type": "integer" },
+        "max_recursion_depth": { "type": "integer" },
+        "input_tokens": { "type": "integer" },
+        "output_tokens": { "type": "integer" },
+        "wall_time_s": { "type": "number" },
+        "estimated_cost": { "type": ["number", "null"] },
+        "exhausted": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
+    "governorSnapshot": {
+      "type": "object",
+      "required": [
+        "execution", "recovery_attempts", "max_recovery_attempts", "compactions",
+        "last_compacted_history_size", "context_pressure", "progress"
+      ],
+      "properties": {
+        "execution": { "const": "automatic" },
+        "recovery_attempts": { "type": "integer" },
+        "max_recovery_attempts": { "type": "integer" },
+        "compactions": { "type": "integer" },
+        "last_compacted_history_size": { "type": "integer" },
+        "context_pressure": { "type": ["number", "null"] },
+        "progress": { "type": ["object", "null"], "additionalProperties": true }
+      },
+      "additionalProperties": false
+    },
+    "protocolError": {
+      "type": "object",
+      "required": ["code", "message", "retryable", "details"],
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "retryable": { "type": "boolean" },
+        "details": { "type": "object", "additionalProperties": true }
+      },
+      "additionalProperties": true
     }
   }
 }
