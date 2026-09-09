@@ -871,7 +871,9 @@ Slice 9 adds the ecosystem surface: `mcp.list/get/create/remove/enable/disable/t
 (mode→profile mapping; souls/profiles never relax it). No engine-level
 browser session is tracked in v1 (browser runs per-turn).
 Slice 10 adds observability: `artifact.list/read` (URI-addressed, bounded,
-truncated flag, no internal paths leak), `context.get` (compaction state +
+truncated flag, no internal paths leak), `artifact.export` (`uri` +
+existing `dest_dir` → real path; basename-contained, numeric suffix on
+collision, never overwrites), `context.get` (compaction state +
 counts from CompactState, no invented pressure %), `usage.get` (model calls
 + tokens + tool calls aggregated from persisted events; cost always null —
 pricing unknown). No `pty.*` in v1: PTY handles live inside tool calls, the

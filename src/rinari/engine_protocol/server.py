@@ -142,6 +142,7 @@ class EngineServer:
         self._dispatcher.register("policy.get", self._policy_get)
         self._dispatcher.register("artifact.list", self._artifact_list)
         self._dispatcher.register("artifact.read", self._artifact_read)
+        self._dispatcher.register("artifact.export", self._artifact_export)
         self._dispatcher.register("context.get", self._context_get)
         self._dispatcher.register("usage.get", self._usage_get)
         self._dispatcher.register("session.queue.add", self._queue_add)
@@ -827,6 +828,48 @@ class EngineServer:
             "truncated": truncated,
             "max_bytes": max_bytes,
         }
+
+    def _artifact_export(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Copy an artifact's bytes into a caller-chosen directory.
+
+        Writes stay engine-side: the desktop picks the destination through
+        its native dialog and never guesses store paths. The destination
+        must be an existing directory; the file name always comes from the
+        artifact record basename (never traverses out), and collisions get
+        a numeric suffix instead of overwriting.
+        """
+        params = params or {}
+        uri = params.get("uri", "")
+        if not isinstance(uri, str) or not uri:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'uri' is required.")
+        dest_dir = params.get("dest_dir", "")
+        if not isinstance(dest_dir, str) or not dest_dir:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'dest_dir' is required.")
+        root = Path(dest_dir).expanduser().resolve()
+        if not root.is_dir():
+            raise EngineProtocolError(
+                INVALID_PARAMS, "Param 'dest_dir' must be an existing directory."
+            )
+        try:
+            record = self._services.artifacts.meta(uri)
+        except NotFoundError as exc:
+            raise NotFoundError(f"Artifact not found: {uri}") from exc
+        target = self._unique_inside(root, Path(record.name).name.strip() or record.id)
+        self._services.artifacts.export(uri, target)
+        return {"artifact": record.to_dict(), "path": str(target)}
+
+    @staticmethod
+    def _unique_inside(root: Path, name: str) -> Path:
+        candidate = (root / name).resolve()
+        if candidate.parent != root:
+            raise EngineProtocolError(INVALID_PARAMS, "Artifact name escapes dest_dir.")
+        stem, suffix = candidate.stem, candidate.suffix
+        index = 0
+        final = candidate
+        while final.exists():
+            index += 1
+            final = root / f"{stem}-{index}{suffix}"
+        return final
 
     def _context_get(self, params: dict[str, Any]) -> dict[str, Any]:
         record = self._services.sessions.show((params or {}).get("ref", ""))

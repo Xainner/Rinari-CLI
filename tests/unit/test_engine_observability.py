@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
 from rinari.application.provider_service import AddProviderInput
 from rinari.application.services import build_services
+from rinari.artifacts.store import ArtifactURIError
 from rinari.engine_protocol.server import EngineServer
 from rinari.storage.records import SessionEventRecord
 
@@ -128,3 +130,97 @@ def test_context_and_usage(services, server, tmp_path) -> None:
     assert usage["tool_calls"] == {"total": 1, "ok": 1, "error": 0}
     # Cost is never invented.
     assert usage["cost"] is None
+
+
+def test_artifact_export_writes_bytes_inside_dest_dir(services, server, tmp_path) -> None:
+    session_id = _make_session(server, "x", tmp_path)
+    record = services.artifacts.create_text(session_id, "notes", "plan.md", "hello artifact")
+    dest = tmp_path / "out"
+    dest.mkdir()
+
+    result = _ok(
+        server.handle_line(
+            _req("x1", "artifact.export", {"uri": record.uri(), "dest_dir": str(dest)})
+        )
+    )
+    assert result["path"] == str(dest / "plan.md")
+    assert Path(result["path"]).read_bytes() == b"hello artifact"
+    assert result["artifact"]["uri"] == record.uri()
+
+    # A second export never overwrites: deterministic numeric suffix.
+    again = _ok(
+        server.handle_line(
+            _req("x2", "artifact.export", {"uri": record.uri(), "dest_dir": str(dest)})
+        )
+    )
+    assert again["path"] == str(dest / "plan-1.md")
+    assert Path(again["path"]).read_bytes() == b"hello artifact"
+
+
+def test_artifact_export_rejects_bad_params(services, server, tmp_path) -> None:
+    session_id = _make_session(server, "y", tmp_path)
+    record = services.artifacts.create_text(session_id, "notes", "a.md", "x")
+    dest = tmp_path / "out"
+    dest.mkdir()
+    as_file = tmp_path / "afile"
+    as_file.write_text("nope")
+
+    assert (
+        _err(server.handle_line(_req("y1", "artifact.export", {"dest_dir": str(dest)})))["code"]
+        == "INVALID_PARAMS"
+    )
+    assert (
+        _err(
+            server.handle_line(
+                _req("y2", "artifact.export", {"uri": "artifact://nope/n/x", "dest_dir": str(dest)})
+            )
+        )["code"]
+        == "NOT_FOUND"
+    )
+    assert (
+        _err(server.handle_line(_req("y3", "artifact.export", {"uri": record.uri()})))["code"]
+        == "INVALID_PARAMS"
+    )
+    assert (
+        _err(
+            server.handle_line(
+                _req("y4", "artifact.export", {"uri": record.uri(), "dest_dir": str(as_file)})
+            )
+        )["code"]
+        == "INVALID_PARAMS"
+    )
+    assert (
+        _err(
+            server.handle_line(
+                _req(
+                    "y5",
+                    "artifact.export",
+                    {"uri": record.uri(), "dest_dir": str(tmp_path / "missing")},
+                )
+            )
+        )["code"]
+        == "INVALID_PARAMS"
+    )
+
+
+def test_artifact_export_neutralizes_traversal_names(services, server, tmp_path) -> None:
+    # First guard lives in the store: hostile names cannot be stored or
+    # addressed at all (segment validation rejects them at write time).
+    session_id = _make_session(server, "z", tmp_path)
+    with pytest.raises(ArtifactURIError):
+        services.artifacts.create_text(session_id, "notes", "..\\evil.md", "x")
+
+    # Second guard lives in the handler: whatever name a record carries,
+    # the export lands as a basename inside dest_dir, never outside it.
+    record = services.artifacts.create_text(session_id, "notes", "ok.md", "x")
+    dest = tmp_path / "out"
+    dest.mkdir()
+    result = _ok(
+        server.handle_line(
+            _req("z1", "artifact.export", {"uri": record.uri(), "dest_dir": str(dest)})
+        )
+    )
+    exported = Path(result["path"])
+    assert exported.parent == dest
+    assert exported.read_bytes() == b"x"
+    assert not (tmp_path / "evil.md").exists()
