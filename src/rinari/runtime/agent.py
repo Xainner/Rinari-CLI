@@ -617,9 +617,7 @@ class AgentLoop:
             session_id=ctx.session_id,
         )
 
-    def _check_pressure(
-        self, ctx: AgentContext, response: Any, governor: TurnGovernor
-    ) -> None:
+    def _check_pressure(self, ctx: AgentContext, response: Any, governor: TurnGovernor) -> None:
         """Let the governor authorize context compaction without risking the turn."""
         if self._on_pressure is None:
             return

@@ -319,12 +319,10 @@ def test_project_archive_policy_is_metadata_only_and_can_be_restored(server, tmp
     root.mkdir()
     marker = root / "owned.txt"
     marker.write_text("user data", encoding="utf-8")
-    project = _ok(server.handle_line(_req("pa1", "project.add", {"path": str(root)})))[
-        "project"
+    project = _ok(server.handle_line(_req("pa1", "project.add", {"path": str(root)})))["project"]
+    session = _ok(server.handle_line(_req("pa2", "session.create", {"project_id": project["id"]})))[
+        "session"
     ]
-    session = _ok(
-        server.handle_line(_req("pa2", "session.create", {"project_id": project["id"]}))
-    )["session"]
 
     removed = _ok(
         server.handle_line(
@@ -338,14 +336,15 @@ def test_project_archive_policy_is_metadata_only_and_can_be_restored(server, tmp
     assert removed["project"]["archived"] is True
     assert removed["filesystem_deleted"] is False
     assert marker.read_text(encoding="utf-8") == "user data"
-    assert _ok(server.handle_line(_req("pa4", "session.get", {"ref": session["id"]})))[
-        "session"
-    ]["state"] == "archived"
+    assert (
+        _ok(server.handle_line(_req("pa4", "session.get", {"ref": session["id"]})))["session"][
+            "state"
+        ]
+        == "archived"
+    )
 
     rejected = _err(
-        server.handle_line(
-            _req("pa5", "session.create", {"project_id": project["id"]})
-        )
+        server.handle_line(_req("pa5", "session.create", {"project_id": project["id"]}))
     )
     assert rejected["code"] == "INVALID_PARAMS"
     restored_project = _ok(
@@ -362,23 +361,25 @@ def test_project_archive_policy_is_metadata_only_and_can_be_restored(server, tmp
 
 def test_chat_lifecycle_and_project_fork_identity(server, tmp_path) -> None:
     chat = _ok(server.handle_line(_req("lc1", "session.create", {"chat": True})))["session"]
-    assert _ok(server.handle_line(_req("lc2", "session.archive", {"ref": chat["id"]})))[
-        "session"
-    ]["state"] == "archived"
-    assert _ok(server.handle_line(_req("lc3", "session.restore", {"ref": chat["id"]})))[
-        "session"
-    ]["state"] == "active"
+    assert (
+        _ok(server.handle_line(_req("lc2", "session.archive", {"ref": chat["id"]})))["session"][
+            "state"
+        ]
+        == "archived"
+    )
+    assert (
+        _ok(server.handle_line(_req("lc3", "session.restore", {"ref": chat["id"]})))["session"][
+            "state"
+        ]
+        == "active"
+    )
 
     root = tmp_path / "fork-project"
     root.mkdir()
-    project = _ok(server.handle_line(_req("lc4", "project.add", {"path": str(root)})))[
-        "project"
-    ]
-    source = _ok(
-        server.handle_line(_req("lc5", "session.create", {"project_id": project["id"]}))
-    )["session"]
-    forked = _ok(server.handle_line(_req("lc6", "session.fork", {"ref": source["id"]})))[
+    project = _ok(server.handle_line(_req("lc4", "project.add", {"path": str(root)})))["project"]
+    source = _ok(server.handle_line(_req("lc5", "session.create", {"project_id": project["id"]})))[
         "session"
     ]
+    forked = _ok(server.handle_line(_req("lc6", "session.fork", {"ref": source["id"]})))["session"]
     assert forked["project_id"] == project["id"]
     assert forked["project_root"] == project["root"]

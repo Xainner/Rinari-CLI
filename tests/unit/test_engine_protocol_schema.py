@@ -36,6 +36,4 @@ def test_protocol_schema_is_codegen_ready_for_desktop_dtos() -> None:
         "protocolError",
     } <= generated
     governor = schema["$defs"]["governorSnapshot"]
-    assert {"compactions", "context_pressure", "progress"} <= set(
-        governor["properties"]
-    )
+    assert {"compactions", "context_pressure", "progress"} <= set(governor["properties"])

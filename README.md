@@ -187,6 +187,12 @@ política, aprobaciones, sandbox, secretos, redacción, traza y budgets:
   que un proveedor no expone se muestran como desconocidos — nunca se
   inventan tokens, costos ni uso.
 
+Los turnos automáticos no usan un pequeño tope ordinario: un gobernador de
+progreso permite continuar mientras aparece evidencia nueva, compacta contexto
+cuando hace falta y detiene loops persistentes. Los límites configurables bajo
+`runtime.emergency` son exclusivamente un circuito de seguridad (120 minutos,
+500 llamadas de modelo, 5000 herramientas y 100 subagentes por defecto).
+
 ## Comandos
 
 Grupos principales (`rinari --help` para el detalle; casi todo soporta
