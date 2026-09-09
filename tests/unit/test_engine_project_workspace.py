@@ -225,6 +225,20 @@ def test_intelligence_reports_real_repo_signals(services, server, tmp_path) -> N
     assert any(s["provenance"] == "./RINARI.md" and s["scope"] == "root" for s in scopes)
 
 
+def test_project_trust_records_explicit_grant_and_enables_instructions(server, tmp_path) -> None:
+    repo = _git_repo(tmp_path)
+    (repo / "RINARI.md").write_text("# conventions\n")
+
+    granted = _ok(server.handle_line(_req("trust", "project.trust", {"path": str(repo)})))
+    assert granted["project"]["root"] == str(repo.resolve())
+    assert granted["trust"]["state"] == "trusted"
+    assert granted["trust"]["trusted_at"]
+
+    intel = _ok(server.handle_line(_req("intel", "project.intelligence", {"path": str(repo)})))
+    assert intel["instructions"]["trusted"] is True
+    assert any(scope["provenance"] == "./RINARI.md" for scope in intel["instructions"]["scopes"])
+
+
 def test_intelligence_rejects_non_directory(server, tmp_path) -> None:
     err = _err(
         server.handle_line(_req("i2", "project.intelligence", {"path": str(tmp_path / "nope")}))

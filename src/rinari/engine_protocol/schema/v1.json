@@ -25,7 +25,7 @@
         "session.turn.cancel", "session.events", "approval.resolve",
         "project.list", "project.get", "project.add", "project.update",
         "project.remove", "project.list_recent", "project.open", "project.status",
-        "project.intelligence", "project.changes", "project.diff",
+        "project.intelligence", "project.trust", "project.changes", "project.diff",
         "provider.list", "provider.get", "provider.create", "provider.update",
         "provider.remove", "provider.test", "provider.discover", "provider.use",
         "model.list", "model.get", "model.add", "model.alias", "model.remove",

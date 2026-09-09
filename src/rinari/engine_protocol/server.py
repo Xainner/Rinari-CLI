@@ -181,6 +181,7 @@ class EngineServer:
         self._dispatcher.register("project.open", self._project_open)
         self._dispatcher.register("project.status", self._project_status)
         self._dispatcher.register("project.intelligence", self._project_intelligence)
+        self._dispatcher.register("project.trust", self._project_trust)
         self._dispatcher.register("pty.start", self._pty_start)
         self._dispatcher.register("pty.write", self._pty_write)
         self._dispatcher.register("pty.resize", self._pty_resize)
@@ -943,6 +944,21 @@ class EngineServer:
                     }
                     for entry in entries
                 ],
+            },
+        }
+
+    def _project_trust(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Record an explicit desktop trust decision for one project root."""
+        root = self._openable_root(params)
+        entry = self._services.trust.add(root)
+        status = self._services.trust.status(root)
+        return {
+            "project": {"root": str(root)},
+            "trust": {
+                "state": status.state,
+                "canonical_path": status.canonical_path,
+                "fingerprint": status.fingerprint,
+                "trusted_at": entry.trusted_at,
             },
         }
 
