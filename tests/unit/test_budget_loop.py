@@ -184,6 +184,34 @@ def test_default_emergency_budget_does_not_stop_useful_sixty_five_calls(env) -> 
     assert "per-turn tool budget exhausted" not in tools_msgs[63].content
 
 
+def test_automatic_turn_can_make_more_than_one_hundred_useful_model_calls(env) -> None:
+    """The governor, not a legacy small ceiling, controls a long healthy turn."""
+    for index in range(101):
+        (env["root"] / f"item-{index}").write_text(str(index), encoding="utf-8")
+    scripted = [
+        ModelResponse(
+            content="",
+            tool_calls=(
+                ToolCall(id=f"long-{index}", name="fs.stat", arguments={"path": f"item-{index}"}),
+            ),
+            stop_reason=StopReason.TOOL_CALLS,
+        )
+        for index in range(101)
+    ]
+    scripted.append(ModelResponse(content="done"))
+    model = FakeModel(scripted=scripted)
+    loop = AgentLoop(model, env["runtime"], env["assembler"])
+    budget = BudgetMeter(TurnBudgetLimits(), FakeClock())
+
+    result = loop.turn(env["ctx"], "inspect every item", budget=budget)
+
+    assert result.kind == "answer"
+    assert len(model.requests) == 102
+    assert budget.model_calls == 102
+    assert result.tool_calls == 101
+    assert budget.first_exhausted() is None
+
+
 def test_fallback_does_not_reintroduce_small_tool_budget(env) -> None:
     """Without a meter the defensive fallback is still an emergency limit."""
     from rinari.runtime.agent import AgentLoop
