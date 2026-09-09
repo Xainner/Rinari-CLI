@@ -70,7 +70,13 @@ These pin what Code already depends on after its stabilization cycle:
 3. **`session.events` as activity source**: historical activity panels
    will page through `session.events` (`after_seq`, `limit` 1..500).
    Event `type` values for turn/tool/approval lifecycle are stable
-   strings; new types are additive.
+   strings; new types are additive. **Gap (2026-09-09, pinned in
+   `tests/unit/test_engine_contract_pins.py`): turn lifecycle terminals
+   (`turn.completed`/`cancelled`/`failed`) are live-only today —
+   `turns.py` never persists to `event_repo` — so panels cannot rely on
+   `session.events` for turn history yet. Persisting terminals is engine
+   work (P1), not a P0 pin; live terminality (exactly one terminal per
+   accepted turn, nothing after it) is pinned and passing.
 
 ## Acceptance criteria
 
