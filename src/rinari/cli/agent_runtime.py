@@ -340,7 +340,7 @@ def _build_pty_registry():
 
     if sys.platform == "win32" or not hasattr(os, "openpty"):
         return None
-    from rinari.tools.native.ptyp import PtyRegistry
+    from rinari.tools.native.ptytools import PtyRegistry
 
     return PtyRegistry()
 
