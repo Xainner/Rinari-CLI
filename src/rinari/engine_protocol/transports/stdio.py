@@ -22,6 +22,10 @@ from typing import Any, TextIO
 from rinari.engine_protocol.server import EngineServer
 
 EVENT_POLL_S = 0.05
+# Requests slower than this get one stderr diagnostic line (desktop log
+# shows them; stdout stays protocol-only). Helps catch stalls like a
+# network-blocked call holding up later requests on the single loop.
+SLOW_REQUEST_S = 10.0
 # After stdin closes, keep draining until in-flight turns settle (bounded:
 # an approval-blocked turn still ends at its own timeout, then we leave).
 EOF_DRAIN_WAIT_S = 60.0
@@ -72,6 +76,7 @@ def run_stdio(
                 eof = True
                 eof_since = time.monotonic()
             elif item is not None:
+                started = time.monotonic()
                 try:
                     response = server.handle_line(item)
                 except Exception as exc:  # defensive: keep serving further requests
@@ -80,6 +85,12 @@ def run_stdio(
                         file=err,
                     )
                     continue
+                elapsed = time.monotonic() - started
+                if elapsed > SLOW_REQUEST_S:
+                    print(
+                        f"engine: slow request {elapsed:.1f}s: {item[:120]}",
+                        file=err,
+                    )
                 if response is not None and not _emit(out, response):
                     return 0
         drained_any = False
