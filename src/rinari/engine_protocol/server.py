@@ -50,10 +50,36 @@ from rinari.shared.errors import NotFoundError, PermissionDeniedError
 from rinari.soul.store import SoulStore
 
 _TEXT_EXTENSIONS = {
-    ".c", ".cc", ".cpp", ".css", ".csv", ".go", ".h", ".hpp", ".html",
-    ".ini", ".java", ".js", ".json", ".jsx", ".log", ".md", ".php", ".ps1",
-    ".py", ".rb", ".rs", ".sh", ".sql", ".toml", ".ts", ".tsx", ".txt",
-    ".xml", ".yaml", ".yml",
+    ".c",
+    ".cc",
+    ".cpp",
+    ".css",
+    ".csv",
+    ".go",
+    ".h",
+    ".hpp",
+    ".html",
+    ".ini",
+    ".java",
+    ".js",
+    ".json",
+    ".jsx",
+    ".log",
+    ".md",
+    ".php",
+    ".ps1",
+    ".py",
+    ".rb",
+    ".rs",
+    ".sh",
+    ".sql",
+    ".toml",
+    ".ts",
+    ".tsx",
+    ".txt",
+    ".xml",
+    ".yaml",
+    ".yml",
 }
 _MAX_ATTACHMENTS = 8
 _MAX_ATTACHMENT_BYTES = 512 * 1024
@@ -62,7 +88,10 @@ _MAX_ATTACHMENTS_TOTAL_BYTES = 1024 * 1024
 
 def _is_supported_text_file(path: Path) -> bool:
     return path.suffix.lower() in _TEXT_EXTENSIONS or path.name.lower() in {
-        "dockerfile", "makefile", "license", "readme",
+        "dockerfile",
+        "makefile",
+        "license",
+        "readme",
     }
 
 
@@ -277,9 +306,7 @@ class EngineServer:
         )
         if not params.get("include_closed", False) and state is None:
             records = [
-                r
-                for r in records
-                if r.state not in {SESSION_STATE_CLOSED, SESSION_STATE_ARCHIVED}
+                r for r in records if r.state not in {SESSION_STATE_CLOSED, SESSION_STATE_ARCHIVED}
             ]
         return {"sessions": [session_to_dict(record) for record in records]}
 
@@ -386,9 +413,11 @@ class EngineServer:
         if checkpoint_id is not None and not isinstance(checkpoint_id, str):
             raise EngineProtocolError(INVALID_PARAMS, "Param 'checkpoint_id' must be a string.")
         record = self._services.sessions.show(ref)
-        if checkpoint_id is not None and (
-            self._services.checkpoints.repo.get(checkpoint_id) or {}
-        ).get("session_ref") != record.id:
+        if (
+            checkpoint_id is not None
+            and (self._services.checkpoints.repo.get(checkpoint_id) or {}).get("session_ref")
+            != record.id
+        ):
             raise EngineProtocolError(
                 INVALID_PARAMS, f"Checkpoint not found in session: {checkpoint_id}"
             )
@@ -697,8 +726,7 @@ class EngineServer:
             {
                 "exists": root.is_dir(),
                 "rinari_initialized": (root / ".rinari" / "project.toml").is_file(),
-                "trusted": root.is_dir()
-                and self._services.trust.status(root).state == "trusted",
+                "trusted": root.is_dir() and self._services.trust.status(root).state == "trusted",
             }
         )
         return {"project": view}
@@ -901,9 +929,7 @@ class EngineServer:
                 "build_command": summary.build[0].command if summary.build else None,
                 "test_command": summary.test[0].command if summary.test else None,
                 "lint_command": summary.lint[0].command if summary.lint else None,
-                "typecheck_command": (
-                    summary.typecheck[0].command if summary.typecheck else None
-                ),
+                "typecheck_command": (summary.typecheck[0].command if summary.typecheck else None),
                 "scanned_files": summary.scanned_files,
             },
             "index": self._services.index.status(root),
@@ -1123,8 +1149,7 @@ class EngineServer:
             (
                 model
                 for model in self._services.models.list()
-                if model.provider_id == provider.id
-                and model.provider_model_id == provider_model_id
+                if model.provider_id == provider.id and model.provider_model_id == provider_model_id
             ),
             None,
         )
@@ -1996,11 +2021,7 @@ class EngineServer:
         snapshot.update(self._turns.runtime_state())
         with self._model_jobs_lock:
             snapshot["model_discovery_jobs"] = [
-                {
-                    key: value
-                    for key, value in job.items()
-                    if key not in ("cache_key", "result")
-                }
+                {key: value for key, value in job.items() if key not in ("cache_key", "result")}
                 for job in self._model_jobs.values()
                 if job.get("status") == "running"
             ]

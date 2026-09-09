@@ -136,9 +136,7 @@ class Config:
                 max_runtime_minutes=_int(data, "agent", "max_runtime_minutes", 1, 1440),
             ),
             runtime=RuntimeSettings(
-                execution=_plain_enum(
-                    runtime, "execution", "runtime.execution", ("automatic",)
-                ),
+                execution=_plain_enum(runtime, "execution", "runtime.execution", ("automatic",)),
                 safeguards=RuntimeSafeguardsSettings(
                     loop_detection=_plain_bool(
                         safeguards, "loop_detection", "runtime.safeguards.loop_detection"
@@ -414,9 +412,7 @@ def _plain_bool(data: dict[str, Any], key: str, dotted: str) -> bool:
     return value
 
 
-def _plain_int(
-    data: dict[str, Any], key: str, dotted: str, minimum: int, maximum: int
-) -> int:
+def _plain_int(data: dict[str, Any], key: str, dotted: str, minimum: int, maximum: int) -> int:
     value = data.get(key)
     if not isinstance(value, int) or isinstance(value, bool):
         _fail(dotted, "must be an integer")
@@ -434,9 +430,7 @@ def _plain_number(data: dict[str, Any], key: str, dotted: str, minimum: float) -
     return float(value)
 
 
-def _plain_enum(
-    data: dict[str, Any], key: str, dotted: str, allowed: tuple[str, ...]
-) -> str:
+def _plain_enum(data: dict[str, Any], key: str, dotted: str, allowed: tuple[str, ...]) -> str:
     value = data.get(key)
     if not isinstance(value, str) or value not in allowed:
         _fail(dotted, f"must be one of {', '.join(allowed)}")

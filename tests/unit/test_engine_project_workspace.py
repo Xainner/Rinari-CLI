@@ -259,9 +259,7 @@ def test_project_crud_is_metadata_only_and_missing_folder_stays_visible(server, 
     assert listed[0]["id"] == project["id"]
 
     root.rename(tmp_path / "moved-away")
-    status = _ok(
-        server.handle_line(_req("p4", "project.status", {"project_id": project["id"]}))
-    )
+    status = _ok(server.handle_line(_req("p4", "project.status", {"project_id": project["id"]})))
     assert status["exists"] is False
     assert status["git"]["error"]["code"] == "PROJECT_PATH_MISSING"
 
@@ -269,9 +267,7 @@ def test_project_crud_is_metadata_only_and_missing_folder_stays_visible(server, 
 def test_session_rename_archive_restore_and_filters(server, tmp_path) -> None:
     root = tmp_path / "project"
     root.mkdir()
-    project = _ok(
-        server.handle_line(_req("a1", "project.add", {"path": str(root)}))
-    )["project"]
+    project = _ok(server.handle_line(_req("a1", "project.add", {"path": str(root)})))["project"]
     created = _ok(
         server.handle_line(
             _req("a2", "session.create", {"project_id": project["id"], "mode": "build"})
@@ -284,9 +280,9 @@ def test_session_rename_archive_restore_and_filters(server, tmp_path) -> None:
         )
     )["session"]
     assert renamed["title"] == "New title"
-    archived = _ok(
-        server.handle_line(_req("a4", "session.archive", {"ref": created["id"]}))
-    )["session"]
+    archived = _ok(server.handle_line(_req("a4", "session.archive", {"ref": created["id"]})))[
+        "session"
+    ]
     assert archived["state"] == "archived"
     filtered = _ok(
         server.handle_line(
@@ -298,7 +294,7 @@ def test_session_rename_archive_restore_and_filters(server, tmp_path) -> None:
         )
     )["sessions"]
     assert [row["id"] for row in filtered] == [created["id"]]
-    restored = _ok(
-        server.handle_line(_req("a6", "session.restore", {"ref": created["id"]}))
-    )["session"]
+    restored = _ok(server.handle_line(_req("a6", "session.restore", {"ref": created["id"]})))[
+        "session"
+    ]
     assert restored["state"] == "active"

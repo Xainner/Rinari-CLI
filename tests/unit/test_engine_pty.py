@@ -75,12 +75,12 @@ def _wait_for(server, event_type, pty_id, timeout=15.0):
     raise AssertionError(f"timed out waiting for {event_type} on {pty_id}")
 
 
-def test_unsupported_platform_reports_machine_code(services, monkeypatch) -> None:
+def test_unsupported_platform_reports_machine_code(services, tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(PtyRegistry, "supported", False)
     service = EnginePtyService(lambda payload: None, home=None)
     err = None
     try:
-        service.start("echo hi", cwd="/tmp")
+        service.start("echo hi", cwd=str(tmp_path))
     except Exception as exc:
         err = exc
     assert err is not None

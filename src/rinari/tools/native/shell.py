@@ -181,6 +181,7 @@ def shell_exec(input: dict, ctx: ToolContext) -> ToolResult:
     cancellation = ctx.cancellation
     remove_cancel_callback = None
     if cancellation is not None:
+
         def terminate_on_cancel() -> None:
             if process.poll() is None:
                 _kill_tree(process)

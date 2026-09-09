@@ -96,6 +96,7 @@ class TurnManager:
         self._events: queue.Queue[dict[str, Any]] = queue.Queue()
         self._turns: dict[str, _ActiveTurn] = {}
         self._threads: dict[str, threading.Thread] = {}
+        self._preparation_threads: set[threading.Thread] = set()
         self._approvals: dict[str, _PendingApproval] = {}
         self._closed_approvals: dict[str, str] = {}
         self._queue: dict[str, collections.deque[str]] = {}
@@ -250,6 +251,13 @@ class TurnManager:
             threads = list(self._threads.values())
         for thread in threads:
             thread.join(timeout=10)
+        # A timed-out/cancelled turn can leave its bounded runtime builder
+        # finishing in the background. Keep the service container alive until
+        # those builders have observed abandonment and released DB resources.
+        with self._lock:
+            preparation_threads = list(self._preparation_threads)
+        for thread in preparation_threads:
+            thread.join(timeout=PREPARATION_TIMEOUT_S + 1)
 
     def _run_turn(
         self,
@@ -309,9 +317,7 @@ class TurnManager:
                 )
         except CancelledError:
             self._cancel_running_activities(turn)
-            self._emit(
-                event("turn.cancelled", {"turn_id": turn_id, "session_id": turn.session_id})
-            )
+            self._emit(event("turn.cancelled", {"turn_id": turn_id, "session_id": turn.session_id}))
         except EngineProtocolError as err:
             self._fail_running_activities(turn, err.message)
             self._emit(
@@ -372,9 +378,7 @@ class TurnManager:
             self._local.token = None
             self._start_next_queued(turn.session_id)
 
-    def _prepare_session(
-        self, turn: _ActiveTurn, record: Any, reasoning_effort: str | None
-    ) -> Any:
+    def _prepare_session(self, turn: _ActiveTurn, record: Any, reasoning_effort: str | None) -> Any:
         """Build the per-turn runtime without stranding cancellation or the UI.
 
         Most preparation is local and normally completes in under a second.
@@ -411,11 +415,21 @@ class TurnManager:
                 with contextlib.suppress(queue.Full):
                     completed.put_nowait((False, exc))
 
-        threading.Thread(
-            target=prepare,
+        def tracked_prepare() -> None:
+            try:
+                prepare()
+            finally:
+                with self._lock:
+                    self._preparation_threads.discard(threading.current_thread())
+
+        thread = threading.Thread(
+            target=tracked_prepare,
             name="rinari-turn-prepare",
             daemon=True,
-        ).start()
+        )
+        with self._lock:
+            self._preparation_threads.add(thread)
+        thread.start()
         deadline = time.monotonic() + PREPARATION_TIMEOUT_S
         while True:
             if turn.cancel_requested.is_set():

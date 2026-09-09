@@ -339,9 +339,7 @@ def test_branch_copies_conversation_compact_state_and_checkpoints(
     assert result["branched_from"]["event_seq"] >= 1
     assert result["checkpoints_copied"] == 2
 
-    history = _ok(server.handle_line(_req("h", "session.history", {"ref": branch_id})))[
-        "messages"
-    ]
+    history = _ok(server.handle_line(_req("h", "session.history", {"ref": branch_id})))["messages"]
     assert [(m["role"], m["content"]) for m in history] == [("user", "goal"), ("assistant", "plan")]
     branched = services.sessions.show(branch_id)
     assert branched.compact_state == {"goal": "goal"}

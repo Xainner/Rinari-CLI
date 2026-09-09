@@ -145,10 +145,7 @@ class BudgetMeter:
         is_network overrides the name-prefix heuristic with ground truth
         from tool classification; the loop always passes it.
         """
-        if (
-            self.limits.max_tool_calls is not None
-            and self.tool_calls >= self.limits.max_tool_calls
-        ):
+        if self.limits.max_tool_calls is not None and self.tool_calls >= self.limits.max_tool_calls:
             return False
         network = is_network if is_network is not None else self._net(name)
         if network:
@@ -184,10 +181,7 @@ class BudgetMeter:
             and self.model_calls >= self.limits.max_model_calls
         ):
             hits.append(MODEL_CALLS)
-        if (
-            self.limits.max_tool_calls is not None
-            and self.tool_calls >= self.limits.max_tool_calls
-        ):
+        if self.limits.max_tool_calls is not None and self.tool_calls >= self.limits.max_tool_calls:
             hits.append(TOOL_CALLS)
         if (
             self.limits.max_network_calls is not None

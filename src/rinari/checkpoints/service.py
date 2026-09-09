@@ -99,11 +99,7 @@ class CheckpointService:
             if cutoff is None or cutoff.get("session_ref") != source_id:
                 raise InvalidUsageError(f"Checkpoint not found in session: {checkpoint_id}")
             stamp = cutoff.get("created_at") or ""
-            ids = [
-                cid
-                for cid in ids
-                if (self.repo.get(cid) or {}).get("created_at", "") <= stamp
-            ]
+            ids = [cid for cid in ids if (self.repo.get(cid) or {}).get("created_at", "") <= stamp]
         copied = 0
         for cid in ids:
             row = self.repo.get(cid)
