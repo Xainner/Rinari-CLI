@@ -23,7 +23,7 @@ from rinari.policy.engine import PermissionProfile, PolicyEngine
 from rinari.policy.sandbox import FilesystemSandbox, ProcessLimits
 from rinari.prompts.assembler import AssemblerContext, PromptAssembler
 from rinari.runtime.agent import AgentContext, AgentLoop
-from rinari.runtime.budget import BudgetMeter, TurnBudgetLimits
+from rinari.runtime.budget import BudgetMeter, EmergencyCircuitBreaker, TurnBudgetLimits
 from rinari.runtime.cancellation import CancellationToken
 from rinari.runtime.loopdetection import (
     NUDGE,
@@ -220,6 +220,18 @@ def test_wall_time_uses_injected_clock() -> None:
     assert meter.elapsed_s() == 0.0
     clock.advance(601.0)
     assert meter.first_exhausted() == "wall-time"
+
+
+def test_emergency_circuit_breaker_is_the_execution_gate() -> None:
+    meter = BudgetMeter(TurnBudgetLimits(max_model_calls=1, max_tool_calls=1), FakeClock())
+    breaker = EmergencyCircuitBreaker(meter)
+    assert breaker.before_model_call() is None
+    assert breaker.allows_tool("fs.read") is True
+    meter.note_model_call()
+    meter.note_tool_call("fs.read")
+    assert breaker.before_model_call() == "model-calls"
+    assert breaker.allows_tool("fs.read") is False
+    assert breaker.snapshot()["tripped"] is True
 
 
 def test_cost_never_invented_without_pricing() -> None:

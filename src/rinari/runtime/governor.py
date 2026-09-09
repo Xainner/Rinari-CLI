@@ -10,6 +10,7 @@ from rinari.runtime.progress import ProgressKind, ProgressMonitor, ProgressObser
 
 class GovernorAction(StrEnum):
     CONTINUE = "continue"
+    COMPACT = "compact"
     CONSOLIDATE = "consolidate"
     NUDGE = "nudge"
     FINALIZE = "finalize"
@@ -31,9 +32,42 @@ class TurnGovernor:
         self.max_recovery_attempts = max(1, max_recovery_attempts)
         self.recovery_attempts = 0
         self.last: ProgressObservation | None = None
+        self.compactions = 0
+        self.last_compacted_history_size = -1
+        self.last_context_pressure: float | None = None
 
     def after_tool(self, name: str, arguments: object, result: object, *, ok: bool) -> None:
         self.progress.observe_tool(name, arguments, result, ok=ok)
+
+    def context_pressure(
+        self,
+        pressure: float,
+        *,
+        history_size: int,
+        compaction_enabled: bool = True,
+    ) -> GovernorDecision:
+        """Decide whether context pressure should trigger compaction.
+
+        A history size is compacted at most once.  This prevents a provider's
+        pre-compaction usage value from repeatedly compacting an unchanged
+        history on subsequent reconciliation passes.
+        """
+        self.last_context_pressure = pressure
+        observation = self.last or self.progress.finish_cycle()
+        self.last = observation
+        if compaction_enabled and history_size > self.last_compacted_history_size:
+            return self._decision(
+                GovernorAction.COMPACT,
+                observation,
+                "context_pressure",
+            )
+        return self._decision(GovernorAction.CONTINUE, observation)
+
+    def record_compaction(self, *, history_size: int, completed: bool) -> None:
+        if not completed:
+            return
+        self.compactions += 1
+        self.last_compacted_history_size = max(self.last_compacted_history_size, history_size)
 
     def after_cycle(self, *, looping: bool = False) -> GovernorDecision:
         observation = self.progress.finish_cycle(looping=looping)
@@ -60,6 +94,9 @@ class TurnGovernor:
             "execution": "automatic",
             "recovery_attempts": self.recovery_attempts,
             "max_recovery_attempts": self.max_recovery_attempts,
+            "compactions": self.compactions,
+            "last_compacted_history_size": self.last_compacted_history_size,
+            "context_pressure": self.last_context_pressure,
             "progress": asdict(observation) if observation is not None else None,
         }
 

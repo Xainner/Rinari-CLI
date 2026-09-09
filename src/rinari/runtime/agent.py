@@ -36,7 +36,7 @@ from rinari.models.types import ChatMessage, ModelRequest, StopReason, Usage
 from rinari.prompts.assembler import AssemblerContext, PromptAssembler
 from rinari.runtime.budget import NETWORK_CALLS as NETWORK_CALLS_DIM
 from rinari.runtime.budget import TOOL_CALLS as TOOL_CALLS_DIM
-from rinari.runtime.budget import BudgetMeter
+from rinari.runtime.budget import BudgetMeter, EmergencyCircuitBreaker
 from rinari.runtime.cancellation import CancellationToken
 from rinari.runtime.governor import RECOVERY_PROMPTS, GovernorAction, TurnGovernor
 from rinari.runtime.loopdetection import LoopDetector
@@ -174,6 +174,7 @@ class AgentLoop:
         tool_calls_rejected = 0
         tool_seq = 0
         total_usage: Usage | None = None
+        circuit_breaker = EmergencyCircuitBreaker(budget) if budget is not None else None
 
         # A present meter is authoritative for model-call iterations; the
         # loop's own cap is only a defensive fallback without one.
@@ -185,7 +186,7 @@ class AgentLoop:
         for model_index in range(max_iters):
             cancel.throw_if_cancelled()
             if budget is not None:
-                hit = budget.first_exhausted(ignore=(TOOL_CALLS_DIM, NETWORK_CALLS_DIM))
+                hit = circuit_breaker.before_model_call() if circuit_breaker is not None else None
                 if hit is not None:
                     return self._stop(
                         ctx.session_id,
@@ -277,7 +278,7 @@ class AgentLoop:
                     ),
                 },
             )
-            self._check_pressure(ctx, response)
+            self._check_pressure(ctx, response, governor)
 
             if not response.has_tool_calls:
                 ctx.history.append(ChatMessage.assistant(response.content or ""))
@@ -322,7 +323,11 @@ class AgentLoop:
                 tool_calls_requested += 1
                 network = self._call_is_network(call.name, call.arguments)
                 if budget is not None:
-                    allowed = budget.allows_tool(call.name, is_network=network)
+                    allowed = (
+                        circuit_breaker.allows_tool(call.name, is_network=network)
+                        if circuit_breaker is not None
+                        else False
+                    )
                 else:
                     allowed = tool_calls_executed < self._max_tool_calls
                 executed = False
@@ -611,8 +616,10 @@ class AgentLoop:
             session_id=ctx.session_id,
         )
 
-    def _check_pressure(self, ctx: AgentContext, response: Any) -> None:
-        """Context-pressure hook (phase 4): never takes the turn down."""
+    def _check_pressure(
+        self, ctx: AgentContext, response: Any, governor: TurnGovernor
+    ) -> None:
+        """Let the governor authorize context compaction without risking the turn."""
         if self._on_pressure is None:
             return
         try:
@@ -623,8 +630,37 @@ class AgentLoop:
             used = response.usage.input_tokens or estimate_tokens(history=ctx.history)
             pressure_value = pressure(used, window)
             if pressure_value is not None and pressure_value >= PRESSURE_COMPACT:
+                history_size = len(ctx.history)
+                decision = governor.context_pressure(
+                    pressure_value,
+                    history_size=history_size,
+                )
+                if decision.action is not GovernorAction.COMPACT:
+                    return
                 ctx.compacted = False
+                self._emit_activity(
+                    "governor.compact",
+                    {
+                        "reason": decision.reason,
+                        "pressure": round(pressure_value, 3),
+                        "history_size": history_size,
+                        "status": "started",
+                    },
+                )
                 self._on_pressure(ctx, pressure_value, used, window)
+                governor.record_compaction(
+                    history_size=history_size,
+                    completed=ctx.compacted,
+                )
+                self._emit_activity(
+                    "governor.compact",
+                    {
+                        "reason": decision.reason,
+                        "pressure": round(pressure_value, 3),
+                        "history_size": history_size,
+                        "status": "completed" if ctx.compacted else "skipped",
+                    },
+                )
         except Exception:
             pass
 

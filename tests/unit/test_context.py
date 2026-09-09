@@ -261,6 +261,7 @@ def test_loop_compacts_at_pressure(app_ctx):
     provider._script.append(
         ModelResponse(content="ok", tool_calls=(), usage=Usage(), stop_reason=StopReason.END_TURN)
     )
+    activity: list[tuple[str, dict]] = []
     loop = AgentLoop(
         provider,
         ToolRuntime(ToolRegistry(), PolicyEngine(), ApprovalEngine()),
@@ -268,6 +269,7 @@ def test_loop_compacts_at_pressure(app_ctx):
         on_pressure=lambda ctx, p, used, window: service.maybe_compact(
             ctx, session_id="ses_ctx", window_tokens=window, used_input_tokens=used
         ),
+        activity_sink=lambda event, payload: activity.append((event, payload)),
     )
     result = loop.turn(context, "continue")
 
@@ -277,6 +279,10 @@ def test_loop_compacts_at_pressure(app_ctx):
     assert context.compact_state_text is not None
     assert len(context.history) < len(history) + 1
     assert context.dropped_total > 0
+    assert result.governor is not None
+    assert result.governor["compactions"] == 1
+    compact_events = [payload for event, payload in activity if event == "governor.compact"]
+    assert [event["status"] for event in compact_events] == ["started", "completed"]
 
     reloaded = app_ctx.session_repo.get("ses_ctx")
     assert reloaded.compact_state is not None

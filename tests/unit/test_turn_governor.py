@@ -35,3 +35,18 @@ def test_persistent_loop_stops_at_recovery_limit() -> None:
     stopped = governor.after_cycle(looping=True)
     assert stopped.action is GovernorAction.STOP
     assert stopped.reason == "persistent_loop"
+
+
+def test_context_pressure_is_an_explicit_deduplicated_compaction_decision() -> None:
+    governor = TurnGovernor()
+    decision = governor.context_pressure(0.82, history_size=20)
+    assert decision.action is GovernorAction.COMPACT
+    assert decision.reason == "context_pressure"
+
+    governor.record_compaction(history_size=20, completed=True)
+    duplicate = governor.context_pressure(0.84, history_size=20)
+    assert duplicate.action is GovernorAction.CONTINUE
+
+    grown = governor.context_pressure(0.86, history_size=22)
+    assert grown.action is GovernorAction.COMPACT
+    assert governor.snapshot()["compactions"] == 1

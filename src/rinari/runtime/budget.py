@@ -235,6 +235,31 @@ class BudgetMeter:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class EmergencyCircuitBreaker:
+    """Hard safety cutoff layered over an observable usage meter.
+
+    ``BudgetMeter`` records work.  This class is the authority that decides
+    whether another model/tool operation may begin, keeping emergency limits
+    separate from progress-based turn governance.
+    """
+
+    meter: BudgetMeter
+
+    def before_model_call(self) -> str | None:
+        return self.meter.first_exhausted(ignore=(TOOL_CALLS, NETWORK_CALLS))
+
+    def allows_tool(self, name: str, *, is_network: bool | None = None) -> bool:
+        return self.meter.allows_tool(name, is_network=is_network)
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "tripped": self.before_model_call() is not None,
+            "reason": self.before_model_call(),
+            "usage": self.meter.snapshot(),
+        }
+
+
 __all__ = [
     "COST",
     "DEFAULT_NETWORK_NAMESPACES",
@@ -246,5 +271,6 @@ __all__ = [
     "TOOL_CALLS",
     "WALL_TIME",
     "BudgetMeter",
+    "EmergencyCircuitBreaker",
     "TurnBudgetLimits",
 ]
