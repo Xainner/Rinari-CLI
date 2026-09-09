@@ -472,6 +472,28 @@ class SessionService:
             self._ctx.session_repo.update(record)
         return record
 
+    def set_soul(self, ref: str, soul_id: str) -> SessionRecord:
+        """Pin a session-scope Soul override. Unknown ids fail (NotFoundError)
+        before anything is written; the SoulStore stays the validator."""
+        from rinari.soul.store import SoulStore
+
+        record = self._resolve(ref)
+        SoulStore(self._ctx.home).get(soul_id)
+        if record.soul_id != soul_id:
+            record.soul_id = soul_id
+            record.updated_at = self._now()
+            self._ctx.session_repo.update(record)
+        return record
+
+    def clear_soul(self, ref: str) -> SessionRecord:
+        """Drop the session override; the global Soul 3.0 chain applies again."""
+        record = self._resolve(ref)
+        if record.soul_id is not None:
+            record.soul_id = None
+            record.updated_at = self._now()
+            self._ctx.session_repo.update(record)
+        return record
+
     def set_model(self, ref: str, model_ref: str, provider_ref: str | None = None) -> SessionRecord:
         """Persist the provider/model used by subsequent turns of one session."""
         record = self._resolve(ref)

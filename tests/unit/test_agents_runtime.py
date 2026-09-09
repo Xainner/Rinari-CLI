@@ -919,3 +919,81 @@ def test_cli_session_wires_agent_tools_end_to_end(app_ctx, git_repo, monkeypatch
     tool_texts = [m.content for m in last_messages if getattr(m, "role", "") == "tool"]
     assert any("agt_001" in t for t in tool_texts)
     assert any("sub done" in t for t in tool_texts)
+
+
+class _CapturingModel:
+    """Scripted caller that records the requests it receives."""
+
+    def __init__(self) -> None:
+        from rinari.models.types import ProviderCapabilities
+
+        self.requests: list = []
+        self._capabilities = ProviderCapabilities(
+            streaming=False, tool_calls=True, structured_output=True
+        )
+
+    def capabilities(self):
+        return self._capabilities
+
+    def invoke(self, request):
+        from rinari.models.types import ModelResponse, StopReason
+
+        self.requests.append(request)
+        return ModelResponse(content="done", stop_reason=StopReason.END_TURN)
+
+
+def _run_effort_subagent(monkeypatch, git_repo, effort_for):
+    from rinari.agents.orchestrator import SubagentRunSpec
+    from rinari.agents.runtime import SubagentRuntimeConfig, make_subagent_runner
+    from rinari.policy.engine import PolicyEngine
+    from rinari.policy.sandbox import FilesystemSandbox
+    from rinari.runtime.cancellation import CancellationToken
+    from rinari.shared.clock import FakeClock
+
+    clock = FakeClock(start=1_700_000_000.0, step=0.05)
+
+    def sandbox_factory(profile, cwd, write_roots):
+        return FilesystemSandbox(read_root=git_repo, write_roots=tuple(write_roots))
+
+    model = _CapturingModel()
+    config = SubagentRuntimeConfig(
+        caller=model,
+        base_registry=None,
+        parent_token=CancellationToken(),
+        policy=PolicyEngine(),
+        sandbox_factory=sandbox_factory,
+        parent_session_ctx=_ParentCtx(git_repo, clock),
+        worktrees=None,
+        effort_for=effort_for,
+    )
+    runner = make_subagent_runner(config)
+    spec = SubagentRunSpec(
+        agent_id="agt_effort",
+        definition=BUILTIN_AGENTS["explore"],
+        objective="map the repo",
+        project_root=git_repo,
+        session_id="parent",
+    )
+    monkeypatch.setattr("rinari.agents.runtime._make_assembler", lambda: _NoopAssembler())
+    result = runner.run(spec)
+    assert result is not None
+    assert model.requests, "subagent made no model calls"
+    return model
+
+
+def test_subagent_effort_reaches_model_request(monkeypatch, git_repo):
+    """docs/desktop 03-A: stored effort changes the invocation (observable)."""
+    seen: list = []
+
+    def effort_for(name):
+        seen.append(name)
+        return "high"
+
+    model = _run_effort_subagent(monkeypatch, git_repo, effort_for=effort_for)
+    assert seen == ["explore"]
+    assert [r.reasoning_effort for r in model.requests] == ["high"] * len(model.requests)
+
+
+def test_subagent_unset_effort_inherits(monkeypatch, git_repo):
+    model = _run_effort_subagent(monkeypatch, git_repo, effort_for=None)
+    assert [r.reasoning_effort for r in model.requests] == [None] * len(model.requests)

@@ -46,6 +46,19 @@ def load_soul(home: str | Path) -> IdentityAsset:
     return _load("soul", Path(home))
 
 
+def load_named_soul(home: str | Path, soul_id: str) -> IdentityAsset:
+    """Load one known Soul by id (session-scope override).
+
+    Raises NotFoundError for unknown ids — the same validator the
+    session service uses before persisting, so an override can never
+    point at a Soul that no longer exists.
+    """
+    from rinari.soul.store import SoulStore
+
+    home_path = Path(home)
+    return _from_definition(SoulStore(home_path).get(soul_id), home_path)
+
+
 def load_active_soul(home: str | Path) -> IdentityAsset:
     """Soul 3.0 resolution: active custom soul → legacy ~/soul.md → bundled default.
 

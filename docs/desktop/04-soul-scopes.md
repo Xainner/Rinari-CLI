@@ -1,5 +1,15 @@
 # 04 — Soul scopes protocol
 
+> Status (2026-09-09): session scope implemented. `sessions.soul_id`
+> (migration 0021, NULL = inherit) validated against the SoulStore at
+> write time; `soul.get_effective` resolves session pin → global Soul 3.0
+> chain (active custom → legacy `~/soul.md` → bundled default) with an
+> explicit `source`; a pin pointing at a removed Soul fails NOT_FOUND
+> instead of silently switching personality. Prompt composition honors
+> the pin (`build_assembler_context`); subagents stay functional
+> (`soul=""`, pinned). Project-level default deferred: no project config
+> surface exists yet, and inventing one here would bypass trust.
+
 ## What Code needs
 
 Soul is a real domain object globally (list/get/create/update/remove/

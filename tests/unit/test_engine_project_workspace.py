@@ -182,3 +182,32 @@ def test_status_git_repo_matches_git_truth_with_binding(server, tmp_path) -> Non
     assert after["status"]["dirty"] is True
     assert {f["path"] if isinstance(f, dict) else f for f in after["status"]["files"]}
     assert after["active_session_id"] == opened["session"]["id"]
+
+
+def test_intelligence_reports_real_repo_signals(services, server, tmp_path) -> None:
+    repo = _git_repo(tmp_path)
+    (repo / "RINARI.md").write_text("# conventions\n")
+    # Untrusted projects withhold their instructions (same rule as prompts).
+    result = _ok(server.handle_line(_req("i1", "project.intelligence", {"path": str(repo)})))
+    assert result["project"]["root"] == str(repo.resolve())
+    repository = result["repository"]
+    assert "python" in repository["languages"]
+    assert repository["scanned_files"] >= 1
+    # No fabrication: commands are null when the repo states none.
+    assert repository["test_command"] is None
+    assert result["index"]["indexed"] is False
+    assert result["instructions"]["trusted"] is False
+    assert result["instructions"]["scopes"] == []
+
+    services.trust.add(repo)
+    trusted = _ok(server.handle_line(_req("i2", "project.intelligence", {"path": str(repo)})))
+    assert trusted["instructions"]["trusted"] is True
+    scopes = trusted["instructions"]["scopes"]
+    assert any(s["provenance"] == "./RINARI.md" and s["scope"] == "root" for s in scopes)
+
+
+def test_intelligence_rejects_non_directory(server, tmp_path) -> None:
+    err = _err(
+        server.handle_line(_req("i2", "project.intelligence", {"path": str(tmp_path / "nope")}))
+    )
+    assert err["code"] == "INVALID_PARAMS"

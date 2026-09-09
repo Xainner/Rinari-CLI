@@ -62,7 +62,12 @@ def test_agent_list_has_builtins_with_empty_assignments(server) -> None:
     assert {"explore", "reviewer", "debugger", "researcher", "implementer", "verifier"} <= names
     explore = next(a for a in result["agents"] if a["name"] == "explore")
     assert explore["profile"] == "read-only"
-    assert explore["assignment"] == {"model": None, "fallback": None, "enabled": True}
+    assert explore["assignment"] == {
+        "model": None,
+        "fallback": None,
+        "enabled": True,
+        "effort": None,
+    }
 
 
 def test_agent_config_set_get_and_clear(server) -> None:
@@ -79,6 +84,7 @@ def test_agent_config_set_get_and_clear(server) -> None:
         "model": "fake-one",
         "fallback": "fake-two",
         "enabled": True,
+        "effort": None,
     }
 
     again = _ok(server.handle_line(_req("a3", "agent.config.get", {"agent": "explore"})))
@@ -87,7 +93,124 @@ def test_agent_config_set_get_and_clear(server) -> None:
     cleared = _ok(
         server.handle_line(_req("a4", "agent.config.set", {"agent": "explore", "clear": True}))
     )
-    assert cleared["agent"]["assignment"] == {"model": None, "fallback": None, "enabled": True}
+    assert cleared["agent"]["assignment"] == {
+        "model": None,
+        "fallback": None,
+        "enabled": True,
+        "effort": None,
+    }
+
+
+def test_agent_config_set_get_and_clear_effort(server) -> None:
+    result = _ok(
+        server.handle_line(_req("e1", "agent.config.set", {"agent": "explore", "effort": "high"}))
+    )
+    assert result["agent"]["assignment"]["effort"] == "high"
+
+    again = _ok(server.handle_line(_req("e2", "agent.config.get", {"agent": "explore"})))
+    assert again["agent"]["assignment"]["effort"] == "high"
+
+    nulled = _ok(
+        server.handle_line(_req("e3", "agent.config.set", {"agent": "explore", "effort": None}))
+    )
+    assert nulled["agent"]["assignment"]["effort"] is None
+
+    bad = _err(
+        server.handle_line(_req("e4", "agent.config.set", {"agent": "explore", "effort": "ultra"}))
+    )
+    assert bad["code"] == "INVALID_PARAMS"
+    # Rejected values never persist.
+    current = _ok(server.handle_line(_req("e5", "agent.config.get", {"agent": "explore"})))
+    assert current["agent"]["assignment"]["effort"] is None
+
+
+def test_agent_effort_store_roundtrip_and_coercion(services) -> None:
+    store = services.agent_configs
+    assert store.set("explore", effort="low").effort == "low"
+    assert store.get("explore").effort == "low"
+    # Unknown values never persist: ValueError at set, None on foreign reads.
+    with pytest.raises(ValueError):
+        store.set("explore", effort="ultra")
+    assert store.get("explore").effort == "low"
+    assert store.set("explore", clear_effort=True).effort is None
+
+
+def test_model_capabilities_matrix_with_unknowns(server) -> None:
+    result = _ok(
+        server.handle_line(
+            _req(
+                "m1",
+                "model.capabilities",
+                {"provider": "fake", "provider_model_id": "fake-model-1"},
+            )
+        )
+    )
+    assert result["provider"] == "fake"
+    assert result["alias"] == "fake-one"
+    assert "availability" in result
+    caps = result["capabilities"]
+    assert set(caps) == {
+        "tools",
+        "streaming",
+        "structured_output",
+        "reasoning",
+        "vision",
+        "max_context_window",
+    }
+    assert caps["tools"] is True
+    assert result["supports_tools"] is True
+    # No adapter determines vision today: unknown, never an invented False.
+    assert caps["vision"] is None
+    assert "vision" in result["unknown"]
+
+
+def test_model_capabilities_record_override(services, server) -> None:
+    services.models.add(
+        "fake",
+        "fake-model-3",
+        "fake-three",
+        capabilities={"tool_calls": False, "max_context_tokens": 128000},
+    )
+    result = _ok(
+        server.handle_line(
+            _req(
+                "m2",
+                "model.capabilities",
+                {"provider": "fake", "provider_model_id": "fake-model-3"},
+            )
+        )
+    )
+    assert result["capabilities"]["tools"] is False
+    assert result["supports_tools"] is False
+    assert result["capabilities"]["max_context_window"] == 128000
+    assert result["unknown"] == ["vision"]
+
+
+def test_model_capabilities_not_found_and_bad_params(server) -> None:
+    assert (
+        _err(
+            server.handle_line(
+                _req("m3", "model.capabilities", {"provider": "nope", "provider_model_id": "x"})
+            )
+        )["code"]
+        == "NOT_FOUND"
+    )
+    assert (
+        _err(
+            server.handle_line(
+                _req(
+                    "m4",
+                    "model.capabilities",
+                    {"provider": "fake", "provider_model_id": "ghost"},
+                )
+            )
+        )["code"]
+        == "NOT_FOUND"
+    )
+    assert (
+        _err(server.handle_line(_req("m5", "model.capabilities", {"provider": "fake"})))["code"]
+        == "INVALID_PARAMS"
+    )
 
 
 def test_agent_config_rejects_unknown_agent_and_alias(server) -> None:

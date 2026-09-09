@@ -131,6 +131,37 @@ class ModelRouter:
     def adapter(self, provider: ProviderRecord):
         return adapter_for(provider, self._client)
 
+    # Normalized capability matrix keys (docs/desktop 03-B). Engine-wide
+    # contract: tools/streaming/structured_output/reasoning mirror the
+    # merged ProviderCapabilities; vision is None until an adapter can
+    # determine it (unknown, never an invented False); max_context_window
+    # is None when no source states it.
+    MATRIX_KEYS = (
+        "tools",
+        "streaming",
+        "structured_output",
+        "reasoning",
+        "vision",
+        "max_context_window",
+    )
+
+    def capability_matrix(self, provider: ProviderRecord, model_id: str) -> dict[str, Any]:
+        """Normalized map + derived routing signals for one model."""
+        merged = self.capabilities(provider, model_id)
+        matrix = {
+            "tools": merged.tool_calls,
+            "streaming": merged.streaming,
+            "structured_output": merged.structured_output,
+            "reasoning": merged.reasoning_effort,
+            "vision": None,
+            "max_context_window": merged.max_context_tokens,
+        }
+        return {
+            "capabilities": matrix,
+            "supports_tools": bool(matrix["tools"]),
+            "unknown": sorted(key for key, value in matrix.items() if value is None),
+        }
+
     def capabilities(
         self, provider: ProviderRecord, model_id: str | None = None
     ) -> ProviderCapabilities:

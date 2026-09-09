@@ -856,11 +856,13 @@ Slice 6a adds project workspace reads: `task.tree/get`,
 `project.changes` (porcelain files + branch/head/dirty, `available:false`
 outside a repo), `project.diff` (unified, truncated, binary-safe).
 Slice 7a adds agent routing: `agent.list` (definitions + assignments),
-`agent.config.get/set` (model/fallback/enabled per agent, `clear` to reset;
-aliases must resolve and support tool calls), `session.events` (persisted
-lifecycle incl. SubagentStart/Stop). Spawn resolves assigned model →
-fallback → parent caller; effort overrides stay out (no model-layer
-plumbing — see debt log).
+`agent.config.get/set` (model/fallback/enabled/effort per agent, `clear`
+to reset; aliases must resolve and support tool calls; effort is low,
+medium, high or null/inherit, anything else is `INVALID_PARAMS`),
+`session.events` (persisted lifecycle incl. SubagentStart/Stop). Spawn
+resolves assigned model → fallback → parent caller, and the stored
+effort (when set) reaches the invocation through the existing
+`reasoning_effort` call path.
 Slice 8a adds Soul 3.0: `soul.list/get/create/update/remove/activate`,
 `~/souls/<id>/{soul.toml,identity.md}` store, bundled `rinari-default` 3.0,
 global activation; legacy `~/soul.md` keeps working (active > legacy >
@@ -893,6 +895,9 @@ running turn → `TURN_RUNNING`; always drains the turn queue and reports
 `queue_dropped` + `checkpoints_removed/kept` + `artifacts_removed/kept`;
 cascade also removes the session's checkpoints and session-retention
 artifacts; tasks are project-scoped and never deleted with a session).
+`session.branch` (`ref`, `title?`, `checkpoint_id?` as history upper
+bound → independent copy of conversation + compact state + checkpoints
+with `branched_from` ancestry; task graphs not copied).
 Post-v1 projects: `project.list_recent` (`limit` 1..100 default 20,
 ordered by shared session activity, never a second store;
 `last_opened_at` falls back to record recency; `active_session_id` binds
@@ -900,7 +905,25 @@ the latest non-closed session), `project.open` (`path` → upsert +
 recommended session, created or reused-and-touched; `$HOME` rejected;
 plain dirs promote to PROJECT) and `project.status` (git truth +
 `active_session_id` dashboard binding; branch/dirty live here, not in
-the recents list).
+the recents list). `project.intelligence` (`path` → read-only repo
+understanding: languages/frameworks/commands, index status, instruction
+scopes honoring the trust gate; uncomputed fields omitted, never
+fabricated).
+Post-v1 soul: `soul.get_effective` (`ref` → `soul_id` + `source`
+session/global/legacy/default), `session.soul.set` (`ref` + `id`; unknown
+ids rejected NOT_FOUND before writing) and `session.soul.clear`
+(`ref` → back to the global chain); the pin reaches prompt composition
+and survives restarts; a pin to a removed Soul fails loudly.
+Post-v1 agents: `model.capabilities` (`provider` + `provider_model_id` →
+normalized map tools/streaming/structured_output/reasoning/vision/
+max_context_window with `supports_tools` + `unknown`; vision is always
+unknown until an adapter determines it, never an invented false).
+Post-v1 runtime: `pty.start` (`command`, `cwd?`, `env?`, `cols?`,
+`rows?`, `session_id?` → user-initiated terminal over the shared PTY
+backend) + `pty.write/resize/read/list/terminate` with `pty.output` /
+single `pty.exit` events; POSIX-only spawn (`PTY_UNSUPPORTED`
+elsewhere); cwd never the home root; dead-handle terminate is no-op
+success; restart reports no handles.
 The envelope contract is unchanged across slices.
 
 ---

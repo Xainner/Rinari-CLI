@@ -29,6 +29,7 @@ from rinari.models.types import (
     StopReason,
 )
 from rinari.shared.errors import CancelledError, InvalidUsageError, NotFoundError
+from rinari.storage.records import SessionMessageRecord
 
 
 class FakeModel:
@@ -290,3 +291,113 @@ def test_delete_rejects_non_boolean_cascade(server, tmp_path) -> None:
     )
     assert err["code"] == "INVALID_PARAMS"
     assert session_id in _list_ids(server, include_closed=True)
+
+
+def _seed_branch_source(services, session_id):
+    services.ctx.message_repo.append_many(
+        session_id,
+        [
+            SessionMessageRecord(
+                id=f"bmsg-{i}",
+                session_id=session_id,
+                seq=0,
+                role=role,
+                content=text,
+                created_at=f"2026-09-09T10:00:0{i}Z",
+            )
+            for i, (role, text) in enumerate([("user", "goal"), ("assistant", "plan")])
+        ],
+    )
+    record = services.sessions.show(session_id)
+    record.compact_state = {"goal": "goal"}
+    services.ctx.session_repo.update(record)
+    for tag, stamp in (("ck-old", "2026-09-09T10:00:00Z"), ("ck-new", "2026-09-09T10:00:01Z")):
+        services.checkpoints.repo.insert(
+            {
+                "id": tag,
+                "session_ref": session_id,
+                "project_root": "root",
+                "label": tag,
+                "agent_changes": 0,
+                "user_owned": 0,
+                "created_at": stamp,
+            }
+        )
+
+
+def test_branch_copies_conversation_compact_state_and_checkpoints(
+    services, server, tmp_path
+) -> None:
+    session_id = _create_chat(server, tmp_path)
+    _seed_branch_source(services, session_id)
+
+    result = _ok(server.handle_line(_req("b", "session.branch", {"ref": session_id})))
+    branch_id = result["session"]["id"]
+    assert branch_id != session_id
+    assert services.sessions.show(branch_id).forked_from == session_id
+    assert result["branched_from"]["session_id"] == session_id
+    assert result["branched_from"]["event_seq"] >= 1
+    assert result["checkpoints_copied"] == 2
+
+    history = _ok(server.handle_line(_req("h", "session.history", {"ref": branch_id})))[
+        "messages"
+    ]
+    assert [(m["role"], m["content"]) for m in history] == [("user", "goal"), ("assistant", "plan")]
+    branched = services.sessions.show(branch_id)
+    assert branched.compact_state == {"goal": "goal"}
+    labels = sorted(
+        services.checkpoints.repo.get(cid)["label"]
+        for cid in services.checkpoints.ids_for_session(branch_id)
+    )
+    assert labels == ["ck-new", "ck-old"]
+    # Source untouched.
+    assert len(services.checkpoints.ids_for_session(session_id)) == 2
+
+
+def test_branch_with_checkpoint_id_copies_history_through_it(services, server, tmp_path) -> None:
+    session_id = _create_chat(server, tmp_path)
+    _seed_branch_source(services, session_id)
+
+    result = _ok(
+        server.handle_line(
+            _req("b", "session.branch", {"ref": session_id, "checkpoint_id": "ck-old"})
+        )
+    )
+    assert result["checkpoints_copied"] == 1
+    branch_id = result["session"]["id"]
+    labels = [
+        services.checkpoints.repo.get(cid)["label"]
+        for cid in services.checkpoints.ids_for_session(branch_id)
+    ]
+    assert labels == ["ck-old"]
+
+
+def test_branch_unknown_checkpoint_rejected_without_branching(services, server, tmp_path) -> None:
+    session_id = _create_chat(server, tmp_path)
+    _seed_branch_source(services, session_id)
+    before = set(_list_ids(server, include_closed=True))
+    err = _err(
+        server.handle_line(
+            _req("b", "session.branch", {"ref": session_id, "checkpoint_id": "ck-nope"})
+        )
+    )
+    assert err["code"] == "INVALID_PARAMS"
+    assert set(_list_ids(server, include_closed=True)) == before
+
+
+def test_branch_reopens_after_restart(services, server, tmp_path) -> None:
+    session_id = _create_chat(server, tmp_path)
+    _seed_branch_source(services, session_id)
+    branch_id = _ok(server.handle_line(_req("b", "session.branch", {"ref": session_id})))[
+        "session"
+    ]["id"]
+    server.close()
+    fresh = EngineServer(services, user_home=tmp_path / "home")
+    try:
+        got = fresh.handle_line(_req("g", "session.get", {"ref": branch_id}))
+        assert got is not None and got["ok"] is True
+        history = fresh.handle_line(_req("h", "session.history", {"ref": branch_id}))
+        assert history is not None and history["ok"] is True
+        assert history["result"]["total"] == 2
+    finally:
+        fresh.close()

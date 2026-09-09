@@ -91,6 +91,7 @@ class SubagentRuntimeConfig:
     project_instructions: Any = ()
     parent_profile: str = "workspace"
     caller_for: Any = None  # (agent_name) -> ModelCaller | None; None = inherit
+    effort_for: Any = None  # (agent_name) -> effort str | None; None = inherit
 
 
 class _SubagentRunner:
@@ -119,17 +120,26 @@ class _SubagentRunner:
         caller = cfg.caller
         if cfg.caller_for is not None:
             try:
-                override = cfg.caller_for(spec.agent)
+                override = cfg.caller_for(definition.name)
             except Exception:
                 override = None
             if override is not None:
                 caller = override
+        # Per-agent effort (docs/desktop 03-A): stored config reaching the
+        # existing reasoning_effort call path; None inherits session effort.
+        effort = None
+        if callable(getattr(cfg, "effort_for", None)):
+            try:
+                effort = cfg.effort_for(definition.name)
+            except Exception:
+                effort = None
         loop = AgentLoop(
             caller,
             runtime,
             _make_assembler(),
             event_sink=cfg.event_sink,
             hook_sink=cfg.hook_sink,
+            reasoning_effort=effort,
         )
         base = self._assembler_base(spec, definition)
         context = AgentContext(

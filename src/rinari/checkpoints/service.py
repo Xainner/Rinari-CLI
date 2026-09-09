@@ -84,6 +84,56 @@ class CheckpointService:
         )
         return [row["id"] for row in rows]
 
+    def duplicate_for_session(
+        self, source_id: str, target_id: str, checkpoint_id: str | None = None
+    ) -> int:
+        """Copy a session's checkpoints (with file rows) onto another session.
+
+        With checkpoint_id, only checkpoints at-or-before it are copied
+        (branch point in checkpoint history). Unknown or foreign ids fail
+        before anything is copied.
+        """
+        ids = self.ids_for_session(source_id)
+        if checkpoint_id is not None:
+            cutoff = self.repo.get(checkpoint_id)
+            if cutoff is None or cutoff.get("session_ref") != source_id:
+                raise InvalidUsageError(f"Checkpoint not found in session: {checkpoint_id}")
+            stamp = cutoff.get("created_at") or ""
+            ids = [
+                cid
+                for cid in ids
+                if (self.repo.get(cid) or {}).get("created_at", "") <= stamp
+            ]
+        copied = 0
+        for cid in ids:
+            row = self.repo.get(cid)
+            if row is None:
+                continue
+            new_id = self._ctx.ids.new(CHECKPOINT_ID_PREFIX)
+            self._ctx.db.execute(
+                "INSERT INTO checkpoints "
+                "(id, session_ref, project_root, label, agent_changes, user_owned, created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (
+                    new_id,
+                    target_id,
+                    row["project_root"],
+                    row["label"],
+                    row["agent_changes"],
+                    row["user_owned"],
+                    row["created_at"],
+                ),
+            )
+            self._ctx.db.execute(
+                "INSERT INTO checkpoint_files "
+                "(checkpoint_id, path, ownership, prior_source, prior_status, prior_blob) "
+                "SELECT ?, path, ownership, prior_source, prior_status, prior_blob "
+                "FROM checkpoint_files WHERE checkpoint_id = ?",
+                (new_id, cid),
+            )
+            copied += 1
+        return copied
+
     def list(self, path: str | Path | None = None) -> list[dict]:
         root = str(self._root(path)) if path else None
         if root is not None:

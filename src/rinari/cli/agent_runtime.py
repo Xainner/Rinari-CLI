@@ -36,7 +36,7 @@ from rinari.prompts.soul_sections import split_soul
 from rinari.runtime.agent import AgentContext, AgentLoop, TurnResult
 from rinari.runtime.budget import BudgetMeter, TurnBudgetLimits
 from rinari.runtime.cancellation import CancellationToken
-from rinari.runtime.identity import load_active_soul, load_constitution
+from rinari.runtime.identity import load_active_soul, load_constitution, load_named_soul
 from rinari.runtime.loopdetection import LoopDetector
 from rinari.runtime.model_caller import ModelCaller, SessionModelGateway
 from rinari.shared.clock import now_iso
@@ -134,7 +134,12 @@ def build_assembler_context(services: ServiceContainer, record: SessionRecord) -
     # Canonical assets through the identity loader (user override supported,
     # harness.md 37; version/sha256 traced by the build manifest).
     constitution = load_constitution(services.ctx.home).text
-    soul = load_active_soul(services.ctx.home).text
+    # Session-scope Soul override wins; None falls through to the global
+    # Soul 3.0 chain (active custom → legacy ~/soul.md → bundled default).
+    if record.soul_id is not None:
+        soul = load_named_soul(services.ctx.home, record.soul_id).text
+    else:
+        soul = load_active_soul(services.ctx.home).text
     canonical, extended = split_soul(soul)
     root = Path(record.project_root_snapshot) if record.project_root_snapshot else None
     environment: dict = {"cwd": record.current_cwd, "version": __version__}
@@ -539,6 +544,7 @@ def _build_orchestrator(
     config = SubagentRuntimeConfig(
         caller=caller,
         caller_for=lambda name: caller_for_agent(services, record, name),
+        effort_for=lambda name: effort_for_agent(services, name),
         base_registry=None,  # runner filters all_native_tools by the allowlist
         parent_token=token,
         policy=policy,
@@ -772,6 +778,15 @@ def caller_for_agent(
             continue
         return _caller_for(services, replace(record, provider_id=provider.id, model_id=model.id))
     return None
+
+
+def effort_for_agent(services: ServiceContainer, agent_name: str) -> str | None:
+    """Per-agent reasoning effort override (docs/desktop 03-A).
+
+    None = inherit the session/turn effort. The store only ever holds
+    validated values, so no re-validation is needed here.
+    """
+    return services.agent_configs.get(agent_name).effort
 
 
 # ---------------------------------------------------------------------------

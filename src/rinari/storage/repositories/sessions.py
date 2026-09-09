@@ -21,8 +21,8 @@ class SessionRepository:
                 created_cwd, current_cwd, provider_id, model_id,
                 profile_id, mode, state, compact_state_json,
                 created_at, updated_at, last_active_at, git_branch, forked_from,
-                active_skills_json, permission_profile
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                active_skills_json, permission_profile, soul_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 rec.id,
@@ -49,6 +49,7 @@ class SessionRepository:
                     else None
                 ),
                 rec.permission_profile,
+                rec.soul_id,
             ),
         )
 
@@ -63,7 +64,8 @@ class SessionRepository:
                 kind = ?, title = ?, project_id = ?, project_root_snapshot = ?,
                 current_cwd = ?, provider_id = ?, model_id = ?, profile_id = ?,
                 mode = ?, state = ?, compact_state_json = ?, updated_at = ?, last_active_at = ?,
-                git_branch = ?, forked_from = ?, active_skills_json = ?, permission_profile = ?
+                git_branch = ?, forked_from = ?, active_skills_json = ?, permission_profile = ?,
+                soul_id = ?
             WHERE id = ?
             """,
             (
@@ -88,6 +90,7 @@ class SessionRepository:
                     else None
                 ),
                 rec.permission_profile,
+                rec.soul_id,
                 rec.id,
             ),
         )
@@ -140,6 +143,7 @@ def _session_to_record(row: dict) -> SessionRecord:
         forked_from=row["forked_from"],
         active_skills=active_skills,
         permission_profile=row["permission_profile"] or "workspace",
+        soul_id=row["soul_id"],
     )
 
 

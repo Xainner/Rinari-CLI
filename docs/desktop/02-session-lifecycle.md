@@ -55,8 +55,11 @@ Response echoes what happened:
 ## Proposal B — branching (P2)
 
 `session.branch { ref, title?, checkpoint_id? }` built on the existing
-`SessionService.fork`, extended to fork task graph + compact state +
-checkpoints, not just conversation. Response returns the new session plus
+`SessionService.fork`, extended to fork compact state + checkpoints, not
+just conversation. Task graphs are project-scoped (shared across
+sessions) and are never copied — same rule as `session.delete`.
+`checkpoint_id` selects an upper bound: only checkpoints at-or-before it
+are copied. Response returns the new session plus
 `branched_from: { session_id, event_seq }` ancestry. Copying visible chat
 messages without task/context state is explicitly out.
 

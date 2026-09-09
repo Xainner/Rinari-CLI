@@ -1,5 +1,13 @@
 # 03 — Model routing protocol
 
+> Status (2026-09-09): both P2 items implemented. Per-agent effort is
+> stored on the assignment, validated at config time and reaches the
+> invocation through the existing `reasoning_effort` path (pinned
+> end-to-end in `test_agents_runtime.py`; also fixed `spec.agent` →
+> `definition.name`, which had silently disabled the model override).
+> `model.capabilities` returns the normalized matrix (pinned in
+> `test_engine_agents.py`).
+
 ## What Code needs
 
 The desktop already assigns model/fallback/enabled per built-in agent

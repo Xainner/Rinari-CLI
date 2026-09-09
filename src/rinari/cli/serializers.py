@@ -68,6 +68,7 @@ def session_dict(record: SessionRecord) -> dict[str, Any]:
         "state": record.state,
         "git_branch": record.git_branch,
         "forked_from": record.forked_from,
+        "soul_id": record.soul_id,
         "active_skills": (
             [list(pair) for pair in record.active_skills] if record.active_skills else None
         ),

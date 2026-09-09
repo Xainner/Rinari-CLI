@@ -13,7 +13,7 @@ from typing import Any
 
 from rinari.application.provider_service import AddProviderInput
 from rinari.application.services import ServiceContainer
-from rinari.application.session_service import SESSION_STATE_CLOSED
+from rinari.application.session_service import EVENT_SESSION_FORKED, SESSION_STATE_CLOSED
 from rinari.cli.serializers import model_dict
 from rinari.engine_protocol import protocol
 from rinari.engine_protocol.dispatcher import EngineDispatcher
@@ -24,6 +24,7 @@ from rinari.engine_protocol.errors import (
     EngineProtocolError,
 )
 from rinari.engine_protocol.messages import event, hello
+from rinari.engine_protocol.pty import EnginePtyService
 from rinari.engine_protocol.observability import (
     clamp_read_bytes,
     context_view,
@@ -97,7 +98,13 @@ class EngineServer:
     def __init__(self, services: ServiceContainer, user_home: Path | str | None = None) -> None:
         self._services = services
         home = Path(user_home) if user_home is not None else None
+        self._user_home = home
         self._turns = TurnManager(services, user_home=home)
+        self._pty = EnginePtyService(
+            self._turns.emit_external,
+            home=home,
+            resolve_session=self._services.sessions.show,
+        )
         self._dispatcher = EngineDispatcher()
         self._dispatcher.register("engine.info", self._engine_info)
         self._dispatcher.register("session.list", self._session_list)
@@ -106,6 +113,7 @@ class EngineServer:
         self._dispatcher.register("session.open", self._session_open)
         self._dispatcher.register("session.close", self._session_close)
         self._dispatcher.register("session.delete", self._session_delete)
+        self._dispatcher.register("session.branch", self._session_branch)
         self._dispatcher.register("session.history", self._session_history)
         self._dispatcher.register("session.mode.set", self._session_mode_set)
         self._dispatcher.register("session.model.set", self._session_model_set)
@@ -126,10 +134,18 @@ class EngineServer:
         self._dispatcher.register("project.list_recent", self._project_list_recent)
         self._dispatcher.register("project.open", self._project_open)
         self._dispatcher.register("project.status", self._project_status)
+        self._dispatcher.register("project.intelligence", self._project_intelligence)
+        self._dispatcher.register("pty.start", self._pty_start)
+        self._dispatcher.register("pty.write", self._pty_write)
+        self._dispatcher.register("pty.resize", self._pty_resize)
+        self._dispatcher.register("pty.read", self._pty_read)
+        self._dispatcher.register("pty.list", self._pty_list)
+        self._dispatcher.register("pty.terminate", self._pty_terminate)
         self._dispatcher.register("workspace.file.search", self._workspace_file_search)
         self._dispatcher.register("agent.list", self._agent_list)
         self._dispatcher.register("agent.config.get", self._agent_config_get)
         self._dispatcher.register("agent.config.set", self._agent_config_set)
+        self._dispatcher.register("model.capabilities", self._model_capabilities)
         self._dispatcher.register("session.events", self._session_events)
         self._dispatcher.register("soul.list", self._soul_list)
         self._dispatcher.register("soul.get", self._soul_get)
@@ -137,6 +153,9 @@ class EngineServer:
         self._dispatcher.register("soul.update", self._soul_update)
         self._dispatcher.register("soul.remove", self._soul_remove)
         self._dispatcher.register("soul.activate", self._soul_activate)
+        self._dispatcher.register("soul.get_effective", self._soul_get_effective)
+        self._dispatcher.register("session.soul.set", self._session_soul_set)
+        self._dispatcher.register("session.soul.clear", self._session_soul_clear)
         self._dispatcher.register("mcp.list", self._mcp_list)
         self._dispatcher.register("mcp.get", self._mcp_get)
         self._dispatcher.register("mcp.create", self._mcp_create)
@@ -203,6 +222,7 @@ class EngineServer:
         self._turns.cancel_all_turns()
 
     def close(self) -> None:
+        self._pty.shutdown()
         self._turns.close()
 
     # -- engine ----------------------------------------------------------
@@ -293,6 +313,48 @@ class EngineServer:
                 "artifacts_removed": artifacts_removed,
                 "artifacts_kept": artifacts_kept,
             },
+        }
+
+    def _session_branch(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Branch a session: independent copy of conversation, compact
+        state and checkpoints, with ancestry.
+
+        Task graphs are project-scoped (shared across sessions) and are
+        not copied. With checkpoint_id, only checkpoints at-or-before it
+        are copied (branch point in checkpoint history).
+        """
+        ref = params.get("ref")
+        if not isinstance(ref, str) or not ref:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'ref' must be a non-empty string.")
+        title = params.get("title")
+        if title is not None and not isinstance(title, str):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'title' must be a string.")
+        checkpoint_id = params.get("checkpoint_id")
+        if checkpoint_id is not None and not isinstance(checkpoint_id, str):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'checkpoint_id' must be a string.")
+        record = self._services.sessions.show(ref)
+        if checkpoint_id is not None and (
+            self._services.checkpoints.repo.get(checkpoint_id) or {}
+        ).get("session_ref") != record.id:
+            raise EngineProtocolError(
+                INVALID_PARAMS, f"Checkpoint not found in session: {checkpoint_id}"
+            )
+        started = self._services.sessions.fork(ref, title)
+        copied = self._services.checkpoints.duplicate_for_session(
+            record.id, started.session.id, checkpoint_id
+        )
+        fork_seq = next(
+            (
+                row.seq
+                for row in self._services.ctx.event_repo.list(started.session.id)
+                if row.type == EVENT_SESSION_FORKED
+            ),
+            0,
+        )
+        return {
+            "session": session_to_dict(started.session),
+            "branched_from": {"session_id": record.id, "event_seq": fork_seq},
+            "checkpoints_copied": copied,
         }
 
     def _session_create(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -584,6 +646,90 @@ class EngineServer:
             "active_session_id": bound.id if bound is not None else None,
         }
 
+    def _project_intelligence(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Read-only repository understanding (docs/desktop 01-P2).
+
+        Re-projects what the engine already computes elsewhere — repo
+        summary, index status, active instruction scopes. No new scanning:
+        fields the engine cannot compute are omitted, never fabricated.
+        """
+        from rinari.instructions.resolver import (
+            provenance_for,
+            resolve_project_instructions,
+        )
+        from rinari.repo.state import analyze_repository
+        from rinari.trust import STATE_TRUSTED
+
+        root = self._openable_root(params)
+        summary = analyze_repository(root)
+        trusted = self._services.trust.status(root).state == STATE_TRUSTED
+        entries = resolve_project_instructions(
+            root,
+            root,
+            global_path=self._services.ctx.home / "RINARI.md",
+            trusted=trusted,
+        )
+        return {
+            "project": {"root": str(root)},
+            "repository": {
+                "languages": list(summary.languages),
+                "frameworks": list(summary.frameworks),
+                "package_managers": list(summary.package_managers),
+                "build_command": summary.build[0].command if summary.build else None,
+                "test_command": summary.test[0].command if summary.test else None,
+                "lint_command": summary.lint[0].command if summary.lint else None,
+                "typecheck_command": (
+                    summary.typecheck[0].command if summary.typecheck else None
+                ),
+                "scanned_files": summary.scanned_files,
+            },
+            "index": self._services.index.status(root),
+            "instructions": {
+                "trusted": trusted,
+                "scopes": [
+                    {
+                        "scope": entry.scope,
+                        "provenance": provenance_for(entry),
+                        "kind": entry.kind,
+                    }
+                    for entry in entries
+                ],
+            },
+        }
+
+    def _pty_start(self, params: dict[str, Any]) -> dict[str, Any]:
+        """User-initiated terminal: the command travels visibly in the call
+        (like opening a local terminal); containment is enforced by the
+        PTY service (POSIX-only, real-dir cwd, never the home root)."""
+        return self._pty.start(
+            params.get("command"),
+            cwd=params.get("cwd"),
+            env=params.get("env"),
+            columns=params.get("columns", 80),
+            rows=params.get("rows", 24),
+            session_id=params.get("session_id"),
+        )
+
+    def _pty_write(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._pty.write(self._need_str(params, "pty_id"), params.get("data"))
+
+    def _pty_resize(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._pty.resize(
+            self._need_str(params, "pty_id"),
+            params.get("columns", 80),
+            params.get("rows", 24),
+        )
+
+    def _pty_read(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._pty.read(self._need_str(params, "pty_id"))
+
+    def _pty_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        _ = params
+        return {"ptys": self._pty.list()}
+
+    def _pty_terminate(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._pty.terminate(self._need_str(params, "pty_id"))
+
     @staticmethod
     def _openable_root(params: dict[str, Any]) -> Path:
         path = params.get("path")
@@ -646,6 +792,7 @@ class EngineServer:
                 "model": assignment.model,
                 "fallback": assignment.fallback,
                 "enabled": assignment.enabled,
+                "effort": assignment.effort,
             },
         }
 
@@ -685,13 +832,32 @@ class EngineServer:
             raise EngineProtocolError(INVALID_PARAMS, "Param 'fallback' must be a string.")
         if enabled is not None and not isinstance(enabled, bool):
             raise EngineProtocolError(INVALID_PARAMS, "Param 'enabled' must be a boolean.")
+        clear_effort = False
+        if "effort" in params:
+            effort = params["effort"]
+            # Explicit null clears back to inherit; unknown strings are
+            # rejected, never silently coerced.
+            if effort is None:
+                clear_effort = True
+                effort = None
+            elif effort not in ("low", "medium", "high"):
+                raise EngineProtocolError(
+                    INVALID_PARAMS, "Param 'effort' must be low, medium, high or null."
+                )
+        else:
+            effort = None
         # Strict at config time: no dangling aliases, no tool-less models.
         # (Spawn time stays lenient so stale assignments degrade, never break.)
         for alias in (model, fallback):
             if alias:
                 self._check_agent_model(alias)
         assignment = self._services.agent_configs.set(
-            definition.name, model=model, fallback=fallback, enabled=enabled
+            definition.name,
+            model=model,
+            fallback=fallback,
+            enabled=enabled,
+            effort=effort,
+            clear_effort=clear_effort,
         )
         return {
             "agent": {
@@ -700,6 +866,7 @@ class EngineServer:
                     "model": assignment.model,
                     "fallback": assignment.fallback,
                     "enabled": assignment.enabled,
+                    "effort": assignment.effort,
                 },
             }
         }
@@ -714,6 +881,40 @@ class EngineServer:
                 INVALID_PARAMS,
                 f"Model {alias!r} does not support tool calls and cannot run subagents.",
             )
+
+    def _model_capabilities(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Normalized capability matrix for one provider model (03-B).
+
+        Advisory for assignment validation; the engine stays the enforcer
+        at invocation time. Unknown stays unknown: gaps render as null /
+        listed in `unknown`, never as an invented false.
+        """
+        provider_ref = params.get("provider")
+        provider_model_id = params.get("provider_model_id")
+        if not isinstance(provider_ref, str) or not provider_ref:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'provider' is required.")
+        if not isinstance(provider_model_id, str) or not provider_model_id:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'provider_model_id' is required.")
+        provider = self._services.providers.get(provider_ref)
+        record = next(
+            (
+                model
+                for model in self._services.models.list()
+                if model.provider_id == provider.id
+                and model.provider_model_id == provider_model_id
+            ),
+            None,
+        )
+        if record is None:
+            raise NotFoundError(f"Model not found: {provider_model_id}")
+        router = ModelRouter(self._services.providers, self._services.models)
+        return {
+            "provider": provider.alias,
+            "provider_model_id": provider_model_id,
+            "alias": record.alias,
+            "availability": record.availability,
+            **router.capability_matrix(provider, record.id),
+        }
 
     def _session_events(self, params: dict[str, Any]) -> dict[str, Any]:
         ref = params.get("ref")
@@ -818,6 +1019,60 @@ class EngineServer:
             raise EngineProtocolError(INVALID_PARAMS, "Param 'id' must be a non-empty string.")
         definition = self._soul_store().activate(soul_id)
         return {"soul": self._soul_view(definition)}
+
+    def _soul_effective(self, record: Any) -> dict[str, Any]:
+        """Engine-owned Soul resolution (docs/desktop 04): the session pin
+        wins; otherwise the global Soul 3.0 chain applies. A pin pointing
+        at a removed Soul fails loudly (NOT_FOUND) instead of silently
+        falling back to another personality."""
+        from rinari.soul.store import DEFAULT_SOUL_ID
+
+        store = self._soul_store()
+        if record.soul_id is not None:
+            try:
+                store.get(record.soul_id)
+            except NotFoundError:
+                raise NotFoundError(f"Session pins unknown soul: {record.soul_id}") from None
+            return {"soul_id": record.soul_id, "source": "session"}
+        active = store.active_id()
+        if active is not None:
+            try:
+                store.get(active)
+            except NotFoundError:
+                pass
+            else:
+                return {"soul_id": active, "source": "global"}
+        if (self._services.ctx.home / "soul.md").is_file():
+            return {"soul_id": None, "source": "legacy"}
+        try:
+            store.get(DEFAULT_SOUL_ID)
+        except NotFoundError:
+            return {"soul_id": None, "source": "default"}
+        return {"soul_id": DEFAULT_SOUL_ID, "source": "default"}
+
+    def _soul_get_effective(self, params: dict[str, Any]) -> dict[str, Any]:
+        ref = params.get("ref")
+        if not isinstance(ref, str) or not ref:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'ref' must be a non-empty string.")
+        record = self._services.sessions.show(ref)
+        return {"session_id": record.id, **self._soul_effective(record)}
+
+    def _session_soul_set(self, params: dict[str, Any]) -> dict[str, Any]:
+        ref = params.get("ref")
+        soul_id = params.get("id")
+        if not isinstance(ref, str) or not ref:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'ref' must be a non-empty string.")
+        if not isinstance(soul_id, str) or not soul_id:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'id' must be a non-empty string.")
+        record = self._services.sessions.set_soul(ref, soul_id)
+        return {"session": session_to_dict(record), **self._soul_effective(record)}
+
+    def _session_soul_clear(self, params: dict[str, Any]) -> dict[str, Any]:
+        ref = params.get("ref")
+        if not isinstance(ref, str) or not ref:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'ref' must be a non-empty string.")
+        record = self._services.sessions.clear_soul(ref)
+        return {"session": session_to_dict(record), **self._soul_effective(record)}
 
     # -- ecosystem (Phase 9) ----------------------------------------------------
 

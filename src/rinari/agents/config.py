@@ -1,10 +1,11 @@
 """Per-agent model assignments (Phase 7).
 
-Which model alias each built-in agent uses. Stored as one TOML file in the
-Rinari home so CLI and desktop share it; resolution (alias → caller, tool
-capability checks, fallback chain) lives in `agent_runtime.caller_for_agent`.
-Effort/reasoning overrides are intentionally out of scope: the model layer
-has no per-model effort plumbing, and a stored no-op would be dishonest.
+Which model alias each built-in agent uses, plus an optional reasoning
+effort override. Stored as one TOML file in the Rinari home so CLI and
+desktop share it; resolution (alias → caller, tool capability checks,
+fallback chain) lives in `agent_runtime.caller_for_agent`, and the effort
+override flows through the existing `reasoning_effort` call path
+(turns → AgentLoop → ModelRequest).
 """
 
 from __future__ import annotations
@@ -16,12 +17,15 @@ from typing import Any
 
 import tomli_w
 
+EFFORTS = ("low", "medium", "high")
+
 
 @dataclass(frozen=True, slots=True)
 class AgentAssignment:
     model: str | None = None
     fallback: str | None = None
     enabled: bool = True
+    effort: str | None = None
 
 
 def _coerce(value: Any) -> AgentAssignment:
@@ -30,10 +34,12 @@ def _coerce(value: Any) -> AgentAssignment:
     model = value.get("model")
     fallback = value.get("fallback")
     enabled = value.get("enabled", True)
+    effort = value.get("effort")
     return AgentAssignment(
         model=model if isinstance(model, str) and model else None,
         fallback=fallback if isinstance(fallback, str) and fallback else None,
         enabled=bool(enabled),
+        effort=effort if effort in EFFORTS else None,
     )
 
 
@@ -64,13 +70,22 @@ class AgentConfigStore:
         model: str | None = None,
         fallback: str | None = None,
         enabled: bool | None = None,
+        effort: Any = None,
+        clear_effort: bool = False,
     ) -> AgentAssignment:
         current = self.all()
         previous = current.get(agent, AgentAssignment())
+        if effort is None:
+            resolved_effort = None if clear_effort else previous.effort
+        elif effort in EFFORTS:
+            resolved_effort = effort
+        else:
+            raise ValueError(f"Unknown effort {effort!r}; expected one of {EFFORTS}.")
         updated = AgentAssignment(
             model=model if model is not None else previous.model,
             fallback=fallback if fallback is not None else previous.fallback,
             enabled=enabled if enabled is not None else previous.enabled,
+            effort=resolved_effort,
         )
         current[agent] = updated
         self._write(current)
@@ -92,6 +107,7 @@ class AgentConfigStore:
                 "model": a.model or "",
                 "fallback": a.fallback or "",
                 "enabled": a.enabled,
+                "effort": a.effort or "",
             }
             for name, a in sorted(assignments.items())
         }

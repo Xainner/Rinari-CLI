@@ -5,6 +5,10 @@
 > deviation: recents carry identity + binding only — `branch`/`dirty`
 > live in `project.status` (single git-truth source for the dashboard
 > header) to keep the application layer free of engine imports.
+> P2 `project.intelligence` also implemented: read-only re-projection of
+> repo summary + index status + instruction scopes, honoring the trust
+> gate (untrusted projects report `trusted: false` with empty scopes,
+> same rule as prompts).
 
 ## What Code needs
 

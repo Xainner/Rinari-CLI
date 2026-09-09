@@ -84,6 +84,9 @@ class SessionRecord:
     # Execution access selected for BUILD. PLAN/REVIEW clamp the effective
     # profile to read-only without discarding this preference.
     permission_profile: str = "workspace"
+    # Session-scope Soul override. None inherits the global active Soul
+    # (Soul 3.0 chain); never a free-form string, always a known soul id.
+    soul_id: str | None = None
 
 
 @dataclass(slots=True)

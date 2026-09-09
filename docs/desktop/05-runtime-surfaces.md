@@ -22,6 +22,20 @@ desktop already depends on after its stabilization cycle.
 
 ## Proposal A — PTY sessions (P2)
 
+> Status (2026-09-09): implemented as `EnginePtyService`
+> (`src/rinari/engine_protocol/pty.py`, one per engine process) over the
+> same `PtyRegistry` backend the tool layer uses — no second
+> implementation. `pty.start/write/resize/read/list/terminate` plus
+> `pty.output`/`pty.exit` events on the shared outbox (desktop renders
+> xterm from events; `pty.read` covers UI-reload recovery). Param
+> validation is platform-independent; only the spawn needs POSIX
+> (`PTY_UNSUPPORTED` elsewhere, never a fake shell). cwd must be a real
+> directory and never the home root (`PERMISSION_DENIED`, same rule as
+> projects); unknown handles are `NOT_FOUND` on every platform;
+> terminate on a dead handle is no-op success; restart reports none.
+> Pinned in `tests/unit/test_engine_pty.py` (spawn/output/exit flows are
+> POSIX-only; validation, NOT_FOUND and PTY_UNSUPPORTED run everywhere).
+
 Promote the existing `PtyRegistry` mechanics to an engine-owned session
 registry (one per engine process, keyed by handle id), still behind
 policy/sandbox/approvals — no second PTY backend in the desktop:
