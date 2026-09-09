@@ -38,7 +38,8 @@ from rinari.engine_protocol.snapshots import (
 from rinari.engine_protocol.turns import TurnManager
 from rinari.engine_protocol.workspace import InvalidGitError, git_diff, git_files
 from rinari.models.router import ModelRouter
-from rinari.shared.errors import NotFoundError
+from rinari.projects.detector import is_home_root
+from rinari.shared.errors import NotFoundError, PermissionDeniedError
 from rinari.soul.store import SoulStore
 
 _TEXT_EXTENSIONS = {
@@ -122,6 +123,9 @@ class EngineServer:
         self._dispatcher.register("checkpoint.restore", self._checkpoint_restore)
         self._dispatcher.register("project.changes", self._project_changes)
         self._dispatcher.register("project.diff", self._project_diff)
+        self._dispatcher.register("project.list_recent", self._project_list_recent)
+        self._dispatcher.register("project.open", self._project_open)
+        self._dispatcher.register("project.status", self._project_status)
         self._dispatcher.register("workspace.file.search", self._workspace_file_search)
         self._dispatcher.register("agent.list", self._agent_list)
         self._dispatcher.register("agent.config.get", self._agent_config_get)
@@ -522,6 +526,73 @@ class EngineServer:
         except InvalidGitError as err:
             raise EngineProtocolError(INVALID_PARAMS, f"Cannot diff: {err}") from err
         return result
+
+    def _project_list_recent(self, params: dict[str, Any]) -> dict[str, Any]:
+        limit = params.get("limit", 20)
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'limit' must be an int in 1..100.")
+        return {"projects": self._services.projects.list_recent(limit=limit)}
+
+    def _project_open(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Upsert a project root and return it with its recommended session.
+
+        Reuses the existing session for the root when there is one (touching
+        its activity so recents reflect the open); otherwise creates a
+        session and promotes it to PROJECT. Never invents a workspace out
+        of $HOME.
+        """
+        root = self._openable_root(params)
+        if is_home_root(root, self._services.ctx.home):
+            raise PermissionDeniedError(
+                "$HOME is never an implicit project workspace",
+                hint="Open a project subdirectory instead.",
+            )
+        project = self._services.projects.upsert(root)
+        existing = self._services.sessions.latest_for_root(root)
+        created = False
+        if existing is None:
+            record = self._services.sessions.new(cwd=root)
+            if record.kind != "PROJECT":
+                record = self._services.sessions.promote(record.id, root)
+            created = True
+        else:
+            record = self._services.sessions.touch(existing.id)
+        return {
+            "project": {
+                "id": project.id,
+                "root": project.canonical_root,
+                "git_fingerprint": project.git_fingerprint,
+            },
+            "session": session_to_dict(record),
+            "created": created,
+        }
+
+    def _project_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Git truth plus session binding: the dashboard header source."""
+        root = self._openable_root(params)
+        status = git_files(root)
+        bound = self._services.sessions.latest_for_root(root)
+        return {
+            "project": {"root": str(root)},
+            "status": {
+                "available": status.available,
+                "branch": status.branch,
+                "head": status.head,
+                "dirty": status.dirty,
+                "files": list(status.files),
+            },
+            "active_session_id": bound.id if bound is not None else None,
+        }
+
+    @staticmethod
+    def _openable_root(params: dict[str, Any]) -> Path:
+        path = params.get("path")
+        if not isinstance(path, str) or not path:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'path' must be a non-empty string.")
+        root = Path(path).expanduser().resolve()
+        if not root.is_dir():
+            raise EngineProtocolError(INVALID_PARAMS, f"Param 'path' is not a directory: {path}")
+        return root
 
     def _workspace_file_search(self, params: dict[str, Any]) -> dict[str, Any]:
         session_id = params.get("session_id")

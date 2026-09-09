@@ -893,6 +893,14 @@ running turn → `TURN_RUNNING`; always drains the turn queue and reports
 `queue_dropped` + `checkpoints_removed/kept` + `artifacts_removed/kept`;
 cascade also removes the session's checkpoints and session-retention
 artifacts; tasks are project-scoped and never deleted with a session).
+Post-v1 projects: `project.list_recent` (`limit` 1..100 default 20,
+ordered by shared session activity, never a second store;
+`last_opened_at` falls back to record recency; `active_session_id` binds
+the latest non-closed session), `project.open` (`path` → upsert +
+recommended session, created or reused-and-touched; `$HOME` rejected;
+plain dirs promote to PROJECT) and `project.status` (git truth +
+`active_session_id` dashboard binding; branch/dirty live here, not in
+the recents list).
 The envelope contract is unchanged across slices.
 
 ---

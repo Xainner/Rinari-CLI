@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from rinari.application.context import AppContext
 from rinari.projects.detector import is_home_root
@@ -95,3 +96,40 @@ class ProjectService:
 
         record = self.upsert(root)
         return record, created
+
+    def list_recent(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Projects ordered by real open activity (shared session table).
+
+        No second store: recency derives from session last_active_at, so
+        CLI and desktop activity both count. Roots never opened in a
+        session fall back to the project record recency. Timestamps are
+        ISO-8601 from the same clock, so string order is chronological.
+        """
+        # Deferred import: session_service imports this module.
+        from rinari.application.session_service import SESSION_STATE_CLOSED
+
+        limit = max(1, min(int(limit), 100))
+        activity: dict[str, str] = {}
+        bound: dict[str, str] = {}
+        for session in self._ctx.session_repo.list(limit=500):
+            root = session.project_root_snapshot
+            if not root:
+                continue
+            activity.setdefault(root, session.last_active_at)
+            if session.state != SESSION_STATE_CLOSED and root not in bound:
+                bound[root] = session.id
+        ranked = sorted(
+            self._ctx.project_repo.list(),
+            key=lambda p: activity.get(p.canonical_root, p.updated_at),
+            reverse=True,
+        )
+        return [
+            {
+                "id": project.id,
+                "root": project.canonical_root,
+                "git_fingerprint": project.git_fingerprint,
+                "last_opened_at": activity.get(project.canonical_root, project.updated_at),
+                "active_session_id": bound.get(project.canonical_root),
+            }
+            for project in ranked[:limit]
+        ]

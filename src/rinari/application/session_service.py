@@ -423,11 +423,26 @@ class SessionService:
         record = self._resolve(ref)
         with self._ctx.db.transaction():
             self._ctx.db.execute("DELETE FROM session_events WHERE session_id = ?", (record.id,))
-            self._ctx.db.execute(
-                "DELETE FROM session_messages WHERE session_id = ?", (record.id,)
-            )
+            self._ctx.db.execute("DELETE FROM session_messages WHERE session_id = ?", (record.id,))
             self._ctx.db.execute("DELETE FROM sessions WHERE id = ?", (record.id,))
         return record.id
+
+    def latest_for_root(self, root: str | Path) -> SessionRecord | None:
+        """Latest non-closed session bound to a project root (or None)."""
+        canonical = str(Path(root).expanduser().resolve())
+        for session in self._ctx.session_repo.list(limit=500):
+            if session.project_root_snapshot == canonical and session.state != SESSION_STATE_CLOSED:
+                return session
+        return None
+
+    def touch(self, ref: str) -> SessionRecord:
+        """Refresh activity timestamps (e.g. the root was opened again)."""
+        record = self._resolve(ref)
+        now = self._now()
+        record.updated_at = now
+        record.last_active_at = now
+        self._ctx.session_repo.update(record)
+        return record
 
     def set_mode(self, ref: str, mode: str) -> SessionRecord:
         """Switch PLAN/BUILD/REVIEW. Same session, task graph and context kept."""

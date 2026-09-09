@@ -1,0 +1,184 @@
+"""Engine project workspace: list_recent/open/status (docs/desktop 01, P1).
+
+Recency derives from the shared session table (no second store), so CLI
+and desktop activity both count. Opening reuses the bound session (touching
+its activity) or creates + promotes one; $HOME is never an openable root.
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+from itertools import count
+from pathlib import Path
+
+import pytest
+
+from rinari.application.provider_service import AddProviderInput
+from rinari.application.services import build_services
+from rinari.engine_protocol.server import EngineServer
+
+
+@pytest.fixture
+def services(app_ctx, tmp_path):
+    user_home = tmp_path / "home"
+    user_home.mkdir()
+    container = build_services(app_ctx, user_home=user_home)
+    container.providers.add(
+        AddProviderInput(
+            alias="fake",
+            provider_type="openai",
+            endpoint="http://127.0.0.1:9/v1",
+            secret="dummy-secret-not-real",
+        )
+    )
+    container.models.add("fake", "fake-model-1", "fake-one")
+    container.providers.use("fake")
+    return container
+
+
+@pytest.fixture
+def server(services, tmp_path):
+    engine = EngineServer(services, user_home=tmp_path / "home")
+    yield engine
+    engine.close()
+
+
+def _req(request_id, method, params=None):
+    line: dict = {"id": request_id, "method": method}
+    if params is not None:
+        line["params"] = params
+    return json.dumps(line)
+
+
+def _ok(response):
+    assert response is not None and response["ok"] is True, response
+    return response["result"]
+
+
+def _err(response):
+    assert response is not None and response["ok"] is False, response
+    return response["error"]
+
+
+def _git(root: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, check=True)
+
+
+def _git_repo(tmp_path, name="repo") -> Path:
+    root = tmp_path / name
+    root.mkdir()
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "t@t.t")
+    _git(root, "config", "user.name", "t")
+    (root / "f.py").write_text("x = 1\n")
+    _git(root, "add", "f.py")
+    _git(root, "commit", "-qm", "seed")
+    return root
+
+
+def _open(server, tag, path):
+    return _ok(server.handle_line(_req(tag, "project.open", {"path": str(path)})))
+
+
+def _recent_roots(server):
+    result = _ok(server.handle_line(_req(f"r-{next(_rids)}", "project.list_recent", {})))
+    return [p["root"] for p in result["projects"]]
+
+
+_rids = count()
+
+
+def test_list_recent_empty(server) -> None:
+    assert _ok(server.handle_line(_req("r", "project.list_recent", {}))) == {"projects": []}
+
+
+def test_open_creates_project_and_promotes_session(server, tmp_path) -> None:
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    first = _open(server, "o1", plain)
+    assert first["created"] is True
+    assert first["project"]["root"] == str(plain.resolve())
+    assert first["session"]["kind"] == "PROJECT"
+    assert first["session"]["project_root"] == str(plain.resolve())
+
+    second = _open(server, "o2", plain)
+    assert second["created"] is False
+    assert second["session"]["id"] == first["session"]["id"]
+    assert second["project"]["id"] == first["project"]["id"]
+
+
+def test_open_reorders_recents(server, tmp_path) -> None:
+    a = tmp_path / "a"
+    a.mkdir()
+    b = tmp_path / "b"
+    b.mkdir()
+    _open(server, "o1", a)
+    _open(server, "o2", b)
+    assert _recent_roots(server) == [str(b.resolve()), str(a.resolve())]
+    _open(server, "o3", a)
+    assert _recent_roots(server) == [str(a.resolve()), str(b.resolve())]
+
+
+def test_list_recent_carries_binding_and_limit_validation(server, tmp_path) -> None:
+    a = tmp_path / "a"
+    a.mkdir()
+    opened = _open(server, "o1", a)
+    recents = _ok(server.handle_line(_req("r2", "project.list_recent", {"limit": 20})))["projects"]
+    assert len(recents) == 1
+    entry = recents[0]
+    assert entry["id"] == opened["project"]["id"]
+    assert entry["active_session_id"] == opened["session"]["id"]
+    assert isinstance(entry["last_opened_at"], str) and entry["last_opened_at"]
+    assert (
+        _err(server.handle_line(_req("r3", "project.list_recent", {"limit": 0})))["code"]
+        == "INVALID_PARAMS"
+    )
+
+
+def test_open_rejects_missing_file_and_home(services, server, tmp_path) -> None:
+    assert (
+        _err(server.handle_line(_req("o1", "project.open", {"path": str(tmp_path / "nope")})))[
+            "code"
+        ]
+        == "INVALID_PARAMS"
+    )
+    afile = tmp_path / "f"
+    afile.write_text("x")
+    assert (
+        _err(server.handle_line(_req("o2", "project.open", {"path": str(afile)})))["code"]
+        == "INVALID_PARAMS"
+    )
+    home = Path(services.ctx.home)
+    home.mkdir(parents=True, exist_ok=True)
+    assert (
+        _err(server.handle_line(_req("o3", "project.open", {"path": str(home)})))["code"]
+        == "PERMISSION_DENIED"
+    )
+
+
+def test_status_plain_dir_has_no_git_and_no_binding(server, tmp_path) -> None:
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    status = _ok(server.handle_line(_req("s", "project.status", {"path": str(plain)})))
+    assert status["project"] == {"root": str(plain.resolve())}
+    assert status["status"]["available"] is False
+    assert status["active_session_id"] is None
+
+
+def test_status_git_repo_matches_git_truth_with_binding(server, tmp_path) -> None:
+    repo = _git_repo(tmp_path)
+    before = _ok(server.handle_line(_req("s1", "project.status", {"path": str(repo)})))
+    assert before["status"]["available"] is True
+    assert isinstance(before["status"]["branch"], str) and before["status"]["branch"]
+    assert isinstance(before["status"]["head"], str) and before["status"]["head"]
+    assert before["status"]["dirty"] is False
+    assert before["active_session_id"] is None
+
+    (repo / "new.py").write_text("y = 2\n")
+    opened = _open(server, "o", repo)
+    assert opened["session"]["kind"] == "PROJECT"
+    after = _ok(server.handle_line(_req("s2", "project.status", {"path": str(repo)})))
+    assert after["status"]["dirty"] is True
+    assert {f["path"] if isinstance(f, dict) else f for f in after["status"]["files"]}
+    assert after["active_session_id"] == opened["session"]["id"]

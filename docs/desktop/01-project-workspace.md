@@ -1,5 +1,11 @@
 # 01 — Project workspace protocol
 
+> Status (2026-09-09): P1 `project.list_recent/open/status` implemented
+> and pinned in `tests/unit/test_engine_project_workspace.py`. One
+> deviation: recents carry identity + binding only — `branch`/`dirty`
+> live in `project.status` (single git-truth source for the dashboard
+> header) to keep the application layer free of engine imports.
+
 ## What Code needs
 
 Rinari Code must open on a project home (recent projects, dashboard,
