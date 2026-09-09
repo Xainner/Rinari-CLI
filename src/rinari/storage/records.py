@@ -81,6 +81,9 @@ class SessionRecord:
     # Durable (name, version) pairs of skills active in this session
     # (phase 4: resume reconciliation; skill runtime arrives in phase 6).
     active_skills: tuple[tuple[str, str], ...] | None = None
+    # Execution access selected for BUILD. PLAN/REVIEW clamp the effective
+    # profile to read-only without discarding this preference.
+    permission_profile: str = "workspace"
 
 
 @dataclass(slots=True)

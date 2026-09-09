@@ -131,7 +131,10 @@ class ApprovalEngine:
         grant = ApprovalGrant(
             capability=request.capability,
             scope=scope,
-            target=request.target,
+            # A session grant intentionally covers subsequent targets of the
+            # same capability in this session. Policy and sandbox boundaries
+            # still apply before approval is consulted.
+            target=None if scope is GrantScope.SESSION else request.target,
             session_id=request.session_id,
             project_id=request.project_id,
         )

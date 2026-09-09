@@ -14,7 +14,7 @@ from rinari.application.context import AppContext
 from rinari.application.project_service import ProjectService
 from rinari.application.provider_service import ProviderService
 from rinari.application.reconcile import Finding, ResumeReconciler, trust_warning
-from rinari.policy.engine import PermissionProfile
+from rinari.policy.engine import PermissionProfile, normalize_profile
 from rinari.projects.detector import ProjectDetection, detect_project
 from rinari.shared.clock import now_iso
 from rinari.shared.errors import (
@@ -51,6 +51,13 @@ def profile_for_mode(mode: str | None) -> PermissionProfile:
     if mode in (SESSION_MODE_PLAN, SESSION_MODE_REVIEW):
         return PermissionProfile.READ_ONLY
     return PermissionProfile.WORKSPACE
+
+
+def profile_for_session(record: SessionRecord) -> PermissionProfile:
+    """Effective profile: PLAN/REVIEW are immutable read-only boundaries."""
+    if record.mode in (SESSION_MODE_PLAN, SESSION_MODE_REVIEW):
+        return PermissionProfile.READ_ONLY
+    return normalize_profile(record.permission_profile)
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,7 +222,15 @@ class SessionService:
             session=record, created=False, warnings=report.warnings, findings=report.findings
         )
 
-    def new(self, cwd: Path, title: str | None = None, forced_chat: bool = False) -> SessionRecord:
+    def new(
+        self,
+        cwd: Path,
+        title: str | None = None,
+        forced_chat: bool = False,
+        *,
+        mode: str = "ask",
+        permission_profile: str = "workspace",
+    ) -> SessionRecord:
         cwd = Path(cwd).expanduser().resolve()
         detection = self.detect(cwd)
         project_root = None if forced_chat else detection.project_root
@@ -237,6 +252,10 @@ class SessionService:
             project = self._projects.upsert(project_root)
             project_id = project.id
             project_root_snapshot = str(project_root.resolve())
+        normalized_mode = (mode or "").strip().lower()
+        if normalized_mode not in (*SESSION_MODES, "ask"):
+            raise InvalidUsageError(f"Unknown session mode: {mode!r}.")
+        normalized_profile = normalize_profile(permission_profile).value
         record = SessionRecord(
             id=self._ctx.ids.new("ses"),
             kind=kind,
@@ -248,12 +267,13 @@ class SessionService:
             provider_id=selection.provider.id,
             model_id=selection.model.id,
             profile_id=self._ctx.config.active_profile_name(),
-            mode="ask",
+            mode=normalized_mode,
             state=SESSION_STATE_ACTIVE,
             compact_state=None,
             created_at=now,
             updated_at=now,
             last_active_at=now,
+            permission_profile=normalized_profile,
         )
         with self._ctx.db.transaction():
             self._ctx.session_repo.insert(record)
@@ -298,6 +318,7 @@ class SessionService:
             git_branch=source.git_branch,
             forked_from=source.id,
             active_skills=source.active_skills,
+            permission_profile=source.permission_profile,
         )
         messages = [
             SessionMessageRecord(
@@ -382,6 +403,38 @@ class SessionService:
             )
         if record.mode != normalized:
             record.mode = normalized
+            record.updated_at = self._now()
+            self._ctx.session_repo.update(record)
+        return record
+
+    def set_permission(self, ref: str, profile: str) -> SessionRecord:
+        record = self._resolve(ref)
+        if profile not in {item.value for item in PermissionProfile}:
+            raise InvalidUsageError(
+                f"Unknown permission profile: {profile!r}. "
+                "Valid profiles: read-only, workspace, full-access."
+            )
+        normalized = normalize_profile(profile).value
+        if record.permission_profile != normalized:
+            record.permission_profile = normalized
+            record.updated_at = self._now()
+            self._ctx.session_repo.update(record)
+        return record
+
+    def set_model(self, ref: str, model_ref: str, provider_ref: str | None = None) -> SessionRecord:
+        """Persist the provider/model used by subsequent turns of one session."""
+        record = self._resolve(ref)
+        model = self._ctx.model_repo.get(model_ref)
+        if model is None:
+            raise NotFoundError(f"Model not found: {model_ref}")
+        provider = self._providers.get(provider_ref or model.provider_id)
+        if model.provider_id != provider.id:
+            raise InvalidUsageError(
+                f"Model {model_ref!r} does not belong to provider {provider.alias!r}."
+            )
+        if record.provider_id != provider.id or record.model_id != model.id:
+            record.provider_id = provider.id
+            record.model_id = model.id
             record.updated_at = self._now()
             self._ctx.session_repo.update(record)
         return record

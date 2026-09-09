@@ -286,7 +286,13 @@ def _secrets_for_redaction(services: ServiceContainer) -> list[str]:
     return secrets
 
 
-def _sandbox_for(record: SessionRecord, user_home: Path) -> FilesystemSandbox:
+def _sandbox_for(
+    record: SessionRecord, user_home: Path, profile: PermissionProfile = PermissionProfile.WORKSPACE
+) -> FilesystemSandbox:
+    if profile is PermissionProfile.FULL_ACCESS:
+        drive_root = Path(record.current_cwd or record.created_cwd).resolve().anchor
+        root = Path(drive_root)
+        return FilesystemSandbox(read_root=root, write_roots=(root,))
     root = Path(record.project_root_snapshot) if record.project_root_snapshot else None
     if record.kind == "PROJECT" and root is not None:
         return FilesystemSandbox(read_root=root, write_roots=(root,))
@@ -368,17 +374,25 @@ def build_agent_session(
     profile: PermissionProfile = PermissionProfile.WORKSPACE,
     model_caller: ModelCaller | None = None,
     approval_prompt: AnswerPrompt | None = None,
+    activity_sink=None,
+    reasoning_effort: str | None = None,
 ) -> AgentSession:
+    def preparing(stage: str) -> None:
+        if activity_sink is not None:
+            activity_sink("turn.preparing", {"stage": stage})
+
+    preparing("runtime")
     root = Path(record.project_root_snapshot) if record.project_root_snapshot else None
     cwd = Path(record.current_cwd)
     home = user_home if user_home is not None else Path.home()
-    sandbox = _sandbox_for(record, home)
+    sandbox = _sandbox_for(record, home, profile)
     token = CancellationToken()
     network_policy = services.network.policy()
     hook_engine = _build_hook_engine(services, root)
     # model_caller is the eval seam: a scripted/caller-equivalent object that
     # satisfies invoke/invoke_stream/capabilities. Production never passes it.
     caller = model_caller if model_caller is not None else _caller_for(services, record)
+    preparing("model")
     # Stable indirection: the loop (and subagent runs) hold the gateway so
     # in-session provider/model switches take effect on the next turn.
     gateway = caller if isinstance(caller, SessionModelGateway) else SessionModelGateway(caller)
@@ -411,6 +425,7 @@ def build_agent_session(
         exposure=ToolExposure(),
     )
     orchestrator = _build_orchestrator(services, record, root, token, tool_ctx, policy, gateway)
+    preparing("agents")
     tools = _build_tools(
         services,
         record,
@@ -423,6 +438,7 @@ def build_agent_session(
         policy=policy,
         orchestrator=orchestrator,
     )
+    preparing("tools")
     loop = AgentLoop(
         gateway,
         tools,
@@ -434,6 +450,8 @@ def build_agent_session(
         hook_sink=lambda event, payload: (
             hook_engine.emit(event, payload, project=root) if hook_engine is not None else None
         ),
+        activity_sink=activity_sink,
+        reasoning_effort=reasoning_effort,
     )
     if hook_engine is not None:
         hook_engine.emit(
@@ -453,6 +471,7 @@ def build_agent_session(
         history=_restore_history(services, record),
     )
     services.context.restore_compact_state(context)
+    preparing("context")
     if record.kind == "PROJECT" and root is not None and root.is_dir():
         _persist_event(
             services,
@@ -491,6 +510,7 @@ def build_agent_session(
     )
     session.orchestrator = orchestrator
     session.close = _end_session
+    preparing("ready")
     return session
 
 

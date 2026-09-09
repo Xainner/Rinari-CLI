@@ -9,11 +9,11 @@ the entry *need revalidation* instead of silently staying active.
 from __future__ import annotations
 
 import hashlib
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 from rinari.application.context import AppContext
+from rinari.projects._git_process import capture_git
 from rinari.shared.clock import now_iso
 from rinari.shared.errors import InvalidUsageError
 from rinari.storage.records import TrustEntryRecord
@@ -58,17 +58,7 @@ def fingerprint_for(root: Path) -> str:
 
 
 def _git(cwd: Path, args: list[str]) -> str:
-    try:
-        proc = subprocess.run(
-            ["git", *args],
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=_GIT_TIMEOUT_S,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    return proc.stdout if proc.returncode == 0 else ""
+    return capture_git(cwd, args, timeout_s=_GIT_TIMEOUT_S) or ""
 
 
 def _sha256(value: str | bytes) -> str:
@@ -106,11 +96,15 @@ class TrustService:
         canonical = str(raw.resolve())
         entry = self._ctx.trust_repo.get(canonical)
         if entry is None:
+            # There is no identity to compare until the user grants trust.
+            # Avoid two Git subprocesses on every prompt in an untrusted
+            # project; besides being wasted work, a broken Git installation
+            # must not prevent the model request from starting.
             return TrustStatus(
                 path=str(raw),
                 canonical_path=canonical,
                 state=STATE_NOT_TRUSTED,
-                fingerprint=fingerprint_for(raw),
+                fingerprint=None,
                 trusted_at=None,
             )
         if not raw.exists():

@@ -24,7 +24,7 @@ from rinari.tools.definition import (
     ToolResult,
 )
 
-DEFAULT_TIMEOUT_S = 300.0
+DEFAULT_TIMEOUT_S = 60.0
 MAX_OUTPUT_BYTES = 1_000_000
 
 
@@ -132,6 +132,9 @@ def shell_exec(input: dict, ctx: ToolContext) -> ToolResult:
 
     kwargs: dict[str, Any] = {
         "shell": True,
+        # shell.exec is deliberately non-interactive. In particular this
+        # prevents ssh from inheriting an unusable stdin and waiting forever.
+        "stdin": subprocess.DEVNULL,
         "stdout": subprocess.PIPE,
         "stderr": subprocess.PIPE,
         "cwd": cwd,
@@ -169,6 +172,13 @@ def shell_exec(input: dict, ctx: ToolContext) -> ToolResult:
     timed_out = False
     cancelled = False
     cancellation = ctx.cancellation
+    remove_cancel_callback = None
+    if cancellation is not None:
+        def terminate_on_cancel() -> None:
+            if process.poll() is None:
+                _kill_tree(process)
+
+        remove_cancel_callback = cancellation.on_cancel(terminate_on_cancel)
     try:
         try:
             process.wait(timeout=timeout_s)
@@ -177,8 +187,10 @@ def shell_exec(input: dict, ctx: ToolContext) -> ToolResult:
             _kill_tree(process)
             process.wait()
     finally:
+        if remove_cancel_callback is not None:
+            remove_cancel_callback()
+        cancelled = cancellation is not None and cancellation.cancelled
         if process.poll() is None:
-            cancelled = cancellation is not None and cancellation.cancelled
             _kill_tree(process)
             with contextlib.suppress(subprocess.TimeoutExpired):
                 process.wait(timeout=5)
@@ -212,7 +224,10 @@ def shell_tools() -> list[ToolDefinition]:
             description=(
                 "Run a command in the session working directory. Returns exit code and "
                 "bounded stdout/stderr. Use for builds, tests, git, and anything without a "
-                "dedicated structured tool."
+                "dedicated structured tool. This is non-interactive (stdin is closed). "
+                "On Windows the command runs through the configured Windows command shell; "
+                "use Windows-compatible commands. Set a short explicit timeout for SSH and "
+                "network probes, and an explicit longer timeout for builds/tests."
             ),
             input_schema={
                 "type": "object",

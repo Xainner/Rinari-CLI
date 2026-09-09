@@ -12,6 +12,7 @@ import pytest
 from rinari.application.provider_service import AddProviderInput
 from rinari.application.services import build_services
 from rinari.cli import agent_runtime
+from rinari.engine_protocol import turns as turns_module
 from rinari.engine_protocol.server import EngineServer
 from rinari.engine_protocol.transports.stdio import run_stdio
 from rinari.models.types import (
@@ -105,6 +106,37 @@ def _create_chat(server, tmp_path, tag="t"):
     return response["result"]["session"]["id"]
 
 
+def test_workspace_search_and_text_attachment_reach_model(server, tmp_path, monkeypatch) -> None:
+    note = tmp_path / "hardware.txt"
+    note.write_text("CPU: test-chip", encoding="utf-8")
+    session_id = _create_chat(server, tmp_path, tag="att")
+    search = server.handle_line(
+        _req("att-s", "workspace.file.search", {"session_id": session_id, "query": "hardware"})
+    )
+    assert search is not None and search["ok"] is True
+    assert search["result"]["files"][0]["name"] == "hardware.txt"
+
+    fake = FakeModel(scripted=[_answer()])
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda services, rec: fake)
+    started = server.handle_line(
+        _req(
+            "att-t",
+            "session.turn.start",
+            {
+                "session_id": session_id,
+                "message": "inspect",
+                "attachments": [
+                    {"id": "a1", "path": str(note), "name": note.name, "source": "workspace"}
+                ],
+            },
+        )
+    )
+    assert started is not None and started["ok"] is True
+    _collect_until(server, session_id)
+    assert fake.requests
+    assert "CPU: test-chip" in "\n".join(m.content or "" for m in fake.requests[0].messages)
+
+
 def _collect_until(server, session_id, timeout=30.0):
     terminal = {"turn.completed", "turn.cancelled", "turn.failed"}
     seen: list = []
@@ -168,6 +200,112 @@ def test_turn_streams_content_deltas_in_order(server, tmp_path, monkeypatch) -> 
     assert events[-1]["event"] == "turn.completed"
 
 
+def test_turn_forwards_reasoning_effort_to_model(server, tmp_path, monkeypatch) -> None:
+    session_id = _create_chat(server, tmp_path)
+    fake = FakeModel(scripted=[_answer()])
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda services, rec: fake)
+
+    started = server.handle_line(
+        _req(
+            "t1",
+            "session.turn.start",
+            {"session_id": session_id, "message": "hi", "reasoning_effort": "high"},
+        )
+    )
+    assert started is not None and started["ok"] is True
+
+    events = _collect_until(server, session_id)
+    assert fake.requests[0].reasoning_effort == "high"
+    assert events[0]["payload"]["reasoning_effort"] == "high"
+
+
+def test_turn_start_accepts_before_runtime_preparation_finishes(
+    server, tmp_path, monkeypatch
+) -> None:
+    session_id = _create_chat(server, tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+    real_build = turns_module.build_agent_session
+
+    def delayed_build(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(turns_module, "build_agent_session", delayed_build)
+    monkeypatch.setattr(
+        agent_runtime, "_caller_for", lambda services, rec: FakeModel(scripted=[_answer()])
+    )
+
+    started_at = time.monotonic()
+    started = server.handle_line(
+        _req("t1", "session.turn.start", {"session_id": session_id, "message": "hi"})
+    )
+    elapsed = time.monotonic() - started_at
+
+    assert started is not None and started["ok"] is True
+    assert elapsed < 1
+    assert entered.wait(1)
+    release.set()
+    assert _collect_until(server, session_id)[-1]["event"] == "turn.completed"
+
+
+def test_runtime_preparation_timeout_becomes_terminal_failure(
+    server, tmp_path, monkeypatch
+) -> None:
+    session_id = _create_chat(server, tmp_path, tag="prep-timeout")
+    entered = threading.Event()
+    release = threading.Event()
+    real_build = turns_module.build_agent_session
+
+    def blocked_build(*args, **kwargs):
+        entered.set()
+        release.wait(5)
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(turns_module, "build_agent_session", blocked_build)
+    monkeypatch.setattr(turns_module, "PREPARATION_TIMEOUT_S", 0.1)
+
+    started = server.handle_line(
+        _req("prep-timeout-t", "session.turn.start", {"session_id": session_id, "message": "hi"})
+    )
+    assert started is not None and started["ok"] is True
+    assert entered.wait(1)
+    events = _collect_until(server, session_id, timeout=1)
+    release.set()
+
+    assert events[-1]["event"] == "turn.failed"
+    assert events[-1]["payload"]["error"]["code"] == "TURN_PREPARATION_TIMEOUT"
+
+
+def test_cancel_interrupts_runtime_preparation(server, tmp_path, monkeypatch) -> None:
+    session_id = _create_chat(server, tmp_path, tag="prep-cancel")
+    entered = threading.Event()
+    release = threading.Event()
+    real_build = turns_module.build_agent_session
+
+    def blocked_build(*args, **kwargs):
+        entered.set()
+        release.wait(5)
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(turns_module, "build_agent_session", blocked_build)
+    started = server.handle_line(
+        _req("prep-cancel-t", "session.turn.start", {"session_id": session_id, "message": "hi"})
+    )
+    assert started is not None and started["ok"] is True
+    assert entered.wait(1)
+
+    cancelled = server.handle_line(
+        _req("prep-cancel-stop", "session.turn.cancel", {"session_id": session_id})
+    )
+    assert cancelled is not None and cancelled["ok"] is True
+    events = _collect_until(server, session_id, timeout=1)
+    release.set()
+
+    assert events[-1]["event"] == "turn.cancelled"
+
+
 def test_second_start_while_running_is_rejected(server, tmp_path, monkeypatch) -> None:
     session_id = _create_chat(server, tmp_path)
     gate, abort = threading.Event(), threading.Event()
@@ -207,9 +345,11 @@ def test_cancel_reports_requested_then_cancelled(server, tmp_path, monkeypatch) 
     cancelled = server.handle_line(_req("t2", "session.turn.cancel", {"session_id": session_id}))
     assert cancelled is not None and cancelled["ok"] is True
     assert cancelled["result"]["status"] == "cancel_requested"
-    abort.set()
 
+    terminal_started = time.monotonic()
     events = _collect_until(server, session_id)
+    abort.set()
+    assert time.monotonic() - terminal_started < 1
     assert events[-1]["event"] == "turn.cancelled"
 
 
@@ -228,6 +368,15 @@ def test_turn_start_validates_params(server) -> None:
     )
     assert unknown is not None and unknown["ok"] is False
     assert unknown["error"]["code"] == "NOT_FOUND"
+    invalid_effort = server.handle_line(
+        _req(
+            "t3",
+            "session.turn.start",
+            {"session_id": "ses_missing", "message": "hi", "reasoning_effort": "ultra"},
+        )
+    )
+    assert invalid_effort is not None and invalid_effort["ok"] is False
+    assert invalid_effort["error"]["code"] == "INVALID_PARAMS"
 
 
 # -- approvals --------------------------------------------------------------
@@ -292,6 +441,15 @@ def test_approval_requested_and_resolved(server) -> None:
     finally:
         thread.join(timeout=10)
     assert answer.get("v") == "y"
+    repeated = server.handle_line(
+        _req(
+            "a3",
+            "approval.resolve",
+            {"approval_id": requested["approval_id"], "decision": "allow_once"},
+        )
+    )
+    assert repeated is not None and repeated["ok"] is True
+    assert repeated["result"]["status"] == "resolved"
     assert manager.drain_events() or True
 
 
@@ -306,6 +464,43 @@ def test_approval_cancelled_while_waiting(server) -> None:
     token.cancel()
     with pytest.raises(CancelledError):
         manager._answer_approval(request, token)
+
+
+def test_pending_approval_expires_cleanly_when_cancelled(server) -> None:
+    manager = server.turns
+    request = ApprovalRequest(
+        capability="shell.exec",
+        description="waiting command",
+        session_id="ses_cancel",
+    )
+    token = CancellationToken()
+    outcome: dict[str, object] = {}
+
+    def wait_for_answer() -> None:
+        try:
+            manager._answer_approval(request, token)
+        except Exception as exc:  # assertion inspects the worker result
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=wait_for_answer, daemon=True)
+    thread.start()
+    requested = _wait_event(server, "ses_cancel", "approval.requested")["payload"]
+    token.cancel()
+    expired = _wait_event(server, "ses_cancel", "approval.expired")["payload"]
+    thread.join(timeout=5)
+
+    assert isinstance(outcome.get("error"), CancelledError)
+    assert expired["approval_id"] == requested["approval_id"]
+    assert expired["reason"] == "turn_cancelled"
+    repeated = server.handle_line(
+        _req(
+            "a4",
+            "approval.resolve",
+            {"approval_id": requested["approval_id"], "decision": "deny"},
+        )
+    )
+    assert repeated is not None and repeated["ok"] is True
+    assert repeated["result"]["status"] == "expired"
 
 
 # -- providers / models ------------------------------------------------------

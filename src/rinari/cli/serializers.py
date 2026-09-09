@@ -60,6 +60,10 @@ def session_dict(record: SessionRecord) -> dict[str, Any]:
         "provider_id": record.provider_id,
         "model_id": record.model_id,
         "profile": record.profile_id,
+        "permission_profile": record.permission_profile,
+        "effective_permission_profile": (
+            "read-only" if record.mode in ("plan", "review") else record.permission_profile
+        ),
         "mode": record.mode,
         "state": record.state,
         "git_branch": record.git_branch,

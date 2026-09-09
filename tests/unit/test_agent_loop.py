@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -276,6 +277,74 @@ def test_cancelled_before_model(env) -> None:
     with pytest.raises(CancelledError):
         loop.turn(env["ctx"], "too late", cancel=token)
     assert model.requests == []
+
+
+def test_cancel_interrupts_a_blocked_stream_without_waiting_for_provider(env) -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingStreamModel(FakeModel):
+        def invoke_stream(self, request: ModelRequest, on_delta) -> ModelResponse:
+            self.requests.append(request)
+            started.set()
+            release.wait(5)
+            return ModelResponse(content="too late")
+
+    model = BlockingStreamModel(scripted=[], streaming=True)
+    loop = AgentLoop(model, env["runtime"], env["assembler"])
+    token = CancellationToken()
+    raised: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            loop.turn(env["ctx"], "hello", on_delta=lambda _text: None, cancel=token)
+        except BaseException as exc:
+            raised.append(exc)
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    assert started.wait(1)
+    token.cancel()
+    worker.join(timeout=0.5)
+    release.set()
+
+    assert not worker.is_alive()
+    assert len(raised) == 1
+    assert isinstance(raised[0], CancelledError)
+
+
+def test_cancel_interrupts_a_blocked_non_stream_call(env) -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingModel(FakeModel):
+        def invoke(self, request: ModelRequest) -> ModelResponse:
+            self.requests.append(request)
+            started.set()
+            release.wait(5)
+            return ModelResponse(content="too late")
+
+    model = BlockingModel(scripted=[], streaming=False)
+    loop = AgentLoop(model, env["runtime"], env["assembler"])
+    token = CancellationToken()
+    raised: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            loop.turn(env["ctx"], "hello", cancel=token)
+        except BaseException as exc:
+            raised.append(exc)
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    assert started.wait(1)
+    token.cancel()
+    worker.join(timeout=0.5)
+    release.set()
+
+    assert not worker.is_alive()
+    assert len(raised) == 1
+    assert isinstance(raised[0], CancelledError)
 
 
 def test_budget_exhaustion_stops(env) -> None:

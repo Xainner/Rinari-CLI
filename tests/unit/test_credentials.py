@@ -78,7 +78,7 @@ def test_facade_env_never_deleted() -> None:
 
 def test_facade_file_roundtrip(tmp_path) -> None:
     layout = layout_for(tmp_path)
-    store = CredentialStore(layout)
+    store = CredentialStore(layout, keyring_backend=None)
     ref = store.store_provider_secret("prov_9", "sk-file-secret")
     assert ref == "file://providers/prov_9"
     assert store.resolve(ref) == "sk-file-secret"

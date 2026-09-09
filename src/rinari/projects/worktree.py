@@ -16,8 +16,9 @@ new-file operations are unaffected.
 from __future__ import annotations
 
 import hashlib
-import subprocess
 from pathlib import Path
+
+from rinari.projects._git_process import capture_git
 
 MAX_HASH_BYTES = 16 * 1024 * 1024
 GIT_TIMEOUT_S = 10.0
@@ -29,19 +30,11 @@ def snapshot_worktree(root: Path) -> dict[str, tuple[str, str | None]]:
     Returns {repo-relative path: (porcelain status, sha256 or None)}.
     """
     root = root.resolve()
-    try:
-        process = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=root,
-            capture_output=True,
-            text=True,
-            timeout=GIT_TIMEOUT_S,
-            check=True,
-        )
-    except (OSError, subprocess.SubprocessError):
+    output = capture_git(root, ["status", "--porcelain"], timeout_s=GIT_TIMEOUT_S)
+    if output is None:
         return {}
     entries: dict[str, tuple[str, str | None]] = {}
-    for line in process.stdout.splitlines():
+    for line in output.splitlines():
         if not line or line.startswith("## "):
             continue
         status = line[:2].strip()

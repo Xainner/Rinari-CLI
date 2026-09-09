@@ -17,7 +17,9 @@ import pytest
 from rinari.application.provider_service import AddProviderInput
 from rinari.application.services import build_services
 from rinari.cli.agent_runtime import build_assembler_context
+from rinari.projects import _git_process
 from rinari.trust import STATE_NOT_FOUND, STATE_NOT_TRUSTED, STATE_REVALIDATION, STATE_TRUSTED
+from rinari.trust import store as trust_store
 
 
 def _git(root: Path, *args: str) -> str:
@@ -76,6 +78,42 @@ def test_trust_lifecycle(services, tmp_path) -> None:
     assert trust.remove(repo) is True
     assert trust.status(repo).state == STATE_NOT_TRUSTED
     assert trust.remove(repo) is False
+
+
+def test_untrusted_status_does_not_run_git_fingerprint(services, tmp_path, monkeypatch) -> None:
+    repo = _git_repo(tmp_path)
+
+    def unexpected_fingerprint(_root: Path) -> str:
+        raise AssertionError("untrusted status must not spawn Git")
+
+    monkeypatch.setattr(trust_store, "fingerprint_for", unexpected_fingerprint)
+    status = services.trust.status(repo)
+
+    assert status.state == STATE_NOT_TRUSTED
+    assert status.fingerprint is None
+
+
+def test_git_timeout_does_not_call_communicate_or_wait_forever(tmp_path, monkeypatch) -> None:
+    class HungGit:
+        def __init__(self) -> None:
+            self.killed = False
+            self.waits = 0
+
+        def wait(self, timeout: float) -> int:
+            self.waits += 1
+            if self.waits == 1:
+                raise subprocess.TimeoutExpired("git", timeout)
+            return -9
+
+        def kill(self) -> None:
+            self.killed = True
+
+    hung = HungGit()
+    monkeypatch.setattr(_git_process.subprocess, "Popen", lambda *args, **kwargs: hung)
+
+    assert _git_process.capture_git(tmp_path, ["remote", "-v"], timeout_s=0.01) is None
+    assert hung.killed is True
+    assert hung.waits == 2
 
 
 def test_trust_revalidation_on_identity_change(services, tmp_path) -> None:

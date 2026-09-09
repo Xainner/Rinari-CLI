@@ -15,6 +15,10 @@ from rinari.shared.errors import NetworkError, ProviderModelError
 # Model generation can run for minutes; the client default (10s) only fits
 # discovery/health probes.
 MODEL_CALL_TIMEOUT = 600.0
+# Streaming calls need a much shorter inactivity bound. A healthy long-running
+# response may keep streaming for minutes, but waiting ten minutes for the first
+# byte makes a dead provider look like a permanently thinking model.
+MODEL_STREAM_TIMEOUT = httpx.Timeout(connect=15.0, read=30.0, write=30.0, pool=10.0)
 
 OPENCODE_SESSION_HEADER = "x-opencode-session"
 

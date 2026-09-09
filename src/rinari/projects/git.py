@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+from rinari.projects._git_process import capture_git
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,14 +19,18 @@ class GitState:
 def git_state(root: Path) -> GitState:
     if not (root / ".git").exists():
         return GitState(available=False)
-    try:
-        head = _run(root, ["rev-parse", "HEAD"]).strip()
-        branch = _run(root, ["rev-parse", "--abbrev-ref", "HEAD"]).strip()
-        status = _run(root, ["status", "--porcelain"]).strip()
-    except (OSError, subprocess.SubprocessError):
+    head_output = _run(root, ["rev-parse", "HEAD"])
+    if head_output is None:
         return GitState(available=False)
+    head = head_output.strip()
     if not head or head == "fatal: not a git repository":
         return GitState(available=False)
+    branch_output = _run(root, ["rev-parse", "--abbrev-ref", "HEAD"])
+    status_output = _run(root, ["status", "--porcelain"])
+    if branch_output is None or status_output is None:
+        return GitState(available=False)
+    branch = branch_output.strip()
+    status = status_output.strip()
     return GitState(available=True, branch=branch or None, head=head, dirty=bool(status))
 
 
@@ -36,12 +41,5 @@ def git_fingerprint(root: Path) -> str | None:
     return state.head[:12]
 
 
-def _run(root: Path, args: list[str]) -> str:
-    return subprocess.run(
-        ["git", *args],
-        cwd=root,
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=True,
-    ).stdout
+def _run(root: Path, args: list[str]) -> str | None:
+    return capture_git(root, args, timeout_s=10.0)

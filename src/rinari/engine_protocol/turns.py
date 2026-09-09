@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from rinari.application.services import ServiceContainer
-from rinari.application.session_service import profile_for_mode
+from rinari.application.session_service import profile_for_session
 from rinari.cli.agent_runtime import build_agent_session, run_turn
 from rinari.engine_protocol import errors
 from rinari.engine_protocol.errors import EngineProtocolError
@@ -33,6 +33,8 @@ from rinari.shared.errors import CancelledError, RinariError
 
 APPROVAL_TIMEOUT_S = 600.0
 APPROVAL_POLL_S = 0.05
+PREPARATION_TIMEOUT_S = 20.0
+PREPARATION_POLL_S = 0.05
 MAX_DELTA_CHARS = 8000
 MAX_DETAIL_CHARS = 2000
 MAX_QUEUE_DEPTH = 20
@@ -45,8 +47,13 @@ _DECISION_TO_ANSWER = {"deny": "n", "allow_once": "y", "allow_session": "s"}
 class _ActiveTurn:
     turn_id: str
     session_id: str
-    session: Any
+    session: Any | None
     done: threading.Event
+    cancel_requested: threading.Event = field(default_factory=threading.Event)
+    started_at: float = field(default_factory=time.time)
+    status: str = "running"
+    preparation_stage: str | None = None
+    activities: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass
@@ -56,6 +63,10 @@ class _PendingApproval:
     turn_id: str | None
     decided: threading.Event = field(default_factory=threading.Event)
     decision: str | None = None
+    capability: str = ""
+    target: str | None = None
+    risk: str = "medium"
+    description: str = ""
 
 
 def _safe_detail(value: Any) -> Any:
@@ -79,6 +90,7 @@ class TurnManager:
         self._turns: dict[str, _ActiveTurn] = {}
         self._threads: dict[str, threading.Thread] = {}
         self._approvals: dict[str, _PendingApproval] = {}
+        self._closed_approvals: dict[str, str] = {}
         self._queue: dict[str, collections.deque[str]] = {}
         self._lock = threading.Lock()
         self._local = threading.local()
@@ -106,37 +118,73 @@ class TurnManager:
         with self._lock:
             return any(not turn.done.is_set() for turn in self._turns.values())
 
+    def runtime_state(self) -> dict[str, Any]:
+        """Presentation-safe live state used to recover after a UI reload."""
+        with self._lock:
+            turns = [
+                {
+                    "turn_id": turn.turn_id,
+                    "session_id": turn.session_id,
+                    "status": "cancelling" if turn.cancel_requested.is_set() else turn.status,
+                    "preparation_stage": turn.preparation_stage,
+                    "started_at": turn.started_at,
+                    "activities": list(turn.activities.values()),
+                }
+                for turn in self._turns.values()
+                if not turn.done.is_set()
+            ]
+            approvals = [
+                {
+                    "approval_id": item.approval_id,
+                    "session_id": item.session_id,
+                    "turn_id": item.turn_id,
+                    "capability": item.capability,
+                    "target": item.target,
+                    "risk": item.risk,
+                    "description": item.description,
+                    "choices": list(DECISIONS),
+                }
+                for item in self._approvals.values()
+            ]
+        return {"active_turns": turns, "pending_approvals": approvals}
+
     # -- turn lifecycle ----------------------------------------------------
 
-    def start_turn(self, session_id: str, message: str) -> dict[str, Any]:
+    def start_turn(
+        self, session_id: str, message: str, reasoning_effort: str | None = None
+    ) -> dict[str, Any]:
         record = self._services.sessions.show(session_id)
-        agent_session = build_agent_session(
-            self._services,
-            record,
-            interactive=False,
-            user_home=self._user_home,
-            profile=profile_for_mode(record.mode),
-            approval_prompt=self._prompt_for_current_turn,
-        )
         turn_id = self._services.ctx.ids.new("turn")
         turn = _ActiveTurn(
             turn_id=turn_id,
             session_id=record.id,
-            session=agent_session,
+            session=None,
             done=threading.Event(),
         )
         with self._lock:
             for active in self._turns.values():
                 if active.session_id == record.id and not active.done.is_set():
-                    agent_session.end()
                     raise EngineProtocolError(
                         errors.TURN_RUNNING,
                         f"Session {record.id} already has a running turn.",
                         details={"turn_id": active.turn_id, "session_id": record.id},
                     )
             self._turns[turn_id] = turn
-        self._emit(event("turn.started", {"turn_id": turn_id, "session_id": record.id}))
-        thread = threading.Thread(target=self._run_turn, args=(turn_id, message), daemon=True)
+        self._emit(
+            event(
+                "turn.started",
+                {
+                    "turn_id": turn_id,
+                    "session_id": record.id,
+                    "reasoning_effort": reasoning_effort,
+                },
+            )
+        )
+        thread = threading.Thread(
+            target=self._run_turn,
+            args=(turn_id, record, message, reasoning_effort),
+            daemon=True,
+        )
         with self._lock:
             self._threads[turn_id] = thread
         thread.start()
@@ -156,7 +204,10 @@ class TurnManager:
             raise EngineProtocolError(
                 errors.NO_ACTIVE_TURN, f"Session {session_id} has no running turn."
             )
-        turn.session.token.cancel()
+        turn.cancel_requested.set()
+        turn.status = "cancelling"
+        if turn.session is not None:
+            turn.session.token.cancel()
         return {
             "status": "cancel_requested",
             "turn_id": turn.turn_id,
@@ -168,7 +219,9 @@ class TurnManager:
             active = [turn for turn in self._turns.values() if not turn.done.is_set()]
         for turn in active:
             with contextlib.suppress(Exception):
-                turn.session.token.cancel()
+                turn.cancel_requested.set()
+                if turn.session is not None:
+                    turn.session.token.cancel()
 
     def close(self) -> None:
         self.cancel_all_turns()
@@ -177,18 +230,30 @@ class TurnManager:
         for thread in threads:
             thread.join(timeout=10)
 
-    def _run_turn(self, turn_id: str, message: str) -> None:
+    def _run_turn(
+        self,
+        turn_id: str,
+        record: Any,
+        message: str,
+        reasoning_effort: str | None,
+    ) -> None:
         turn = self._turns[turn_id]
         self._local.turn_id = turn_id
-        self._local.token = turn.session.token
         try:
+            agent_session = self._prepare_session(turn, record, reasoning_effort)
+            with self._lock:
+                turn.session = agent_session
+            self._local.token = agent_session.token
+            if turn.cancel_requested.is_set():
+                agent_session.token.cancel()
+            self._activity_cb(turn)("turn.preparing", {"stage": "session_lock"})
             result = run_turn(
-                turn.session,
+                agent_session,
                 message,
                 on_delta=self._delta_cb(turn),
-                on_tool=self._tool_cb(turn),
             )
             if result.kind == "cancelled":
+                self._cancel_running_activities(turn)
                 self._emit(
                     event("turn.cancelled", {"turn_id": turn_id, "session_id": turn.session_id})
                 )
@@ -204,7 +269,30 @@ class TurnManager:
                         },
                     )
                 )
+        except CancelledError:
+            self._cancel_running_activities(turn)
+            self._emit(
+                event("turn.cancelled", {"turn_id": turn_id, "session_id": turn.session_id})
+            )
+        except EngineProtocolError as err:
+            self._fail_running_activities(turn, err.message)
+            self._emit(
+                event(
+                    "turn.failed",
+                    {
+                        "turn_id": turn_id,
+                        "session_id": turn.session_id,
+                        "error": {
+                            "code": err.code,
+                            "message": err.message,
+                            "retryable": err.retryable,
+                            "details": err.details,
+                        },
+                    },
+                )
+            )
         except RinariError as err:
+            self._fail_running_activities(turn, str(err))
             mapped = errors.from_rinari_error(err)
             self._emit(
                 event(
@@ -222,6 +310,7 @@ class TurnManager:
                 )
             )
         except Exception as err:  # defensive: the desktop must see a terminal event
+            self._fail_running_activities(turn, str(err))
             self._emit(
                 event(
                     "turn.failed",
@@ -239,10 +328,81 @@ class TurnManager:
             )
         finally:
             turn.done.set()
-            turn.session.end()
+            if turn.session is not None:
+                turn.session.end()
             self._local.turn_id = None
             self._local.token = None
             self._start_next_queued(turn.session_id)
+
+    def _prepare_session(
+        self, turn: _ActiveTurn, record: Any, reasoning_effort: str | None
+    ) -> Any:
+        """Build the per-turn runtime without stranding cancellation or the UI.
+
+        Most preparation is local and normally completes in under a second.
+        Extension discovery, keyring backends, or filesystem edge cases can
+        nevertheless block. Run it behind a bounded handoff so Stop remains
+        responsive and a broken initializer becomes a terminal turn failure.
+        """
+        completed: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
+        abandoned = threading.Event()
+
+        def prepare() -> None:
+            session = None
+            try:
+                session = build_agent_session(
+                    self._services,
+                    record,
+                    interactive=False,
+                    user_home=self._user_home,
+                    profile=profile_for_session(record),
+                    approval_prompt=self._prompt_for_current_turn,
+                    activity_sink=self._activity_cb(turn),
+                    reasoning_effort=reasoning_effort,
+                )
+                if abandoned.is_set():
+                    session.end()
+                    return
+                completed.put_nowait((True, session))
+            except BaseException as exc:
+                if abandoned.is_set():
+                    if session is not None:
+                        with contextlib.suppress(Exception):
+                            session.end()
+                    return
+                with contextlib.suppress(queue.Full):
+                    completed.put_nowait((False, exc))
+
+        threading.Thread(
+            target=prepare,
+            name="rinari-turn-prepare",
+            daemon=True,
+        ).start()
+        deadline = time.monotonic() + PREPARATION_TIMEOUT_S
+        while True:
+            if turn.cancel_requested.is_set():
+                abandoned.set()
+                raise CancelledError("Turn cancelled during runtime preparation")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                abandoned.set()
+                stage = turn.preparation_stage or "runtime"
+                raise EngineProtocolError(
+                    errors.TURN_PREPARATION_TIMEOUT,
+                    (
+                        "Turn runtime preparation stalled during "
+                        f"{stage!r} for more than {PREPARATION_TIMEOUT_S:g} seconds."
+                    ),
+                    retryable=True,
+                    details={"stage": stage, "timeout_s": PREPARATION_TIMEOUT_S},
+                )
+            try:
+                ok, value = completed.get(timeout=min(PREPARATION_POLL_S, remaining))
+            except queue.Empty:
+                continue
+            if ok:
+                return value
+            raise value
 
     # -- prompt queue ------------------------------------------------------
     # Queued messages run FIFO after the live turn ends, preserving normal
@@ -345,6 +505,66 @@ class TurnManager:
 
         return _on_tool
 
+    def _activity_cb(self, turn: _ActiveTurn) -> Any:
+        def _on_activity(event_name: str, payload: dict[str, Any]) -> None:
+            if turn.done.is_set():
+                return
+            safe = {
+                "turn_id": turn.turn_id,
+                "session_id": turn.session_id,
+                **payload,
+            }
+            if "arguments" in safe:
+                safe["arguments"] = _safe_detail(safe["arguments"])
+            if "result" in safe:
+                safe["result"] = _safe_detail(safe["result"])
+            activity_id = str(safe.get("tool_call_id") or safe.get("model_call_id") or "")
+            with self._lock:
+                if event_name == "turn.preparing":
+                    turn.preparation_stage = str(safe.get("stage") or "") or None
+                if activity_id:
+                    current = turn.activities.get(activity_id, {})
+                    turn.activities[activity_id] = {**current, **safe, "event": event_name}
+            self._emit(event(event_name, safe))
+
+        return _on_activity
+
+    def _cancel_running_activities(self, turn: _ActiveTurn) -> None:
+        with self._lock:
+            running = [
+                dict(item)
+                for item in turn.activities.values()
+                if item.get("event") == "tool.started"
+            ]
+        for item in running:
+            self._activity_cb(turn)(
+                "tool.cancelled",
+                {
+                    "tool_call_id": item.get("tool_call_id"),
+                    "tool": item.get("tool", ""),
+                    "ok": False,
+                    "error": {"code": "cancelled", "message": "Turn cancelled"},
+                },
+            )
+
+    def _fail_running_activities(self, turn: _ActiveTurn, message: str) -> None:
+        with self._lock:
+            running = [
+                dict(item)
+                for item in turn.activities.values()
+                if item.get("event") == "tool.started"
+            ]
+        for item in running:
+            self._activity_cb(turn)(
+                "tool.failed",
+                {
+                    "tool_call_id": item.get("tool_call_id"),
+                    "tool": item.get("tool", ""),
+                    "ok": False,
+                    "error": {"code": "turn_failed", "message": message},
+                },
+            )
+
     # -- approvals (worker thread blocks, main loop resolves) -----------------
 
     def _prompt_for_current_turn(self, request: ApprovalRequest) -> str:
@@ -356,7 +576,13 @@ class TurnManager:
         turn_id = getattr(self._local, "turn_id", None)
         approval_id = self._services.ctx.ids.new("apr")
         pending = _PendingApproval(
-            approval_id=approval_id, session_id=request.session_id, turn_id=turn_id
+            approval_id=approval_id,
+            session_id=request.session_id,
+            turn_id=turn_id,
+            capability=request.capability,
+            target=request.target,
+            risk=request.risk,
+            description=request.description,
         )
         with self._lock:
             self._approvals[approval_id] = pending
@@ -377,21 +603,45 @@ class TurnManager:
             )
         )
         deadline = time.time() + APPROVAL_TIMEOUT_S
+        expired = False
         try:
             while not pending.decided.wait(APPROVAL_POLL_S):
                 if token is not None and getattr(token, "cancelled", False):
                     raise CancelledError("Approval abandoned: turn was cancelled.")
                 if time.time() >= deadline:
+                    expired = True
                     self._emit(
                         event(
                             "approval.expired",
-                            {"approval_id": approval_id, "session_id": request.session_id},
+                            {
+                                "approval_id": approval_id,
+                                "session_id": request.session_id,
+                                "turn_id": turn_id,
+                                "reason": "timeout",
+                            },
                         )
                     )
                     return "n"
+        except CancelledError:
+            expired = True
+            self._emit(
+                event(
+                    "approval.expired",
+                    {
+                        "approval_id": approval_id,
+                        "session_id": request.session_id,
+                        "turn_id": turn_id,
+                        "reason": "turn_cancelled",
+                    },
+                )
+            )
+            raise
         finally:
             with self._lock:
                 self._approvals.pop(approval_id, None)
+                self._closed_approvals[approval_id] = "expired" if expired else "resolved"
+                if len(self._closed_approvals) > 200:
+                    self._closed_approvals.pop(next(iter(self._closed_approvals)))
         if pending.decision is None:
             return "n"
         self._emit(
@@ -400,6 +650,7 @@ class TurnManager:
                 {
                     "approval_id": approval_id,
                     "session_id": request.session_id,
+                    "turn_id": turn_id,
                     "decision": pending.decision,
                 },
             )
@@ -415,8 +666,11 @@ class TurnManager:
         with self._lock:
             pending = self._approvals.get(approval_id)
             if pending is None:
+                status = self._closed_approvals.get(approval_id)
+                if status is not None:
+                    return {"status": status, "approval_id": approval_id, "decision": decision}
                 raise EngineProtocolError(
-                    errors.APPROVAL_NOT_FOUND, f"Unknown or expired approval: {approval_id}."
+                    errors.APPROVAL_NOT_FOUND, f"Unknown approval: {approval_id}."
                 )
             pending.decision = decision
             pending.decided.set()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -10,13 +11,21 @@ import pytest
 
 from rinari.policy.engine import CAPABILITY_PROCESS_LOCAL, PolicyAction, PolicyEngine, SessionScope
 from rinari.policy.sandbox import FilesystemSandbox, ProcessLimits
+from rinari.runtime.cancellation import CancellationToken
 from rinari.shared.clock import FakeClock
 from rinari.tools.definition import ToolContext
 from rinari.tools.native.process import ProcessRegistry
 from rinari.tools.native.shell import shell_exec
 
 
-def _ctx(tmp_path: Path, root: Path, *, sink=None, processes=None) -> ToolContext:
+def _ctx(
+    tmp_path: Path,
+    root: Path,
+    *,
+    sink=None,
+    processes=None,
+    cancellation=None,
+) -> ToolContext:
     return ToolContext(
         session_id="s1",
         kind="PROJECT",
@@ -28,7 +37,7 @@ def _ctx(tmp_path: Path, root: Path, *, sink=None, processes=None) -> ToolContex
         limits=ProcessLimits(timeout_s=30, max_output_bytes=65536),
         artifact_root=tmp_path / "artifacts",
         clock=FakeClock(start=1_700_000_000.0, step=0.01),
-        cancellation=None,
+        cancellation=cancellation,
         output_sink=sink,
         processes=processes,
     )
@@ -161,3 +170,28 @@ def test_shell_live_streaming(env) -> None:
     assert "b" in result.data["stdout"].replace("\r", "")
     streamed = "".join(chunk for stream, chunk in received if stream == "stdout")
     assert "a" in streamed and "b" in streamed
+
+
+def test_shell_cancel_kills_process_without_waiting_for_timeout(env) -> None:
+    tmp_path, root = env
+    token = CancellationToken()
+    ctx = _ctx(tmp_path, root, cancellation=token)
+    result: dict = {}
+    started = time.monotonic()
+    worker = threading.Thread(
+        target=lambda: result.setdefault(
+            "value",
+            shell_exec(
+                {"command": _python("import time; time.sleep(30)"), "timeout_s": 30},
+                ctx,
+            ),
+        )
+    )
+    worker.start()
+    time.sleep(0.25)
+    token.cancel()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert time.monotonic() - started < 5
+    assert result["value"].ok is False
+    assert result["value"].error.code.value == "CANCELLED"

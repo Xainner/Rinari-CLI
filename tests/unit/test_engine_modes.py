@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
 from rinari.application.provider_service import AddProviderInput
 from rinari.application.services import build_services
-from rinari.application.session_service import profile_for_mode
+from rinari.application.session_service import profile_for_mode, profile_for_session
 from rinari.engine_protocol import turns as turns_module
 from rinari.engine_protocol.server import EngineServer
 from rinari.policy.engine import PermissionProfile
@@ -109,8 +110,78 @@ def test_plan_turn_builds_read_only_session(server, tmp_path, monkeypatch) -> No
     started = server.handle_line(
         _req("m5", "session.turn.start", {"session_id": session_id, "message": "hi"})
     )
-    # The spy aborts session construction; the envelope proves the call path
-    # reached build_agent_session, where the profile was captured.
-    assert started is not None and started["ok"] is False
-    assert started["error"]["code"] == "ENGINE_ERROR"
+    # Runtime preparation is asynchronous: acceptance must not wait for it,
+    # and preparation failures arrive through the terminal event stream.
+    assert started is not None and started["ok"] is True
+    deadline = time.monotonic() + 2
+    failed = None
+    while time.monotonic() < deadline and failed is None:
+        failed = next(
+            (event for event in server.drain_events() if event["event"] == "turn.failed"),
+            None,
+        )
+        if failed is None:
+            time.sleep(0.01)
+    assert failed is not None
+    assert failed["payload"]["error"]["code"] == "ENGINE_ERROR"
     assert seen.get("profile") is PermissionProfile.READ_ONLY
+
+
+def test_desktop_session_defaults_and_permission_are_persisted(server, tmp_path) -> None:
+    response = server.handle_line(
+        _req(
+            "p1",
+            "session.create",
+            {
+                "cwd": str(tmp_path),
+                "chat": True,
+                "mode": "build",
+                "permission_profile": "full-access",
+            },
+        )
+    )
+    assert response is not None and response["ok"] is True
+    session = response["result"]["session"]
+    assert session["mode"] == "build"
+    assert session["permission_profile"] == "full-access"
+    record = server._services.sessions.show(session["id"])
+    assert profile_for_session(record) is PermissionProfile.FULL_ACCESS
+
+    plan = server.handle_line(
+        _req("p2", "session.mode.set", {"ref": session["id"], "mode": "plan"})
+    )
+    assert plan is not None and plan["ok"] is True
+    record = server._services.sessions.show(session["id"])
+    assert profile_for_session(record) is PermissionProfile.READ_ONLY
+    assert record.permission_profile == "full-access"
+
+
+def test_session_model_selection_is_persisted_per_chat(server, services, tmp_path) -> None:
+    provider = services.providers.add(
+        AddProviderInput(
+            alias="xainner",
+            provider_type="custom",
+            endpoint="https://example.invalid/v1",
+            secret="dummy-secret-not-real",
+        )
+    )
+    model = services.models.add("xainner", "uncensored", "uncensored")
+    session_id = _create_chat(server, tmp_path)
+
+    response = server.handle_line(
+        _req(
+            "model-session",
+            "session.model.set",
+            {"ref": session_id, "model": model.id, "provider": provider.id},
+        )
+    )
+
+    assert response is not None and response["ok"] is True
+    assert response["result"]["session"]["provider_id"] == provider.id
+    assert response["result"]["session"]["model_id"] == model.id
+    persisted = services.sessions.show(session_id)
+    assert persisted.provider_id == provider.id
+    assert persisted.model_id == model.id
+    event_payload = server.drain_events()[-1]["payload"]
+    assert event_payload["session_id"] == session_id
+    assert event_payload["model_id"] == model.id

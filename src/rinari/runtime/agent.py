@@ -19,6 +19,9 @@ model I/O surfaces as a CancelledError at the next boundary.
 from __future__ import annotations
 
 import contextlib
+import queue
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -74,6 +77,7 @@ class TurnResult:
 ModelProvider = Any
 DeltaFn = Callable[[str], None]
 ToolHook = Callable[[str, str, object], None]  # (phase, name, detail)
+ActivityHook = Callable[[str, dict], None]
 # (agent_ctx, pressure, used_input_tokens, window_tokens); storage-aware
 # compaction lives outside the loop and mutates AgentContext in place.
 PressureHook = Callable[[object, float, int, int], None]
@@ -112,6 +116,8 @@ class AgentLoop:
         event_sink: Callable[[str, str, dict], None] | None = None,
         on_pressure: PressureHook | None = None,
         hook_sink: HookSink | None = None,
+        activity_sink: ActivityHook | None = None,
+        reasoning_effort: str | None = None,
     ) -> None:
         self._provider = model_provider
         self._tools = tool_runtime
@@ -121,6 +127,8 @@ class AgentLoop:
         self._event_sink = event_sink
         self._on_pressure = on_pressure
         self._hook_sink = hook_sink
+        self._activity_sink = activity_sink
+        self._reasoning_effort = reasoning_effort
 
     @property
     def tool_registry(self):
@@ -164,7 +172,7 @@ class AgentLoop:
         # A present meter is authoritative for model-call iterations; the
         # loop's own cap is only a defensive fallback without one.
         max_iters = budget.limits.max_model_calls if budget is not None else self._max_model_calls
-        for _ in range(max_iters):
+        for model_index in range(max_iters):
             cancel.throw_if_cancelled()
             if budget is not None:
                 hit = budget.first_exhausted(ignore=(TOOL_CALLS_DIM, NETWORK_CALLS_DIM))
@@ -203,7 +211,32 @@ class AgentLoop:
             if exposure_metrics is not None:
                 before_model_payload["exposure"] = exposure_metrics.metrics(self._tools.registry)
             self._emit_hook("BeforeModel", before_model_payload)
-            response = self._invoke(ctx, request, self._guarded_delta(ctx, on_delta))
+            model_call_id = f"model_{model_index + 1}"
+            model_started = time.monotonic()
+            self._emit_activity(
+                "model.started",
+                {"model_call_id": model_call_id, "model": ctx.model_ref},
+            )
+            try:
+                response = self._invoke(ctx, request, self._guarded_delta(ctx, on_delta), cancel)
+            except BaseException as exc:
+                self._emit_activity(
+                    "model.failed",
+                    {
+                        "model_call_id": model_call_id,
+                        "duration_ms": round((time.monotonic() - model_started) * 1000, 1),
+                        "error": {"message": str(exc), "type": type(exc).__name__},
+                    },
+                )
+                raise
+            self._emit_activity(
+                "model.completed",
+                {
+                    "model_call_id": model_call_id,
+                    "duration_ms": round((time.monotonic() - model_started) * 1000, 1),
+                    "usage": _usage_dict(response.usage),
+                },
+            )
             total_usage = _merge_usage(total_usage, response.usage)
             self._emit_hook(
                 "AfterModel",
@@ -261,6 +294,14 @@ class AgentLoop:
             ctx.history.append(ChatMessage.assistant(response.content or "", response.tool_calls))
             for call in response.tool_calls:
                 cancel.throw_if_cancelled()
+                self._emit_activity(
+                    "tool.requested",
+                    {
+                        "tool_call_id": call.id,
+                        "tool": call.name,
+                        "arguments": call.arguments,
+                    },
+                )
                 tool_calls_requested += 1
                 network = self._call_is_network(call.name, call.arguments)
                 if budget is not None:
@@ -315,6 +356,14 @@ class AgentLoop:
                         {"tool": call.name, "arguments": call.arguments, "tool_call_id": call.id},
                     )
                     _hook(on_tool, "start", call.name, call.arguments)
+                    self._emit_activity(
+                        "tool.started",
+                        {
+                            "tool_call_id": call.id,
+                            "tool": call.name,
+                            "arguments": call.arguments,
+                        },
+                    )
                     trace = {"tool_seq": tool_seq + 1}
                     if turn_index is not None:
                         trace["turn_index"] = turn_index
@@ -346,11 +395,56 @@ class AgentLoop:
                             },
                         )
                     _hook(on_tool, "end", call.name, result)
+                    terminal_event = "tool.completed"
+                    if not result.ok:
+                        terminal_event = (
+                            "tool.cancelled"
+                            if result.error is not None
+                            and result.error.code is ToolErrorCode.CANCELLED
+                            else "tool.failed"
+                        )
+                    self._emit_activity(
+                        terminal_event,
+                        {
+                            "tool_call_id": call.id,
+                            "tool": call.name,
+                            "ok": result.ok,
+                            "duration_ms": round(result.duration_ms, 1),
+                            "error": (
+                                {
+                                    "code": result.error.code.value,
+                                    "message": result.error.message,
+                                    "retryable": result.error.retryable,
+                                }
+                                if result.error is not None
+                                else None
+                            ),
+                            "result": result.to_model_text(call.name)[:2000],
+                        },
+                    )
                 tool_seq += 1
                 ctx.history.append(
                     ChatMessage.tool_result(call.id, call.name, result.to_model_text(call.name))
                 )
                 if not executed:
+                    self._emit_activity(
+                        "tool.failed",
+                        {
+                            "tool_call_id": call.id,
+                            "tool": call.name,
+                            "ok": False,
+                            "duration_ms": round(result.duration_ms, 1),
+                            "error": (
+                                {
+                                    "code": result.error.code.value,
+                                    "message": result.error.message,
+                                    "retryable": result.error.retryable,
+                                }
+                                if result.error is not None
+                                else None
+                            ),
+                        },
+                    )
                     tool_completed_payload: dict = {
                         "tool_call_id": call.id,
                         "name": call.name,
@@ -441,6 +535,7 @@ class AgentLoop:
             model=ctx.model_ref,
             messages=tuple(messages),
             tools=wire_tools,
+            reasoning_effort=self._reasoning_effort,
             session_id=ctx.session_id,
         )
 
@@ -461,11 +556,45 @@ class AgentLoop:
         except Exception:
             pass
 
-    def _invoke(self, ctx: AgentContext, request: ModelRequest, on_delta: DeltaFn | None) -> Any:
+    def _invoke(
+        self,
+        ctx: AgentContext,
+        request: ModelRequest,
+        on_delta: DeltaFn | None,
+        cancellation: CancellationToken,
+    ) -> Any:
         capabilities = self._provider.capabilities()
-        if on_delta is not None and getattr(capabilities, "streaming", False):
-            return self._provider.invoke_stream(request, on_delta)
-        return self._provider.invoke(request)
+        streaming = on_delta is not None and getattr(capabilities, "streaming", False)
+        # Both streaming and non-streaming HTTP calls can block in a socket
+        # read. Keep every provider invocation outside the logical turn worker
+        # so cancellation is bounded by this 50 ms polling interval.
+        completed: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
+
+        def invoke_provider() -> None:
+            try:
+                value = (
+                    self._provider.invoke_stream(request, on_delta)
+                    if streaming
+                    else self._provider.invoke(request)
+                )
+                completed.put((True, value))
+            except BaseException as exc:  # re-raised on the turn worker
+                completed.put((False, exc))
+
+        threading.Thread(
+            target=invoke_provider,
+            name="rinari-model-stream" if streaming else "rinari-model-call",
+            daemon=True,
+        ).start()
+        while True:
+            cancellation.throw_if_cancelled("Model call cancelled")
+            try:
+                ok, value = completed.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            if ok:
+                return value
+            raise value
 
     def _guarded_delta(self, ctx: AgentContext, on_delta: DeltaFn | None) -> DeltaFn | None:
         """Abort a live stream promptly on cancel (§8/Etapa D).
@@ -545,6 +674,12 @@ class AgentLoop:
         with contextlib.suppress(Exception):
             # Hook failures are recorded in the outcome; never fatal here.
             self._hook_sink(event, payload)
+
+    def _emit_activity(self, event: str, payload: dict) -> None:
+        if self._activity_sink is None:
+            return
+        with contextlib.suppress(Exception):
+            self._activity_sink(event, payload)
 
 
 def _turn_completed_payload(

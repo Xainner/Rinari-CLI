@@ -34,6 +34,7 @@ from rinari.models.types import (
 from rinari.providers.adapters.base import AuthStatus, DiscoveredModel, ProviderAdapter
 from rinari.providers.adapters.http import (
     MODEL_CALL_TIMEOUT,
+    MODEL_STREAM_TIMEOUT,
     auth_failure,
     decode_json,
     provider_error,
@@ -163,7 +164,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                 url,
                 json=self._responses_payload(request, stream=True, tool_aliases=tool_aliases),
                 headers=headers,
-                timeout=MODEL_CALL_TIMEOUT,
+                timeout=MODEL_STREAM_TIMEOUT,
             ) as response:
                 if response.status_code in (401, 403):
                     raise auth_failure(response, url, model=request.model)

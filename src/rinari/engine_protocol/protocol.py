@@ -25,4 +25,7 @@ CAPABILITIES: dict[str, bool] = {
     "artifacts": True,
     "checkpoints": True,
     "terminal": True,
+    # Session permissions, attachment/file search, model/tool lifecycle
+    # telemetry, approval expiry and runtime snapshot recovery.
+    "desktop_turn_runtime_v3": True,
 }
