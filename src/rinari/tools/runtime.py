@@ -323,6 +323,15 @@ class ToolRuntime:
         )
         if not outcome.granted:
             return False, ctx
+        if decision.capability == "fs.read" and decision.target:
+            target = Path(decision.target).resolve()
+            sandbox = FilesystemSandbox(
+                ctx.sandbox.read_root,
+                ctx.sandbox.write_roots,
+                unrestricted=ctx.sandbox.unrestricted,
+                approved_read_roots=(*ctx.sandbox.approved_read_roots, target),
+            )
+            return True, dataclasses.replace(ctx, sandbox=sandbox)
         # A granted write outside the base roots extends this call's sandbox
         # for exactly this action's target directory.
         if decision.capability == "fs.write" and decision.target:
@@ -333,6 +342,7 @@ class ToolRuntime:
                     ctx.sandbox.read_root,
                     (*ctx.sandbox.write_roots, approved_root),
                     unrestricted=ctx.sandbox.unrestricted,
+                    approved_read_roots=(*ctx.sandbox.approved_read_roots, target),
                 )
                 return True, dataclasses.replace(ctx, sandbox=sandbox)
         return True, ctx

@@ -181,6 +181,52 @@ def test_approval_denied(project) -> None:
     assert not (tmp_path / "nope.txt").exists()
 
 
+def test_approved_external_read_is_scoped_to_call(project) -> None:
+    tmp_path, root, outside = project
+    ctx = _ctx(tmp_path, root)
+    runtime, _ = _runtime(ctx, tmp_path, answer="y")
+    result = runtime.execute("fs.read", {"path": str(outside)}, ctx)
+    assert result.ok, result.error
+    assert "outside" in str(result.data)
+    from rinari.shared.errors import SandboxViolationError
+
+    with pytest.raises(SandboxViolationError):
+        ctx.sandbox.assert_readable(outside)
+    denied, _ = _runtime(ctx, tmp_path, answer="n")
+    assert not denied.execute("fs.read", {"path": str(outside)}, ctx).ok
+
+
+def test_approved_external_directory_can_be_listed(project) -> None:
+    tmp_path, root, _ = project
+    destination = tmp_path / "Test Code ñ"
+    destination.mkdir()
+    ctx = _ctx(tmp_path, root)
+    runtime, _ = _runtime(ctx, tmp_path, answer="y")
+    assert runtime.execute("fs.list", {"path": str(destination)}, ctx).ok
+    result = runtime.execute(
+        "fs.write", {"path": str(destination / "plan.md"), "content": "Diseño"}, ctx
+    )
+    assert result.ok, result.error
+    assert (destination / "plan.md").read_text(encoding="utf-8") == "Diseño"
+
+
+def test_git_timeout_returns_tool_error(project, monkeypatch) -> None:
+    import subprocess
+
+    tmp_path, root, _ = project
+    ctx = _ctx(tmp_path, root)
+    runtime, _ = _runtime(ctx, tmp_path)
+
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired("git", 30)
+
+    monkeypatch.setattr("rinari.tools.native.git.subprocess.run", timeout)
+    result = runtime.execute("git.status", {}, ctx)
+    assert not result.ok
+    assert result.error.code is ToolErrorCode.TIMEOUT
+    assert result.error.retryable
+
+
 def test_chat_shell_asks(project) -> None:
     tmp_path, root, _ = project
     ctx = _ctx(tmp_path, root, kind="CHAT", profile="workspace")

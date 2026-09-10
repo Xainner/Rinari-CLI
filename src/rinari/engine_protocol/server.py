@@ -569,6 +569,7 @@ class EngineServer:
             payload = dict(row.payload or {})
             event_name = row.type
             if event_name == "turn.started":
+                turn["mode"] = payload.get("mode")
                 turn["started_at"] = payload.get("occurred_at") or row.created_at
                 turn["user_message"] = str(payload.get("message") or "")
                 continue

@@ -60,6 +60,8 @@ def run_stdio(
     # Leave injected test/embedded streams under the caller's ownership.
     if stdin is None and hasattr(sys.stdin, "reconfigure"):
         sys.stdin.reconfigure(encoding="utf-8", errors="strict")
+    if stdout is None and hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="strict")
     inp = stdin or sys.stdin
     out = stdout or sys.stdout
     err = stderr or sys.stderr

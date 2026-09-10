@@ -472,12 +472,23 @@ class SessionService:
         state: str | None = None,
         limit: int = 50,
     ) -> list[SessionRecord]:
-        return self._ctx.session_repo.list(
+        records = self._ctx.session_repo.list(
             kind=kind,
             project_id=project_id,
             state=state,
             limit=limit,
         )
+        # Older Windows transports decoded UTF-8 titles with the ANSI locale.
+        # Repair only the known generated title; never guess at user-authored text.
+        default_title = "Nueva conversación"
+        broken_titles = {
+            default_title.encode("utf-8").decode(codec) for codec in ("cp1252", "latin-1")
+        }
+        for record in records:
+            if record.title in broken_titles:
+                record.title = default_title
+                self._ctx.session_repo.update(record)
+        return records
 
     def show(self, ref: str) -> SessionRecord:
         return self._resolve(ref)

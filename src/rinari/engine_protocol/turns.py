@@ -58,6 +58,7 @@ class _ActiveTurn:
     cancel_requested: threading.Event = field(default_factory=threading.Event)
     started_at: float = field(default_factory=time.time)
     status: str = "running"
+    mode: str | None = None
     preparation_stage: str | None = None
     activities: dict[str, dict[str, Any]] = field(default_factory=dict)
     activity_keys: dict[str, int] = field(default_factory=dict)
@@ -200,6 +201,7 @@ class TurnManager:
                     "session_id": turn.session_id,
                     "status": "cancelling" if turn.cancel_requested.is_set() else turn.status,
                     "preparation_stage": turn.preparation_stage,
+                    "mode": turn.mode,
                     "started_at": turn.started_at,
                     "items": sorted(
                         (dict(item) for item in turn.activities.values()),
@@ -261,10 +263,12 @@ class TurnManager:
                         details={"turn_id": active.turn_id, "session_id": record.id},
                     )
             self._turns[turn_id] = turn
+            turn.mode = record.mode
         self._activity_cb(turn)(
             "turn.started",
             {
                 "reasoning_effort": reasoning_effort,
+                "mode": record.mode,
                 "message": message,
             },
         )

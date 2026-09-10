@@ -45,6 +45,18 @@ def test_general_chats_have_independent_workspaces(desktop):
     assert Path(a["current_cwd"]).is_dir()
 
 
+def test_known_legacy_title_repaired_without_altering_unicode_titles(desktop):
+    session = create(desktop)
+    services = desktop._services
+    title = "Nueva conversación"
+    services.sessions.rename(session["id"], title.encode("utf-8").decode("cp1252"))
+    services.sessions.list()
+    assert services.sessions.show(session["id"]).title == title
+    services.sessions.rename(session["id"], "Diseño de aplicación — 日本語")
+    services.sessions.list()
+    assert services.sessions.show(session["id"]).title == "Diseño de aplicación — 日本語"
+
+
 def test_move_preserves_origin_and_reads_historical_turn(desktop, tmp_path):
     session = create(desktop)
     origin = Path(session["current_cwd"])
@@ -297,6 +309,9 @@ def test_plan_tool_asks_and_resumes_real_agent_loop(desktop, monkeypatch):
         assert any(e["event"] == "question.requested" for e in seen), json.dumps(seen, indent=2)
         assert any(e["event"] == "turn.completed" for e in seen), json.dumps(seen, indent=2)
         assert "Small scope" in str(model.requests[-1])
+        assert next(e for e in seen if e["event"] == "turn.started")["payload"]["mode"] == "plan"
+        history = desktop._session_timeline({"ref": session["id"]})
+        assert history["turns"][-1]["mode"] == "plan"
     finally:
         if desktop._turns.has_active_turn(session["id"]):
             desktop._turns.cancel_turn(session["id"])

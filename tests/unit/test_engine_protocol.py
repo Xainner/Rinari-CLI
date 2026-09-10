@@ -211,3 +211,29 @@ def test_stdio_end_to_end(server, tmp_path) -> None:
     assert lines[2]["id"] == "t2" and lines[2]["ok"] is True
     assert lines[3]["ok"] is False and lines[3]["error"]["code"] == "BROKEN_FRAME"
     assert stderr.getvalue() == ""
+
+
+def test_stdio_overrides_windows_ansi_locale(server, tmp_path, monkeypatch) -> None:
+    import sys
+
+    title = "Nueva conversación — diseño 日本語"
+    request = json.dumps(
+        {
+            "id": "unicode",
+            "method": "session.create",
+            "params": {"cwd": str(tmp_path), "chat": True, "title": title},
+        },
+        ensure_ascii=False,
+    )
+    inp = io.TextIOWrapper(io.BytesIO((request + "\n").encode("utf-8")), encoding="cp1252")
+    output = io.BytesIO()
+    out = io.TextIOWrapper(output, encoding="cp1252")
+    with monkeypatch.context() as context:
+        context.setattr(sys, "stdin", inp)
+        context.setattr(sys, "stdout", out)
+        assert run_stdio(server, stderr=io.StringIO()) == 0
+        out.flush()
+        frames = [json.loads(line) for line in output.getvalue().decode("utf-8").splitlines()]
+    response = next(frame for frame in frames if frame.get("id") == "unicode")
+    assert response["ok"], response
+    assert response["result"]["session"]["title"] == title

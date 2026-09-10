@@ -24,10 +24,12 @@ class FilesystemSandbox:
         write_roots: tuple[Path, ...] = (),
         *,
         unrestricted: bool = False,
+        approved_read_roots: tuple[Path, ...] = (),
     ) -> None:
         self._read_root = read_root.resolve() if read_root else None
         self._write_roots = tuple(r.resolve() for r in write_roots)
         self._unrestricted = unrestricted
+        self.approved_read_roots = tuple(r.resolve() for r in approved_read_roots)
 
     @property
     def read_root(self) -> Path | None:
@@ -54,7 +56,10 @@ class FilesystemSandbox:
         return candidate.resolve()
 
     def assert_readable(self, resolved: Path) -> None:
+        resolved = resolved.resolve()
         if self._unrestricted:
+            return
+        if any(resolved == root or root in resolved.parents for root in self.approved_read_roots):
             return
         if self._read_root is None:
             raise SandboxViolationError(

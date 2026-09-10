@@ -30,8 +30,10 @@ def _ok(data: Any) -> ToolResult:
     return ToolResult(ok=True, data=data)
 
 
-def _fail(code: ToolErrorCode, message: str) -> ToolResult:
-    return ToolResult(ok=False, error=ToolErrorInfo(code=code, message=message))
+def _fail(code: ToolErrorCode, message: str, *, retryable: bool = False) -> ToolResult:
+    return ToolResult(
+        ok=False, error=ToolErrorInfo(code=code, message=message, retryable=retryable)
+    )
 
 
 def _bound(text: str) -> tuple[str, bool]:
