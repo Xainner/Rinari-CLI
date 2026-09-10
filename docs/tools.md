@@ -1826,3 +1826,10 @@ raw shell escape hatch
 ```
 
 Prefer the most structured, deterministic and least risky interface available.
+# Structured desktop questions
+
+`user.ask` requests clarification through a host-provided interaction channel.
+It uses the common ToolRuntime and is available in PLAN without authorizing
+filesystem mutations. Unsupported hosts omit it from model exposure.
+The [interactive workspace contract](desktop/06-interactive-workspace.md)
+defines question schemas, explicit replies, skips, cancellation and recovery.

@@ -172,6 +172,7 @@ class ToolContext:
     environment: dict[str, str] | None = None
     output_sink: OutputSink | None = None
     # Mutable session-scoped process registry for process.* tools (None = disabled).
+    ask_user: Any = None
     processes: Any = None
     # Session-scoped PtyRegistry (tools.native.pty); None on platforms without
     # a POSIX pty or for CHAT sessions that disable interactive processes.

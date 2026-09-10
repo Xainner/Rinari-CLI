@@ -147,6 +147,13 @@ class EngineServer:
         self._dispatcher.register("session.list", self._session_list)
         self._dispatcher.register("session.get", self._session_get)
         self._dispatcher.register("session.create", self._session_create)
+        from rinari.engine_protocol.desktop import DesktopWorkspace
+
+        self._desktop = DesktopWorkspace(self)
+        self._dispatcher.register("session.move", self._desktop.move)
+        self._dispatcher.register("workspace.file.read", self._desktop.read)
+        self._dispatcher.register("question.list", self._question_list)
+        self._dispatcher.register("question.resolve", self._turns.questions.resolve)
         self._dispatcher.register("session.open", self._session_open)
         self._dispatcher.register("session.rename", self._session_rename)
         self._dispatcher.register("session.archive", self._session_archive)
@@ -445,6 +452,9 @@ class EngineServer:
             "checkpoints_copied": copied,
         }
 
+    def _question_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._turns.questions.list(params.get("session_id"))
+
     def _session_create(self, params: dict[str, Any]) -> dict[str, Any]:
         chat = params.get("chat", False)
         if not isinstance(chat, bool):
@@ -475,6 +485,9 @@ class EngineServer:
                 INVALID_PARAMS,
                 "Mode and permission_profile must be strings.",
             )
+        if chat and params.get("cwd") is None:
+            cwd = self._services.ctx.home / "workspaces" / self._services.ctx.ids.new("chat")
+            cwd.mkdir(parents=True, exist_ok=True)
         record = self._services.sessions.new(
             cwd=cwd,
             title=title,
@@ -531,6 +544,7 @@ class EngineServer:
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
             raise EngineProtocolError(INVALID_PARAMS, "Param 'limit' must be an int in 1..100.")
         record = self._services.sessions.show(ref)
+        self._turns.questions.list(record.id)  # Reconcile orphaned waits after restart.
         events = [row for row in self._services.ctx.event_repo.list(record.id) if row.turn_id]
         messages = self._services.ctx.message_repo.list(record.id)
 
@@ -2190,6 +2204,10 @@ class EngineServer:
         _ = params
         snapshot = build_snapshot(self._services)
         snapshot.update(self._turns.runtime_state())
+        with self._turns.questions.lock:
+            snapshot["pending_questions"] = [
+                entry[0].copy() for entry in self._turns.questions.pending.values()
+            ]
         with self._model_jobs_lock:
             snapshot["model_discovery_jobs"] = [
                 {key: value for key, value in job.items() if key not in ("cache_key", "result")}

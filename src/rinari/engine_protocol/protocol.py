@@ -16,6 +16,8 @@ def engine_version() -> str:
 
 
 CAPABILITIES: dict[str, bool] = {
+    "desktop_workspace_v1": True,
+    "interactive_questions_v1": True,
     "chat": True,
     "projects": True,
     "browser": True,

@@ -114,8 +114,11 @@ class TurnManager:
         self._approvals: dict[str, _PendingApproval] = {}
         self._closed_approvals: dict[str, str] = {}
         self._queue: dict[str, collections.deque[str]] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._local = threading.local()
+        from rinari.engine_protocol.questions import QuestionBroker
+
+        self.questions = QuestionBroker(services, self.has_active_turn)
 
     # -- outbox ----------------------------------------------------------
 
@@ -249,6 +252,7 @@ class TurnManager:
             done=threading.Event(),
         )
         with self._lock:
+            record = self._services.sessions.show(session_id)
             for active in self._turns.values():
                 if active.session_id == record.id and not active.done.is_set():
                     raise EngineProtocolError(
@@ -351,7 +355,8 @@ class TurnManager:
                 worktree=agent_session.context.tool_ctx.worktree,
             )
             agent_session.context.tool_ctx = replace(
-                agent_session.context.tool_ctx, change_tracker=tracker
+                agent_session.context.tool_ctx,
+                change_tracker=tracker,
             )
             with self._lock:
                 turn.session = agent_session
@@ -464,6 +469,9 @@ class TurnManager:
                     user_home=self._user_home,
                     profile=profile_for_session(record),
                     approval_prompt=self._prompt_for_current_turn,
+                    question_prompt=lambda args, token, deadline: self.questions.ask(
+                        turn, self._activity_cb(turn), args, token, deadline
+                    ),
                     activity_sink=self._activity_cb(turn),
                     reasoning_effort=reasoning_effort,
                 )
@@ -618,6 +626,14 @@ class TurnManager:
                 "session_id": turn.session_id,
                 **payload,
             }
+            safe["workspace_root"] = self._services.sessions.show(turn.session_id).current_cwd
+            arguments = safe.get("arguments")
+            if (
+                safe.get("tool") in {"fs.write", "fs.patch"}
+                and isinstance(arguments, dict)
+                and isinstance(arguments.get("path"), str)
+            ):
+                safe["file_path"] = arguments["path"]
             if "arguments" in safe:
                 safe["arguments"] = _safe_detail(safe["arguments"])
             if "result" in safe:
@@ -659,6 +675,8 @@ class TurnManager:
             return f"tool:{payload['tool_call_id']}"
         if payload.get("model_call_id"):
             return f"model:{payload['model_call_id']}"
+        if payload.get("request_id") and event_name.startswith("question."):
+            return f"question:{payload['request_id']}"
         if payload.get("approval_id"):
             return f"approval:{payload['approval_id']}"
         if event_name.startswith("turn.changes."):
@@ -678,7 +696,11 @@ class TurnManager:
         return f"event:{self._services.ctx.ids.new('activity')}:{event_name}"
 
     def _persist_activity(self, event_name: str, payload: dict[str, Any]) -> None:
-        with contextlib.suppress(Exception):
+        with (
+            contextlib.nullcontext()
+            if event_name.startswith("question.")
+            else contextlib.suppress(Exception)
+        ):
             self._services.ctx.event_repo.insert(
                 SessionEventRecord(
                     id=self._services.ctx.ids.new("evt"),

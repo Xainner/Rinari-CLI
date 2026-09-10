@@ -7,7 +7,7 @@ state (turns, tool calls) joins in phase 2 without changing this contract.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from rinari.application.context import AppContext
@@ -28,6 +28,7 @@ from rinari.storage.records import (
     SessionEventRecord,
     SessionMessageRecord,
     SessionRecord,
+    WorktreeBaselineRecord,
 )
 from rinari.trust import TrustService
 
@@ -348,6 +349,76 @@ class SessionService:
         return StartedSession(session=record, created=True)
 
     # -- promotion ----------------------------------------------------------
+
+    def move(self, session_ref: str, project_id: str | None) -> SessionRecord:
+        """Rebind future execution; historical files/checkpoints stay at origin."""
+        from rinari.sessions.turn_lock import SessionTurnLock
+
+        record = self._resolve(session_ref)
+        lock_path = self._ctx.layout.dir("sessions") / f"{record.id}.turn.lock"
+        with SessionTurnLock(lock_path, record.id):
+            return self._move_workspace(record.id, project_id)
+
+    def _move_workspace(self, session_ref: str, project_id: str | None) -> SessionRecord:
+        record = self._resolve(session_ref)
+        if record.state != SESSION_STATE_ACTIVE:
+            raise ConflictError("Restore the session before moving it.")
+        project = self._projects.get(project_id) if project_id else None
+        if project is not None and project.archived:
+            raise ConflictError("Restore the destination project first.")
+        original = Path(record.created_cwd).resolve()
+        general = (
+            original
+            if original.is_relative_to((self._ctx.home / "workspaces").resolve())
+            else self._ctx.home / "workspaces" / record.id
+        )
+        root = (Path(project.canonical_root) if project else general).resolve()
+        if project is None:
+            root.mkdir(parents=True, exist_ok=True)
+        if not root.is_dir() or root == self._home():
+            raise PermissionDeniedError("Destination must be an available workspace directory.")
+        if root == Path(record.current_cwd).resolve() and record.project_id == project_id:
+            return record
+        previous = {"cwd": record.current_cwd, "project_id": record.project_id}
+        baseline = [asdict(row) for row in self._ctx.worktree_repo.list(record.id)]
+        restored_baseline = []
+        for event in self._ctx.event_repo.list(record.id):
+            if event.type == "session.moved" and event.payload.get("previous", {}).get(
+                "cwd"
+            ) == str(root):
+                restored_baseline = event.payload.get("baseline", [])
+        pins = [
+            p
+            for p in self._ctx.pin_repo.list(record.id)
+            if p["source"] in ("file", "symbol", "term")
+        ]
+        record.current_cwd = str(root)
+        record.kind = SESSION_KIND_PROJECT if project else SESSION_KIND_CHAT
+        record.project_id = project.id if project else None
+        record.project_root_snapshot = str(root) if project else None
+        record.compact_state = None
+        record.active_skills = None
+        record.git_branch = None
+        record.updated_at = self._now()
+        with self._ctx.db.transaction():
+            self._ctx.session_repo.update(record)
+            self._ctx.worktree_repo.insert_many(
+                record.id, [WorktreeBaselineRecord(**row) for row in restored_baseline]
+            )
+            for pin in pins:
+                self._ctx.pin_repo.unpin(record.id, pin["source"], pin["pin_ref"])
+            self._append_event(
+                record.id,
+                "session.moved",
+                {
+                    "previous": previous,
+                    "cwd": str(root),
+                    "project_id": record.project_id,
+                    "baseline": baseline,
+                    "previous_pins": pins,
+                },
+            )
+        return record
 
     def promote(self, session_ref: str, project_root: Path) -> SessionRecord:
         root = Path(project_root).expanduser().resolve()

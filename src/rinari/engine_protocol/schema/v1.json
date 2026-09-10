@@ -5,9 +5,116 @@
   "type": "object",
   "x-codegen-definitions": [
     "attachment", "sessionSummary", "projectSummary", "usageSnapshot",
-    "governorSnapshot", "protocolError"
+    "governorSnapshot", "protocolError", "questionOption", "userQuestion", "questionRequest", "filePreview"
   ],
   "$defs": {
+    "questionOption": {
+      "type": "object",
+      "required": [
+        "label"
+      ],
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "recommended": {
+          "type": "boolean"
+        }
+      }
+    },
+    "userQuestion": {
+      "type": "object",
+      "required": [
+        "id",
+        "title"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/questionOption"
+          }
+        }
+      }
+    },
+    "questionRequest": {
+      "type": "object",
+      "required": [
+        "request_id",
+        "session_id",
+        "turn_id",
+        "status",
+        "questions"
+      ],
+      "properties": {
+        "request_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "turn_id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "answered",
+            "skipped",
+            "expired"
+          ]
+        },
+        "questions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/userQuestion"
+          }
+        },
+        "answers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "filePreview": {
+      "type": "object",
+      "required": [
+        "path",
+        "name",
+        "content",
+        "language",
+        "size"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "language": {
+          "type": "string"
+        },
+        "size": {
+          "type": "integer"
+        }
+      }
+    },
     "request": {
       "type": "object",
       "required": ["id", "method"],
@@ -22,6 +129,7 @@
       "type": "string",
       "enum": [
         "engine.info", "runtime.snapshot.get",
+        "session.move", "workspace.file.read", "question.list", "question.resolve",
         "session.list", "session.get", "session.create", "session.open",
         "session.rename", "session.archive", "session.restore", "session.delete",
         "session.fork", "session.history", "session.mode.set", "session.model.set",
@@ -60,6 +168,7 @@
         "model.completed", "model.failed", "tool.requested", "tool.started",
         "tool.output.delta", "tool.completed", "tool.failed", "tool.cancelled",
         "approval.requested", "approval.resolved", "approval.expired",
+        "question.requested", "question.resolved", "question.expired", "session.moved",
         "governor.progress", "governor.nudge", "governor.compact",
         "governor.consolidate", "governor.stop", "usage.updated",
         "agent.started", "agent.completed", "agent.failed",

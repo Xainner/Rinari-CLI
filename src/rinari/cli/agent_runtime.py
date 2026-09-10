@@ -397,6 +397,7 @@ def build_agent_session(
     profile: PermissionProfile = PermissionProfile.WORKSPACE,
     model_caller: ModelCaller | None = None,
     approval_prompt: AnswerPrompt | None = None,
+    question_prompt=None,
     activity_sink=None,
     reasoning_effort: str | None = None,
 ) -> AgentSession:
@@ -409,6 +410,12 @@ def build_agent_session(
     cwd = Path(record.current_cwd)
     home = user_home if user_home is not None else Path.home()
     sandbox = _sandbox_for(record, home, profile)
+    if (
+        record.kind == "CHAT"
+        and cwd.resolve().is_relative_to((services.ctx.home / "workspaces").resolve())
+        and profile is not PermissionProfile.FULL_ACCESS
+    ):
+        sandbox = FilesystemSandbox(read_root=cwd, write_roots=(cwd,))
     token = CancellationToken()
     network_policy = services.network.policy()
     hook_engine = _build_hook_engine(services, root)
@@ -433,6 +440,7 @@ def build_agent_session(
         clock=services.ctx.clock,
         cancellation=token,
         output_sink=_live_output_sink(interactive if live_output is None else live_output),
+        ask_user=question_prompt,
         processes=ProcessRegistry(),
         pty=_build_pty_registry(),
         worktree=_ensure_worktree_baseline(services, record),
@@ -458,6 +466,7 @@ def build_agent_session(
         interactive=interactive,
         token=token,
         approval_prompt=approval_prompt,
+        questions_enabled=question_prompt is not None,
         network_policy=network_policy,
         root=root,
         hook_engine=hook_engine,
@@ -661,9 +670,12 @@ def _build_tools(
     policy: PolicyEngine | None = None,
     orchestrator=None,
     approval_prompt: AnswerPrompt | None = None,
+    questions_enabled: bool = False,
 ) -> ToolRuntime:
     registry = ToolRegistry()
-    registry.register_all(all_native_tools())
+    registry.register_all(
+        tool for tool in all_native_tools() if questions_enabled or tool.name != "user.ask"
+    )
     # Extension tool sources normalize into the same registry (harness.md 108-110).
     with contextlib.suppress(Exception):
         registry.register_all(_plugin_tools(services, root))
@@ -1204,6 +1216,16 @@ def run_turn(
 
     lock_path = session.services.ctx.layout.dir("sessions") / f"{session.record.id}.turn.lock"
     with SessionTurnLock(lock_path, session.record.id):
+        latest = records_get(session.services, session.record.id)
+        if (
+            latest.current_cwd != session.record.current_cwd
+            or latest.project_id != session.record.project_id
+        ):
+            from rinari.shared.errors import ConflictError
+
+            raise ConflictError(
+                "Session workspace changed in another client. Resume the session before continuing."
+            )
         return _run_turn_unlocked(
             session,
             message,
