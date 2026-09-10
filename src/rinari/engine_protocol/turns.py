@@ -85,6 +85,7 @@ class _PendingApproval:
     target: str | None = None
     risk: str = "medium"
     description: str = ""
+    choices: tuple[str, ...] = DECISIONS
 
 
 def _safe_detail(value: Any) -> Any:
@@ -177,7 +178,7 @@ class TurnManager:
                     "target": item.target,
                     "risk": item.risk,
                     "description": item.description,
-                    "choices": list(DECISIONS),
+                    "choices": list(item.choices),
                 }
                 for item in self._approvals.values()
             ]
@@ -669,6 +670,7 @@ class TurnManager:
             target=request.target,
             risk=request.risk,
             description=request.description,
+            choices=request.choices,
         )
         with self._lock:
             self._approvals[approval_id] = pending
@@ -680,7 +682,7 @@ class TurnManager:
             "target": request.target,
             "risk": request.risk,
             "description": request.description,
-            "choices": list(DECISIONS),
+            "choices": list(request.choices),
         }
         if turn is not None:
             self._activity_cb(turn)("approval.requested", approval_payload)
@@ -782,6 +784,11 @@ class TurnManager:
                     return {"status": status, "approval_id": approval_id, "decision": decision}
                 raise EngineProtocolError(
                     errors.APPROVAL_NOT_FOUND, f"Unknown approval: {approval_id}."
+                )
+            if decision not in pending.choices:
+                raise EngineProtocolError(
+                    errors.INVALID_PARAMS,
+                    f"Decision {decision!r} is not available for this approval.",
                 )
             pending.decision = decision
             pending.decided.set()

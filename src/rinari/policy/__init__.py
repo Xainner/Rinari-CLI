@@ -22,7 +22,9 @@ from rinari.policy.engine import (
     PolicyDecision,
     PolicyEngine,
     SessionScope,
+    ShellRisk,
     classify_git_remote,
+    classify_shell_risk,
     is_sensitive_file,
     normalize_profile,
 )
@@ -46,7 +48,9 @@ __all__ = [
     "PolicyEngine",
     "ProcessLimits",
     "SessionScope",
+    "ShellRisk",
     "classify_git_remote",
+    "classify_shell_risk",
     "is_sensitive_file",
     "normalize_profile",
 ]

@@ -83,6 +83,21 @@ class PolicyDecision:
     target: str | None = None
     risk: str = "low"
     risk_class: str = "none"
+    rule_id: str = "default"
+    reusable: bool = True
+    choices: tuple[str, ...] = ("deny", "allow_once", "allow_session")
+
+
+@dataclass(frozen=True, slots=True)
+class ShellRisk:
+    """Best-effort shell intent classification, never a sandbox claim."""
+
+    local_mutation: bool = False
+    external_path_targets: tuple[str, ...] = ()
+    remote_git_mutation: bool = False
+    destructive: bool = False
+    sensitive_target: bool = False
+    confidence: str = "low"
 
 
 # Locked system rules (harness.md 74-79; AGENTS.md 13, 31). They fire
@@ -119,6 +134,74 @@ def classify_git_remote(command: str) -> str | None:
             return "force"
         return "remote"
     return None
+
+
+_MUTATING_SHELL = re.compile(
+    r"(?:^|[;&|]\s*)(?:sudo\s+)?(?:cp|mv|rm|mkdir|touch|install|tee|"
+    r"copy|move|del|erase|md|rd|rmdir|set-content|add-content|out-file|"
+    r"new-item|remove-item|move-item|copy-item|rename-item)\b",
+    re.IGNORECASE,
+)
+_DESTRUCTIVE_SHELL = re.compile(
+    r"(?:^|[;&|]\s*)(?:sudo\s+)?(?:rm|del|erase|rd|rmdir|remove-item)\b",
+    re.IGNORECASE,
+)
+_REDIRECT_TARGET = re.compile(r"(?<!>)>>?\s*(?:\"([^\"]+)\"|'([^']+)'|([^\s;&|]+))")
+_PATH_TOKEN = re.compile(r"(?:\"([^\"]+)\"|'([^']+)'|([^\s;&|]+))")
+
+
+def classify_shell_risk(command: str, scope: SessionScope) -> ShellRisk:
+    """Recognise obvious filesystem mutation targets across common shells."""
+
+    remote = classify_git_remote(command)
+    mutation = bool(_MUTATING_SHELL.search(command) or _REDIRECT_TARGET.search(command))
+    destructive = bool(_DESTRUCTIVE_SHELL.search(command))
+    candidates: list[str] = []
+    for match in _REDIRECT_TARGET.finditer(command):
+        candidates.append(next(value for value in match.groups() if value is not None))
+    if mutation:
+        for segment in re.split(r"[;&|]+", command):
+            if not _MUTATING_SHELL.search(segment):
+                continue
+            tokens = [
+                next(value for value in match.groups() if value is not None)
+                for match in _PATH_TOKEN.finditer(segment)
+            ]
+            candidates.extend(token for token in tokens[1:] if not token.startswith("-"))
+    external: list[str] = []
+    sensitive = False
+    for raw in candidates:
+        value = raw.strip().rstrip(",)")
+        if not value or value in {"-", "/dev/null", "NUL"}:
+            continue
+        looks_path = (
+            value.startswith((".", "/", "\\"))
+            or bool(re.match(r"^[A-Za-z]:[\\/]", value))
+            or "/" in value
+            or "\\" in value
+        )
+        if not looks_path:
+            continue
+        try:
+            base = scope.root if scope.root is not None and scope.kind == "PROJECT" else scope.cwd
+            candidate = Path(value)
+            resolved = (base / candidate if not candidate.is_absolute() else candidate).resolve()
+        except (OSError, RuntimeError, ValueError):
+            continue
+        sensitive = sensitive or is_sensitive_file(resolved)
+        root = scope.root.resolve() if scope.root is not None else None
+        if root is None or not (resolved == root or root in resolved.parents):
+            rendered = str(resolved)
+            if rendered not in external:
+                external.append(rendered)
+    return ShellRisk(
+        local_mutation=mutation,
+        external_path_targets=tuple(external),
+        remote_git_mutation=remote is not None,
+        destructive=destructive,
+        sensitive_target=sensitive,
+        confidence="high" if mutation and candidates else "low",
+    )
 
 
 class PolicyEngine:
@@ -311,6 +394,9 @@ class PolicyEngine:
                 target=str(resolved),
                 risk="high",
                 risk_class="credential",
+                rule_id="sensitive_credential",
+                reusable=False,
+                choices=("deny", "allow_once"),
             )
         if self._inside_root(resolved, scope.root):
             return PolicyDecision(
@@ -370,10 +456,17 @@ class PolicyEngine:
                 target=str(resolved),
                 risk="critical",
                 risk_class="credential",
+                rule_id="sensitive_credential",
+                reusable=False,
+                choices=("deny", "allow_once"),
             )
         root = scope.root
         home_root = root is not None and self._is_home(root, scope)
-        if self._is_home(resolved, scope) and not home_root:
+        if (
+            self._is_home(resolved, scope)
+            and not home_root
+            and scope.profile is not PermissionProfile.FULL_ACCESS
+        ):
             return PolicyDecision(
                 action=PolicyAction.DENY,
                 capability=CAPABILITY_FS_WRITE,
@@ -381,6 +474,9 @@ class PolicyEngine:
                 target=str(resolved),
                 risk="high",
                 risk_class="local-destructive",
+                rule_id="implicit_home_write",
+                reusable=False,
+                choices=("deny",),
             )
         # Dirty-worktree protection: overwriting a file the user already had
         # uncommitted modifies work that predates the session, so it always
@@ -400,6 +496,9 @@ class PolicyEngine:
                     target=str(resolved),
                     risk="medium",
                     risk_class="local-destructive",
+                    rule_id="preexisting_user_work",
+                    reusable=False,
+                    choices=("deny", "allow_once"),
                 )
         inside = self._inside_root(resolved, scope.root)
         inside_allow_reason: str | None = None
@@ -435,11 +534,11 @@ class PolicyEngine:
                 risk=risk,
                 risk_class=risk_class,
             )
-        if scope.profile is PermissionProfile.FULL_ACCESS and scope.kind == "CHAT":
+        if scope.profile is PermissionProfile.FULL_ACCESS:
             return PolicyDecision(
                 action=PolicyAction.ALLOW,
                 capability=CAPABILITY_FS_WRITE,
-                reason="full-access profile in a chat session",
+                reason="full-access profile permits ordinary local writes",
                 target=str(resolved),
                 risk=risk,
                 risk_class=risk_class,
@@ -475,6 +574,9 @@ class PolicyEngine:
                 target=command,
                 risk="critical",
                 risk_class="remote-destructive",
+                rule_id="git_force_push",
+                reusable=False,
+                choices=("deny", "allow_once"),
             )
         if remote == "remote":
             return PolicyDecision(
@@ -484,6 +586,22 @@ class PolicyEngine:
                 target=command,
                 risk="high",
                 risk_class="remote-reversible",
+                rule_id="git_remote_mutation",
+                reusable=False,
+                choices=("deny", "allow_once"),
+            )
+        shell_risk = classify_shell_risk(command or "", scope)
+        if shell_risk.sensitive_target:
+            return PolicyDecision(
+                action=PolicyAction.ASK,
+                capability=CAPABILITY_SHELL,
+                reason="command targets a sensitive credential file (locked system rule)",
+                target=command,
+                risk="critical",
+                risk_class="credential",
+                rule_id="sensitive_credential",
+                reusable=False,
+                choices=("deny", "allow_once"),
             )
         if scope.profile is PermissionProfile.READ_ONLY:
             return PolicyDecision(
@@ -494,11 +612,33 @@ class PolicyEngine:
                 risk=risk,
                 risk_class=risk_class,
             )
-        if scope.kind == "PROJECT" and scope.root is not None:
+        if scope.profile is PermissionProfile.FULL_ACCESS:
             return PolicyDecision(
                 action=PolicyAction.ALLOW,
                 capability=CAPABILITY_SHELL,
-                reason="project-local execution inside the workspace",
+                reason="full-access profile permits ordinary local shell execution",
+                target=command,
+                risk=risk,
+                risk_class=risk_class,
+            )
+        if shell_risk.local_mutation and shell_risk.external_path_targets:
+            return PolicyDecision(
+                action=PolicyAction.ASK,
+                capability=CAPABILITY_SHELL,
+                reason=(
+                    "workspace profile: command has an explicit write target "
+                    "outside the workspace"
+                ),
+                target=command,
+                risk="high" if shell_risk.destructive else risk,
+                risk_class="local-destructive" if shell_risk.destructive else risk_class,
+                rule_id="shell_external_mutation",
+            )
+        if scope.root is not None:
+            return PolicyDecision(
+                action=PolicyAction.ALLOW,
+                capability=CAPABILITY_SHELL,
+                reason="local execution inside the selected workspace",
                 target=command,
                 risk=risk,
                 risk_class=risk_class,

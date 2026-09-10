@@ -146,6 +146,15 @@ def test_write_home_chat_full_access_is_explicit_choice() -> None:
     assert d.action is PolicyAction.ALLOW
 
 
+def test_write_outside_project_full_access_is_allowed() -> None:
+    d = PolicyEngine().decide(
+        CAPABILITY_FS_WRITE,
+        _scope(profile="full-access"),
+        path="/home/xainner/other-project/file.py",
+    )
+    assert d.action is PolicyAction.ALLOW
+
+
 # -- shell --------------------------------------------------------------------
 
 
@@ -164,6 +173,36 @@ def test_shell_chat_asks() -> None:
         CAPABILITY_SHELL, _scope(kind="CHAT", root=None, cwd=HOME), command="ls"
     )
     assert d.action is PolicyAction.ASK
+
+
+def test_shell_workspace_external_write_asks() -> None:
+    d = PolicyEngine().decide(
+        CAPABILITY_SHELL,
+        _scope(),
+        command="cp result.txt ../elsewhere/result.txt",
+    )
+    assert d.action is PolicyAction.ASK
+    assert d.rule_id == "shell_external_mutation"
+
+
+def test_shell_full_access_external_write_allowed() -> None:
+    d = PolicyEngine().decide(
+        CAPABILITY_SHELL,
+        _scope(profile="full-access"),
+        command="Set-Content ../elsewhere/result.txt ok",
+    )
+    assert d.action is PolicyAction.ALLOW
+
+
+def test_shell_sensitive_target_never_reusable() -> None:
+    d = PolicyEngine().decide(
+        CAPABILITY_SHELL,
+        _scope(profile="full-access"),
+        command="Set-Content .env secret",
+    )
+    assert d.action is PolicyAction.ASK
+    assert d.reusable is False
+    assert d.choices == ("deny", "allow_once")
 
 
 def test_shell_git_push_asks() -> None:
@@ -341,6 +380,25 @@ def test_no_approval_fatigue_for_allowed_reads() -> None:
     d = PolicyEngine().decide(CAPABILITY_FS_READ, _scope(), path="a.py")
     assert d.action is PolicyAction.ALLOW
     assert d.action is not PolicyAction.ASK
+
+
+def test_non_reusable_request_ignores_session_grant() -> None:
+    answers = iter(("s", "n"))
+    engine = ApprovalEngine(prompt=lambda _req: next(answers))
+    ordinary = ApprovalRequest(
+        capability=CAPABILITY_SHELL,
+        description="ordinary",
+        session_id="s1",
+    )
+    assert engine.check(ordinary).granted is True
+    locked = ApprovalRequest(
+        capability=CAPABILITY_SHELL,
+        description="git push",
+        session_id="s1",
+        reusable=False,
+        choices=("deny", "allow_once"),
+    )
+    assert engine.check(locked).granted is False
 
 
 def test_audit_trail() -> None:

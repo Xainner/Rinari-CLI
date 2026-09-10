@@ -33,6 +33,9 @@ class ApprovalRequest:
     risk: str = "medium"
     session_id: str | None = None
     project_id: str | None = None
+    rule_id: str = "default"
+    reusable: bool = True
+    choices: tuple[str, ...] = ("deny", "allow_once", "allow_session")
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,15 +81,19 @@ class ApprovalEngine:
         return list(self._audit)
 
     def check(self, request: ApprovalRequest) -> ApprovalOutcome:
-        grant = self._find_grant(request)
+        grant = self._find_grant(request) if request.reusable else None
         if grant is not None:
             outcome = ApprovalOutcome(granted=True, grant=grant, reason="covered by existing grant")
             self._record(outcome)
             return outcome
         answer = (self._prompt(request) if self._prompt is not None else "n").strip().lower()
-        if answer in ("y", "yes"):
+        if answer in ("y", "yes") and "allow_once" in request.choices:
             return self._record(self._issue(request, GrantScope.ONCE, reason="approved once"))
-        if answer in ("s", "session", "always-session"):
+        if (
+            answer in ("s", "session", "always-session")
+            and request.reusable
+            and "allow_session" in request.choices
+        ):
             return self._record(
                 self._issue(request, GrantScope.SESSION, reason="approved for session")
             )

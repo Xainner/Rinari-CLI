@@ -299,6 +299,9 @@ class ToolRuntime:
             risk=decision.risk,
             session_id=ctx.session_id,
             project_id=None,
+            rule_id=decision.rule_id,
+            reusable=decision.reusable,
+            choices=decision.choices,
         )
         outcome = self.approvals.check(request)
         self._event(

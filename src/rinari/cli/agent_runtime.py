@@ -132,7 +132,11 @@ def project_instructions(
     )
 
 
-def build_assembler_context(services: ServiceContainer, record: SessionRecord) -> AssemblerContext:
+def build_assembler_context(
+    services: ServiceContainer,
+    record: SessionRecord,
+    profile: PermissionProfile = PermissionProfile.WORKSPACE,
+) -> AssemblerContext:
     # Canonical assets through the identity loader (user override supported,
     # harness.md 37; version/sha256 traced by the build manifest).
     constitution = load_constitution(services.ctx.home).text
@@ -172,7 +176,7 @@ def build_assembler_context(services: ServiceContainer, record: SessionRecord) -
     return AssemblerContext(
         session_kind=record.kind,
         constitution=constitution,
-        runtime_policy=_policy_summary(record.kind),
+        runtime_policy=_policy_summary(record.kind, profile),
         soul=canonical,
         extended_identity=extended,
         project_instructions=instructions,
@@ -256,7 +260,21 @@ def _task_state_text(services: ServiceContainer, root: Path) -> str:
     return "\n".join(lines)
 
 
-def _policy_summary(kind: str) -> str:
+def _policy_summary(kind: str, profile: PermissionProfile) -> str:
+    if profile is PermissionProfile.FULL_ACCESS:
+        return (
+            "Runtime policy: the user explicitly selected full local access. Ordinary "
+            "local reads, writes, and shell commands may target paths outside the current "
+            "workspace. Sensitive credentials, pre-existing user work, remote Git "
+            "mutations, and external side effects still require explicit approval. Never "
+            "reveal or copy secrets into files or logs."
+        )
+    if profile is PermissionProfile.READ_ONLY:
+        return (
+            "Runtime policy: read-only. Inspect the selected workspace, but do not write "
+            "files or execute local commands that can mutate state. Sensitive credential "
+            "reads still require explicit approval."
+        )
     if kind == "PROJECT":
         return (
             "Runtime policy: you operate inside the project sandbox. Reads and writes "
@@ -476,7 +494,7 @@ def build_agent_session(
         session_id=record.id,
         model_ref=record.model_id,
         tool_ctx=tool_ctx,
-        assembler_base=build_assembler_context(services, record),
+        assembler_base=build_assembler_context(services, record, profile),
         history=_restore_history(services, record),
     )
     services.context.restore_compact_state(context)
@@ -1034,7 +1052,7 @@ def _apply_promotion(session: AgentSession, record: SessionRecord, marker: str) 
         kind=record.kind,
         cwd=root,
         project_root=root,
-        sandbox=_sandbox_for(record, home),
+        sandbox=_sandbox_for(record, home, session.context.tool_ctx.profile),
         worktree=_ensure_worktree_baseline(services, record),
         lsp=_build_lsp_manager(root),
         validation=services.verification,
@@ -1042,7 +1060,9 @@ def _apply_promotion(session: AgentSession, record: SessionRecord, marker: str) 
         context_retrieval=services.retrieval,
         project_trusted=_project_trusted(services, root),
     )
-    session.context.assembler_base = build_assembler_context(services, record)
+    session.context.assembler_base = build_assembler_context(
+        services, record, session.context.tool_ctx.profile
+    )
     _persist_event(
         services,
         record.id,
