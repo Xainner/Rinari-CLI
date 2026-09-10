@@ -1,250 +1,161 @@
+<div align="center">
+
+<img src="docs/img/readme-img.png" alt="Rinari" width="100%" />
+
 # Rinari CLI
 
-![Rinari — banner](docs/img/readme-img.png)
+**An agent harness for real work in your terminal.**
 
-**Tu asistente personal de IA en la terminal.**
+Persistent sessions · Policy-controlled tools · Verifiable execution
 
-[![CI](https://github.com/Xainner/Rinari-CLI/actions/workflows/ci.yml/badge.svg)](https://github.com/Xainner/Rinari-CLI/actions)
-![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
-![License: MIT](https://img.shields.io/badge/license-MIT-green)
+[![CI](https://github.com/Xainner/Rinari-CLI/actions/workflows/ci.yml/badge.svg)](https://github.com/Xainner/Rinari-CLI/actions/workflows/ci.yml)
+![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
+[![License: MIT](https://img.shields.io/badge/License-MIT-8b5cf6)](LICENSE)
 
-Rinari es un harness de agentes productivo: un CLI que conversa con modelos
-de lenguaje, ejecuta herramientas reales en tu máquina (archivos, shell, git,
-web, navegador), recuerda contexto entre sesiones y trabaja con seguridad
-por defecto — sandbox, permisos y aprobaciones antes de cualquier acción
-sensible.
+[Quick start](#quick-start) · [Capabilities](#capabilities) · [Architecture](#architecture) · [Documentation](#documentation) · [Desktop client](https://github.com/Xainner/Rinari-Code)
 
-[Instalación](#instalación) · [Uso](#uso) · [Lo que puede hacer](#lo-que-puede-hacer) ·
-[Comandos](#comandos) · [Documentación](#documentación) · [Desarrollo](#desarrollo)
+</div>
 
 ---
 
-## Instalación
+Rinari connects language models to a durable execution environment: files, commands, Git, browsers, tools and project context. The harness owns permissions, approvals, budgets, cancellation and verification around the model loop.
 
-Requisitos: Python 3.11+ y [`uv`](https://docs.astral.sh/uv/).
+This repository contains **Rinari Engine** and its **terminal client**. [Rinari Code](https://github.com/Xainner/Rinari-Code) exposes the same engine through a native desktop workspace.
+
+> **Status:** Active development. Interfaces and packaging may evolve before stable v1. See the [roadmap](TODO.md) for implementation status and remaining release gates.
+
+## Quick start
+
+Requires **Python 3.11+**, **uv** and Git. Configure a model provider through setup.
 
 ```bash
-git clone https://github.com/Xainner/Rinari-CLI
+git clone https://github.com/Xainner/Rinari-CLI.git
 cd Rinari-CLI
 uv sync
 uv run rinari setup
 uv run rinari doctor
 ```
 
-`setup` te guía (proveedor, modelo, capacidades); re-ejecutarlo nunca borra
-lo ya configurado. `doctor` verifica el entorno sin tocar credenciales
-ni estado.
-
-## Uso
+When working from the source checkout, prefix commands with `uv run`. To make the command available outside the checkout:
 
 ```bash
-# Conversar en el proyecto actual (detecta repo → sesión PROJECT,
-# fuera de repo → sesión CHAT)
-uv run rinari
-
-# Chat explícito, aunque estés dentro de un repositorio
-uv run rinari chat
-
-# Preguntar sin modificar nada (solo lectura)
-uv run rinari ask "¿dónde se valida la config?"
-
-# Plan de implementación sin tocar archivos
-uv run rinari plan "agregar export en JSON"
-
-# Ejecutar una tarea autónoma en el workspace
-uv run rinari agent "agrega tests al módulo de sesiones"
-
-# Revisar cambios recientes sin modificarlos
-uv run rinari review
-
-# Abrir el proyecto en Rinari Code (cliente de escritorio)
-uv run rinari code .
+uv tool install .
 ```
 
-Conecta tu proveedor (ejemplo con endpoint compatible OpenAI):
+### A typical workflow
 
 ```bash
-uv run rinari providers add custom --name mi-proveedor \
-  --endpoint https://tu-endpoint/v1 --api-key-env MI_API_KEY
-uv run rinari models add --provider mi-proveedor \
-  --model <model-id> --name mi-modelo
-uv run rinari provider use mi-proveedor
-uv run rinari model use mi-modelo
+# Start a session in the current project
+rinari
+
+# Inspect before changing anything
+rinari ask "Where is configuration validated?"
+
+# Develop an implementation plan
+rinari plan "Add JSON export to the report command"
+
+# Implement and verify a task
+rinari agent "Add tests for session persistence"
+
+# Review the current changes
+rinari review
+
+# Continue in the desktop client, when installed
+rinari code .
 ```
 
-Algunos modelos viven en transporte `/responses` en vez de
-`/chat/completions`:
+`rinari` detects project context. `rinari chat` explicitly starts a general conversation. Sessions retain their history and can be resumed with `rinari resume`.
+
+## Capabilities
+
+| Area | What the harness provides |
+| :--- | :--- |
+| **Execution** | Streaming agent loop, structured tool results, cancellation, queued prompts and progress monitoring. |
+| **Sessions** | Durable CHAT and PROJECT sessions, context pins, resume reconciliation and project promotion. |
+| **Providers** | Persistent provider/model catalogs, model-specific transports, connection checks and per-agent routing. |
+| **Code tools** | Filesystem operations, shell, session processes, PTY, Git, repository search, tree-sitter and LSP integration. |
+| **Context** | Memory retrieval, repository indexing, compaction and artifact references for large outputs. |
+| **Verification** | Task dependencies, verification records, checkpoints and evidence-based completion gates. |
+| **Extensibility** | Lazy-loaded skills, subagents, MCP, OpenAPI tools, plugins and lifecycle hooks. |
+| **Observability** | Session events, traces, logs, metrics, usage and local diagnostics. |
+
+### Permissions are part of execution
+
+**PLAN** and **REVIEW** keep execution immutable. **BUILD** enables implementation subject to the selected policy. In desktop sessions, the selected read scope independently controls whether external filesystem reads are allowed, require approval or remain limited to the session root.
+
+Tool calls pass through schema validation, policy checks, approvals and sandbox enforcement. Credential reads retain explicit handling, and provider credentials use supported credential backends. See [read-scope semantics](docs/plan-read-scope.md) and the [tool contract](docs/tools.md).
+
+### Reusable procedures and delegated work
+
+Packaged skills cover repository exploration, implementation, debugging, testing, review, refactoring, CI repair, research and final verification. Their procedures load when needed.
+
+Built-in agents provide specialized exploration, implementation, review and verification roles, with model assignments, budgets, cancellation and workspace isolation. The engine remains the authority for their tools and permissions.
+
+## Architecture
+
+```mermaid
+flowchart TD
+    CLI["Rinari CLI · terminal"] --> Engine["Rinari Engine"]
+    Code["Rinari Code · desktop"] --> Protocol["Versioned stdio protocol"]
+    Protocol --> Engine
+    Engine --> Models["Providers & models"]
+    Engine --> Runtime["Tool runtime & policy"]
+    Engine --> State["Sessions, context & artifacts"]
+    Runtime --> Tools["Files · Git · Shell · Browser · MCP"]
+```
+
+The engine owns the agent loop and persistent operational state. Clients present that state and submit actions through the application boundary. The desktop transport uses NDJSON requests, responses and session-scoped events:
 
 ```bash
-uv run rinari models add --provider mi-proveedor \
-  --model <model-id> --name mi-modelo --transport responses
+rinari engine --stdio
 ```
 
-## Lo que puede hacer
+Capabilities are negotiated at startup. Runtime snapshots support reconstruction after reconnects; large outputs stay in the artifact store.
 
-### Asistente que ejecuta, no solo responde
+## Command map
 
-- Loop agente real con streaming: el modelo razona, llama herramientas,
-  observa resultados estructurados y continúa hasta terminar.
-- Modos de sesión **PLAN / BUILD / REVIEW**: PLAN y REVIEW trabajan en
-  solo-lectura; BUILD tiene workspace. El modo nunca relaja la política
-  de seguridad.
-- Cola de prompts por sesión: encola instrucciones que corren
-  automáticamente al terminar el turno en vivo, con los mismos límites
-  y aprobaciones.
-- Presupuestos por turno (llamadas al modelo, tool calls, llamadas de red,
-  tiempo, subagentes) y detección de loops que frena repeticiones antes
-  de quemar contexto.
-- Reanudación durable: `rinari resume` reconcilia proyecto, rama, working
-  tree, permisos y provider/modelo antes de continuar.
+| Workflow | Commands |
+| :--- | :--- |
+| Work | `chat`, `ask`, `plan`, `agent`, `review`, `verify` |
+| Continue | `session`, `resume`, `project`, `checkpoint`, `undo` |
+| Configure | `setup`, `providers`, `models`, `agents`, `profiles` |
+| Extend | `tools`, `skills`, `mcp`, `plugins`, `api`, `hooks` |
+| Inspect | `status`, `doctor`, `context`, `artifacts`, `metrics`, `trace` |
+| Control | `trust`, `permissions`, `approvals`, `sandbox`, `network` |
+| Connect | `engine`, `code` |
 
-### Proveedores y modelos
+Use `rinari --help` or consult the [complete command contract](docs/commands.md) for options, persistence rules and exit codes.
 
-- Registros persistentes multi-proveedor y multi-modelo: cambiar de
-  selección **nunca elimina** configuraciones previas; cada proveedor
-  recuerda su modelo.
-- Credenciales fuera del código: referencias `env://`, llavero del SO
-  (`keyring://`) o archivo (`file://`); las vistas siempre redactadas,
-  los valores nunca aparecen en logs, trazas ni exports.
-- Transporte por modelo (`chat` / `responses`) con detección automática
-  para endpoints OpenCode Go.
-
-### Sesiones y proyectos
-
-- Sesiones **CHAT** y **PROJECT** persistentes con conversación guardada,
-  pines de contexto y artefactos por sesión.
-- `rinari chat` fuerza CHAT; `rinari` solo detecta proyecto (AUTO);
-  promoción CHAT → PROJECT sin reiniciar; `$HOME` jamás es workspace
-  implícito.
-- Confianza por proyecto (`trust`), índice del repositorio con
-  invalidación incremental (símbolos, referencias, mapa de tests),
-  instrucciones `RINARI.md` por niveles y protección de working tree
-  sucio (tus cambios sin commitear piden aprobación explícita).
-
-### Herramientas (tools)
-
-Catálogo amplio bajo un único Tool Runtime — toda tool pasa por schema,
-política, aprobaciones, sandbox, secretos, redacción, traza y budgets:
-
-- **Archivos y shell**: leer/escribir/editar con sandbox por raíces,
-  procesos por sesión y PTY real para comandos interactivos.
-- **Código**: búsqueda (archivos, regex, símbolos, referencias, híbrida),
-  AST con tree-sitter, LSP (definición, referencias, diagnósticos…),
-  estado git y `review` de diffs.
-- **Web y automatización**: HTTP tipado con reintentos, fetching y
-  extracción web, y navegador propio sobre CDP (capturas, snapshot de
-  accesibilidad, clicks, formularios; uploads/downloads con provenance).
-- **Memoria y contexto**: 4 stores (usuario, proyecto, episódica, patrones),
-  recuperación rankeada con pins, compactación que preserva la verdad de
-  la tarea y Artifact Store (`artifact://…`) para salidas grandes.
-- **Tareas y verificación**: grafo de tareas con dependencias, planes de
-  verificación y gate de completitud (`DONE` exige evidencia; el
-  falso-éxito se rechaza).
-- **Carga dinámica**: el modelo no recibe cientos de tools por request —
-  ve núcleo + activadas + recientes, y descubre el resto con
-  `capability.search` → `capability.activate` (`turn` con TTL o `session`).
-- **Extensiones**: MCP (stdio), OpenAPI (specs JSON → tools tipadas),
-  plugins con manifiesto y permisos explícitos, y hooks de ciclo de vida.
-
-### Skills y multi-agente
-
-- 10 skills incluidos: `repository-explore`, `implement-feature`,
-  `fix-bug`, `debug`, `test`, `code-review`, `refactor`, `fix-ci`,
-  `research`, `final-verification` — catálogo de una línea en el prompt,
-  cuerpo cargado bajo demanda.
-- 6 agentes built-in (`explore`, `reviewer`, `debugger`, `researcher`,
-  `implementer`, `verifier`) con perfiles read-only/workspace, routing de
-  modelo por agente, límites, cancelación propagada y worktrees aislados
-  para escritores paralelos.
-
-### Identidad (Soul)
-
-- Sistema de identidad Soul con store versionado, activación global y
-  soul empaquetado por defecto; el prompt siempre inyecta el Canonical
-  Soul y la referencia extendida solo en turnos de identidad.
-
-### Escritorio (Rinari Code)
-
-- `rinari engine --stdio`: protocolo máquina NDJSON sobre stdio para
-  clientes de escritorio (sesiones, modos, cola, tareas, verificación,
-  artefactos, métricas, MCP/plugins, credenciales redactadas).
-- `rinari code [path] [--session]`: abre el proyecto en el cliente de
-  escritorio, con handoff de sesión.
-- Bundles de perfil: aplican soul + modo + modelos por agente de una vez,
-  con reporte de lo aplicado.
-
-### Seguridad
-
-- Sandbox de filesystem y red (allow/deny por host, fail-closed),
-  perfiles `read-only`/`workspace`, aprobaciones con grants persistentes,
-  redacción de secretos en cada frontera y contenido remoto tratado
-  como dato desconfiado.
-
-### Observabilidad
-
-- Traza de eventos por sesión (`trace`, `logs`), métricas desde eventos
-  (`metrics`), `status` operativo rápido y `doctor` local. Los números
-  que un proveedor no expone se muestran como desconocidos — nunca se
-  inventan tokens, costos ni uso.
-
-Los turnos automáticos no usan un pequeño tope ordinario: un gobernador de
-progreso permite continuar mientras aparece evidencia nueva, compacta contexto
-cuando hace falta y detiene loops persistentes. Los límites configurables bajo
-`runtime.emergency` son exclusivamente un circuito de seguridad (120 minutos,
-500 llamadas de modelo, 5000 herramientas y 100 subagentes por defecto).
-
-## Comandos
-
-Grupos principales (`rinari --help` para el detalle; casi todo soporta
-`--json` para automatización):
-
-| Área | Comandos |
-|---|---|
-| Conversar | `chat`, `ask`, `plan`, `agent`, `review`, `run`, `stop`, `verify` |
-| Sesiones | `session`, `resume`, `checkpoint`, `undo`, `project`, `init` |
-| Modelos | `providers`, `provider`, `models`, `model`, `setup` |
-| Conocimiento | `index`, `tasks`, `memory`, `context`, `artifacts` |
-| Capacidades | `tools`, `skills`, `agents`, `plugins`, `mcp`, `api`, `hooks`, `profiles` |
-| Seguridad | `trust`, `permissions`, `approvals`, `sandbox`, `secrets`, `network` |
-| Escritorio | `engine`, `code` |
-| Sistema | `status`, `doctor`, `version`, `update`, `metrics`, `logs`, `trace`, `cache`, `config`, `completion`, `help` |
-
-El contrato exacto de cada comando (semántica, persistencia y códigos de
-salida) está en [docs/commands.md](docs/commands.md).
-
-## Documentación
-
-- [TODO.md](TODO.md) — roadmap, fases y registro de decisiones
-- [AGENTS.md](AGENTS.md) — reglas de trabajo para agentes (y humanos)
-- [docs/soul.md](docs/soul.md) — identidad de Rinari
-- [docs/stack.md](docs/stack.md) — principios arquitectónicos
-- [docs/commands.md](docs/commands.md) — contrato público del CLI
-- [docs/tools.md](docs/tools.md) — catálogo y contrato de tools
-- [docs/skills.md](docs/skills.md) — catálogo y contrato de skills
-- [docs/harness.md](docs/harness.md) — blueprint completo del runtime
-- [docs/troubleshooting.md](docs/troubleshooting.md) — resolución de problemas
-
-## Desarrollo
+## Development
 
 ```bash
 uv sync
-uv run pytest          # suite completa (network-isolated por defecto)
 uv run pytest tests/unit -q
 uv run ruff check .
 uv run ruff format --check .
-uv build               # sdist + wheel
+uv build
 ```
 
-Ramas por tarea y sin merge sin aprobación. Nunca se commitean secretos:
-la config referencia credenciales (`env://`, llavero, secret manager),
-jamás las contiene. Ver [AGENTS.md](AGENTS.md) para las reglas del repo.
+Run `uv run pytest` for the full test suite. Follow [AGENTS.md](AGENTS.md) and the current phase in [TODO.md](TODO.md) when contributing.
 
-## Estado
+## Documentation
 
-Desarrollo activo en `main` con CI (Linux 3.11/3.12 + Windows: lint,
-tests, build, smoke en venv limpio y release gate en tags). Roadmap y
-pendientes honestos en [TODO.md](TODO.md).
+| Guide | Contents |
+| :--- | :--- |
+| [Harness](docs/harness.md) | Runtime design and subsystem contracts |
+| [Architecture](docs/stack.md) | Stack and architectural principles |
+| [Commands](docs/commands.md) | Public CLI reference |
+| [Tools](docs/tools.md) / [Skills](docs/skills.md) | Execution and procedure contracts |
+| [Desktop protocol](docs/desktop/README.md) | Shared engine/client integration |
+| [Troubleshooting](docs/troubleshooting.md) | Diagnostics and recovery |
+| [Roadmap](TODO.md) | Delivery status and open work |
 
-## Licencia
+---
 
-MIT — ver [LICENSE](LICENSE).
+<div align="center">
+
+**One engine. Terminal and desktop.**
+
+[Rinari Code](https://github.com/Xainner/Rinari-Code) · [Issues](https://github.com/Xainner/Rinari-CLI/issues) · [MIT License](LICENSE)
+
+</div>
