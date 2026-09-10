@@ -22,9 +22,12 @@ class FilesystemSandbox:
         self,
         read_root: Path | None,
         write_roots: tuple[Path, ...] = (),
+        *,
+        unrestricted: bool = False,
     ) -> None:
         self._read_root = read_root.resolve() if read_root else None
         self._write_roots = tuple(r.resolve() for r in write_roots)
+        self._unrestricted = unrestricted
 
     @property
     def read_root(self) -> Path | None:
@@ -33,6 +36,10 @@ class FilesystemSandbox:
     @property
     def write_roots(self) -> tuple[Path, ...]:
         return self._write_roots
+
+    @property
+    def unrestricted(self) -> bool:
+        return self._unrestricted
 
     def resolve(self, path: str | Path, base: Path | None = None) -> Path:
         """Canonicalize a model/user-supplied path against `base`."""
@@ -47,6 +54,8 @@ class FilesystemSandbox:
         return candidate.resolve()
 
     def assert_readable(self, resolved: Path) -> None:
+        if self._unrestricted:
+            return
         if self._read_root is None:
             raise SandboxViolationError(
                 "No read root granted for this session",
@@ -59,6 +68,8 @@ class FilesystemSandbox:
             )
 
     def assert_writable(self, resolved: Path) -> None:
+        if self._unrestricted:
+            return
         if not self._write_roots:
             raise SandboxViolationError(
                 "No write root granted for this session",

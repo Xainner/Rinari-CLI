@@ -1,4 +1,5 @@
 from rinari.storage.repositories.api_specs import ApiSpecRepository
+from rinari.storage.repositories.changes import TurnChangeRepository
 from rinari.storage.repositories.checkpoints import CheckpointRepository
 from rinari.storage.repositories.config_values import ConfigValueRepository
 from rinari.storage.repositories.hooks import HookRepository
@@ -41,6 +42,7 @@ __all__ = [
     "SessionRepository",
     "TaskRepository",
     "TrustEntryRepository",
+    "TurnChangeRepository",
     "ValidationRecordRepository",
     "WorktreeBaselineRepository",
 ]

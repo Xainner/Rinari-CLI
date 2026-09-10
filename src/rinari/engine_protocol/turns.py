@@ -18,7 +18,7 @@ import json
 import queue
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -86,6 +86,8 @@ class _PendingApproval:
     risk: str = "medium"
     description: str = ""
     choices: tuple[str, ...] = DECISIONS
+    rule_id: str = "default"
+    reusable: bool = True
 
 
 def _safe_detail(value: Any) -> Any:
@@ -145,6 +147,47 @@ class TurnManager:
                 for turn in self._turns.values()
             )
 
+    def conflicts_with_changeset(self, changeset: dict[str, Any]) -> bool:
+        """Return whether undo would race an active turn in its session/project."""
+        with self._lock:
+            active_session_ids = {
+                turn.session_id for turn in self._turns.values() if not turn.done.is_set()
+            }
+        if changeset["session_id"] in active_session_ids:
+            return True
+        project_id = changeset.get("project_id")
+        if not project_id:
+            return False
+        return any(
+            self._services.sessions.show(session_id).project_id == project_id
+            for session_id in active_session_ids
+        )
+
+    def emit_persisted_activity(
+        self,
+        event_name: str,
+        *,
+        session_id: str,
+        turn_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Append post-turn lifecycle activity, such as a conservative undo."""
+        rows = self._services.ctx.event_repo.list(session_id)
+        activity_seq = 1 + max(
+            (int(row.activity_seq or 0) for row in rows if row.turn_id == turn_id),
+            default=0,
+        )
+        occurred_at = now_iso(self._services.ctx.clock)
+        safe = {
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "activity_seq": activity_seq,
+            "occurred_at": occurred_at,
+            **payload,
+        }
+        self._persist_activity(event_name, safe)
+        self._emit(event(event_name, safe))
+
     def runtime_state(self) -> dict[str, Any]:
         """Presentation-safe live state used to recover after a UI reload."""
         with self._lock:
@@ -179,6 +222,8 @@ class TurnManager:
                     "risk": item.risk,
                     "description": item.description,
                     "choices": list(item.choices),
+                    "rule_id": item.rule_id,
+                    "reusable": item.reusable,
                 }
                 for item in self._approvals.values()
             ]
@@ -285,8 +330,29 @@ class TurnManager:
     ) -> None:
         turn = self._turns[turn_id]
         self._local.turn_id = turn_id
+        tracker = None
+        changes_finalized = False
+
+        def finalize_changes() -> None:
+            nonlocal changes_finalized
+            if changes_finalized or tracker is None:
+                return
+            changes_finalized = True
+            changeset = tracker.finalize()
+            if changeset is not None:
+                self._activity_cb(turn)("turn.changes.completed", changeset)
+
         try:
             agent_session = self._prepare_session(turn, record, reasoning_effort)
+            tracker = self._services.changes.begin(
+                self._services,
+                record,
+                turn_id,
+                worktree=agent_session.context.tool_ctx.worktree,
+            )
+            agent_session.context.tool_ctx = replace(
+                agent_session.context.tool_ctx, change_tracker=tracker
+            )
             with self._lock:
                 turn.session = agent_session
             self._local.token = agent_session.token
@@ -300,8 +366,10 @@ class TurnManager:
             )
             if result.kind == "cancelled":
                 self._cancel_running_activities(turn)
+                finalize_changes()
                 self._activity_cb(turn)("turn.cancelled", {})
             elif result.stop_reason is not None:
+                finalize_changes()
                 self._activity_cb(turn)(
                     "turn.stopped",
                     {
@@ -315,15 +383,18 @@ class TurnManager:
                     },
                 )
             else:
+                finalize_changes()
                 self._activity_cb(turn)(
                     "turn.completed",
                     {"kind": result.kind, "content": result.content},
                 )
         except CancelledError:
             self._cancel_running_activities(turn)
+            finalize_changes()
             self._activity_cb(turn)("turn.cancelled", {})
         except EngineProtocolError as err:
             self._fail_running_activities(turn, err.message)
+            finalize_changes()
             self._activity_cb(turn)(
                 "turn.failed",
                 {
@@ -337,6 +408,7 @@ class TurnManager:
             )
         except RinariError as err:
             self._fail_running_activities(turn, str(err))
+            finalize_changes()
             mapped = errors.from_rinari_error(err)
             self._activity_cb(turn)(
                 "turn.failed",
@@ -351,6 +423,7 @@ class TurnManager:
             )
         except Exception as err:  # defensive: the desktop must see a terminal event
             self._fail_running_activities(turn, str(err))
+            finalize_changes()
             self._activity_cb(turn)(
                 "turn.failed",
                 {
@@ -588,6 +661,9 @@ class TurnManager:
             return f"model:{payload['model_call_id']}"
         if payload.get("approval_id"):
             return f"approval:{payload['approval_id']}"
+        if event_name.startswith("turn.changes."):
+            change_id = payload.get("id") or payload.get("changeset_id") or turn.turn_id
+            return f"changeset:{change_id}"
         if event_name == "governor.compact":
             return f"context:compact:{payload.get('history_size', 0)}"
         if event_name.startswith("verification."):
@@ -671,6 +747,8 @@ class TurnManager:
             risk=request.risk,
             description=request.description,
             choices=request.choices,
+            rule_id=request.rule_id,
+            reusable=request.reusable,
         )
         with self._lock:
             self._approvals[approval_id] = pending
@@ -683,6 +761,8 @@ class TurnManager:
             "risk": request.risk,
             "description": request.description,
             "choices": list(request.choices),
+            "rule_id": request.rule_id,
+            "reusable": request.reusable,
         }
         if turn is not None:
             self._activity_cb(turn)("approval.requested", approval_payload)

@@ -30,4 +30,6 @@ CAPABILITIES: dict[str, bool] = {
     "desktop_turn_runtime_v3": True,
     # Correlated, persisted, replayable narrative activity for Rinari Code.
     "activity_timeline_v1": True,
+    "permission_profiles_v2": True,
+    "turn_changeset_v1": True,
 }

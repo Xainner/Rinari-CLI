@@ -44,6 +44,9 @@ TABLES_AFTER_MIGRATIONS = {
     "mcp_servers",
     "api_specs",
     "hooks",
+    "turn_changesets",
+    "turn_changed_files",
+    "turn_change_undo_operations",
 }
 
 
@@ -87,6 +90,7 @@ def test_migrate_fresh_database_applies_all(db):
         21,
         22,
         23,
+        24,
     ]
     assert _table_names(db) == TABLES_AFTER_MIGRATIONS
 
@@ -95,7 +99,7 @@ def test_migrate_is_idempotent(db):
     runner = MigrationRunner(db, FakeClock())
     runner.migrate()
     assert runner.migrate() == []
-    assert runner.current_version() == 23
+    assert runner.current_version() == 24
 
 
 def test_migrations_are_replayed_from_on_disk(db, tmp_path):

@@ -17,6 +17,7 @@ from rinari.application.project_service import ProjectService
 from rinari.application.provider_service import ProviderService
 from rinari.application.session_service import SessionService
 from rinari.artifacts.store import ArtifactStore
+from rinari.changes.service import TurnChangeService
 from rinari.checkpoints.service import CheckpointService
 from rinari.context.retrieval import ContextRetrievalService
 from rinari.context.service import ContextService
@@ -44,6 +45,7 @@ class ServiceContainer:
     tasks: TaskService
     verification: VerificationService
     checkpoints: CheckpointService
+    changes: TurnChangeService
     sessions: SessionService
     artifacts: ArtifactStore
     context: ContextService
@@ -73,6 +75,7 @@ def build_services(
     tasks = TaskService(ctx)
     verification = VerificationService(ctx)
     checkpoints = CheckpointService(ctx)
+    changes = TurnChangeService(ctx)
     sessions = SessionService(ctx, providers, projects, trust=trust, user_home=user_home)
     artifacts = ArtifactStore(ctx)
     context_service = ContextService(ctx, artifacts)
@@ -97,6 +100,7 @@ def build_services(
         tasks=tasks,
         verification=verification,
         checkpoints=checkpoints,
+        changes=changes,
         sessions=sessions,
         artifacts=artifacts,
         context=context_service,

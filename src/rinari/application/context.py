@@ -36,6 +36,7 @@ from rinari.storage.repositories import (
     SessionRepository,
     TaskRepository,
     TrustEntryRepository,
+    TurnChangeRepository,
     ValidationRecordRepository,
     WorktreeBaselineRepository,
 )
@@ -65,6 +66,7 @@ class AppContext:
     memory_repo: MemoryRepository
     pin_repo: PinRepository
     network_repo: NetworkRepository
+    turn_change_repo: TurnChangeRepository
     plugin_repo: PluginRepository = None
     mcp_server_repo: McpServerRepository = None
     api_spec_repo: ApiSpecRepository = None
@@ -117,6 +119,7 @@ def build_app_context(
         memory_repo=MemoryRepository(db),
         pin_repo=PinRepository(db),
         network_repo=NetworkRepository(db),
+        turn_change_repo=TurnChangeRepository(db),
         plugin_repo=PluginRepository(db),
         mcp_server_repo=McpServerRepository(db),
         api_spec_repo=ApiSpecRepository(db),

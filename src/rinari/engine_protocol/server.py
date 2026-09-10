@@ -163,6 +163,10 @@ class EngineServer:
         self._dispatcher.register("session.permission.set", self._session_permission_set)
         self._dispatcher.register("session.turn.start", self._turn_start)
         self._dispatcher.register("session.turn.cancel", self._turn_cancel)
+        self._dispatcher.register("turn.changes.get", self._turn_changes_get)
+        self._dispatcher.register("turn.changes.review", self._turn_changes_review)
+        self._dispatcher.register("turn.changes.undo.preview", self._turn_changes_undo_preview)
+        self._dispatcher.register("turn.changes.undo", self._turn_changes_undo)
         self._dispatcher.register("approval.resolve", self._approval_resolve)
         self._dispatcher.register("task.tree", self._task_tree)
         self._dispatcher.register("task.get", self._task_get)
@@ -554,7 +558,12 @@ class EngineServer:
                 turn["started_at"] = payload.get("occurred_at") or row.created_at
                 turn["user_message"] = str(payload.get("message") or "")
                 continue
-            if event_name.startswith("turn."):
+            if event_name in {
+                "turn.completed",
+                "turn.failed",
+                "turn.cancelled",
+                "turn.stopped",
+            }:
                 turn["status"] = event_name.removeprefix("turn.")
                 turn["completed_at"] = payload.get("occurred_at") or row.created_at
                 turn["terminal"] = payload
@@ -1724,6 +1733,79 @@ class EngineServer:
                 INVALID_PARAMS, "Param 'session_id' must be a non-empty string."
             )
         return self._turns.cancel_turn(session_id)
+
+    def _turn_changes_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._services.changes.get(self._need_str(params, "turn_id"))
+
+    def _turn_changes_review(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._services.changes.review(
+            self._need_str(params, "turn_id"), self._opt_str(params, "path")
+        )
+
+    def _turn_changes_undo_preview(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._services.changes.preview(
+            self._need_str(params, "turn_id"), self._change_paths(params)
+        )
+
+    def _turn_changes_undo(self, params: dict[str, Any]) -> dict[str, Any]:
+        turn_id = self._need_str(params, "turn_id")
+        changeset = self._services.changes.get(turn_id)
+        if self._turns.conflicts_with_changeset(changeset):
+            raise EngineProtocolError(
+                TURN_RUNNING,
+                "A turn is active in the same session or project.",
+                details={"turn_id": turn_id, "session_id": changeset["session_id"]},
+            )
+        self._turns.emit_persisted_activity(
+            "turn.changes.undo.started",
+            session_id=changeset["session_id"],
+            turn_id=turn_id,
+            payload={"changeset_id": changeset["id"]},
+        )
+        result = self._services.changes.undo(
+            turn_id,
+            self._change_paths(params),
+            apply_safe_only=bool(params.get("apply_safe_only", False)),
+        )
+        event_name = (
+            "turn.changes.undo.conflict"
+            if result["status"] == "conflicted"
+            else "turn.changes.undo.completed"
+        )
+        self._turns.emit_persisted_activity(
+            event_name,
+            session_id=changeset["session_id"],
+            turn_id=turn_id,
+            payload={
+                "changeset_id": changeset["id"],
+                "undo_operation_id": result.get("undo_operation_id"),
+                "status": result["status"],
+                "applied": result["applied"],
+                "skipped": result["skipped"],
+                "conflicts": result["conflicts"],
+            },
+        )
+        self._turns.emit_external(
+            event(
+                "workspace.changed",
+                {
+                    "session_id": changeset["session_id"],
+                    "project_id": changeset.get("project_id"),
+                    "turn_id": turn_id,
+                    "reason": "turn_changes_undo",
+                },
+            )
+        )
+        return result
+
+    @staticmethod
+    def _change_paths(params: dict[str, Any]) -> list[str] | None:
+        paths = params.get("paths")
+        if paths is None:
+            return None
+        if not isinstance(paths, list) or any(not isinstance(path, str) for path in paths):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'paths' must be a string list.")
+        return paths
 
     def _approval_resolve(self, params: dict[str, Any]) -> dict[str, Any]:
         approval_id = params.get("approval_id")

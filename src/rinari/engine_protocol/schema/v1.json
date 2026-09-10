@@ -27,6 +27,8 @@
         "session.fork", "session.history", "session.mode.set", "session.model.set",
         "session.permission.get", "session.permission.set", "session.turn.start",
         "session.turn.cancel", "session.events", "session.timeline", "approval.resolve",
+        "turn.changes.get", "turn.changes.review", "turn.changes.undo.preview",
+        "turn.changes.undo",
         "project.list", "project.get", "project.add", "project.update",
         "project.remove", "project.list_recent", "project.open", "project.status",
         "project.intelligence", "project.trust", "project.changes", "project.diff",
@@ -62,7 +64,10 @@
         "governor.consolidate", "governor.stop", "usage.updated",
         "agent.started", "agent.completed", "agent.failed",
         "verification.started", "verification.completed", "verification.failed",
-        "model.discovery.completed", "model.discovery.failed"
+        "model.discovery.completed", "model.discovery.failed",
+        "turn.changes.completed", "turn.changes.undo.started",
+        "turn.changes.undo.completed", "turn.changes.undo.conflict",
+        "workspace.changed"
       ]
     },
     "attachment": {

@@ -179,6 +179,12 @@ class ToolContext:
     # WorktreeGuard (projects.worktree) with the session's dirty-tree
     # baseline; None for CHAT sessions or repos without dirty state.
     worktree: Any = None
+    # Per-turn filesystem attribution. It is supplied by the engine host and
+    # deliberately absent from tool schemas and model-visible context.
+    change_tracker: Any = None
+    # Engine-private roots are never readable or writable by model tools,
+    # including under FULL_ACCESS.
+    private_roots: tuple[Path, ...] = ()
     # Session-scoped LspManager (rinari.lsp); None for CHAT sessions or when
     # no language server is registered/available.
     lsp: Any = None

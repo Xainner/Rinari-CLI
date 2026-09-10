@@ -73,6 +73,7 @@ class SessionScope:
     user_home: Path | None = None
     # Optional WorktreeGuard: dirty-state baseline captured at session start.
     worktree: Any | None = None
+    private_roots: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +98,7 @@ class ShellRisk:
     remote_git_mutation: bool = False
     destructive: bool = False
     sensitive_target: bool = False
+    private_target: bool = False
     confidence: str = "low"
 
 
@@ -118,6 +120,10 @@ SYSTEM_RULES: tuple[str, ...] = (
 def is_sensitive_file(path: Path) -> bool:
     name = path.name
     return bool(SENSITIVE_FILE.search(name)) or bool(SENSITIVE_FILE.search(str(path)))
+
+
+def _inside_any(path: Path, roots: tuple[Path, ...]) -> bool:
+    return any(path == root.resolve() or root.resolve() in path.parents for root in roots)
 
 
 def classify_git_remote(command: str) -> str | None:
@@ -170,6 +176,7 @@ def classify_shell_risk(command: str, scope: SessionScope) -> ShellRisk:
             candidates.extend(token for token in tokens[1:] if not token.startswith("-"))
     external: list[str] = []
     sensitive = False
+    private = False
     for raw in candidates:
         value = raw.strip().rstrip(",)")
         if not value or value in {"-", "/dev/null", "NUL"}:
@@ -189,6 +196,7 @@ def classify_shell_risk(command: str, scope: SessionScope) -> ShellRisk:
         except (OSError, RuntimeError, ValueError):
             continue
         sensitive = sensitive or is_sensitive_file(resolved)
+        private = private or _inside_any(resolved, scope.private_roots)
         root = scope.root.resolve() if scope.root is not None else None
         if root is None or not (resolved == root or root in resolved.parents):
             rendered = str(resolved)
@@ -200,6 +208,7 @@ def classify_shell_risk(command: str, scope: SessionScope) -> ShellRisk:
         remote_git_mutation=remote is not None,
         destructive=destructive,
         sensitive_target=sensitive,
+        private_target=private,
         confidence="high" if mutation and candidates else "low",
     )
 
@@ -386,6 +395,18 @@ class PolicyEngine:
                 risk_class=risk_class,
             )
         resolved = self._resolve(scope, path)
+        if _inside_any(resolved, scope.private_roots):
+            return PolicyDecision(
+                action=PolicyAction.DENY,
+                capability=CAPABILITY_FS_READ,
+                reason="private restoration data is never model-readable",
+                target=str(resolved),
+                risk="critical",
+                risk_class="private-runtime-state",
+                rule_id="private_change_snapshot",
+                reusable=False,
+                choices=("deny",),
+            )
         if is_sensitive_file(resolved):
             return PolicyDecision(
                 action=PolicyAction.ASK,
@@ -448,6 +469,18 @@ class PolicyEngine:
                 risk_class=risk_class,
             )
         resolved = self._resolve(scope, path)
+        if _inside_any(resolved, scope.private_roots):
+            return PolicyDecision(
+                action=PolicyAction.DENY,
+                capability=CAPABILITY_FS_WRITE,
+                reason="private restoration data cannot be modified by tools",
+                target=str(resolved),
+                risk="critical",
+                risk_class="private-runtime-state",
+                rule_id="private_change_snapshot",
+                reusable=False,
+                choices=("deny",),
+            )
         if is_sensitive_file(resolved):
             return PolicyDecision(
                 action=PolicyAction.ASK,
@@ -591,6 +624,18 @@ class PolicyEngine:
                 choices=("deny", "allow_once"),
             )
         shell_risk = classify_shell_risk(command or "", scope)
+        if shell_risk.private_target:
+            return PolicyDecision(
+                action=PolicyAction.DENY,
+                capability=CAPABILITY_SHELL,
+                reason="command targets private restoration data",
+                target=command,
+                risk="critical",
+                risk_class="private-runtime-state",
+                rule_id="private_change_snapshot",
+                reusable=False,
+                choices=("deny",),
+            )
         if shell_risk.sensitive_target:
             return PolicyDecision(
                 action=PolicyAction.ASK,
@@ -626,8 +671,7 @@ class PolicyEngine:
                 action=PolicyAction.ASK,
                 capability=CAPABILITY_SHELL,
                 reason=(
-                    "workspace profile: command has an explicit write target "
-                    "outside the workspace"
+                    "workspace profile: command has an explicit write target outside the workspace"
                 ),
                 target=command,
                 risk="high" if shell_risk.destructive else risk,

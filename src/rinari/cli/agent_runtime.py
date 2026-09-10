@@ -315,9 +315,7 @@ def _sandbox_for(
     record: SessionRecord, user_home: Path, profile: PermissionProfile = PermissionProfile.WORKSPACE
 ) -> FilesystemSandbox:
     if profile is PermissionProfile.FULL_ACCESS:
-        drive_root = Path(record.current_cwd or record.created_cwd).resolve().anchor
-        root = Path(drive_root)
-        return FilesystemSandbox(read_root=root, write_roots=(root,))
+        return FilesystemSandbox(read_root=None, unrestricted=True)
     root = Path(record.project_root_snapshot) if record.project_root_snapshot else None
     if record.kind == "PROJECT" and root is not None:
         return FilesystemSandbox(read_root=root, write_roots=(root,))
@@ -438,6 +436,7 @@ def build_agent_session(
         processes=ProcessRegistry(),
         pty=_build_pty_registry(),
         worktree=_ensure_worktree_baseline(services, record),
+        private_roots=(services.changes.blobs.root,),
         lsp=_build_lsp_manager(root),
         validation=services.verification,
         memory=services.memory,

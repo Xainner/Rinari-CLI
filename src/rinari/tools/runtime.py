@@ -53,6 +53,7 @@ def scope_from_context(ctx: ToolContext) -> SessionScope:
         profile=ctx.profile,
         user_home=ctx.user_home,
         worktree=ctx.worktree,
+        private_roots=ctx.private_roots,
     )
 
 
@@ -253,7 +254,10 @@ class ToolRuntime:
         ctx: ToolContext,
         tool_call_id: str,
     ) -> ToolResult:
+        observation = None
         try:
+            if call_ctx.change_tracker is not None:
+                observation = call_ctx.change_tracker.before_tool(tool.name, arguments, call_ctx)
             result = tool.handler(arguments, call_ctx)
         except CancelledError:
             return self._error(ctx, ToolErrorCode.CANCELLED, "Tool execution cancelled")
@@ -278,6 +282,10 @@ class ToolRuntime:
                 ToolErrorCode.NOT_FOUND,
                 f"filesystem operation failed: {exc.__class__.__name__}",
             )
+        finally:
+            if call_ctx.change_tracker is not None:
+                with contextlib.suppress(Exception):
+                    call_ctx.change_tracker.after_tool(observation)
 
         if not isinstance(result, ToolResult):
             result = ToolResult(ok=True, data=result)
@@ -322,7 +330,9 @@ class ToolRuntime:
             if target.is_absolute() and not self._inside_any(target, ctx.sandbox.write_roots):
                 approved_root = target.parent
                 sandbox = FilesystemSandbox(
-                    ctx.sandbox.read_root, (*ctx.sandbox.write_roots, approved_root)
+                    ctx.sandbox.read_root,
+                    (*ctx.sandbox.write_roots, approved_root),
+                    unrestricted=ctx.sandbox.unrestricted,
                 )
                 return True, dataclasses.replace(ctx, sandbox=sandbox)
         return True, ctx

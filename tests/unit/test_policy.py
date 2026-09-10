@@ -300,6 +300,35 @@ def test_sandbox_no_read_root(tmp_path) -> None:
         sandbox.assert_readable(tmp_path)
 
 
+def test_explicit_full_access_sandbox_allows_canonical_external_paths(tmp_path) -> None:
+    sandbox = FilesystemSandbox(None, unrestricted=True)
+    external = (tmp_path.parent / "other-root" / "file.txt").resolve()
+    sandbox.assert_readable(external)
+    sandbox.assert_writable(external)
+
+
+def test_private_change_snapshots_are_denied_even_with_full_access(tmp_path) -> None:
+    private_root = (tmp_path / "rinari-home" / "change-blobs").resolve()
+    scope = SessionScope(
+        "CHAT",
+        tmp_path,
+        tmp_path,
+        PermissionProfile.FULL_ACCESS,
+        private_roots=(private_root,),
+    )
+    policy = PolicyEngine()
+    target = private_root / "aa" / ("a" * 64)
+    assert policy.decide(CAPABILITY_FS_READ, scope, path=target).action is PolicyAction.DENY
+    assert policy.decide(CAPABILITY_FS_WRITE, scope, path=target).action is PolicyAction.DENY
+    shell = policy.decide(
+        CAPABILITY_SHELL,
+        scope,
+        command=f'Set-Content "{target}" value',
+    )
+    assert shell.action is PolicyAction.DENY
+    assert shell.rule_id == "private_change_snapshot"
+
+
 # -- approvals -----------------------------------------------------------------
 
 
