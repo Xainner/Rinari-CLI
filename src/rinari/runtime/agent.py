@@ -233,6 +233,7 @@ class AgentLoop:
                 "model.started",
                 {"model_call_id": model_call_id, "model": ctx.model_ref},
             )
+
             def visible_delta(text: str, call_id: str = model_call_id) -> None:
                 if on_delta is not None:
                     on_delta(text)

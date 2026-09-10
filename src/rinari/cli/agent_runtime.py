@@ -563,6 +563,7 @@ def _build_orchestrator(
         event_sink=lambda sid, event, payload: _persist_event(services, record.id, event, payload),
         project_instructions=(),
     )
+
     def orchestrator_event(session_id: str, event: str, payload: dict) -> None:
         _persist_event(services, record.id, event, payload)
         if activity_sink is None:

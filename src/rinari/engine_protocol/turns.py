@@ -580,9 +580,7 @@ class TurnManager:
 
         return _on_activity
 
-    def _activity_key(
-        self, turn: _ActiveTurn, event_name: str, payload: dict[str, Any]
-    ) -> str:
+    def _activity_key(self, turn: _ActiveTurn, event_name: str, payload: dict[str, Any]) -> str:
         if payload.get("tool_call_id"):
             return f"tool:{payload['tool_call_id']}"
         if payload.get("model_call_id"):
