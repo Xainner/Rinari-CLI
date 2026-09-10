@@ -74,6 +74,7 @@ class SessionScope:
     # Optional WorktreeGuard: dirty-state baseline captured at session start.
     worktree: Any | None = None
     private_roots: tuple[Path, ...] = ()
+    read_profile: PermissionProfile | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +237,18 @@ class PolicyEngine:
         risk: str = "low",
         risk_class: str = "none",
     ) -> PolicyDecision:
+        if scope.profile is PermissionProfile.READ_ONLY and capability in (
+            CAPABILITY_FS_WRITE,
+            CAPABILITY_SHELL,
+        ):
+            return PolicyDecision(
+                action=PolicyAction.DENY,
+                capability=capability,
+                reason="read-only execution cannot write files or execute commands",
+                target=str(path) if path is not None else command,
+                risk=risk,
+                risk_class=risk_class,
+            )
         if capability == CAPABILITY_NETWORK:
             return self._network_decision(host, risk, risk_class)
         if capability in (CAPABILITY_FS_READ, CAPABILITY_GIT_LOCAL):
@@ -428,7 +441,8 @@ class PolicyEngine:
                 risk=risk,
                 risk_class=risk_class,
             )
-        if scope.profile is PermissionProfile.FULL_ACCESS:
+        read_profile = scope.read_profile or scope.profile
+        if read_profile is PermissionProfile.FULL_ACCESS:
             return PolicyDecision(
                 action=PolicyAction.ALLOW,
                 capability=CAPABILITY_FS_READ,
@@ -437,7 +451,7 @@ class PolicyEngine:
                 risk=risk,
                 risk_class=risk_class,
             )
-        if scope.profile is PermissionProfile.READ_ONLY:
+        if read_profile is PermissionProfile.READ_ONLY:
             return PolicyDecision(
                 action=PolicyAction.DENY,
                 capability=CAPABILITY_FS_READ,

@@ -25,10 +25,12 @@ class FilesystemSandbox:
         *,
         unrestricted: bool = False,
         approved_read_roots: tuple[Path, ...] = (),
+        unrestricted_reads: bool = False,
     ) -> None:
         self._read_root = read_root.resolve() if read_root else None
         self._write_roots = tuple(r.resolve() for r in write_roots)
         self._unrestricted = unrestricted
+        self.unrestricted_reads = unrestricted_reads
         self.approved_read_roots = tuple(r.resolve() for r in approved_read_roots)
 
     @property
@@ -57,7 +59,7 @@ class FilesystemSandbox:
 
     def assert_readable(self, resolved: Path) -> None:
         resolved = resolved.resolve()
-        if self._unrestricted:
+        if self._unrestricted or self.unrestricted_reads:
             return
         if any(resolved == root or root in resolved.parents for root in self.approved_read_roots):
             return

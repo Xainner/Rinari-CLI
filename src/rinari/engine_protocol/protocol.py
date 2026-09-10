@@ -16,6 +16,7 @@ def engine_version() -> str:
 
 
 CAPABILITIES: dict[str, bool] = {
+    "plan_read_scope_v1": True,
     "web_preview_v1": True,
     "desktop_workspace_v1": True,
     "interactive_questions_v1": True,

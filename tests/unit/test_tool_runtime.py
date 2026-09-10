@@ -469,3 +469,46 @@ def test_git_tools_in_repo(project) -> None:
     assert log.ok is True
     branch = runtime.execute("git.branch", {}, ctx)
     assert branch.ok is True and branch.data["current"]
+
+
+@pytest.mark.parametrize(
+    "read_profile,allowed", [("full-access", True), ("workspace", True), ("read-only", False)]
+)
+def test_immutable_execution_with_independent_read_scope(project, read_profile, allowed):
+    from dataclasses import replace
+
+    tmp_path, root, outside = project
+    ctx = replace(
+        _ctx(tmp_path, root, profile="read-only", write=False),
+        read_profile=normalize_profile(read_profile),
+        sandbox=FilesystemSandbox(
+            root, write_roots=(), unrestricted_reads=read_profile == "full-access"
+        ),
+    )
+    runtime, _events = _runtime(ctx, tmp_path, answer="y")
+    result = runtime.execute("fs.read", {"path": str(outside)}, ctx)
+    assert result.ok is allowed, result.error
+    assert not runtime.execute("fs.write", {"path": str(outside), "content": "changed"}, ctx).ok
+    assert not runtime.execute(
+        "fs.write", {"path": str(root / ".env"), "content": "changed"}, ctx
+    ).ok
+    assert not runtime.execute("shell.exec", {"command": "echo forbidden"}, ctx).ok
+    assert outside.read_text(encoding="utf-8") == "outside"
+
+
+def test_full_read_scope_still_requires_sensitive_read_approval(project):
+    from dataclasses import replace
+
+    tmp_path, root, outside = project
+    secret = tmp_path / ".env"
+    secret.write_text("EXAMPLE=value", encoding="utf-8")
+    ctx = replace(
+        _ctx(tmp_path, root, profile="read-only", write=False),
+        read_profile=normalize_profile("full-access"),
+        sandbox=FilesystemSandbox(root, write_roots=(), unrestricted_reads=True),
+    )
+    denied, _ = _runtime(ctx, tmp_path, answer="n")
+    assert denied.execute("fs.read", {"path": str(outside)}, ctx).ok
+    assert not denied.execute("fs.read", {"path": str(secret)}, ctx).ok
+    approved, _ = _runtime(ctx, tmp_path, answer="y")
+    assert approved.execute("fs.read", {"path": str(secret)}, ctx).ok

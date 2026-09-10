@@ -54,6 +54,7 @@ def scope_from_context(ctx: ToolContext) -> SessionScope:
         user_home=ctx.user_home,
         worktree=ctx.worktree,
         private_roots=ctx.private_roots,
+        read_profile=ctx.read_profile,
     )
 
 
@@ -329,6 +330,7 @@ class ToolRuntime:
                 ctx.sandbox.read_root,
                 ctx.sandbox.write_roots,
                 unrestricted=ctx.sandbox.unrestricted,
+                unrestricted_reads=ctx.sandbox.unrestricted_reads,
                 approved_read_roots=(*ctx.sandbox.approved_read_roots, target),
             )
             return True, dataclasses.replace(ctx, sandbox=sandbox)
@@ -342,6 +344,7 @@ class ToolRuntime:
                     ctx.sandbox.read_root,
                     (*ctx.sandbox.write_roots, approved_root),
                     unrestricted=ctx.sandbox.unrestricted,
+                    unrestricted_reads=ctx.sandbox.unrestricted_reads,
                     approved_read_roots=(*ctx.sandbox.approved_read_roots, target),
                 )
                 return True, dataclasses.replace(ctx, sandbox=sandbox)

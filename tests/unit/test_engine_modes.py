@@ -185,3 +185,36 @@ def test_session_model_selection_is_persisted_per_chat(server, services, tmp_pat
     event_payload = server.drain_events()[-1]["payload"]
     assert event_payload["session_id"] == session_id
     assert event_payload["model_id"] == model.id
+
+
+@pytest.mark.parametrize("mode", ["plan", "review"])
+@pytest.mark.parametrize("permission", ["full-access", "workspace", "read-only"])
+def test_runtime_preserves_read_scope_without_enabling_execution(
+    server, tmp_path, mode, permission
+):
+    from rinari.cli.agent_runtime import build_agent_session
+
+    response = server.handle_line(
+        _req(
+            "scope",
+            "session.create",
+            {
+                "chat": True,
+                "mode": mode,
+                "permission_profile": permission,
+            },
+        )
+    )
+    record = server._services.sessions.show(response["result"]["session"]["id"])
+    session = build_agent_session(
+        server._services,
+        record,
+        interactive=False,
+        user_home=tmp_path / "home",
+        profile=profile_for_session(record),
+    )
+    ctx = session.context.tool_ctx
+    assert ctx.profile is PermissionProfile.READ_ONLY
+    assert ctx.read_profile.value == permission
+    assert ctx.sandbox.unrestricted_reads is (permission == "full-access")
+    assert not ctx.sandbox.write_roots

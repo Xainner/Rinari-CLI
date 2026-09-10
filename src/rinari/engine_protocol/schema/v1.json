@@ -259,7 +259,8 @@
         "provider_id": { "type": "string" },
         "model_id": { "type": "string" },
         "permission_profile": { "enum": ["read-only", "workspace", "full-access"] },
-        "effective_permission_profile": { "enum": ["read-only", "workspace", "full-access"] }
+        "effective_permission_profile": { "enum": ["read-only", "workspace", "full-access"] },
+        "read_permission_profile": { "enum": ["read-only", "workspace", "full-access"] }
       },
       "additionalProperties": true
     },

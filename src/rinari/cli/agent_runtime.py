@@ -26,7 +26,7 @@ from rinari.instructions.resolver import provenance_for, resolve_project_instruc
 from rinari.models.router import ModelRouter
 from rinari.models.types import ChatMessage, ToolCall
 from rinari.policy.approvals import AnswerPrompt, ApprovalEngine
-from rinari.policy.engine import PermissionProfile, PolicyEngine
+from rinari.policy.engine import PermissionProfile, PolicyEngine, normalize_profile
 from rinari.policy.network import NetworkGuard, NetworkPolicy
 from rinari.policy.sandbox import FilesystemSandbox, ProcessLimits
 from rinari.projects.git import git_state
@@ -176,7 +176,7 @@ def build_assembler_context(
     return AssemblerContext(
         session_kind=record.kind,
         constitution=constitution,
-        runtime_policy=_policy_summary(record.kind, profile),
+        runtime_policy=_policy_summary(record.kind, profile, _read_profile(record, profile)),
         soul=canonical,
         extended_identity=extended,
         project_instructions=instructions,
@@ -260,7 +260,15 @@ def _task_state_text(services: ServiceContainer, root: Path) -> str:
     return "\n".join(lines)
 
 
-def _policy_summary(kind: str, profile: PermissionProfile) -> str:
+def _read_profile(record: SessionRecord, profile: PermissionProfile) -> PermissionProfile:
+    if record.mode in ("plan", "review"):
+        return normalize_profile(record.permission_profile)
+    return profile
+
+
+def _policy_summary(
+    kind: str, profile: PermissionProfile, read_profile: PermissionProfile | None = None
+) -> str:
     if profile is PermissionProfile.FULL_ACCESS:
         return (
             "Runtime policy: the user explicitly selected full local access. Ordinary "
@@ -270,8 +278,17 @@ def _policy_summary(kind: str, profile: PermissionProfile) -> str:
             "reveal or copy secrets into files or logs."
         )
     if profile is PermissionProfile.READ_ONLY:
+        scope = {
+            PermissionProfile.FULL_ACCESS: (
+                "Ordinary filesystem reads may target external folders without approval."
+            ),
+            PermissionProfile.WORKSPACE: (
+                "Filesystem reads outside the session root require "
+                "approval. Request it through the read tool."
+            ),
+        }.get(read_profile, "Filesystem reads are limited to the session root.")
         return (
-            "Runtime policy: read-only. Inspect the selected workspace, but do not write "
+            f"Runtime policy: read-only execution. {scope} Do not write "
             "files or execute local commands that can mutate state. Sensitive credential "
             "reads still require explicit approval."
         )
@@ -416,6 +433,13 @@ def build_agent_session(
         and profile is not PermissionProfile.FULL_ACCESS
     ):
         sandbox = FilesystemSandbox(read_root=cwd, write_roots=(cwd,))
+    read_profile = _read_profile(record, profile)
+    if profile is PermissionProfile.READ_ONLY:
+        sandbox = FilesystemSandbox(
+            read_root=root or cwd,
+            write_roots=(),
+            unrestricted_reads=read_profile is PermissionProfile.FULL_ACCESS,
+        )
     token = CancellationToken()
     network_policy = services.network.policy()
     hook_engine = _build_hook_engine(services, root)
@@ -434,6 +458,7 @@ def build_agent_session(
         project_root=root,
         user_home=home,
         profile=profile,
+        read_profile=read_profile,
         sandbox=sandbox,
         limits=ProcessLimits(timeout_s=300, max_output_bytes=128 * 1024),
         artifact_root=home / ".rinari" / "artifacts",
