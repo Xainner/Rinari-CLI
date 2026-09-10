@@ -233,8 +233,21 @@ class AgentLoop:
                 "model.started",
                 {"model_call_id": model_call_id, "model": ctx.model_ref},
             )
+            def visible_delta(text: str, call_id: str = model_call_id) -> None:
+                if on_delta is not None:
+                    on_delta(text)
+                self._emit_activity(
+                    "model.content.delta",
+                    {"model_call_id": call_id, "delta": text},
+                )
+
             try:
-                response = self._invoke(ctx, request, self._guarded_delta(ctx, on_delta), cancel)
+                response = self._invoke(
+                    ctx,
+                    request,
+                    self._guarded_delta(ctx, visible_delta),
+                    cancel,
+                )
             except BaseException as exc:
                 self._emit_activity(
                     "model.failed",
@@ -245,12 +258,24 @@ class AgentLoop:
                     },
                 )
                 raise
+            duration_ms = round((time.monotonic() - model_started) * 1000, 1)
+            if response.content:
+                self._emit_activity(
+                    "model.content.completed",
+                    {
+                        "model_call_id": model_call_id,
+                        "content": response.content,
+                        "output_kind": "progress" if response.has_tool_calls else "final",
+                        "duration_ms": duration_ms,
+                    },
+                )
             self._emit_activity(
                 "model.completed",
                 {
                     "model_call_id": model_call_id,
-                    "duration_ms": round((time.monotonic() - model_started) * 1000, 1),
+                    "duration_ms": duration_ms,
                     "usage": _usage_dict(response.usage),
+                    "finish_reason": response.stop_reason.value,
                 },
             )
             total_usage = _merge_usage(total_usage, response.usage)
@@ -318,6 +343,7 @@ class AgentLoop:
                         "tool_call_id": call.id,
                         "tool": call.name,
                         "arguments": call.arguments,
+                        "model_call_id": model_call_id,
                     },
                 )
                 tool_calls_requested += 1
@@ -384,6 +410,7 @@ class AgentLoop:
                             "tool_call_id": call.id,
                             "tool": call.name,
                             "arguments": call.arguments,
+                            "model_call_id": model_call_id,
                         },
                     )
                     trace = {"tool_seq": tool_seq + 1}
@@ -430,6 +457,7 @@ class AgentLoop:
                         {
                             "tool_call_id": call.id,
                             "tool": call.name,
+                            "model_call_id": model_call_id,
                             "ok": result.ok,
                             "duration_ms": round(result.duration_ms, 1),
                             "error": (

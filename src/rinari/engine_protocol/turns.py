@@ -33,7 +33,9 @@ from rinari.engine_protocol import errors
 from rinari.engine_protocol.errors import EngineProtocolError
 from rinari.engine_protocol.messages import event
 from rinari.policy.approvals import ApprovalRequest
+from rinari.shared.clock import now_iso
 from rinari.shared.errors import CancelledError, RinariError
+from rinari.storage.records import SessionEventRecord
 
 APPROVAL_TIMEOUT_S = 600.0
 APPROVAL_POLL_S = 0.05
@@ -58,6 +60,8 @@ class _ActiveTurn:
     status: str = "running"
     preparation_stage: str | None = None
     activities: dict[str, dict[str, Any]] = field(default_factory=dict)
+    activity_keys: dict[str, int] = field(default_factory=dict)
+    next_activity_seq: int = 1
     governor: dict[str, Any] = field(
         default_factory=lambda: {
             "execution": "automatic",
@@ -150,7 +154,15 @@ class TurnManager:
                     "status": "cancelling" if turn.cancel_requested.is_set() else turn.status,
                     "preparation_stage": turn.preparation_stage,
                     "started_at": turn.started_at,
-                    "activities": list(turn.activities.values()),
+                    "items": sorted(
+                        (dict(item) for item in turn.activities.values()),
+                        key=lambda item: int(item.get("activity_seq") or 0),
+                    ),
+                    "activities": sorted(
+                        (dict(item) for item in turn.activities.values()),
+                        key=lambda item: int(item.get("activity_seq") or 0),
+                    ),
+                    "next_activity_seq": turn.next_activity_seq,
                     "governor": dict(turn.governor),
                 }
                 for turn in self._turns.values()
@@ -199,15 +211,12 @@ class TurnManager:
                         details={"turn_id": active.turn_id, "session_id": record.id},
                     )
             self._turns[turn_id] = turn
-        self._emit(
-            event(
-                "turn.started",
-                {
-                    "turn_id": turn_id,
-                    "session_id": record.id,
-                    "reasoning_effort": reasoning_effort,
-                },
-            )
+        self._activity_cb(turn)(
+            "turn.started",
+            {
+                "reasoning_effort": reasoning_effort,
+                "message": message,
+            },
         )
         thread = threading.Thread(
             target=self._run_turn,
@@ -286,96 +295,71 @@ class TurnManager:
             result = run_turn(
                 agent_session,
                 message,
-                on_delta=self._delta_cb(turn),
+                turn_id=turn_id,
             )
             if result.kind == "cancelled":
                 self._cancel_running_activities(turn)
-                self._emit(
-                    event("turn.cancelled", {"turn_id": turn_id, "session_id": turn.session_id})
-                )
+                self._activity_cb(turn)("turn.cancelled", {})
             elif result.stop_reason is not None:
-                self._emit(
-                    event(
-                        "turn.stopped",
-                        {
-                            "turn_id": turn_id,
-                            "session_id": turn.session_id,
-                            "reason": result.stop_reason,
-                            "recoverable": result.recoverable,
-                            "details": {
-                                "content": result.content,
-                                "governor": result.governor,
-                            },
-                            "usage": result.budget,
+                self._activity_cb(turn)(
+                    "turn.stopped",
+                    {
+                        "reason": result.stop_reason,
+                        "recoverable": result.recoverable,
+                        "details": {
+                            "content": result.content,
+                            "governor": result.governor,
                         },
-                    )
+                        "usage": result.budget,
+                    },
                 )
             else:
-                self._emit(
-                    event(
-                        "turn.completed",
-                        {
-                            "turn_id": turn_id,
-                            "session_id": turn.session_id,
-                            "kind": result.kind,
-                            "content": result.content,
-                        },
-                    )
+                self._activity_cb(turn)(
+                    "turn.completed",
+                    {"kind": result.kind, "content": result.content},
                 )
         except CancelledError:
             self._cancel_running_activities(turn)
-            self._emit(event("turn.cancelled", {"turn_id": turn_id, "session_id": turn.session_id}))
+            self._activity_cb(turn)("turn.cancelled", {})
         except EngineProtocolError as err:
             self._fail_running_activities(turn, err.message)
-            self._emit(
-                event(
-                    "turn.failed",
-                    {
-                        "turn_id": turn_id,
-                        "session_id": turn.session_id,
-                        "error": {
-                            "code": err.code,
-                            "message": err.message,
-                            "retryable": err.retryable,
-                            "details": err.details,
-                        },
+            self._activity_cb(turn)(
+                "turn.failed",
+                {
+                    "error": {
+                        "code": err.code,
+                        "message": err.message,
+                        "retryable": err.retryable,
+                        "details": err.details,
                     },
-                )
+                },
             )
         except RinariError as err:
             self._fail_running_activities(turn, str(err))
             mapped = errors.from_rinari_error(err)
-            self._emit(
-                event(
-                    "turn.failed",
-                    {
-                        "turn_id": turn_id,
-                        "session_id": turn.session_id,
-                        "error": {
-                            "code": mapped.code,
-                            "message": mapped.message,
-                            "retryable": mapped.retryable,
-                            "details": mapped.details,
-                        },
+            self._activity_cb(turn)(
+                "turn.failed",
+                {
+                    "error": {
+                        "code": mapped.code,
+                        "message": mapped.message,
+                        "retryable": mapped.retryable,
+                        "details": mapped.details,
                     },
-                )
+                },
             )
         except Exception as err:  # defensive: the desktop must see a terminal event
             self._fail_running_activities(turn, str(err))
-            self._emit(
-                event(
-                    "turn.failed",
-                    {
-                        "turn_id": turn_id,
-                        "session_id": turn.session_id,
-                        "error": {
-                            "code": errors.ENGINE_ERROR,
-                            "message": f"{type(err).__name__}: {err}",
-                            "retryable": False,
-                            "details": {},
-                        },
+            self._activity_cb(turn)(
+                "turn.failed",
+                {
+                    "error": {
+                        "code": errors.ENGINE_ERROR,
+                        "message": f"{type(err).__name__}: {err}",
+                        "retryable": False,
+                        "details": {},
                     },
-                )
+                },
             )
         finally:
             turn.done.set()
@@ -535,19 +519,6 @@ class TurnManager:
 
     # -- streaming callbacks (worker thread) --------------------------------
 
-    def _delta_cb(self, turn: _ActiveTurn) -> Any:
-        def _on_delta(text: str) -> None:
-            if len(text) > MAX_DELTA_CHARS:
-                text = text[:MAX_DELTA_CHARS] + "…[truncated]"
-            self._emit(
-                event(
-                    "model.content.delta",
-                    {"turn_id": turn.turn_id, "session_id": turn.session_id, "delta": text},
-                )
-            )
-
-        return _on_delta
-
     def _tool_cb(self, turn: _ActiveTurn) -> Any:
         def _on_tool(phase: str, name: str, detail: Any) -> None:
             self._emit(
@@ -577,8 +548,16 @@ class TurnManager:
                 safe["arguments"] = _safe_detail(safe["arguments"])
             if "result" in safe:
                 safe["result"] = _safe_detail(safe["result"])
-            activity_id = str(safe.get("tool_call_id") or safe.get("model_call_id") or "")
+            occurred_at = now_iso(self._services.ctx.clock)
+            safe["occurred_at"] = occurred_at
+            activity_key = self._activity_key(turn, event_name, safe)
             with self._lock:
+                activity_seq = turn.activity_keys.get(activity_key)
+                if activity_seq is None:
+                    activity_seq = turn.next_activity_seq
+                    turn.next_activity_seq += 1
+                    turn.activity_keys[activity_key] = activity_seq
+                safe["activity_seq"] = activity_seq
                 if event_name == "turn.preparing":
                     turn.preparation_stage = str(safe.get("stage") or "") or None
                 if event_name.startswith("governor."):
@@ -587,12 +566,56 @@ class TurnManager:
                         turn.governor = {**turn.governor, **snapshot, "event": event_name}
                     else:
                         turn.governor = {**turn.governor, **safe, "event": event_name}
-                if activity_id:
-                    current = turn.activities.get(activity_id, {})
-                    turn.activities[activity_id] = {**current, **safe, "event": event_name}
+                current = turn.activities.get(activity_key, {})
+                if event_name == "model.content.delta":
+                    delta = str(safe.get("delta") or "")
+                    safe["delta"] = delta[:MAX_DELTA_CHARS]
+                    current = {**current, "content": str(current.get("content") or "") + delta}
+                elif event_name == "model.content.completed":
+                    current = {**current, "content": str(safe.get("content") or "")}
+                turn.activities[activity_key] = {**current, **safe, "event": event_name}
+            if event_name != "model.content.delta":
+                self._persist_activity(event_name, safe)
             self._emit(event(event_name, safe))
 
         return _on_activity
+
+    def _activity_key(
+        self, turn: _ActiveTurn, event_name: str, payload: dict[str, Any]
+    ) -> str:
+        if payload.get("tool_call_id"):
+            return f"tool:{payload['tool_call_id']}"
+        if payload.get("model_call_id"):
+            return f"model:{payload['model_call_id']}"
+        if payload.get("approval_id"):
+            return f"approval:{payload['approval_id']}"
+        if event_name == "governor.compact":
+            return f"context:compact:{payload.get('history_size', 0)}"
+        if event_name.startswith("verification."):
+            return "verification:completion-gate"
+        if event_name.startswith("agent.") and payload.get("agent_id"):
+            phase = "terminal" if event_name in {"agent.completed", "agent.failed"} else "started"
+            return f"agent:{payload['agent_id']}:{phase}"
+        if event_name == "turn.preparing":
+            return "system:preparing"
+        if event_name.startswith("turn."):
+            return f"system:{event_name}"
+        return f"event:{self._services.ctx.ids.new('activity')}:{event_name}"
+
+    def _persist_activity(self, event_name: str, payload: dict[str, Any]) -> None:
+        with contextlib.suppress(Exception):
+            self._services.ctx.event_repo.insert(
+                SessionEventRecord(
+                    id=self._services.ctx.ids.new("evt"),
+                    session_id=str(payload["session_id"]),
+                    seq=self._services.ctx.event_repo.next_seq(str(payload["session_id"])),
+                    type=event_name,
+                    payload=dict(payload),
+                    created_at=str(payload["occurred_at"]),
+                    turn_id=str(payload["turn_id"]),
+                    activity_seq=int(payload["activity_seq"]),
+                )
+            )
 
     def _cancel_running_activities(self, turn: _ActiveTurn) -> None:
         with self._lock:
@@ -651,22 +674,29 @@ class TurnManager:
         )
         with self._lock:
             self._approvals[approval_id] = pending
-        self._emit(
-            event(
-                "approval.requested",
-                {
-                    "approval_id": approval_id,
-                    "session_id": request.session_id,
-                    "turn_id": turn_id,
-                    "tool": request.capability,
-                    "capability": request.capability,
-                    "target": request.target,
-                    "risk": request.risk,
-                    "description": request.description,
-                    "choices": list(DECISIONS),
-                },
+        turn = self._turns.get(str(turn_id))
+        approval_payload = {
+            "approval_id": approval_id,
+            "tool": request.capability,
+            "capability": request.capability,
+            "target": request.target,
+            "risk": request.risk,
+            "description": request.description,
+            "choices": list(DECISIONS),
+        }
+        if turn is not None:
+            self._activity_cb(turn)("approval.requested", approval_payload)
+        else:
+            self._emit(
+                event(
+                    "approval.requested",
+                    {
+                        **approval_payload,
+                        "session_id": request.session_id,
+                        "turn_id": turn_id,
+                    },
+                )
             )
-        )
         deadline = time.time() + APPROVAL_TIMEOUT_S
         expired = False
         try:
@@ -675,31 +705,43 @@ class TurnManager:
                     raise CancelledError("Approval abandoned: turn was cancelled.")
                 if time.time() >= deadline:
                     expired = True
-                    self._emit(
-                        event(
+                    if turn is not None:
+                        self._activity_cb(turn)(
                             "approval.expired",
-                            {
-                                "approval_id": approval_id,
-                                "session_id": request.session_id,
-                                "turn_id": turn_id,
-                                "reason": "timeout",
-                            },
+                            {"approval_id": approval_id, "reason": "timeout"},
                         )
-                    )
+                    else:
+                        self._emit(
+                            event(
+                                "approval.expired",
+                                {
+                                    "approval_id": approval_id,
+                                    "session_id": request.session_id,
+                                    "turn_id": turn_id,
+                                    "reason": "timeout",
+                                },
+                            )
+                        )
                     return "n"
         except CancelledError:
             expired = True
-            self._emit(
-                event(
+            if turn is not None:
+                self._activity_cb(turn)(
                     "approval.expired",
-                    {
-                        "approval_id": approval_id,
-                        "session_id": request.session_id,
-                        "turn_id": turn_id,
-                        "reason": "turn_cancelled",
-                    },
+                    {"approval_id": approval_id, "reason": "turn_cancelled"},
                 )
-            )
+            else:
+                self._emit(
+                    event(
+                        "approval.expired",
+                        {
+                            "approval_id": approval_id,
+                            "session_id": request.session_id,
+                            "turn_id": turn_id,
+                            "reason": "turn_cancelled",
+                        },
+                    )
+                )
             raise
         finally:
             with self._lock:
@@ -709,17 +751,23 @@ class TurnManager:
                     self._closed_approvals.pop(next(iter(self._closed_approvals)))
         if pending.decision is None:
             return "n"
-        self._emit(
-            event(
+        if turn is not None:
+            self._activity_cb(turn)(
                 "approval.resolved",
-                {
-                    "approval_id": approval_id,
-                    "session_id": request.session_id,
-                    "turn_id": turn_id,
-                    "decision": pending.decision,
-                },
+                {"approval_id": approval_id, "decision": pending.decision},
             )
-        )
+        else:
+            self._emit(
+                event(
+                    "approval.resolved",
+                    {
+                        "approval_id": approval_id,
+                        "session_id": request.session_id,
+                        "turn_id": turn_id,
+                        "decision": pending.decision,
+                    },
+                )
+            )
         return _DECISION_TO_ANSWER[pending.decision]
 
     def resolve_approval(self, approval_id: str, decision: str) -> dict[str, Any]:

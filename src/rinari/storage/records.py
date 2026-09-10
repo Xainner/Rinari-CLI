@@ -102,6 +102,8 @@ class SessionEventRecord:
     type: str
     payload: dict[str, Any] = field(default_factory=dict)
     created_at: str = ""
+    turn_id: str | None = None
+    activity_seq: int | None = None
 
 
 @dataclass(slots=True)
@@ -120,6 +122,7 @@ class SessionMessageRecord:
     tool_call_id: str | None = None
     name: str | None = None
     created_at: str = ""
+    turn_id: str | None = None
 
 
 @dataclass(slots=True)

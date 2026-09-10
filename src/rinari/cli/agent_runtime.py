@@ -82,6 +82,7 @@ class AgentSession:
     # gate outcome (both fed to the RuntimeSnapshot, the UI's source of truth).
     usage: object = field(default_factory=lambda: _new_usage(), repr=False)
     last_completion: dict | None = None
+    activity_sink: object = field(default=None, repr=False)
     # Bound by build_agent_session; the host calls it exactly once when the
     # session ends (emits the SessionEnd lifecycle hook).
     close: object = field(default=None, repr=False)
@@ -430,7 +431,9 @@ def build_agent_session(
         mcp=services.mcp,
         exposure=ToolExposure(),
     )
-    orchestrator = _build_orchestrator(services, record, root, token, tool_ctx, policy, gateway)
+    orchestrator = _build_orchestrator(
+        services, record, root, token, tool_ctx, policy, gateway, activity_sink
+    )
     preparing("agents")
     tools = _build_tools(
         services,
@@ -513,6 +516,7 @@ def build_agent_session(
         gateway=gateway,
         token=token,
         user_home=home,
+        activity_sink=activity_sink,
     )
     session.orchestrator = orchestrator
     session.close = _end_session
@@ -528,6 +532,7 @@ def _build_orchestrator(
     tool_ctx: ToolContext,
     policy: PolicyEngine,
     caller: ModelCaller,
+    activity_sink=None,
 ):
     """Per-session orchestrator with the production scoped-loop runner."""
     from rinari.agents.definition import MAX_CONCURRENT, MAX_DEPTH, MAX_TOTAL
@@ -558,6 +563,17 @@ def _build_orchestrator(
         event_sink=lambda sid, event, payload: _persist_event(services, record.id, event, payload),
         project_instructions=(),
     )
+    def orchestrator_event(session_id: str, event: str, payload: dict) -> None:
+        _persist_event(services, record.id, event, payload)
+        if activity_sink is None:
+            return
+        if event == "SubagentStart":
+            activity_sink("agent.started", dict(payload))
+        elif event == "SubagentStop":
+            status = str(payload.get("status") or payload.get("state") or "failed")
+            name = "agent.completed" if status == "completed" else "agent.failed"
+            activity_sink(name, dict(payload))
+
     orchestrator = AgentOrchestrator(
         make_subagent_runner(config),
         registry=services.agents,
@@ -568,7 +584,7 @@ def _build_orchestrator(
         max_depth=MAX_DEPTH,
         max_total=MAX_TOTAL,
         clock=services.ctx.clock,
-        event_sink=lambda sid, event, payload: _persist_event(services, record.id, event, payload),
+        event_sink=orchestrator_event,
     )
     orchestrator.bind_session(record.id)
     orchestrator.set_project_root(root)
@@ -877,7 +893,11 @@ def _record_to_message(rec: SessionMessageRecord) -> ChatMessage:
 
 
 def _message_to_record(
-    services: ServiceContainer, session_id: str, msg: ChatMessage, ts: str
+    services: ServiceContainer,
+    session_id: str,
+    msg: ChatMessage,
+    ts: str,
+    turn_id: str | None = None,
 ) -> SessionMessageRecord:
     tool_calls = [
         {"id": tc.id, "name": tc.name, "arguments": tc.arguments} for tc in msg.tool_calls
@@ -892,6 +912,7 @@ def _message_to_record(
         tool_call_id=msg.tool_call_id,
         name=msg.name,
         created_at=ts,
+        turn_id=turn_id,
     )
 
 
@@ -900,12 +921,15 @@ def _restore_history(services: ServiceContainer, record: SessionRecord) -> list[
 
 
 def _persist_new_messages(
-    services: ServiceContainer, record: SessionRecord, messages: list[ChatMessage]
+    services: ServiceContainer,
+    record: SessionRecord,
+    messages: list[ChatMessage],
+    turn_id: str | None = None,
 ) -> None:
     if not messages:
         return
     ts = now_iso(services.ctx.clock)
-    recs = [_message_to_record(services, record.id, m, ts) for m in messages]
+    recs = [_message_to_record(services, record.id, m, ts, turn_id) for m in messages]
     with services.ctx.db.transaction():
         services.ctx.message_repo.append_many(record.id, recs)
 
@@ -1148,16 +1172,34 @@ def _claims_completion(content: str) -> bool:
     )
 
 
-def run_turn(session: AgentSession, message: str, *, on_delta=None, on_tool=None) -> TurnResult:
+def run_turn(
+    session: AgentSession,
+    message: str,
+    *,
+    on_delta=None,
+    on_tool=None,
+    turn_id: str | None = None,
+) -> TurnResult:
     from rinari.sessions.turn_lock import SessionTurnLock
 
     lock_path = session.services.ctx.layout.dir("sessions") / f"{session.record.id}.turn.lock"
     with SessionTurnLock(lock_path, session.record.id):
-        return _run_turn_unlocked(session, message, on_delta=on_delta, on_tool=on_tool)
+        return _run_turn_unlocked(
+            session,
+            message,
+            on_delta=on_delta,
+            on_tool=on_tool,
+            turn_id=turn_id,
+        )
 
 
 def _run_turn_unlocked(
-    session: AgentSession, message: str, *, on_delta=None, on_tool=None
+    session: AgentSession,
+    message: str,
+    *,
+    on_delta=None,
+    on_tool=None,
+    turn_id: str | None = None,
 ) -> TurnResult:
     services = session.services
     _set_session_state(services, session.record, STATE_ACTIVE)
@@ -1211,7 +1253,7 @@ def _run_turn_unlocked(
     except CancelledError:
         _set_session_state(services, session.record, STATE_INTERRUPTED)
         new_msgs = _new_history(session.context, before, dropped_before)
-        _persist_new_messages(services, session.record, new_msgs)
+        _persist_new_messages(services, session.record, new_msgs, turn_id)
         _account_turn(
             session,
             result=TurnResult(
@@ -1221,7 +1263,7 @@ def _run_turn_unlocked(
         )
         return TurnResult(kind="cancelled", content="Turn cancelled.", tool_calls=0, usage=None)
     new_msgs = _new_history(session.context, before, dropped_before)
-    _persist_new_messages(services, session.record, new_msgs)
+    _persist_new_messages(services, session.record, new_msgs, turn_id)
     if result.kind != "cancelled" and session.record.kind == "CHAT":
         _maybe_promote(session)
     read_only = session.context.tool_ctx.profile is PermissionProfile.READ_ONLY
@@ -1285,12 +1327,18 @@ def _finalize_turn(
     root = Path(record.project_root_snapshot)
     if not root.is_dir():
         return result
+    if callable(session.activity_sink):
+        session.activity_sink("verification.started", {"record_ids": sorted(validation_ids)})
     try:
         decision = services.verification.evaluate(root, record_ids=validation_ids)
     except RinariError:
+        if callable(session.activity_sink):
+            session.activity_sink("verification.failed", {"error": "verification unavailable"})
         return result
     payload = decision.to_dict()
     payload["turn_kind"] = result.kind
+    if callable(session.activity_sink):
+        session.activity_sink("verification.completed", payload)
     with contextlib.suppress(Exception):
         _persist_event(services, record.id, "CompletionGateEvaluated", payload)
     return replace(result, completion=payload)

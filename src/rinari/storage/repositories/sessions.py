@@ -184,8 +184,9 @@ class SessionEventRepository:
     def _execute_insert(self, rec: SessionEventRecord, seq: int) -> None:
         self._db.execute(
             """
-            INSERT INTO session_events (id, session_id, seq, type, payload_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO session_events (
+                id, session_id, seq, type, payload_json, created_at, turn_id, activity_seq
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 rec.id,
@@ -194,6 +195,8 @@ class SessionEventRepository:
                 rec.type,
                 json.dumps(rec.payload, sort_keys=True),
                 rec.created_at,
+                rec.turn_id,
+                rec.activity_seq,
             ),
         )
 
@@ -220,6 +223,8 @@ def _event_to_record(row: dict) -> SessionEventRecord:
         type=row["type"],
         payload=json.loads(row["payload_json"]) if row["payload_json"] else {},
         created_at=row["created_at"],
+        turn_id=row["turn_id"],
+        activity_seq=row["activity_seq"],
     )
 
 
@@ -242,8 +247,8 @@ class SessionMessageRepository:
                 """
                 INSERT INTO session_messages (
                     id, session_id, seq, role, content,
-                    tool_calls_json, tool_call_id, name, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    tool_calls_json, tool_call_id, name, created_at, turn_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     rec.id,
@@ -255,6 +260,7 @@ class SessionMessageRepository:
                     rec.tool_call_id,
                     rec.name,
                     rec.created_at,
+                    rec.turn_id,
                 ),
             )
 
@@ -318,4 +324,5 @@ def _message_to_record(row: dict) -> SessionMessageRecord:
         tool_call_id=row["tool_call_id"],
         name=row["name"],
         created_at=row["created_at"],
+        turn_id=row["turn_id"],
     )

@@ -28,4 +28,6 @@ CAPABILITIES: dict[str, bool] = {
     # Session permissions, attachment/file search, model/tool lifecycle
     # telemetry, approval expiry and runtime snapshot recovery.
     "desktop_turn_runtime_v3": True,
+    # Correlated, persisted, replayable narrative activity for Rinari Code.
+    "activity_timeline_v1": True,
 }

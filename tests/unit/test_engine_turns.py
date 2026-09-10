@@ -195,9 +195,42 @@ def test_turn_streams_content_deltas_in_order(server, tmp_path, monkeypatch) -> 
     assert started is not None and started["ok"] is True
 
     events = _collect_until(server, session_id)
-    deltas = [e["payload"]["delta"] for e in events if e["event"] == "model.content.delta"]
+    delta_events = [e for e in events if e["event"] == "model.content.delta"]
+    deltas = [e["payload"]["delta"] for e in delta_events]
     assert deltas == ["he", "llo"]
+    assert {e["payload"]["model_call_id"] for e in delta_events} == {"model_1"}
+    completed_content = next(e for e in events if e["event"] == "model.content.completed")
+    assert completed_content["payload"]["model_call_id"] == "model_1"
+    assert completed_content["payload"]["output_kind"] == "final"
+    assert completed_content["payload"]["content"] == "hola"
     assert events[-1]["event"] == "turn.completed"
+
+
+def test_persisted_timeline_replays_visible_model_content(server, tmp_path, monkeypatch) -> None:
+    session_id = _create_chat(server, tmp_path, tag="timeline")
+    monkeypatch.setattr(
+        agent_runtime,
+        "_caller_for",
+        lambda services, rec: FakeStreamModel(scripted=[_answer()]),
+    )
+    started = server.handle_line(
+        _req("timeline-start", "session.turn.start", {"session_id": session_id, "message": "hi"})
+    )
+    assert started is not None and started["ok"] is True
+    turn_id = started["result"]["turn_id"]
+    _collect_until(server, session_id)
+
+    replay = server.handle_line(_req("timeline-read", "session.timeline", {"ref": session_id}))
+    assert replay is not None and replay["ok"] is True
+    turn = replay["result"]["turns"][0]
+    assert turn["turn_id"] == turn_id
+    assert turn["user_message"] == "hi"
+    assert turn["status"] == "completed"
+    assert turn["final_response"] == "hola"
+    assert not any(item["event"] == "model.content.delta" for item in turn["items"])
+    model = next(item for item in turn["items"] if item["event"] == "model.content.completed")
+    assert model["model_call_id"] == "model_1"
+    assert model["activity_seq"] > 0
 
 
 def test_turn_forwards_reasoning_effort_to_model(server, tmp_path, monkeypatch) -> None:

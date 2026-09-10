@@ -156,6 +156,7 @@ class EngineServer:
         self._dispatcher.register("session.branch", self._session_branch)
         self._dispatcher.register("session.fork", self._session_branch)
         self._dispatcher.register("session.history", self._session_history)
+        self._dispatcher.register("session.timeline", self._session_timeline)
         self._dispatcher.register("session.mode.set", self._session_mode_set)
         self._dispatcher.register("session.model.set", self._session_model_set)
         self._dispatcher.register("session.permission.get", self._session_permission_get)
@@ -508,6 +509,78 @@ class EngineServer:
             "messages": [message_to_dict(item) for item in window],
             "total": total,
             "has_more": total > len(window),
+        }
+
+    def _session_timeline(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return persisted narrative turns, newest page first but chronological."""
+        ref = params.get("ref")
+        if not isinstance(ref, str) or not ref:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'ref' must be a non-empty string.")
+        before = params.get("before_turn_index")
+        if before is not None and (
+            not isinstance(before, int) or isinstance(before, bool) or before < 0
+        ):
+            raise EngineProtocolError(
+                INVALID_PARAMS, "Param 'before_turn_index' must be an int >= 0."
+            )
+        limit = params.get("limit", 30)
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'limit' must be an int in 1..100.")
+        record = self._services.sessions.show(ref)
+        events = [row for row in self._services.ctx.event_repo.list(record.id) if row.turn_id]
+        messages = self._services.ctx.message_repo.list(record.id)
+
+        by_turn: dict[str, dict[str, Any]] = {}
+        order: list[str] = []
+        for row in events:
+            turn_id = str(row.turn_id)
+            if turn_id not in by_turn:
+                by_turn[turn_id] = {
+                    "turn_id": turn_id,
+                    "session_id": record.id,
+                    "turn_index": len(order),
+                    "status": "running",
+                    "started_at": row.created_at,
+                    "completed_at": None,
+                    "user_message": "",
+                    "items": [],
+                    "final_response": "",
+                }
+                order.append(turn_id)
+            turn = by_turn[turn_id]
+            payload = dict(row.payload or {})
+            event_name = row.type
+            if event_name == "turn.started":
+                turn["started_at"] = payload.get("occurred_at") or row.created_at
+                turn["user_message"] = str(payload.get("message") or "")
+                continue
+            if event_name.startswith("turn."):
+                turn["status"] = event_name.removeprefix("turn.")
+                turn["completed_at"] = payload.get("occurred_at") or row.created_at
+                turn["terminal"] = payload
+                continue
+            payload["event"] = event_name
+            payload["activity_seq"] = row.activity_seq or payload.get("activity_seq")
+            turn["items"].append(payload)
+            if event_name == "model.content.completed" and payload.get("output_kind") == "final":
+                turn["final_response"] = str(payload.get("content") or "")
+
+        for message in messages:
+            if not message.turn_id or message.turn_id not in by_turn:
+                continue
+            if message.role == "user" and not by_turn[message.turn_id]["user_message"]:
+                by_turn[message.turn_id]["user_message"] = message.content or ""
+
+        selected = [by_turn[item] for item in order]
+        if before is not None:
+            selected = [item for item in selected if item["turn_index"] < before]
+        has_more = len(selected) > limit
+        selected = selected[-limit:]
+        return {
+            "session_id": record.id,
+            "turns": selected,
+            "has_more": has_more,
+            "next_before_turn_index": selected[0]["turn_index"] if has_more and selected else None,
         }
 
     def _session_mode_set(self, params: dict[str, Any]) -> dict[str, Any]:

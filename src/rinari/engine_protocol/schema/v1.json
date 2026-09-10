@@ -26,7 +26,7 @@
         "session.rename", "session.archive", "session.restore", "session.delete",
         "session.fork", "session.history", "session.mode.set", "session.model.set",
         "session.permission.get", "session.permission.set", "session.turn.start",
-        "session.turn.cancel", "session.events", "approval.resolve",
+        "session.turn.cancel", "session.events", "session.timeline", "approval.resolve",
         "project.list", "project.get", "project.add", "project.update",
         "project.remove", "project.list_recent", "project.open", "project.status",
         "project.intelligence", "project.trust", "project.changes", "project.diff",
@@ -60,6 +60,8 @@
         "approval.requested", "approval.resolved", "approval.expired",
         "governor.progress", "governor.nudge", "governor.compact",
         "governor.consolidate", "governor.stop", "usage.updated",
+        "agent.started", "agent.completed", "agent.failed",
+        "verification.started", "verification.completed", "verification.failed",
         "model.discovery.completed", "model.discovery.failed"
       ]
     },

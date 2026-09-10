@@ -234,7 +234,7 @@ def test_events_paginate_with_after_seq_and_limit(server, tmp_path, monkeypatch)
     # terminality pins below cover delivery; persisting terminals for
     # historical panels is engine work, not a P0 pin.
     types = {e["type"] for e in rest["result"]["events"]}
-    assert "turn.completed" not in types
+    assert "turn.completed" in types
 
     bad = server.handle_line(_req("e3", "session.events", {"ref": session_id, "limit": 0}))
     assert bad is not None and bad["ok"] is False
@@ -274,6 +274,8 @@ def test_snapshot_shape_while_turn_runs(server, tmp_path, monkeypatch) -> None:
         assert isinstance(turn["status"], str)
         assert isinstance(turn["started_at"], float) and turn["started_at"] > 0
         assert isinstance(turn["activities"], list)
+        assert turn["items"] == turn["activities"]
+        assert isinstance(turn["next_activity_seq"], int)
         for activity in turn["activities"]:
             assert {"event", "turn_id", "session_id"} <= set(activity)
     finally:
