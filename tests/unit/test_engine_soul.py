@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 
 import pytest
@@ -52,6 +53,92 @@ def _ok(response):
 def _err(response):
     assert response is not None and response["ok"] is False, response
     return response["error"]
+
+
+def test_soul_unicode_roundtrip(server):
+    identity = "Español, 日本語, Rinari 💜✨"
+    result = _ok(
+        server.handle_line(
+            _req(
+                "unicode",
+                "soul.create",
+                {
+                    "id": "unicode",
+                    "name": "日本語 💜",
+                    "identity": identity,
+                },
+            )
+        )
+    )
+    assert result["soul"]["identity"] == identity
+    _ok(server.handle_line(_req("activate", "soul.activate", {"id": "unicode"})))
+
+
+def test_stdio_reads_utf8_regardless_of_windows_locale(server, monkeypatch):
+    from rinari.engine_protocol.transports.stdio import run_stdio
+
+    identity = "日本語 💜 Español"
+    request = (
+        json.dumps(
+            {
+                "id": "wire",
+                "method": "soul.create",
+                "params": {
+                    "id": "wire",
+                    "name": "Rinari",
+                    "identity": identity,
+                },
+            },
+            ensure_ascii=False,
+        )
+        + "\n"
+    )
+    incoming = io.TextIOWrapper(
+        io.BytesIO(request.encode("utf-8")), encoding="cp1252", errors="surrogateescape"
+    )
+    monkeypatch.setattr("sys.stdin", incoming)
+    output = io.StringIO()
+    assert run_stdio(server, stdout=output, stderr=io.StringIO()) == 0
+    response = next(
+        json.loads(line)
+        for line in output.getvalue().splitlines()
+        if json.loads(line).get("id") == "wire"
+    )
+    assert _ok(response)["soul"]["identity"] == identity
+
+
+@pytest.mark.parametrize("field", ["identity", "name", "description", "version"])
+def test_invalid_unicode_does_not_modify_existing_soul(server, field):
+    _ok(
+        server.handle_line(
+            _req(
+                "create",
+                "soul.create",
+                {
+                    "id": "valid",
+                    "name": "Original",
+                    "identity": "Original identity",
+                },
+            )
+        )
+    )
+    error = _err(
+        server.handle_line(
+            _req(
+                "update",
+                "soul.update",
+                {
+                    "id": "valid",
+                    "name": "Changed",
+                    field: "broken\udc81",
+                },
+            )
+        )
+    )
+    assert error["code"] != "ENGINE_ERROR"
+    result = _ok(server.handle_line(_req("get", "soul.get", {"id": "valid"})))
+    assert result["soul"]["name"] == "Original"
+    assert result["soul"]["identity"] == "Original identity"
 
 
 def test_list_contains_bundled_default(server) -> None:

@@ -61,7 +61,18 @@ def validate_identity(identity: Any) -> str:
         raise InvalidUsageError(
             f"Soul identity exceeds {_MAX_IDENTITY_CHARS} chars.",
         )
+    _validate_unicode(identity)
     return identity
+
+
+def _validate_unicode(value: str) -> None:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise InvalidUsageError(
+            "Soul text contains invalid Unicode. "
+            "Paste the original text again or import UTF-8 text."
+        ) from exc
 
 
 def _read_definition(soul_id: str, directory: Path, source: str) -> SoulDefinition | None:
@@ -72,7 +83,7 @@ def _read_definition(soul_id: str, directory: Path, source: str) -> SoulDefiniti
     try:
         meta = tomllib.loads(meta_path.read_text(encoding="utf-8"))
         identity = identity_path.read_text(encoding="utf-8")
-    except (OSError, tomllib.TOMLDecodeError):
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
         return None
     if not isinstance(meta, dict):
         return None
@@ -149,6 +160,8 @@ class SoulStore:
         if not isinstance(description, str) or len(description) > 500:
             raise InvalidUsageError("Soul description must be at most 500 chars.")
         validate_identity(identity)
+        for value in (name, version, description):
+            _validate_unicode(value)
         if any(d.id == soul_id for d in self.list()):
             raise ConflictError(f"Soul already exists: {soul_id}")
         directory = self._dir / soul_id
@@ -193,6 +206,9 @@ class SoulStore:
             raise InvalidUsageError("Soul description must be at most 500 chars.")
         if identity is not None:
             validate_identity(identity)
+        for value in (name, version, description):
+            if value is not None:
+                _validate_unicode(value)
         directory = self._dir / soul_id
         (directory / "soul.toml").write_text(
             tomli_w.dumps(

@@ -56,6 +56,10 @@ def run_stdio(
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
 ) -> int:
+    # The wire contract is UTF-8, independent of the Windows console locale.
+    # Leave injected test/embedded streams under the caller's ownership.
+    if stdin is None and hasattr(sys.stdin, "reconfigure"):
+        sys.stdin.reconfigure(encoding="utf-8", errors="strict")
     inp = stdin or sys.stdin
     out = stdout or sys.stdout
     err = stderr or sys.stderr
