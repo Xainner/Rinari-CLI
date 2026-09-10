@@ -150,6 +150,12 @@ class EngineServer:
         from rinari.engine_protocol.desktop import DesktopWorkspace
 
         self._desktop = DesktopWorkspace(self)
+        from rinari.engine_protocol.preview import WebPreviews
+
+        self._previews = WebPreviews(self._desktop)
+        self._dispatcher.register("workspace.preview.start", self._previews.start)
+        self._dispatcher.register("workspace.preview.status", self._previews.status)
+        self._dispatcher.register("workspace.preview.stop", self._previews.stop)
         self._dispatcher.register("session.move", self._desktop.move)
         self._dispatcher.register("workspace.file.read", self._desktop.read)
         self._dispatcher.register("question.list", self._question_list)
@@ -282,6 +288,7 @@ class EngineServer:
         self._turns.cancel_all_turns()
 
     def close(self) -> None:
+        self._previews.close()
         self._pty.shutdown()
         self._turns.close()
 
@@ -360,7 +367,9 @@ class EngineServer:
                 f"Session {record.id} has a running turn; cancel it before closing.",
                 details={"session_id": record.id},
             )
-        return {"session": session_to_dict(self._services.sessions.close(ref))}
+        result = self._services.sessions.close(ref)
+        self._previews.stop_session(record.id)
+        return {"session": session_to_dict(result)}
 
     def _session_delete(self, params: dict[str, Any]) -> dict[str, Any]:
         """Delete a session with explicit cascade accounting.
@@ -391,6 +400,7 @@ class EngineServer:
         else:
             checkpoints_removed, checkpoints_kept = 0, len(checkpoint_ids)
         sid = self._services.sessions.delete(record.id)
+        self._previews.stop_session(record.id)
         if cascade:
             artifacts_removed = self._services.artifacts.gc(session_id=sid)
             artifacts_kept = 0

@@ -5,9 +5,55 @@
   "type": "object",
   "x-codegen-definitions": [
     "attachment", "sessionSummary", "projectSummary", "usageSnapshot",
-    "governorSnapshot", "protocolError", "questionOption", "userQuestion", "questionRequest", "filePreview"
+    "governorSnapshot", "protocolError", "questionOption", "userQuestion", "questionRequest", "filePreview", "webPreview"
   ],
   "$defs": {
+    "webPreview": {
+      "type": "object",
+      "required": [
+        "preview_id",
+        "session_id",
+        "url",
+        "kind",
+        "ready",
+        "revision"
+      ],
+      "properties": {
+        "preview_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "static",
+            "development"
+          ]
+        },
+        "ready": {
+          "type": "boolean"
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "command": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
     "questionOption": {
       "type": "object",
       "required": [
@@ -129,7 +175,7 @@
       "type": "string",
       "enum": [
         "engine.info", "runtime.snapshot.get",
-        "session.move", "workspace.file.read", "question.list", "question.resolve",
+        "session.move", "workspace.file.read", "workspace.preview.start", "workspace.preview.status", "workspace.preview.stop", "question.list", "question.resolve",
         "session.list", "session.get", "session.create", "session.open",
         "session.rename", "session.archive", "session.restore", "session.delete",
         "session.fork", "session.history", "session.mode.set", "session.model.set",

@@ -21,6 +21,10 @@ class DesktopWorkspace:
         if not isinstance(ref, str) or not ref:
             raise EngineProtocolError(INVALID_PARAMS, "session_id is required.")
         record = self.services.sessions.show(ref)
+        if self.server._previews.busy(record.id):
+            raise EngineProtocolError(
+                "SESSION_BUSY", "Close the development preview before moving."
+            )
         with self.server._turns._lock:
             prior_turns = [
                 t for t in self.server._turns._turns.values() if t.session_id == record.id
@@ -56,7 +60,7 @@ class DesktopWorkspace:
         )
         return {"session": session_to_dict(result)}
 
-    def read(self, params):
+    def resolve_file(self, params):
         if not isinstance(params.get("session_id"), str) or not params["session_id"]:
             raise EngineProtocolError(INVALID_PARAMS, "session_id is required.")
         record = self.services.sessions.show(params.get("session_id"))
@@ -93,6 +97,10 @@ class DesktopWorkspace:
             raise EngineProtocolError("PERMISSION_DENIED", "Engine-private file.")
         if not path.is_file():
             raise EngineProtocolError("NOT_FOUND", "File no longer exists.")
+        return path, root
+
+    def read(self, params):
+        path, _ = self.resolve_file(params)
         limit = 512 * 1024
         with path.open("rb") as stream:
             data = stream.read(limit + 1)
