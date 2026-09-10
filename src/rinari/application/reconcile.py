@@ -28,7 +28,8 @@ from rinari.application.context import AppContext
 from rinari.application.project_service import ProjectService
 from rinari.projects.git import git_state
 from rinari.projects.worktree import snapshot_worktree
-from rinari.skills.catalog import SkillInfo, discover_skills
+from rinari.skills.manifest import SkillManifest
+from rinari.skills.service import SkillService
 from rinari.storage.records import SessionRecord
 from rinari.trust import STATE_REVALIDATION, STATE_TRUSTED, TrustService
 
@@ -279,11 +280,8 @@ class ResumeReconciler:
             )
         return Finding("skills", OK, f"{len(record.active_skills)} active skill(s) unchanged")
 
-    def _skill_catalog(self, root: Path | None, root_exists: bool) -> dict[str, SkillInfo]:
-        project_dir = root / ".rinari" / "skills" if root is not None and root_exists else None
-        return discover_skills(
-            str(self._ctx.layout.dir("skills")), str(project_dir) if project_dir else None
-        )
+    def _skill_catalog(self, root: Path | None, root_exists: bool) -> dict[str, SkillManifest]:
+        return SkillService(self._ctx, self._trust).discover(root if root_exists else None)
 
     def _assumptions(self, record: SessionRecord) -> Finding:
         if not record.current_cwd:

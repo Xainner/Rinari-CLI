@@ -262,6 +262,7 @@ class TurnManager:
                         f"Session {record.id} already has a running turn.",
                         details={"turn_id": active.turn_id, "session_id": record.id},
                     )
+            record = self._services.sessions.name_from_first_message(record.id, message)
             self._turns[turn_id] = turn
             turn.mode = record.mode
         self._activity_cb(turn)(

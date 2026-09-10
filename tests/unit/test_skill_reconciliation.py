@@ -204,3 +204,15 @@ def test_fork_copies_active_skills(env, tmp_path):
     assert started.session.active_skills == (("demo", "1.0.0"),)
     # source is untouched
     assert s.ctx.session_repo.get(record.id).active_skills == (("demo", "1.0.0"),)
+
+
+def test_resume_recognizes_packaged_active_skill(env, tmp_path):
+    _, services = env
+    cwd = tmp_path / "chat"
+    cwd.mkdir()
+    record = services.sessions.start(cwd).session
+    services.skills.activate("implement-feature", record.id)
+    for _ in range(2):
+        resumed = services.sessions.resume(record.id)
+        assert _finding(resumed, "skills").state == OK
+        assert not any("[skills]" in warning for warning in resumed.warnings)

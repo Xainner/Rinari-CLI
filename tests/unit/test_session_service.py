@@ -194,3 +194,33 @@ def test_init_and_promote_flow(services, home) -> None:
     promoted = services.sessions.promote(candidate.id, project_root)
     assert promoted.id == started.session.id
     assert promoted.kind == "PROJECT"
+
+
+def test_first_message_title_is_persisted_and_not_replaced(services, home):
+    _configure(services, home)
+    record = services.sessions.start(home).session
+    title = "Diseñar un juego de invasión espacial"
+    updated = services.sessions.name_from_first_message(record.id, title)
+    assert updated.title == title
+    assert services.sessions.show(record.id).title == title
+    assert services.sessions.name_from_first_message(record.id, "Segundo mensaje").title == title
+
+
+def test_manual_default_title_is_respected(services, home):
+    _configure(services, home)
+    record = services.sessions.start(home).session
+    services.sessions.rename(record.id, "Nueva conversación")
+    assert (
+        services.sessions.name_from_first_message(record.id, "Otro título").title
+        == "Nueva conversación"
+    )
+
+
+def test_first_message_title_is_bounded(services, home):
+    _configure(services, home)
+    record = services.sessions.start(home).session
+    title = services.sessions.name_from_first_message(
+        record.id, "Diseñar una nave moderna " * 20
+    ).title
+    assert len(title) <= 72
+    assert title.endswith("…")

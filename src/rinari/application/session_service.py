@@ -511,6 +511,28 @@ class SessionService:
             self._append_event(record.id, EVENT_SESSION_CLOSED, {})
         return record
 
+    def name_from_first_message(self, ref: str, message: str) -> SessionRecord:
+        """Give an untouched session a bounded, Unicode-safe first-message title."""
+        record = self._resolve(ref)
+        defaults = {
+            "Nueva conversación",
+            "New conversation",
+            "New chat",
+            "",
+            self._default_title(Path(record.current_cwd), record.kind),
+        }
+        if record.title not in defaults or self._ctx.message_repo.list(record.id):
+            return record
+        if any(e.type == EVENT_SESSION_RENAMED for e in self._ctx.event_repo.list(record.id)):
+            return record
+        clean = " ".join(message.split())
+        if not clean:
+            return record
+        if len(clean) > 72:
+            prefix = clean[:69]
+            clean = (prefix.rsplit(" ", 1)[0] or prefix) + "…"
+        return self.rename(ref, clean)
+
     def rename(self, ref: str, title: str) -> SessionRecord:
         record = self._resolve(ref)
         clean = (title or "").strip()
