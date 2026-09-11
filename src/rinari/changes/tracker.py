@@ -59,6 +59,16 @@ class TurnChangeTracker:
     def before_tool(self, tool: str, arguments: dict[str, Any], ctx) -> ToolObservation | None:
         if tool in {"fs.write", "fs.patch"}:
             self.mutating_tool_seen = True
+            if "files" in arguments:
+                states = {}
+                for row in arguments["files"]:
+                    target = self._resolve(row.get("path"), ctx.cwd)
+                    if target is not None:
+                        state = capture(target)
+                        self.before.setdefault(str(target), state)
+                        self.roots.add(str(target.parent))
+                        states[str(target)] = state
+                return ToolObservation(tool, states, ())
             target = self._resolve(arguments.get("path"), ctx.cwd)
             if target is None:
                 return None
@@ -68,7 +78,9 @@ class TurnChangeTracker:
             return ToolObservation(tool, {str(target): state}, ())
         if tool not in {"shell.exec", "process.start"}:
             return None
-        command = str(arguments.get("command") or "")
+        from rinari.tools.definition import command_text
+
+        command = command_text(arguments)
         scope = SessionScope(
             kind=ctx.kind,
             root=ctx.project_root if ctx.kind == "PROJECT" else ctx.cwd,

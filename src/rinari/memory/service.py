@@ -251,29 +251,34 @@ class MemoryService:
         topic: str | None = None,
         confidence: float | None = None,
         provenance: str | None = None,
+        expected_version: str | None = None,
     ) -> dict:
-        existing = self.repo.user_get(memory_id)
-        if existing is None:
-            raise InvalidUsageError(f"user memory not found: {memory_id}")
-        fields: dict = {}
-        if text is not None:
-            text = self._require(text, "text")
-            self._check_sensitive(text)
-            fields["text"] = text
-        if topic is not None:
-            topic = self._require(topic, "topic")
-            fields["topic"] = topic[:128]
-        if confidence is not None:
-            if not 0.0 <= float(confidence) <= 1.0:
-                raise InvalidUsageError("confidence must be between 0 and 1")
-            fields["confidence"] = float(confidence)
-        if provenance is not None:
-            provenance = provenance.strip()[:MEM_MAX_PROVENANCE]
-            self._check_sensitive(provenance, "provenance")
-            fields["provenance"] = provenance
-        if fields:
-            self.repo.user_update(memory_id, fields, self._now())
-        return self.repo.user_get(memory_id)
+        with self.repo._db.transaction():
+            existing = self.repo.user_get(memory_id)
+            if existing is None:
+                raise InvalidUsageError(f"user memory not found: {memory_id}")
+            if expected_version is not None and existing.get("updated_at") != expected_version:
+                raise InvalidUsageError("memory version conflict; recall the current record")
+            fields: dict = {}
+            if text is not None:
+                text = self._require(text, "text")
+                self._check_sensitive(text)
+                fields["text"] = text
+            if topic is not None:
+                topic = self._require(topic, "topic")
+                fields["topic"] = topic[:128]
+            if confidence is not None:
+                if not 0.0 <= float(confidence) <= 1.0:
+                    raise InvalidUsageError("confidence must be between 0 and 1")
+                fields["confidence"] = float(confidence)
+            if provenance is not None:
+                provenance = provenance.strip()[:MEM_MAX_PROVENANCE]
+                self._check_sensitive(provenance, "provenance")
+                fields["provenance"] = provenance
+            fields = {k: v for k, v in fields.items() if existing.get(k) != v}
+            if fields:
+                self.repo.user_update(memory_id, fields, self._now())
+            return self.repo.user_get(memory_id)
 
     def forget_user(self, memory_id: str) -> bool:
         return self.repo.user_delete(memory_id)
@@ -325,28 +330,33 @@ class MemoryService:
         topic: str | None = None,
         confidence: float | None = None,
         provenance: str | None = None,
+        expected_version: str | None = None,
     ) -> dict:
-        existing = self.repo.project_get(project_root, memory_id)
-        if existing is None:
-            raise InvalidUsageError(f"project memory not found: {memory_id}")
-        fields: dict = {}
-        if text is not None:
-            text = self._require(text, "text")
-            self._check_sensitive(text)
-            fields["text"] = text
-        if topic is not None:
-            fields["topic"] = self._require(topic, "topic")[:128]
-        if confidence is not None:
-            if not 0.0 <= float(confidence) <= 1.0:
-                raise InvalidUsageError("confidence must be between 0 and 1")
-            fields["confidence"] = float(confidence)
-        if provenance is not None:
-            provenance = provenance.strip()[:MEM_MAX_PROVENANCE]
-            self._check_sensitive(provenance, "provenance")
-            fields["provenance"] = provenance
-        if fields:
-            self.repo.project_update(project_root, memory_id, fields, self._now())
-        return self.repo.project_get(project_root, memory_id)
+        with self.repo._db.transaction():
+            existing = self.repo.project_get(project_root, memory_id)
+            if existing is None:
+                raise InvalidUsageError(f"project memory not found: {memory_id}")
+            if expected_version is not None and existing.get("updated_at") != expected_version:
+                raise InvalidUsageError("memory version conflict; recall the current record")
+            fields: dict = {}
+            if text is not None:
+                text = self._require(text, "text")
+                self._check_sensitive(text)
+                fields["text"] = text
+            if topic is not None:
+                fields["topic"] = self._require(topic, "topic")[:128]
+            if confidence is not None:
+                if not 0.0 <= float(confidence) <= 1.0:
+                    raise InvalidUsageError("confidence must be between 0 and 1")
+                fields["confidence"] = float(confidence)
+            if provenance is not None:
+                provenance = provenance.strip()[:MEM_MAX_PROVENANCE]
+                self._check_sensitive(provenance, "provenance")
+                fields["provenance"] = provenance
+            fields = {k: v for k, v in fields.items() if existing.get(k) != v}
+            if fields:
+                self.repo.project_update(project_root, memory_id, fields, self._now())
+            return self.repo.project_get(project_root, memory_id)
 
     def forget_project(self, project_root: str, memory_id: str) -> bool:
         return self.repo.project_delete(project_root, memory_id)
@@ -367,19 +377,28 @@ class MemoryService:
         provenance = (provenance or "agent").strip()[:MEM_MAX_PROVENANCE]
         self._check_sensitive(summary, "summary")
         self._check_sensitive(outcome, "outcome")
-        memory_id = self._ctx.ids.new("mem-episo")
-        self.repo.episodic_insert(
-            {
-                "id": memory_id,
-                "session_ref": session_id,
-                "project_root": project_root or "",
-                "summary": summary,
-                "outcome": outcome,
-                "provenance": provenance,
-                "created_at": self._now(),
-            }
-        )
-        return {"id": memory_id, "session_ref": session_id, "summary_chars": len(summary)}
+        with self.repo._db.transaction():
+            existing = self.repo.episodic_match(session_id, project_root or "", summary, outcome)
+            if existing:
+                return {
+                    "id": existing["id"],
+                    "session_ref": session_id,
+                    "summary_chars": len(summary),
+                    "deduplicated": True,
+                }
+            memory_id = self._ctx.ids.new("mem-episo")
+            self.repo.episodic_insert(
+                {
+                    "id": memory_id,
+                    "session_ref": session_id,
+                    "project_root": project_root or "",
+                    "summary": summary,
+                    "outcome": outcome,
+                    "provenance": provenance,
+                    "created_at": self._now(),
+                }
+            )
+            return {"id": memory_id, "session_ref": session_id, "summary_chars": len(summary)}
 
     def search_episodic(
         self, project_root: str = "", query: str = "", *, limit: int = 10

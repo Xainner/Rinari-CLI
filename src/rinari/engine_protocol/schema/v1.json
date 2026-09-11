@@ -4,8 +4,19 @@
   "title": "Rinari Engine Protocol v1",
   "type": "object",
   "x-codegen-definitions": [
-    "attachment", "sessionSummary", "projectSummary", "usageSnapshot",
-    "governorSnapshot", "protocolError", "questionOption", "userQuestion", "questionRequest", "filePreview", "webPreview"
+    "attachment",
+    "sessionSummary",
+    "projectSummary",
+    "usageSnapshot",
+    "governorSnapshot",
+    "protocolError",
+    "questionOption",
+    "userQuestion",
+    "questionRequest",
+    "filePreview",
+    "webPreview",
+    "toolAvailability",
+    "toolSummary"
   ],
   "$defs": {
     "webPreview": {
@@ -163,176 +174,669 @@
     },
     "request": {
       "type": "object",
-      "required": ["id", "method"],
+      "required": [
+        "id",
+        "method"
+      ],
       "properties": {
-        "id": { "type": "string", "minLength": 1 },
-        "method": { "$ref": "#/$defs/method" },
-        "params": { "type": "object" }
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "method": {
+          "$ref": "#/$defs/method"
+        },
+        "params": {
+          "type": "object"
+        }
       },
       "additionalProperties": false
     },
     "method": {
       "type": "string",
       "enum": [
-        "engine.info", "runtime.snapshot.get",
-        "session.move", "workspace.file.read", "workspace.preview.start", "workspace.preview.status", "workspace.preview.stop", "question.list", "question.resolve",
-        "session.list", "session.get", "session.create", "session.open",
-        "session.rename", "session.archive", "session.restore", "session.delete",
-        "session.fork", "session.history", "session.mode.set", "session.model.set",
-        "session.permission.get", "session.permission.set", "session.turn.start",
-        "session.turn.cancel", "session.events", "session.timeline", "approval.resolve",
-        "turn.changes.get", "turn.changes.review", "turn.changes.undo.preview",
+        "engine.info",
+        "runtime.snapshot.get",
+        "session.move",
+        "workspace.file.read",
+        "workspace.preview.start",
+        "workspace.preview.status",
+        "workspace.preview.stop",
+        "question.list",
+        "question.resolve",
+        "session.list",
+        "session.get",
+        "session.create",
+        "session.open",
+        "session.rename",
+        "session.archive",
+        "session.restore",
+        "session.delete",
+        "session.fork",
+        "session.history",
+        "session.mode.set",
+        "session.model.set",
+        "session.permission.get",
+        "session.permission.set",
+        "session.turn.start",
+        "target.list",
+        "target.add",
+        "operation.start",
+        "operation.get",
+        "operation.cancel",
+        "session.turn.cancel",
+        "session.events",
+        "session.timeline",
+        "approval.resolve",
+        "turn.changes.get",
+        "turn.changes.review",
+        "turn.changes.undo.preview",
         "turn.changes.undo",
-        "project.list", "project.get", "project.add", "project.update",
-        "project.remove", "project.list_recent", "project.open", "project.status",
-        "project.intelligence", "project.trust", "project.changes", "project.diff",
-        "provider.list", "provider.get", "provider.create", "provider.update",
-        "provider.remove", "provider.test", "provider.discover", "provider.use",
-        "model.list", "model.get", "model.add", "model.alias", "model.remove",
-        "model.use", "model.discover", "model.discovery.start", "model.refresh",
-        "model.test", "model.capabilities", "agent.list", "agent.config.get",
-        "agent.config.set", "soul.list", "soul.get", "soul.create", "soul.update",
-        "soul.remove", "soul.activate", "soul.get_effective", "session.soul.set",
-        "session.soul.clear", "mcp.list", "mcp.get", "mcp.create", "mcp.remove",
-        "mcp.enable", "mcp.disable", "mcp.test", "plugin.list", "plugin.get",
-        "plugin.enable", "plugin.disable", "plugin.diagnostics", "tool.list",
-        "policy.get", "task.tree", "task.get", "verification.latest",
-        "verification.plan", "checkpoint.list", "checkpoint.show", "checkpoint.restore",
-        "pty.start", "pty.write", "pty.resize", "pty.read", "pty.list", "pty.terminate",
-        "profile_bundle.list", "profile_bundle.get", "profile_bundle.create",
-        "profile_bundle.remove", "profile_bundle.apply", "session.queue.add",
-        "session.queue.list", "session.queue.clear", "session.branch",
-        "workspace.file.search", "artifact.list", "artifact.read", "artifact.export",
-        "context.get", "usage.get", "session.close"
+        "project.list",
+        "project.get",
+        "project.add",
+        "project.update",
+        "project.remove",
+        "project.list_recent",
+        "project.open",
+        "project.status",
+        "project.intelligence",
+        "project.trust",
+        "project.changes",
+        "project.diff",
+        "provider.list",
+        "provider.get",
+        "provider.create",
+        "provider.update",
+        "provider.remove",
+        "provider.test",
+        "provider.discover",
+        "provider.use",
+        "model.list",
+        "model.get",
+        "model.add",
+        "model.alias",
+        "model.remove",
+        "model.use",
+        "model.discover",
+        "model.discovery.start",
+        "model.refresh",
+        "model.test",
+        "model.capabilities",
+        "agent.list",
+        "agent.config.get",
+        "agent.config.set",
+        "soul.list",
+        "soul.get",
+        "soul.create",
+        "soul.update",
+        "soul.remove",
+        "soul.activate",
+        "soul.get_effective",
+        "session.soul.set",
+        "session.soul.clear",
+        "mcp.list",
+        "mcp.get",
+        "mcp.create",
+        "mcp.remove",
+        "mcp.enable",
+        "mcp.disable",
+        "mcp.test",
+        "plugin.list",
+        "plugin.get",
+        "plugin.enable",
+        "plugin.disable",
+        "plugin.diagnostics",
+        "tool.list",
+        "policy.get",
+        "task.tree",
+        "task.get",
+        "verification.latest",
+        "verification.plan",
+        "checkpoint.list",
+        "checkpoint.show",
+        "checkpoint.restore",
+        "pty.start",
+        "pty.write",
+        "pty.resize",
+        "pty.read",
+        "pty.list",
+        "pty.terminate",
+        "profile_bundle.list",
+        "profile_bundle.get",
+        "profile_bundle.create",
+        "profile_bundle.remove",
+        "profile_bundle.apply",
+        "session.queue.add",
+        "session.queue.list",
+        "session.queue.clear",
+        "session.branch",
+        "workspace.file.search",
+        "artifact.list",
+        "artifact.read",
+        "artifact.export",
+        "context.get",
+        "usage.get",
+        "session.close",
+        "channel.pending",
+        "channel.resolve",
+        "artifact.receive_image",
+        "artifact.delete_media",
+        "session.image_support",
+        "artifact.media_list",
+        "model.vision.set"
       ]
     },
     "event": {
       "type": "string",
       "enum": [
-        "turn.started", "turn.completed", "turn.failed", "turn.cancelled", "turn.stopped",
-        "model.started", "model.content.delta", "model.content.completed",
-        "model.completed", "model.failed", "tool.requested", "tool.started",
-        "tool.output.delta", "tool.completed", "tool.failed", "tool.cancelled",
-        "approval.requested", "approval.resolved", "approval.expired",
-        "question.requested", "question.resolved", "question.expired", "session.moved",
-        "governor.progress", "governor.nudge", "governor.compact",
-        "governor.consolidate", "governor.stop", "usage.updated",
-        "agent.started", "agent.completed", "agent.failed",
-        "verification.started", "verification.completed", "verification.failed",
-        "model.discovery.completed", "model.discovery.failed",
-        "turn.changes.completed", "turn.changes.undo.started",
-        "turn.changes.undo.completed", "turn.changes.undo.conflict",
-        "workspace.changed"
+        "turn.started",
+        "turn.completed",
+        "turn.failed",
+        "turn.cancelled",
+        "turn.stopped",
+        "model.started",
+        "model.content.delta",
+        "model.content.completed",
+        "model.completed",
+        "model.failed",
+        "tool.requested",
+        "tool.started",
+        "tool.output.delta",
+        "tool.completed",
+        "tool.failed",
+        "tool.cancelled",
+        "approval.requested",
+        "approval.resolved",
+        "approval.expired",
+        "question.requested",
+        "question.resolved",
+        "question.expired",
+        "session.moved",
+        "governor.progress",
+        "governor.nudge",
+        "governor.compact",
+        "governor.consolidate",
+        "governor.stop",
+        "usage.updated",
+        "agent.started",
+        "agent.completed",
+        "agent.failed",
+        "verification.started",
+        "verification.completed",
+        "verification.failed",
+        "model.discovery.completed",
+        "model.discovery.failed",
+        "turn.changes.completed",
+        "turn.changes.undo.started",
+        "turn.changes.undo.completed",
+        "turn.changes.undo.conflict",
+        "workspace.changed",
+        "channel.requested"
       ]
     },
     "attachment": {
       "type": "object",
-      "required": ["id", "path", "name", "source"],
+      "required": [
+        "id",
+        "path",
+        "name",
+        "source"
+      ],
       "properties": {
-        "id": { "type": "string" }, "path": { "type": "string" },
-        "name": { "type": "string" }, "mime_type": { "type": ["string", "null"] },
-        "size": { "type": ["integer", "null"], "minimum": 0 },
-        "source": { "enum": ["native", "workspace"] }
+        "id": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "mime_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "size": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "source": {
+          "enum": [
+            "native",
+            "workspace"
+          ]
+        }
       },
       "additionalProperties": false
     },
     "sessionSummary": {
       "type": "object",
       "required": [
-        "id", "kind", "title", "mode", "state", "updated_at", "project_id",
-        "project_root", "current_cwd", "git_branch", "last_active_at",
-        "provider_id", "model_id", "permission_profile",
+        "id",
+        "kind",
+        "title",
+        "mode",
+        "state",
+        "updated_at",
+        "project_id",
+        "project_root",
+        "current_cwd",
+        "git_branch",
+        "last_active_at",
+        "provider_id",
+        "model_id",
+        "permission_profile",
         "effective_permission_profile"
       ],
       "properties": {
-        "id": { "type": "string" },
-        "kind": { "enum": ["CHAT", "PROJECT"] },
-        "title": { "type": ["string", "null"] },
-        "mode": { "enum": ["plan", "build", "review"] },
-        "state": { "enum": ["active", "closed", "archived"] },
-        "updated_at": { "type": "string" },
-        "project_id": { "type": ["string", "null"] },
-        "project_root": { "type": ["string", "null"] },
-        "current_cwd": { "type": ["string", "null"] },
-        "git_branch": { "type": ["string", "null"] },
-        "last_active_at": { "type": "string" },
-        "provider_id": { "type": "string" },
-        "model_id": { "type": "string" },
-        "permission_profile": { "enum": ["read-only", "workspace", "full-access"] },
-        "effective_permission_profile": { "enum": ["read-only", "workspace", "full-access"] },
-        "read_permission_profile": { "enum": ["read-only", "workspace", "full-access"] }
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "CHAT",
+            "PROJECT"
+          ]
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "enum": [
+            "plan",
+            "build",
+            "review"
+          ]
+        },
+        "state": {
+          "enum": [
+            "active",
+            "closed",
+            "archived"
+          ]
+        },
+        "updated_at": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project_root": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "current_cwd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "git_branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "last_active_at": {
+          "type": "string"
+        },
+        "provider_id": {
+          "type": "string"
+        },
+        "model_id": {
+          "type": "string"
+        },
+        "permission_profile": {
+          "enum": [
+            "read-only",
+            "workspace",
+            "full-access"
+          ]
+        },
+        "effective_permission_profile": {
+          "enum": [
+            "read-only",
+            "workspace",
+            "full-access"
+          ]
+        },
+        "read_permission_profile": {
+          "enum": [
+            "read-only",
+            "workspace",
+            "full-access"
+          ]
+        }
       },
       "additionalProperties": true
     },
     "projectSummary": {
       "type": "object",
       "required": [
-        "id", "root", "canonical_root", "name", "description", "pinned",
-        "archived", "git_fingerprint", "created_at", "updated_at", "last_opened_at"
+        "id",
+        "root",
+        "canonical_root",
+        "name",
+        "description",
+        "pinned",
+        "archived",
+        "git_fingerprint",
+        "created_at",
+        "updated_at",
+        "last_opened_at"
       ],
       "properties": {
-        "id": { "type": "string" },
-        "root": { "type": "string" },
-        "canonical_root": { "type": "string" },
-        "name": { "type": "string" },
-        "description": { "type": "string" },
-        "pinned": { "type": "boolean" },
-        "archived": { "type": "boolean" },
-        "git_fingerprint": { "type": ["string", "null"] },
-        "created_at": { "type": "string" },
-        "updated_at": { "type": "string" },
-        "last_opened_at": { "type": "string" },
-        "active_session_id": { "type": ["string", "null"] }
+        "id": {
+          "type": "string"
+        },
+        "root": {
+          "type": "string"
+        },
+        "canonical_root": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "pinned": {
+          "type": "boolean"
+        },
+        "archived": {
+          "type": "boolean"
+        },
+        "git_fingerprint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        },
+        "last_opened_at": {
+          "type": "string"
+        },
+        "active_session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
       },
       "additionalProperties": true
     },
     "usageSnapshot": {
       "type": "object",
       "required": [
-        "model_calls", "tool_calls", "network_calls", "subagent_calls",
-        "max_recursion_depth", "input_tokens", "output_tokens", "wall_time_s", "exhausted"
+        "model_calls",
+        "tool_calls",
+        "network_calls",
+        "subagent_calls",
+        "max_recursion_depth",
+        "input_tokens",
+        "output_tokens",
+        "wall_time_s",
+        "exhausted"
       ],
       "properties": {
-        "model_calls": { "type": "integer" },
-        "tool_calls": { "type": "integer" },
-        "network_calls": { "type": "integer" },
-        "subagent_calls": { "type": "integer" },
-        "max_recursion_depth": { "type": "integer" },
-        "input_tokens": { "type": "integer" },
-        "output_tokens": { "type": "integer" },
-        "wall_time_s": { "type": "number" },
-        "estimated_cost": { "type": ["number", "null"] },
-        "exhausted": { "type": "array", "items": { "type": "string" } }
+        "model_calls": {
+          "type": "integer"
+        },
+        "tool_calls": {
+          "type": "integer"
+        },
+        "network_calls": {
+          "type": "integer"
+        },
+        "subagent_calls": {
+          "type": "integer"
+        },
+        "max_recursion_depth": {
+          "type": "integer"
+        },
+        "input_tokens": {
+          "type": "integer"
+        },
+        "output_tokens": {
+          "type": "integer"
+        },
+        "wall_time_s": {
+          "type": "number"
+        },
+        "estimated_cost": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "exhausted": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
       },
       "additionalProperties": false
     },
     "governorSnapshot": {
       "type": "object",
       "required": [
-        "execution", "recovery_attempts", "max_recovery_attempts", "compactions",
-        "last_compacted_history_size", "context_pressure", "progress"
+        "execution",
+        "recovery_attempts",
+        "max_recovery_attempts",
+        "compactions",
+        "last_compacted_history_size",
+        "context_pressure",
+        "progress"
       ],
       "properties": {
-        "execution": { "const": "automatic" },
-        "recovery_attempts": { "type": "integer" },
-        "max_recovery_attempts": { "type": "integer" },
-        "compactions": { "type": "integer" },
-        "last_compacted_history_size": { "type": "integer" },
-        "context_pressure": { "type": ["number", "null"] },
-        "progress": { "type": ["object", "null"], "additionalProperties": true }
+        "execution": {
+          "const": "automatic"
+        },
+        "recovery_attempts": {
+          "type": "integer"
+        },
+        "max_recovery_attempts": {
+          "type": "integer"
+        },
+        "compactions": {
+          "type": "integer"
+        },
+        "last_compacted_history_size": {
+          "type": "integer"
+        },
+        "context_pressure": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "progress": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": true
+        }
       },
       "additionalProperties": false
     },
     "protocolError": {
       "type": "object",
-      "required": ["code", "message", "retryable", "details"],
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "details"
+      ],
       "properties": {
-        "code": { "type": "string" },
-        "message": { "type": "string" },
-        "retryable": { "type": "boolean" },
-        "details": { "type": "object", "additionalProperties": true }
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": true
+        }
       },
       "additionalProperties": true
+    },
+    "toolAvailability": {
+      "type": "object",
+      "required": [
+        "available",
+        "reason",
+        "requires"
+      ],
+      "properties": {
+        "available": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "requires": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "toolSummary": {
+      "type": "object",
+      "required": [
+        "name",
+        "description",
+        "risk",
+        "side_effects",
+        "namespace",
+        "capabilities",
+        "permissions",
+        "always_loaded"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "risk": {
+          "type": "string"
+        },
+        "side_effects": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "capabilities": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "permissions": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "always_loaded": {
+          "type": "boolean"
+        },
+        "availability": {
+          "$ref": "#/$defs/toolAvailability"
+        },
+        "input_schema": {
+          "type": "object"
+        },
+        "output_schema": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      }
+    },
+    "channelContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "binding_id",
+        "capabilities"
+      ],
+      "properties": {
+        "binding_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "channel.reply",
+              "channel.send_attachment",
+              "channel.delivery_get"
+            ]
+          }
+        }
+      }
+    },
+    "imageReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "uri",
+        "sha256"
+      ],
+      "properties": {
+        "uri": {
+          "type": "string",
+          "pattern": "^artifact://"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
     }
   }
 }

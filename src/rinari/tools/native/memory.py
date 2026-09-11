@@ -45,7 +45,7 @@ def _service(ctx: ToolContext):
 
 
 def _project_root(ctx: ToolContext) -> Path | None:
-    root = ctx.project_root if ctx.project_root is not None else ctx.cwd
+    root = ctx.project_root if ctx.kind == "PROJECT" else None
     if root is None or not Path(root).is_dir():
         return None
     return Path(root).resolve()
@@ -209,7 +209,12 @@ def memory_update(input: dict, ctx: ToolContext) -> ToolResult:
     try:
         if scope == "user":
             row = service.update_user(
-                memory_id, text=text, topic=topic, confidence=confidence, provenance=provenance
+                memory_id,
+                text=text,
+                topic=topic,
+                confidence=confidence,
+                provenance=provenance,
+                expected_version=input.get("expected_version"),
             )
         else:
             root = _project_root(ctx)
@@ -225,9 +230,13 @@ def memory_update(input: dict, ctx: ToolContext) -> ToolResult:
                 topic=topic,
                 confidence=confidence,
                 provenance=provenance,
+                expected_version=input.get("expected_version"),
             )
     except Exception as exc:
-        return _fail(ToolErrorCode.NOT_FOUND, getattr(exc, "message", str(exc)))
+        return _fail(
+            ToolErrorCode.CONFLICT if "version conflict" in str(exc) else ToolErrorCode.NOT_FOUND,
+            getattr(exc, "message", str(exc)),
+        )
     return _ok(row)
 
 
@@ -362,6 +371,10 @@ def memory_tools() -> list[ToolDefinition]:
                 "properties": {
                     "scope": {"type": "string", "enum": ["user", "project"]},
                     "id": {"type": "string"},
+                    "expected_version": {
+                        "type": "string",
+                        "description": "updated_at from recall; reject a concurrent update",
+                    },
                     "text": {"type": "string"},
                     "topic": {"type": "string"},
                     "confidence": {"type": "number", "minimum": 0, "maximum": 1},

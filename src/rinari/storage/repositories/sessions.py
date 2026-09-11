@@ -247,8 +247,8 @@ class SessionMessageRepository:
                 """
                 INSERT INTO session_messages (
                     id, session_id, seq, role, content,
-                    tool_calls_json, tool_call_id, name, created_at, turn_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    tool_calls_json, tool_call_id, name, created_at, turn_id, images_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     rec.id,
@@ -261,6 +261,7 @@ class SessionMessageRepository:
                     rec.name,
                     rec.created_at,
                     rec.turn_id,
+                    json.dumps(rec.images) if rec.images else None,
                 ),
             )
 
@@ -314,6 +315,10 @@ class WorktreeBaselineRepository:
 
 
 def _message_to_record(row: dict) -> SessionMessageRecord:
+    try:
+        images_json = row["images_json"]
+    except (IndexError, KeyError):
+        images_json = None
     return SessionMessageRecord(
         id=row["id"],
         session_id=row["session_id"],
@@ -325,4 +330,5 @@ def _message_to_record(row: dict) -> SessionMessageRecord:
         name=row["name"],
         created_at=row["created_at"],
         turn_id=row["turn_id"],
+        images=json.loads(images_json) if images_json else None,
     )

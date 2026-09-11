@@ -452,3 +452,40 @@ def test_web_fetch_binary_not_text(tmp_path) -> None:
     assert result.ok
     assert result.data["binary"] is True
     assert "text" not in result.data
+
+
+def test_web_operations_share_snapshot_and_can_refresh(tmp_path):
+    from rinari.tools.native.web import web_links, web_open
+
+    calls = []
+
+    def handle(request):
+        calls.append(str(request.url))
+        return httpx.Response(200, text=PAGE_HTML, headers={"content-type": "text/html"})
+
+    ctx = _ctx(tmp_path, web=_factory(handle))
+    args = {"url": "https://example.com/"}
+    assert web_open(args, ctx).ok
+    assert web_links(args, ctx).ok
+    assert len(calls) == 1
+    assert web_open({**args, "refresh": True}, ctx).ok
+    assert len(calls) == 2
+
+
+def test_source_id_keeps_exact_snapshot_and_unknown_id_does_not_fetch(tmp_path):
+    calls = []
+    def handle(request):
+        calls.append(str(request.url))
+        return httpx.Response(200, text=PAGE_HTML, headers={"content-type": "text/html"})
+    ctx = _ctx(tmp_path, web=_factory(handle))
+    registry = ToolRegistry()
+    registry.register_all(web_tools())
+    runtime = ToolRuntime(registry, PolicyEngine(), ApprovalEngine(prompt=lambda _: "y"))
+    opened = runtime.execute("web.open", {"url": "https://example.com/"}, ctx)
+    assert opened.ok
+    reference = opened.data["source_id"]
+    cited = runtime.execute("web.cite", {"source_id": reference}, ctx)
+    assert cited.ok and cited.data["citation"]["sha256"] == opened.data["provenance"]["sha256"]
+    assert len(calls) == 1
+    assert not runtime.execute("web.cite", {"source_id": "expired"}, ctx).ok
+    assert len(calls) == 1

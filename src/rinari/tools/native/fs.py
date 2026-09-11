@@ -8,12 +8,15 @@ bounded (harness.md section 65).
 
 from __future__ import annotations
 
+import codecs
 import fnmatch
+import hashlib
 import os
 import time
 from pathlib import Path
 from typing import Any
 
+from rinari.tools.atomic import ContentConflict, replace_text
 from rinari.tools.definition import (
     RISK_LOW,
     RISK_MEDIUM,
@@ -80,10 +83,14 @@ def _classify_user_work(ctx: ToolContext, resolved: Path) -> str | None:
 
 
 def fs_read(input: dict, ctx: ToolContext) -> ToolResult:
+    if "paths" in input:
+        from rinari.tools.read_batch import read_batch
+
+        return read_batch(input["paths"], ctx, fs_read)
     resolved, error = _resolve_read(ctx, input.get("path"))
     if error:
         return error
-    if resolved.is_dir():
+    if not resolved.is_file():
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "Path is a directory; use fs.list")
     raw = read_text_bounded(resolved)
     return _ok(
@@ -92,28 +99,35 @@ def fs_read(input: dict, ctx: ToolContext) -> ToolResult:
             "size_bytes": resolved.stat().st_size,
             "text": raw.text,
             "truncated": raw.truncated,
+            "sha256": raw.sha256,
         }
     )
 
 
 def read_text_bounded(path: Path, max_bytes: int = MAX_READ_BYTES) -> _Bounded:
     try:
-        raw = path.read_bytes()
+        with path.open("rb") as stream:
+            raw = stream.read(max_bytes + 1)
     except OSError as exc:
         return _Bounded(text=f"[unreadable: {exc.__class__.__name__}]", truncated=False)
     truncated = len(raw) > max_bytes
     data = raw[:max_bytes]
     try:
-        text = data.decode("utf-8")
+        text = codecs.getincrementaldecoder("utf-8")().decode(data, final=not truncated)
     except UnicodeDecodeError:
         return _Bounded(text="[binary file - content not shown]", truncated=truncated)
-    return _Bounded(text=text, truncated=truncated)
+    return _Bounded(
+        text=text,
+        truncated=truncated,
+        sha256=hashlib.sha256(data).hexdigest() if not truncated else None,
+    )
 
 
 class _Bounded:
-    def __init__(self, text: str, truncated: bool) -> None:
+    def __init__(self, text: str, truncated: bool, sha256: str | None = None) -> None:
         self.text = text
         self.truncated = truncated
+        self.sha256 = sha256
 
 
 # -- fs.read_lines ------------------------------------------------------------
@@ -123,20 +137,56 @@ def fs_read_lines(input: dict, ctx: ToolContext) -> ToolResult:
     resolved, error = _resolve_read(ctx, input.get("path"))
     if error:
         return error
-    raw = read_text_bounded(resolved, max_bytes=1_000_000)
-    lines = raw.text.splitlines()
-    start = input.get("start", 1)
-    end = input.get("end", len(lines))
     try:
-        start, end = int(start), int(end)
+        start = max(1, int(input.get("start", 1)))
+        end = int(input.get("end", start + 199))
+        if end < start:
+            return _fail(ToolErrorCode.INVALID_ARGUMENT, "end must be >= start")
+        end = min(end, start + 1999)
+        selected = []
+        number = 0
+        used = 0
+        complete = True
+        with resolved.open("r", encoding="utf-8", newline="") as stream:
+            while True:
+                if ctx.cancellation:
+                    ctx.cancellation.throw_if_cancelled()
+                if ctx.deadline_at is not None and time.time() >= ctx.deadline_at:
+                    return _fail(ToolErrorCode.TIMEOUT, "Line scan deadline exhausted")
+                line = stream.readline(1_000_001)
+                if not line:
+                    break
+                if len(line) > 1_000_000:
+                    return _fail(ToolErrorCode.RESOURCE_EXHAUSTED, "Line exceeds 1 MB")
+                number += 1
+                if number > end:
+                    complete = False
+                    break
+                if number >= start:
+                    text = line.rstrip("\r\n")
+                    if used + len(text) > 64_000:
+                        complete = False
+                        break
+                    selected.append({"line": number, "text": text})
+                    used += len(text)
+        return ToolResult(
+            ok=True,
+            data={
+                "path": str(resolved),
+                "lines": selected,
+                "total_lines": number if complete else None,
+                "next_line": None
+                if complete
+                else (selected[-1]["line"] + 1 if selected else start),
+            },
+            truncated=not complete,
+        )
+    except UnicodeDecodeError:
+        return _fail(ToolErrorCode.INVALID_ARGUMENT, "File is not valid UTF-8 text")
+    except OSError as exc:
+        return _fail(ToolErrorCode.PERMISSION_DENIED, f"Read failed: {type(exc).__name__}")
     except (TypeError, ValueError):
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "start/end must be integers")
-    start = max(1, start)
-    end = min(len(lines), max(start, end))
-    selected = [
-        {"line": start + i, "text": content} for i, content in enumerate(lines[start - 1 : end])
-    ]
-    return _ok({"path": str(resolved), "lines": selected, "total_lines": len(lines)})
 
 
 # -- fs.write -----------------------------------------------------------------
@@ -155,10 +205,16 @@ def fs_write(input: dict, ctx: ToolContext) -> ToolResult:
     try:
         if create_parents:
             resolved.parent.mkdir(parents=True, exist_ok=True)
-        resolved.write_text(content, encoding="utf-8")
+        digest = replace_text(resolved, content, input.get("expected_hash"))
+    except ContentConflict as exc:
+        return _fail(ToolErrorCode.CONFLICT, str(exc))
     except OSError as exc:
         return _fail(ToolErrorCode.PERMISSION_DENIED, f"Write failed: {exc.__class__.__name__}")
-    data: dict = {"path": str(resolved), "bytes_written": len(content.encode("utf-8"))}
+    data: dict = {
+        "path": str(resolved),
+        "bytes_written": len(content.encode("utf-8")),
+        "sha256": digest,
+    }
     if pre_existing is not None:
         data["user_pre_existing_changes"] = True
         data["warning"] = (
@@ -171,6 +227,10 @@ def fs_write(input: dict, ctx: ToolContext) -> ToolResult:
 
 
 def fs_patch(input: dict, ctx: ToolContext) -> ToolResult:
+    if "files" in input:
+        from rinari.tools.patches import patch_files
+
+        return patch_files(input["files"], ctx)
     resolved, error = _resolve_write(ctx, input.get("path"))
     if error:
         return error
@@ -181,7 +241,8 @@ def fs_patch(input: dict, ctx: ToolContext) -> ToolResult:
     if not old:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "old_string must not be empty")
     try:
-        original = resolved.read_text(encoding="utf-8")
+        with resolved.open("r", encoding="utf-8", newline="") as stream:
+            original = stream.read()
     except UnicodeDecodeError:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "Cannot patch a non-UTF-8 file")
     except OSError as exc:
@@ -205,12 +266,19 @@ def fs_patch(input: dict, ctx: ToolContext) -> ToolResult:
     )
     pre_existing = _classify_user_work(ctx, resolved)
     try:
-        resolved.write_text(updated, encoding="utf-8")
+        digest = replace_text(
+            resolved,
+            updated,
+            input.get("expected_hash") or hashlib.sha256(original.encode("utf-8")).hexdigest(),
+        )
+    except ContentConflict as exc:
+        return _fail(ToolErrorCode.CONFLICT, str(exc))
     except OSError as exc:
         return _fail(ToolErrorCode.PERMISSION_DENIED, f"Write failed: {exc.__class__.__name__}")
     data = {
         "path": str(resolved),
         "replacements": count if input.get("replace_all", False) else 1,
+        "sha256": digest,
     }
     if pre_existing is not None:
         data["user_pre_existing_changes"] = True
@@ -231,9 +299,15 @@ def fs_list(input: dict, ctx: ToolContext) -> ToolResult:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "Path is not a directory")
     entries = []
     try:
-        for entry in sorted(resolved.iterdir(), key=lambda p: (p.is_file(), p.name.lower())):
-            if len(entries) >= MAX_LIST_ENTRIES:
-                break
+        offset = max(0, int(input.get("offset", 0)))
+        limit = max(1, min(MAX_LIST_ENTRIES, int(input.get("limit", MAX_LIST_ENTRIES))))
+        revision = str(resolved.stat().st_mtime_ns)
+        if input.get("revision") is not None and input["revision"] != revision:
+            return _fail(ToolErrorCode.CONFLICT, "Directory changed; restart pagination")
+        all_entries = sorted(
+            resolved.iterdir(), key=lambda p: (p.is_file(), p.name.lower(), p.name)
+        )
+        for entry in all_entries[offset : offset + limit]:
             try:
                 size = entry.stat().st_size if entry.is_file() else None
             except OSError:
@@ -247,7 +321,19 @@ def fs_list(input: dict, ctx: ToolContext) -> ToolResult:
             )
     except OSError as exc:
         return _fail(ToolErrorCode.PERMISSION_DENIED, f"List failed: {exc.__class__.__name__}")
-    return _ok({"path": str(resolved), "entries": entries})
+    except (TypeError, ValueError):
+        return _fail(ToolErrorCode.INVALID_ARGUMENT, "offset/limit must be integers")
+    return _ok(
+        {
+            "path": str(resolved),
+            "entries": entries,
+            "revision": revision,
+            "total_entries": len(all_entries),
+            "next_offset": offset + len(entries)
+            if offset + len(entries) < len(all_entries)
+            else None,
+        }
+    )
 
 
 # -- fs.glob --------------------------------------------------------------------
@@ -261,19 +347,20 @@ def fs_glob(input: dict, ctx: ToolContext) -> ToolResult:
     pattern = input.get("pattern")
     if not isinstance(pattern, str) or not pattern:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "pattern must be a non-empty string")
-    matches: list[str] = []
+    from rinari.tools.file_search import file_matches
+
     try:
-        for path in resolved.glob(pattern):
-            if len(matches) >= 500:
-                break
-            try:
-                ctx.sandbox.assert_readable(path.resolve())
-            except Exception:
-                continue
-            matches.append(str(path))
-    except OSError as exc:
-        return _fail(ToolErrorCode.PERMISSION_DENIED, f"Glob failed: {exc.__class__.__name__}")
-    return _ok({"root": str(resolved), "pattern": pattern, "matches": sorted(matches)})
+        return _ok(
+            file_matches(
+                resolved,
+                pattern,
+                ctx,
+                limit=min(500, max(1, int(input.get("limit", 500)))),
+                offset=max(0, int(input.get("offset", 0))),
+            )
+        )
+    except ValueError as exc:
+        return _fail(ToolErrorCode.INVALID_ARGUMENT, str(exc))
 
 
 def _walk_text_files(root: Path, include: str | None):
@@ -324,43 +411,19 @@ def fs_search_text(input: dict, ctx: ToolContext) -> ToolResult:
     pattern = input.get("pattern")
     if not isinstance(pattern, str) or not pattern:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "pattern must be a non-empty string")
-    include = input.get("include")
-    needle = pattern.lower()
-    files = [resolved] if resolved.is_file() else list(_walk_text_files(resolved, include))
-    matches = []
-    searched = 0
-    for file in files:
-        if not _is_text_file(file):
-            continue
-        searched += 1
-        try:
-            lines = file.read_text(encoding="utf-8", errors="strict").splitlines()
-        except (UnicodeDecodeError, OSError):
-            continue
-        file_hits = [
-            {"line": i + 1, "text": line.rstrip()[:500]}
-            for i, line in enumerate(lines)
-            if needle in line.lower()
-        ]
-        if file_hits:
-            matches.append({"file": str(file), "lines": file_hits[:50]})
-        if len(matches) >= MAX_SEARCH_RESULTS:
-            break
-    return _ok(
-        {
-            "root": str(resolved),
-            "pattern": pattern,
-            "files_searched": searched,
-            "matches": matches,
-            "truncated": len(matches) >= MAX_SEARCH_RESULTS,
-        }
-    )
+    from rinari.tools.text_search import search_text
+
+    return search_text(resolved, input, ctx, literal=True)
 
 
 # -- fs.stat --------------------------------------------------------------------
 
 
 def fs_stat(input: dict, ctx: ToolContext) -> ToolResult:
+    if "paths" in input:
+        from rinari.tools.read_batch import read_batch
+
+        return read_batch(input["paths"], ctx, fs_stat)
     resolved, error = _resolve_read(ctx, input.get("path"))
     if error:
         return error
@@ -399,8 +462,15 @@ def fs_diff(input: dict, ctx: ToolContext) -> ToolResult:
     path_b, error = _resolve_read(ctx, input.get("b"))
     if error:
         return error
-    text_a = read_text_bounded(path_a, max_bytes=1_000_000).text
-    text_b = read_text_bounded(path_b, max_bytes=1_000_000).text
+    source_a = read_text_bounded(path_a, max_bytes=1_000_000)
+    source_b = read_text_bounded(path_b, max_bytes=1_000_000)
+    if source_a.truncated or source_b.truncated:
+        return _fail(
+            ToolErrorCode.RESOURCE_EXHAUSTED,
+            "Input exceeds the diff limit; compare targeted ranges or use git.diff. "
+            "No complete comparison was performed.",
+        )
+    text_a, text_b = source_a.text, source_b.text
     diff = list(
         difflib.unified_diff(
             text_a.splitlines(),
@@ -425,16 +495,23 @@ def fs_diff(input: dict, ctx: ToolContext) -> ToolResult:
 
 
 def filesystem_tools() -> list[ToolDefinition]:
+    from rinari.tools.patches import FILES_SCHEMA
+    from rinari.tools.read_batch import PATHS_SCHEMA
+
     return [
         ToolDefinition(
             name="fs.read",
-            description="Read a text file inside the session root.",
+            description=(
+                "Read a text file; use paths for up to 16 independent files in one "
+                "parallel batch. Every path is permission checked."
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
+                    "paths": PATHS_SCHEMA,
                 },
-                "required": ["path"],
+                "oneOf": [{"required": ["path"]}, {"required": ["paths"]}],
             },
             risk=RISK_LOW,
             side_effects=SIDE_EFFECT_NONE,
@@ -467,6 +544,10 @@ def filesystem_tools() -> list[ToolDefinition]:
                     "path": {"type": "string"},
                     "content": {"type": "string"},
                     "create_parents": {"type": "boolean"},
+                    "expected_hash": {
+                        "type": "string",
+                        "description": "SHA-256 of the current file, or missing for create-only.",
+                    },
                 },
                 "required": ["path", "content"],
             },
@@ -478,7 +559,10 @@ def filesystem_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="fs.patch",
-            description="Replace the exact unique old_string with new_string in a file.",
+            description=(
+                "Replace unique text, or supply files with edits for a prevalidated "
+                "multi-file patch. Rollback never overwrites concurrent changes."
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -486,8 +570,16 @@ def filesystem_tools() -> list[ToolDefinition]:
                     "old_string": {"type": "string"},
                     "new_string": {"type": "string"},
                     "replace_all": {"type": "boolean"},
+                    "files": FILES_SCHEMA,
+                    "expected_hash": {
+                        "type": "string",
+                        "description": "SHA-256 of the file previously read.",
+                    },
                 },
-                "required": ["path", "old_string", "new_string"],
+                "oneOf": [
+                    {"required": ["path", "old_string", "new_string"]},
+                    {"required": ["files"]},
+                ],
             },
             risk=RISK_MEDIUM,
             side_effects=SIDE_EFFECT_LOCAL_REVERSIBLE,
@@ -497,11 +589,14 @@ def filesystem_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="fs.list",
-            description="List the entries of a directory.",
+            description="List a directory page. Continue with next_offset and revision.",
             input_schema={
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
+                    "offset": {"type": "integer", "minimum": 0},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": MAX_LIST_ENTRIES},
+                    "revision": {"type": "string"},
                 },
             },
             risk=RISK_LOW,
@@ -549,8 +644,9 @@ def filesystem_tools() -> list[ToolDefinition]:
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
+                    "paths": PATHS_SCHEMA,
                 },
-                "required": ["path"],
+                "oneOf": [{"required": ["path"]}, {"required": ["paths"]}],
             },
             risk=RISK_LOW,
             side_effects=SIDE_EFFECT_NONE,

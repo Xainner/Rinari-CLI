@@ -195,3 +195,18 @@ def test_shell_cancel_kills_process_without_waiting_for_timeout(env) -> None:
     assert time.monotonic() - started < 5
     assert result["value"].ok is False
     assert result["value"].error.code.value == "CANCELLED"
+
+
+def test_process_cursor_returns_only_new_output(env):
+    from rinari.tools.native.process import process_output, process_wait
+
+    tmp_path, root = env
+    ctx = _ctx(tmp_path, root, processes=ProcessRegistry())
+    handle = ctx.processes.start(_python("print('abcdef')"))
+    assert process_wait({"handle": handle, "timeout_s": 10}, ctx).ok
+    first = process_output({"handle": handle, "max_chars": 3}, ctx)
+    second = process_output({"handle": handle, "cursor": first.data["cursor"]}, ctx)
+    third = process_output({"handle": handle, "cursor": second.data["cursor"]}, ctx)
+    assert first.data["stdout"] == "abc"
+    assert second.data["stdout"].startswith("def")
+    assert third.data["stdout"] == ""

@@ -60,3 +60,25 @@ def test_artifact_read_rejects_another_session(tool_ctx: ToolContext) -> None:
 
     assert result.ok is False
     assert result.error.code.value == "PERMISSION_DENIED"
+
+
+def test_artifact_cursor_preserves_unicode(tool_ctx):
+    ctx = tool_ctx
+    path = ctx.artifact_root / ctx.session_id / "runtime" / "unicode.txt"
+    path.parent.mkdir(parents=True)
+    original = "ñ😀fin"
+    path.write_text(original, encoding="utf-8")
+    uri = f"artifact://{ctx.session_id}/runtime/unicode.txt"
+    cursor = 0
+    chunks = []
+    while cursor is not None:
+        result = _tool("artifact.read").handler(
+            {"uri": uri, "start_byte": cursor, "max_bytes": 1}, ctx
+        )
+        assert result.ok
+        assert result.data["end_byte"] > cursor
+        chunks.append(result.data["text"])
+        cursor = result.data["next_start_byte"]
+    assert "".join(chunks) == original
+    path.write_bytes(b"\xff\0")
+    assert not _tool("artifact.read").handler({"uri": uri}, ctx).ok

@@ -1,8 +1,8 @@
 """Unified capability search (phase 5).
 
 Ranks the capabilities available to the session — native, plugin, MCP and
-OpenAPI tools (they all converge in the same ToolRegistry) plus the browser
-fallback — with a reliability x risk model.
+OpenAPI tools (they all converge in the same ToolRegistry), including registered
+browser tools — with a reliability x risk model.
 
 Reliability follows the harness.md preference order (typed connector >
 MCP > HTTP > browser DOM):
@@ -16,6 +16,8 @@ ships in v1.
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from collections.abc import Callable
 
 from rinari.tools.definition import (
@@ -46,6 +48,31 @@ _RELIABILITY: dict[str, float] = {
 
 _RISK_DEMOTION = {RISK_MEDIUM: 0.05, RISK_HIGH: 0.15}
 
+_INTENT_TERMS = {
+    "archivos": "file",
+    "archivo": "file",
+    "leer": "read",
+    "buscar": "search",
+    "carpeta": "directory",
+    "directorios": "directory",
+    "navegador": "browser",
+    "remoto": "ssh",
+    "servidor": "ssh",
+    "hardware": "hardware",
+    "memoria": "memory",
+    "proceso": "process",
+    "terminal": "pty",
+    "verificar": "verify",
+}
+
+
+def _terms(text: str) -> list[str]:
+    normalized = "".join(
+        c for c in unicodedata.normalize("NFKD", text.lower()) if not unicodedata.combining(c)
+    )
+    words = re.findall(r"[\w.-]+", normalized)
+    return list(dict.fromkeys([*words, *(_INTENT_TERMS[w] for w in words if w in _INTENT_TERMS)]))
+
 
 def classify_source(tool: ToolDefinition) -> str:
     manifest = tool.manifest or {}
@@ -73,7 +100,7 @@ def search_capabilities(
     limit: int = 10,
     extra_sources: Callable[[], list[ToolDefinition]] | None = None,
 ) -> list[dict]:
-    terms = [t.lower() for t in query.split() if t]
+    terms = _terms(query)
     candidates: list[ToolDefinition] = [
         tool for tool in (registry.get(name) for name in registry.names()) if tool is not None
     ]
@@ -86,7 +113,12 @@ def search_capabilities(
             continue
         seen.add(tool.name)
         haystack = f"{tool.name} {tool.description}".lower()
-        base = sum(haystack.count(term) for term in terms) if terms else 1
+        # A verbose description must not win merely by repeating keywords.
+        base = (
+            sum((3 if term in tool.name.lower() else 1) for term in terms if term in haystack)
+            if terms
+            else 1
+        )
         if terms and base == 0:
             continue
         source = classify_source(tool)
@@ -107,24 +139,7 @@ def search_capabilities(
                 "score": round(score, 3),
             }
         )
-    if not results and terms:
-        results.append(_browser_fallback(query))
     return results
-
-
-def _browser_fallback(query: str) -> dict:
-    return {
-        "name": "browser.open",
-        "source": SOURCE_BROWSER,
-        "description": (
-            f"No typed capability matched {query!r}; browser automation is the "
-            "fallback route (slower, higher risk). Consider registering an "
-            "OpenAPI spec or MCP server for this service."
-        ),
-        "risk": RISK_HIGH,
-        "side_effects": "remote-reversible",
-        "score": 0.0,
-    }
 
 
 def capability_search_tool(registry: ToolRegistry) -> ToolDefinition:
@@ -146,20 +161,62 @@ def capability_search_tool(registry: ToolRegistry) -> ToolDefinition:
         else:
             limit = 10
         results = search_capabilities(registry, query, limit=limit)
-        return ToolResult(ok=True, data={"query": query, "results": results}, origin="capability")
+        from rinari.tools.availability import availability
+
+        for item in results:
+            item.update(availability(item["name"], ctx))
+        loaded = []
+        load_error = None
+        if arguments.get("load") and getattr(ctx, "exposure", None) is not None:
+            names = [item["name"] for item in results if item["available"] is not False]
+            from rinari.tools.exposure import _schema_tokens
+
+            visible = set(ctx.exposure.exposed_names(registry)) | set(names)
+            if (
+                len(visible) <= ctx.exposure.max_schema_count
+                and sum(_schema_tokens(registry.get(n)) for n in visible)
+                <= ctx.exposure.max_schema_tokens
+            ):
+                loaded = ctx.exposure.activate(names, reason=query, scope="turn")
+            else:
+                load_error = (
+                    "Schema budget exceeded; request fewer matches or deactivate unused tools."
+                )
+        elif arguments.get("load"):
+            load_error = "Dynamic exposure is not enabled in this context."
+        return ToolResult(
+            ok=True,
+            data={
+                "query": query,
+                "results": results,
+                "matched": bool(results),
+                "loaded": loaded,
+                "load_error": load_error,
+                "diagnostics": list(registry.diagnostics),
+                "guidance": (
+                    "Use an exact returned tool name."
+                    if results
+                    else "No registered capability matched. Check the integration configuration; "
+                    "do not repeat the same search without new information."
+                ),
+            },
+            origin="capability",
+        )
 
     return ToolDefinition(
         name="capability.search",
         description=(
             "Search the capabilities available this session across all sources "
-            "(native, plugin, MCP, OpenAPI, browser fallback). Prefer typed "
-            "API/connector matches over browser automation."
+            "(native, plugin, MCP, OpenAPI and browser). Prefer typed "
+            "API/connector matches over browser automation. Set load=true to "
+            "activate matching schemas in the same call, within the schema budget."
         ),
         input_schema={
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "What you want to do (service, verb)."},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
+                "load": {"type": "boolean", "default": False},
             },
             "required": ["query"],
         },
@@ -239,6 +296,21 @@ def capability_activation_tools(registry: ToolRegistry) -> list[ToolDefinition]:
         except (TypeError, ValueError):
             ttl = 4
         reason = str(arguments.get("reason") or "")
+        from rinari.tools.exposure import _schema_tokens
+
+        visible = set(exposure.exposed_names(registry)) | set(names)
+        if (
+            len(visible) > exposure.max_schema_count
+            or sum(_schema_tokens(registry.get(n)) for n in visible) > exposure.max_schema_tokens
+        ):
+            return ToolResult(
+                ok=False,
+                error=ToolErrorInfo(
+                    ToolErrorCode.RESOURCE_EXHAUSTED,
+                    "Schema budget exceeded; activate fewer tools or deactivate unused tools.",
+                ),
+                origin="capability",
+            )
         activated = exposure.activate(names, reason=reason, scope=scope, ttl_rounds=ttl)
         return ToolResult(
             ok=True,
@@ -259,8 +331,20 @@ def capability_activation_tools(registry: ToolRegistry) -> list[ToolDefinition]:
                 error=ToolErrorInfo(ToolErrorCode.INVALID_ARGUMENT, "names is required"),
                 origin="capability",
             )
+        removed = exposure.deactivate(names)
         return ToolResult(
-            ok=True, data={"deactivated": exposure.deactivate(names)}, origin="capability"
+            ok=True,
+            data={
+                "deactivated": removed,
+                "still_exposed": [
+                    name for name in names if name in exposure.exposed_names(registry)
+                ],
+                "note": (
+                    "Core or recently used tools may remain visible "
+                    "after explicit activation is removed."
+                ),
+            },
+            origin="capability",
         )
 
     return [

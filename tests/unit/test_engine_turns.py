@@ -160,6 +160,89 @@ def _answer() -> ModelResponse:
 # -- live turns -------------------------------------------------------------
 
 
+def test_channel_request_uses_normal_runtime_and_private_resolution(server, tmp_path, monkeypatch):
+    from rinari.models.types import ToolCall
+    session_id = _create_chat(server, tmp_path, tag="channel")
+    fake = FakeModel(scripted=[
+        ModelResponse(
+            content="",
+            tool_calls=(ToolCall(
+                id="find", name="capability.search", arguments={"query": "channel reply"}
+            ),),
+            stop_reason=StopReason.TOOL_CALLS,
+        ),
+        ModelResponse(
+            content="",
+            tool_calls=(ToolCall(
+                id="send", name="channel.reply", arguments={"text": "Respuesta sintética"}
+            ),),
+            stop_reason=StopReason.TOOL_CALLS,
+        ),
+        _answer(),
+    ])
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda services, rec: fake)
+    started = server.handle_line(_req("start", "operation.start", {
+        "operation_id": "channel-test", "session_id": session_id, "message": "Responde citando",
+        "channel": {"binding_id": "channel-test", "capabilities": ["channel.reply"]}}))
+    assert started["ok"], started
+    requested = None
+    deadline = time.time() + 8
+    while time.time() < deadline:
+        result = server.handle_line(_req(str(time.monotonic_ns()), "channel.pending"))
+        assert result["ok"], result
+        if result["result"]["requests"]:
+            requested = result["result"]["requests"][0]
+            break
+        time.sleep(0.02)
+    assert requested, [m.content for r in fake.requests for m in r.messages if m.role == "tool"]
+    resolved = server.handle_line(_req("resolve", "channel.resolve", {
+        "request_id": requested["request_id"], "binding_id": "channel-test",
+        "result": {"ok": True, "data": {"state": "sent", "delivery_id": "synthetic"}}}))
+    assert resolved["ok"]
+    events = _collect_until(server, session_id)
+    assert any(e["event"] == "turn.completed" for e in events), events
+
+
+def test_image_protocol_preserves_reference_and_reaches_model(
+    server, services, tmp_path, monkeypatch
+):
+    from PIL import Image
+    path = tmp_path / "synthetic.png"
+    Image.new("RGB", (24, 24), "blue").save(path)
+    session_id = _create_chat(server, tmp_path, tag="vision")
+    configured = server.handle_line(_req("vision-config", "model.vision.set", {
+        "ref": services.sessions.show(session_id).model_id, "enabled": True}))
+    assert configured["ok"], configured
+    imported = server.handle_line(_req("image-import", "artifact.receive_image", {
+        "session_id": session_id, "path": str(path)}))
+    assert imported["ok"], imported
+    attachment = imported["result"]["attachment"]
+
+    class Visual(FakeModel):
+        def capabilities(self):
+            return ProviderCapabilities(streaming=False, tool_calls=True, vision=True)
+
+    fake = Visual([_answer()])
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda *_: fake)
+    started = server.handle_line(_req("vision-start", "operation.start", {
+        "operation_id": "vision-test", "session_id": session_id,
+        "message": "Describe", "attachments": [attachment]}))
+    assert started["ok"], started
+    events = _collect_until(server, session_id)
+    assert any(e["event"] == "turn.completed" for e in events)
+    user = next(m for m in fake.requests[0].messages if m.images)
+    assert user.images[0].uri == attachment["uri"]
+    assert attachment["uri"] in user.content
+    listed = server.handle_line(
+        _req("image-list", "artifact.media_list", {"session_id": session_id})
+    )
+    assert listed["result"]["count"] == 1
+    deleted = server.handle_line(
+        _req("image-delete", "artifact.delete_media", {"uri": attachment["uri"]})
+    )
+    assert deleted["ok"], deleted
+
+
 def test_turn_start_streams_and_completes(server, tmp_path, monkeypatch) -> None:
     session_id = _create_chat(server, tmp_path)
     monkeypatch.setattr(
@@ -603,3 +686,123 @@ def test_stdio_flushes_async_events(server, tmp_path, monkeypatch) -> None:
     assert "turn.completed" in by_event
     assert "e1" in by_event
     assert stderr.getvalue() == ""
+
+
+def test_durable_operation_replay_and_restart(server, services, tmp_path, monkeypatch):
+    fake = FakeModel([ModelResponse(content="done", stop_reason=StopReason.END_TURN)])
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda *_a, **_kw: fake)
+    session_id = _create_chat(server, tmp_path, tag="durable")
+    params = {"operation_id": "durable-test", "session_id": session_id, "message": "hello"}
+    first = server.handle_line(_req("op1", "operation.start", params))
+    assert first["ok"], first
+    second = server.handle_line(_req("op2", "operation.start", params))
+    assert second["result"]["turn_id"] == first["result"]["turn_id"]
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        result = server._turns.operations.get("durable-test")
+        if result["state"] == "completed":
+            break
+        time.sleep(0.02)
+    assert result["state"] == "completed", result
+    assert len(fake.requests) == 1
+    conflict = server.handle_line(_req("op3", "operation.start", {**params, "message": "changed"}))
+    assert not conflict["ok"]
+    from rinari.engine_protocol.operations import OperationStore
+
+    restarted = OperationStore(services.ctx.layout.root)
+    assert restarted.get("durable-test")["state"] == "completed"
+    restarted.claim("crash-test", session_id, "private message", None, "never-started")
+    after_crash = OperationStore(services.ctx.layout.root)
+    assert after_crash.get("crash-test")["state"] == "uncertain"
+    replay, claimed = after_crash.claim("crash-test", session_id, "private message", None, "new")
+    assert not claimed and replay["turn_id"] == "never-started"
+    assert b"private message" not in after_crash.path.read_bytes()
+
+
+def test_operation_cancellation_is_persisted(server, tmp_path, monkeypatch):
+    gate, abort = threading.Event(), threading.Event()
+    fake = FakeBlockingModel([], gate, abort)
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda *_a, **_kw: fake)
+    session_id = _create_chat(server, tmp_path, tag="op-cancel")
+    started = server.handle_line(
+        _req(
+            "oc1",
+            "operation.start",
+            {"operation_id": "cancel-operation", "session_id": session_id, "message": "hello"},
+        )
+    )
+    assert started["ok"]
+    try:
+        deadline = time.monotonic() + 5
+        while not fake.requests and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert fake.requests
+        result = server.handle_line(
+            _req("oc2", "operation.cancel", {"operation_id": "cancel-operation"})
+        )
+        assert result["result"]["state"] == "cancelling"
+        abort.set()
+        while time.monotonic() < deadline:
+            operation = server._turns.operations.get("cancel-operation")
+            if operation["state"] == "cancelled":
+                break
+            time.sleep(0.01)
+        assert operation["state"] == "cancelled"
+    finally:
+        abort.set()
+
+
+def test_remote_operation_exposes_only_bound_ssh(server, services, tmp_path, monkeypatch):
+    import base64
+
+    from rinari.application.ssh_targets import TargetStore
+
+    key = base64.b64encode(b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20" + b"x" * 32).decode()
+    target = TargetStore(services.ctx.layout.root).add(
+        {
+            "id": "remote",
+            "name": "Remote",
+            "host": "192.0.2.10",
+            "port": 22,
+            "username": "test",
+            "identity": "fixture",
+            "host_key": "ssh-ed25519 " + key,
+        }
+    )
+    session_id = _create_chat(server, tmp_path, tag="remote")
+    fake = FakeModel([ModelResponse(content="done", stop_reason=StopReason.END_TURN)])
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda *_a, **_kw: fake)
+    session = agent_runtime.build_agent_session(
+        services,
+        services.sessions.show(session_id),
+        interactive=False,
+        user_home=tmp_path / "home",
+        remote_target=target,
+    )
+    try:
+        assert session.loop.tool_registry.names() == ["ssh.inspect"]
+        schema = session.loop.tool_registry.get("ssh.inspect").input_schema
+        assert schema["properties"]["target_id"]["enum"] == ["remote"]
+    finally:
+        session.end()
+    params = {
+        "operation_id": "remote-id",
+        "session_id": session_id,
+        "message": "inspect",
+        "target_id": "remote",
+        "target_revision": "wrong",
+    }
+    result = server.handle_line(_req("remote-wrong", "operation.start", params))
+    assert not result["ok"]
+    assert server._turns.operations.get("remote-id") is None
+    channel_session = agent_runtime.build_agent_session(
+        services, services.sessions.show(session_id), interactive=False,
+        user_home=tmp_path / "home", remote_target=target,
+        channel_host=lambda *_: None,
+    )
+    try:
+        names = set(channel_session.loop.tool_registry.names())
+        assert {"ssh.inspect", "artifact.import", "channel.send_attachment"} <= names
+        assert not {"shell.exec", "fs.read", "fs.write", "process.start"} & names
+    finally:
+        channel_session.end()

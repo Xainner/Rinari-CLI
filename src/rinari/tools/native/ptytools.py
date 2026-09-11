@@ -63,7 +63,9 @@ class PtyHandle:
         "lock",
         "master",
         "process",
+        "read_cursor",
         "reaper",
+        "size",
     )
 
     def __init__(self, handle_id: str, command: str, cwd: str, master: int, process) -> None:
@@ -76,6 +78,8 @@ class PtyHandle:
         self.exit_code: int | None = None
         self.lock = threading.Lock()
         self.reaper: threading.Thread | None = None
+        self.read_cursor = 0
+        self.size = None
 
     def pump(self) -> None:
         import select
@@ -134,7 +138,7 @@ class PtyRegistry:
             process_env = dict(self._base_env)
             process_env.setdefault("TERM", "xterm-256color")
             if env:
-                process_env.update({str(k): str(v) for k, v in env})
+                process_env.update({str(k): str(v) for k, v in env.items()})
             kwargs: dict = {
                 "stdin": slave,
                 "stdout": slave,
@@ -169,6 +173,8 @@ class PtyRegistry:
     def _wait(self, handle_id: str, handle: PtyHandle) -> None:
         code = handle.process.wait()
         handle.exit_code = code
+        if handle.reaper is not None:
+            handle.reaper.join(timeout=1)
         with contextlib.suppress(OSError):
             os.close(handle.master)
 
@@ -221,47 +227,41 @@ def pty_start(input: dict, ctx: ToolContext) -> ToolResult:
             cwd = str(resolved)
         except Exception as exc:
             return _fail(ToolErrorCode.SANDBOX_VIOLATION, getattr(exc, "message", str(exc)))
-    handle_id = registry.start(command, cwd, env, columns, rows)
+    handle_id = registry.start(command, cwd or str(ctx.cwd), env, columns, rows)
     return _ok({"handle": handle_id, "command": command, "running": True})
 
 
 def pty_read(input: dict, ctx: ToolContext) -> ToolResult:
-    import select
-
     handle = _resolve(ctx, input.get("handle"))
     if handle is None:
         return _fail(ToolErrorCode.NOT_FOUND, "unknown pty handle")
-    timeout = input.get("timeout_s")
-    try:
-        timeout = float(timeout) if timeout is not None else DEFAULT_READ_TIMEOUT_S
-    except (TypeError, ValueError):
-        timeout = DEFAULT_READ_TIMEOUT_S
-    timeout = min(max(timeout, 0.0), MAX_READ_TIMEOUT_S)
-    data = b""
+    timeout = min(MAX_READ_TIMEOUT_S, max(0, float(input.get("timeout_s", DEFAULT_READ_TIMEOUT_S))))
+    if ctx.deadline_at is not None:
+        timeout = min(timeout, max(0, ctx.deadline_at - time.time()))
+    offset = int(input.get("cursor", handle.read_cursor))
+    maximum = min(32000, max(1, int(input.get("max_chars", 16000))))
     deadline = time.monotonic() + timeout
     while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        if ctx.cancellation:
+            ctx.cancellation.throw_if_cancelled()
+        with handle.lock:
+            text = handle.buffer.text()
+        if offset < 0 or offset > len(text):
+            return _fail(ToolErrorCode.INVALID_ARGUMENT, "cursor is outside retained output")
+        if len(text) > offset or handle.exited or time.monotonic() >= deadline:
             break
-        try:
-            ready, _, _ = select.select([handle.master], [], [], min(remaining, 0.5))
-        except OSError:
-            break
-        if not ready:
-            continue
-        try:
-            chunk = os.read(handle.master, 65536)
-        except OSError:
-            break
-        if not chunk:
-            break
-        data += chunk
-    text = data.decode("utf-8", errors="replace")
+        time.sleep(0.02)
+    chunk = text[offset : offset + maximum]
+    next_cursor = offset + len(chunk)
+    if "cursor" not in input:
+        handle.read_cursor = next_cursor
     return _ok(
         {
             "handle": handle.id,
-            "output": text,
-            "truncated": False,
+            "output": chunk,
+            "cursor": next_cursor,
+            "has_more": next_cursor < len(text),
+            "truncated": handle.buffer.truncated,
             "exit_code": handle.exit_code,
             "running": not handle.exited,
         }
@@ -280,7 +280,7 @@ def pty_write(input: dict, ctx: ToolContext) -> ToolResult:
     if len(data) > 16 * 1024:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "data exceeds 16 KiB per write")
     payload = data.encode("utf-8")
-    if not payload.endswith(b"\n") and not payload.endswith(b"\r"):
+    if input.get("submit_line", True) and not payload.endswith((b"\n", b"\r")):
         payload += b"\n"  # a pty line is only delivered to the reader on a newline
     try:
         written = os.write(handle.master, payload)
@@ -306,11 +306,14 @@ def pty_resize(input: dict, ctx: ToolContext) -> ToolResult:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "rows/columns must be integers")
     rows = min(max(rows, 1), 200)
     columns = min(max(columns, 2), 500)
+    if handle.size == (rows, columns):
+        return _ok({"handle": handle.id, "rows": rows, "columns": columns, "changed": False})
     try:
         fcntl.ioctl(handle.master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
     except OSError as exc:
         return _fail(ToolErrorCode.SANDBOX_VIOLATION, str(exc))
-    return _ok({"handle": handle.id, "rows": rows, "columns": columns})
+    handle.size = (rows, columns)
+    return _ok({"handle": handle.id, "rows": rows, "columns": columns, "changed": True})
 
 
 def pty_terminate(input: dict, ctx: ToolContext) -> ToolResult:
@@ -325,7 +328,13 @@ def pty_terminate(input: dict, ctx: ToolContext) -> ToolResult:
         with contextlib.suppress(OSError):
             os.killpg(os.getpgid(handle.process.pid), 9)
     deadline = time.monotonic() + 5.0
+    kill_at = time.monotonic() + 1.0
+    killed = False
     while not handle.exited and time.monotonic() < deadline:
+        if not killed and time.monotonic() >= kill_at:
+            with contextlib.suppress(OSError):
+                os.killpg(os.getpgid(handle.process.pid), 9)
+            killed = True
         time.sleep(0.1)
     if not handle.exited:
         return _fail(ToolErrorCode.TIMEOUT, "process did not exit after TERM/KILL")
@@ -375,6 +384,8 @@ def pty_tools() -> list[ToolDefinition]:
                 "type": "object",
                 "properties": {
                     "handle": {"type": "string"},
+                    "cursor": {"type": "integer", "minimum": 0},
+                    "max_chars": {"type": "integer", "minimum": 1, "maximum": 32000},
                     "timeout_s": {"type": "number", "minimum": 0, "maximum": 60},
                 },
                 "required": ["handle"],
@@ -391,13 +402,15 @@ def pty_tools() -> list[ToolDefinition]:
             name="pty.write",
             description=(
                 "Write keystrokes to a pty handle. A newline is appended if the "
-                "payload does not end with one (a pty delivers lines, not bytes)."
+                "payload does not end with one. Set submit_line=false for literal "
+                "keystrokes, partial input or control characters."
             ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "handle": {"type": "string"},
                     "data": {"type": "string"},
+                    "submit_line": {"type": "boolean", "default": True},
                 },
                 "required": ["handle", "data"],
             },

@@ -111,6 +111,16 @@ class ModelService:
             )
         raise NotFoundError(f"Model not found: {ref}", hint="Use `rinari models list`.")
 
+    def set_vision(self, ref: str, enabled: bool) -> ModelRecord:
+        from dataclasses import replace
+        if type(enabled) is not bool:
+            raise ValueError("Vision must be boolean")
+        record = self.resolve(ref)
+        updated = replace(record, capabilities={**(record.capabilities or {}), "vision": enabled},
+                          updated_at=self._now())
+        self._ctx.model_repo.update(updated)
+        return updated
+
     def available(self, provider_ref: str | None = None) -> dict[str, list[DiscoveredModel]]:
         """Query provider discovery without saving anything."""
         provider = self._providers.get(provider_ref) if provider_ref else self._active_provider()

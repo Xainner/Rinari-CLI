@@ -11,6 +11,8 @@ client (tests inject httpx.MockTransport); None -> fresh real client.
 
 from __future__ import annotations
 
+import hashlib
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -107,8 +109,22 @@ def _provenance(fetched, ctx: ToolContext) -> dict:
         "content_type": fetched.content_type,
         "bytes": len(fetched.body),
         "sha256": fetched.sha256,
-        "fetched_at": now_iso(ctx.clock),
+        "source_id": snapshot_id(fetched),
+        "fetched_at": next(
+            (v[2] for v in ctx.web_snapshots.values() if v[1] is fetched), now_iso(ctx.clock)
+        ),
     }
+
+
+def snapshot_id(fetched):
+    return "source_" + hashlib.sha256((fetched.url + fetched.sha256).encode()).hexdigest()[:24]
+
+
+def source_snapshot(ctx, identifier):
+    return next(
+        (entry[1] for entry in ctx.web_snapshots.values() if snapshot_id(entry[1]) == identifier),
+        None,
+    )
 
 
 def _is_text(fetched) -> bool:
@@ -116,13 +132,43 @@ def _is_text(fetched) -> bool:
     return not ctype or "text" in ctype or "json" in ctype or "xml" in ctype
 
 
-def _fetch_guarded(ctx: ToolContext, url: str, *, timeout_s: float = DEFAULT_TIMEOUT_S):
+def _fetch_guarded(
+    ctx: ToolContext,
+    url: str,
+    *,
+    timeout_s: float = DEFAULT_TIMEOUT_S,
+    refresh: bool = False,
+    source_id: str | None = None,
+):
     """(Fetched, None) on success; (None, failed ToolResult) on any failure."""
+    if source_id:
+        cached = source_snapshot(ctx, source_id)
+        if cached is None:
+            return None, _fail(
+                ToolErrorCode.NOT_FOUND, "Source snapshot expired; open the URL again"
+            )
+        denied = _guard(ctx, cached.url) or _guard(ctx, cached.final_url)
+        return (None, denied) if denied is not None else (cached, None)
     denied = _guard(ctx, url)
     if denied is not None:
         return None, denied
+    if ctx.cancellation:
+        ctx.cancellation.throw_if_cancelled()
+    if ctx.deadline_at is not None:
+        timeout_s = min(timeout_s, ctx.deadline_at - time.time())
+        if timeout_s <= 0:
+            return None, _fail(ToolErrorCode.TIMEOUT, "Web deadline exhausted")
+    cached = ctx.web_snapshots.get(url)
+    if cached and not refresh and time.monotonic() - cached[0] < 30:
+        denied = _guard(ctx, cached[1].final_url)
+        return (None, denied) if denied else (cached[1], None)
     try:
-        return fetch(url, client_factory=_client_factory(ctx), timeout_s=timeout_s), None
+        fetched = fetch(url, client_factory=_client_factory(ctx), timeout_s=timeout_s)
+        if len(fetched.body) <= 1_000_000:
+            if len(ctx.web_snapshots) >= 8:
+                ctx.web_snapshots.pop(next(iter(ctx.web_snapshots)))
+            ctx.web_snapshots[url] = (time.monotonic(), fetched, now_iso(ctx.clock))
+        return fetched, None
     except WebRequestError as exc:
         return None, _fail(ToolErrorCode(exc.code), exc.message, retryable=exc.retryable)
 
@@ -131,6 +177,28 @@ def _fetch_guarded(ctx: ToolContext, url: str, *, timeout_s: float = DEFAULT_TIM
 
 
 def web_search(input: dict, ctx: ToolContext) -> ToolResult:
+    if "queries" in input:
+        queries = input["queries"]
+        if not isinstance(queries, list) or not 1 <= len(queries) <= 4:
+            return _fail(ToolErrorCode.INVALID_ARGUMENT, "queries must contain 1 to 4 strings")
+        rows = []
+        for query in queries:
+            if ctx.cancellation:
+                ctx.cancellation.throw_if_cancelled()
+            if ctx.deadline_at is not None and time.time() >= ctx.deadline_at:
+                return _fail(ToolErrorCode.TIMEOUT, "Search deadline exhausted")
+            result = web_search(
+                {k: v for k, v in {**input, "query": query}.items() if k != "queries"}, ctx
+            )
+            rows.append(
+                {
+                    "query": query,
+                    "ok": result.ok,
+                    "data": result.data,
+                    "error": result.error.message if result.error else None,
+                }
+            )
+        return _ok({"searches": rows})
     query = input.get("query")
     if not isinstance(query, str) or not query.strip():
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "query must be a non-empty string")
@@ -155,7 +223,9 @@ def web_fetch(input: dict, ctx: ToolContext) -> ToolResult:
     url = _validate_url(input.get("url"))
     if url is None:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "url must be an http(s) URL")
-    fetched, error = _fetch_guarded(ctx, url)
+    fetched, error = _fetch_guarded(
+        ctx, url, refresh=bool(input.get("refresh", False)), source_id=input.get("source_id")
+    )
     if error is not None:
         return error
     data: dict = {"truncated": fetched.truncated}
@@ -187,7 +257,9 @@ def web_open(input: dict, ctx: ToolContext) -> ToolResult:
     url = _validate_url(input.get("url"))
     if url is None:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "url must be an http(s) URL")
-    fetched, error = _fetch_guarded(ctx, url)
+    fetched, error = _fetch_guarded(
+        ctx, url, refresh=bool(input.get("refresh", False)), source_id=input.get("source_id")
+    )
     if error is not None:
         return error
     if not _is_text(fetched):
@@ -215,7 +287,9 @@ def web_links(input: dict, ctx: ToolContext) -> ToolResult:
     url = _validate_url(input.get("url"))
     if url is None:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "url must be an http(s) URL")
-    fetched, error = _fetch_guarded(ctx, url)
+    fetched, error = _fetch_guarded(
+        ctx, url, refresh=bool(input.get("refresh", False)), source_id=input.get("source_id")
+    )
     if error is not None:
         return error
     page = parse_page(fetched.body.decode("utf-8", errors="replace"), fetched.final_url)
@@ -233,7 +307,9 @@ def web_find(input: dict, ctx: ToolContext) -> ToolResult:
     pattern = input.get("pattern")
     if not isinstance(pattern, str) or not pattern:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "pattern must be a non-empty string")
-    fetched, error = _fetch_guarded(ctx, url)
+    fetched, error = _fetch_guarded(
+        ctx, url, refresh=bool(input.get("refresh", False)), source_id=input.get("source_id")
+    )
     if error is not None:
         return error
     text = parse_page(fetched.body.decode("utf-8", errors="replace"), fetched.final_url).text()
@@ -262,7 +338,9 @@ def web_extract_text(input: dict, ctx: ToolContext) -> ToolResult:
     url = _validate_url(input.get("url"))
     if url is None:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "url must be an http(s) URL")
-    fetched, error = _fetch_guarded(ctx, url)
+    fetched, error = _fetch_guarded(
+        ctx, url, refresh=bool(input.get("refresh", False)), source_id=input.get("source_id")
+    )
     if error is not None:
         return error
     text = parse_page(fetched.body.decode("utf-8", errors="replace"), fetched.final_url).text()
@@ -280,7 +358,9 @@ def web_extract_markdown(input: dict, ctx: ToolContext) -> ToolResult:
     url = _validate_url(input.get("url"))
     if url is None:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "url must be an http(s) URL")
-    fetched, error = _fetch_guarded(ctx, url)
+    fetched, error = _fetch_guarded(
+        ctx, url, refresh=bool(input.get("refresh", False)), source_id=input.get("source_id")
+    )
     if error is not None:
         return error
     page = parse_page(fetched.body.decode("utf-8", errors="replace"), fetched.final_url)
@@ -299,7 +379,9 @@ def web_extract_metadata(input: dict, ctx: ToolContext) -> ToolResult:
     url = _validate_url(input.get("url"))
     if url is None:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "url must be an http(s) URL")
-    fetched, error = _fetch_guarded(ctx, url)
+    fetched, error = _fetch_guarded(
+        ctx, url, refresh=bool(input.get("refresh", False)), source_id=input.get("source_id")
+    )
     if error is not None:
         return error
     page = parse_page(fetched.body.decode("utf-8", errors="replace"), fetched.final_url)
@@ -322,7 +404,7 @@ def web_download(input: dict, ctx: ToolContext) -> ToolResult:
     url = _validate_url(input.get("url"))
     if url is None:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "url must be an http(s) URL")
-    fetched, error = _fetch_guarded(ctx, url, timeout_s=60.0)
+    fetched, error = _fetch_guarded(ctx, url, timeout_s=60.0, refresh=True)
     if error is not None:
         return error
     artifact_root = Path(ctx.artifact_root)
@@ -370,13 +452,23 @@ def web_cite(input: dict, ctx: ToolContext) -> ToolResult:
     url = _validate_url(input.get("url"))
     if url is None:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "url must be an http(s) URL")
-    fetched, error = _fetch_guarded(ctx, url)
+    fetched, error = _fetch_guarded(
+        ctx, url, refresh=bool(input.get("refresh", False)), source_id=input.get("source_id")
+    )
     if error is not None:
         return error
     return _ok({"citation": _cite(fetched, ctx)})
 
 
 def web_sources(input: dict, ctx: ToolContext) -> ToolResult:
+    if not input.get("urls"):
+        return _ok(
+            {
+                "sources": [_provenance(v[1], ctx) for v in ctx.web_snapshots.values()],
+                "source": "session-snapshots",
+                "network_requests": 0,
+            }
+        )
     urls = input.get("urls")
     if not isinstance(urls, list) or not urls or len(urls) > MAX_SOURCE_URLS:
         return _fail(
@@ -389,7 +481,9 @@ def web_sources(input: dict, ctx: ToolContext) -> ToolResult:
         if url is None:
             sources.append({"url": str(raw), "ok": False, "error": "invalid http(s) URL"})
             continue
-        fetched, error = _fetch_guarded(ctx, url)
+        fetched, error = _fetch_guarded(
+            ctx, url, refresh=bool(input.get("refresh", False)), source_id=input.get("source_id")
+        )
         if error is not None:
             sources.append(
                 {"url": url, "ok": False, "error": error.error.message if error.error else ""}
@@ -408,8 +502,18 @@ def web_tools() -> list[ToolDefinition]:
     common = dict(capabilities=("network.outbound",), namespace="web")
     url_schema = {
         "type": "object",
-        "properties": {"url": {"type": "string"}},
-        "required": ["url"],
+        "properties": {
+            "url": {"type": "string"},
+            "source_id": {
+                "type": "string",
+                "description": "Stable source_id from this runtime; reuses its exact snapshot.",
+            },
+            "refresh": {
+                "type": "boolean",
+                "description": "Bypass the 30-second session snapshot cache.",
+            },
+        },
+        "anyOf": [{"required": ["url"]}, {"required": ["source_id"]}],
     }
     return [
         ToolDefinition(
@@ -419,9 +523,15 @@ def web_tools() -> list[ToolDefinition]:
                 "type": "object",
                 "properties": {
                     "query": {"type": "string"},
+                    "queries": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 1},
+                        "minItems": 1,
+                        "maxItems": 4,
+                    },
                     "max_results": {"type": "integer", "minimum": 1, "maximum": 50},
                 },
-                "required": ["query"],
+                "oneOf": [{"required": ["query"]}, {"required": ["queries"]}],
             },
             risk=RISK_LOW,
             side_effects=SIDE_EFFECT_NONE,
@@ -463,9 +573,14 @@ def web_tools() -> list[ToolDefinition]:
                 "type": "object",
                 "properties": {
                     "url": {"type": "string"},
+                    "source_id": {
+                        "type": "string",
+                        "description": "Stable source_id; reuses its exact snapshot.",
+                    },
                     "pattern": {"type": "string"},
                 },
-                "required": ["url", "pattern"],
+                "required": ["pattern"],
+                "anyOf": [{"required": ["url"]}, {"required": ["source_id"]}],
             },
             risk=RISK_LOW,
             side_effects=SIDE_EFFECT_NONE,
@@ -502,7 +617,12 @@ def web_tools() -> list[ToolDefinition]:
         ToolDefinition(
             name="web.download",
             description="Download a URL into the session artifact directory (bounded 2 MiB).",
-            input_schema=url_schema,
+            input_schema={
+                "type": "object",
+                "properties": {"url": {"type": "string"}},
+                "required": ["url"],
+                "additionalProperties": False,
+            },
             risk=RISK_MEDIUM,
             side_effects=SIDE_EFFECT_LOCAL_REVERSIBLE,
             timeout_ms=90_000,
@@ -524,7 +644,6 @@ def web_tools() -> list[ToolDefinition]:
             input_schema={
                 "type": "object",
                 "properties": {"urls": {"type": "array", "items": {"type": "string"}}},
-                "required": ["urls"],
             },
             risk=RISK_LOW,
             side_effects=SIDE_EFFECT_NONE,

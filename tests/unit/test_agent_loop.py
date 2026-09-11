@@ -215,7 +215,11 @@ def test_exposure_view_limits_lazy_tools(env) -> None:
     loop2 = AgentLoop(model2, env["runtime"], env["assembler"])
     loop2.turn(env["ctx"], "hello again")
     names2 = {t.name for t in model2.requests[0].tools}
-    assert "browser.open" in names2
+    assert "browser.open" not in names2  # No browser service in this session.
+    env["ctx"].tool_ctx = replace(env["ctx"].tool_ctx, browser=object())
+    model3 = FakeModel(scripted=[ModelResponse(content="done")])
+    AgentLoop(model3, env["runtime"], env["assembler"]).turn(env["ctx"], "with browser")
+    assert "browser.open" in {t.name for t in model3.requests[0].tools}
 
 
 def test_gateway_switch_changes_provider_mid_session(env) -> None:

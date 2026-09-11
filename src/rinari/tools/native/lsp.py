@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from rinari.lsp import LspError
+from rinari.lsp.client import LspRequestTimeout
+from rinari.shared.errors import CancelledError
 from rinari.tools.definition import (
     RISK_LOW,
     SIDE_EFFECT_NONE,
@@ -79,6 +81,14 @@ def _handle(ctx: ToolContext, input: dict, op: str) -> ToolResult:
     try:
         if op in _POSITION_OPS or op == "rename":
             line, column = _pos(input)
+            if input.get("column_encoding") == "unicode":
+                if base.stat().st_size > 2 * 1024 * 1024:
+                    raise ValueError("Document exceeds 2 MiB")
+                lines = base.read_text(encoding="utf-8").split("\n")
+                if line > len(lines) or column > len(lines[line - 1].rstrip("\r")) + 1:
+                    raise ValueError("Position outside document")
+                column = len(lines[line - 1][: column - 1].encode("utf-16-le")) // 2 + 1
+
             if op == "rename":
                 new_name = input.get("new_name")
                 if not isinstance(new_name, str) or not new_name:
@@ -87,7 +97,13 @@ def _handle(ctx: ToolContext, input: dict, op: str) -> ToolResult:
                     )
                 return _ok(method(base, line, column, new_name))
             return _ok(method(base, line, column))
+        if op == "diagnostics" and input.get("include_state"):
+            return _ok(manager.diagnostics_snapshot(base))
         return _ok(method(base))
+    except CancelledError:
+        raise
+    except LspRequestTimeout as exc:
+        return _err(ToolErrorCode.TIMEOUT, str(exc))
     except (ValueError, LspError) as exc:
         return _err(
             ToolErrorCode.INVALID_ARGUMENT
@@ -116,8 +132,8 @@ lsp_signature = _handler("signature")
 lsp_rename = _handler("rename")
 
 
-def _as_fs_read(path: Any):
-    return ClassifiedAction("fs.read", str(path) if path else "")
+def _as_fs_read(arguments: dict):
+    return ClassifiedAction("fs.read", str(arguments.get("path") or "."))
 
 
 def lsp_tools() -> list[ToolDefinition]:
@@ -127,6 +143,12 @@ def lsp_tools() -> list[ToolDefinition]:
             "path": {"type": "string"},
             "line": {"type": "integer", "minimum": 1},
             "column": {"type": "integer", "minimum": 1},
+            "column_encoding": {
+                "type": "string",
+                "enum": ["utf-16", "unicode"],
+                "default": "utf-16",
+                "description": "unicode counts code points; output columns use UTF-16.",
+            },
         },
         "required": ["path", "line"],
     }
@@ -141,6 +163,12 @@ def lsp_tools() -> list[ToolDefinition]:
             "path": {"type": "string"},
             "line": {"type": "integer", "minimum": 1},
             "column": {"type": "integer", "minimum": 1},
+            "column_encoding": {
+                "type": "string",
+                "enum": ["utf-16", "unicode"],
+                "default": "utf-16",
+                "description": "unicode counts code points; output columns use UTF-16.",
+            },
             "new_name": {"type": "string"},
         },
         "required": ["path", "line", "new_name"],
@@ -166,8 +194,14 @@ def lsp_tools() -> list[ToolDefinition]:
         ),
         (
             "lsp.diagnostics",
-            "Latest diagnostics (errors/warnings) published for a file.",
-            file_schema,
+            "Latest diagnostics; include_state=true distinguishes pending from received/verified.",
+            {
+                **file_schema,
+                "properties": {
+                    **file_schema["properties"],
+                    "include_state": {"type": "boolean", "default": False},
+                },
+            },
             "diagnostics",
         ),
         (
@@ -195,7 +229,8 @@ def lsp_tools() -> list[ToolDefinition]:
     return [
         ToolDefinition(
             name=name,
-            description=description,
+            description=description
+            + " Columns use UTF-16 units; input may set column_encoding=unicode.",
             input_schema=schema,
             risk=RISK_LOW,
             side_effects=SIDE_EFFECT_NONE,

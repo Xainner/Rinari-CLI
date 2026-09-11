@@ -9170,3 +9170,19 @@ It is:
 > **A persistent, multi-provider, project-aware agent runtime where Rinari can operate as the same AI identity in both ordinary chat and high-autonomy software-engineering sessions, with tools, skills, policies, context, memory, sessions, and verification wired together as explicit subsystems.**
 
 That is the architecture the implementation should converge toward.
+
+## Gateway channel extension
+
+The trusted operation context can advertise `channel_tools_v1` and image attachments.
+Channel capabilities are native ToolDefinitions whose execution delegates over the
+existing private Engine Protocol. They do not constitute a parallel executor. The
+channel broker waits in the turn worker while protocol resolution and cancellation
+continue on the reader. The parent binding is not inherited by subordinate agents.
+Gateway binds installation, owner conversation and operation, owns outbox persistence,
+and reconciles quoted owner approvals using allow_once/deny. Model output cannot
+choose recipient identities or manufacture authority.
+
+Image references are stored in migration 0025. OpenAI-compatible, Responses and
+Anthropic adapters emit actual visual content only with explicit vision capability.
+Original artifact URIs remain available to tools, independently of provider-side
+thumbnail encoding. Attachment hashes participate in operation idempotency.

@@ -98,7 +98,12 @@ class ProcessRegistry:
         self._base_env = dict(base_env or os.environ)
 
     def start(self, command: str, cwd: str | None = None, env: dict | None = None) -> str:
-        kwargs: dict = {"shell": True, "stdout": subprocess.PIPE, "stderr": subprocess.PIPE}
+        kwargs: dict = {
+            "shell": isinstance(command, str),
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+        }
         if cwd:
             kwargs["cwd"] = cwd
         process_env = dict(self._base_env)
@@ -209,9 +214,16 @@ def process_start(input: dict, ctx: ToolContext) -> ToolResult:
     registry = _registry(ctx)
     if registry is None:
         return _fail(ToolErrorCode.DEPENDENCY_ERROR, "process registry unavailable in this session")
-    command = input.get("command")
-    if not isinstance(command, str) or not command.strip():
-        return _fail(ToolErrorCode.INVALID_ARGUMENT, "command must be a non-empty string")
+    command = input.get("argv") if "argv" in input else input.get("command")
+    if isinstance(command, list):
+        if not command or not all(isinstance(s, str) and "\0" not in s for s in command):
+            return _fail(
+                ToolErrorCode.INVALID_ARGUMENT, "argv must be non-empty strings without NUL"
+            )
+    elif not isinstance(command, str) or not command.strip():
+        return _fail(ToolErrorCode.INVALID_ARGUMENT, "command or argv is required")
+    if "argv" in input and "command" in input:
+        return _fail(ToolErrorCode.INVALID_ARGUMENT, "Use command or argv, not both")
     cwd = input.get("cwd")
     if cwd is not None and not isinstance(cwd, str):
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "cwd must be a string")
@@ -227,7 +239,7 @@ def process_start(input: dict, ctx: ToolContext) -> ToolResult:
             cwd = str(resolved)
         except Exception as exc:
             return _fail(ToolErrorCode.SANDBOX_VIOLATION, getattr(exc, "message", str(exc)))
-    handle_id = registry.start(command, cwd=cwd, env=env)
+    handle_id = registry.start(command, cwd=cwd or str(ctx.cwd), env=env)
     handle = registry.get(handle_id)
     pid = handle.process.pid if handle is not None else None
     return _ok({"handle": handle_id, "pid": pid, "command": command, "running": True})
@@ -259,13 +271,27 @@ def process_output(input: dict, ctx: ToolContext) -> ToolResult:
     handle = _resolve_handle(ctx, input.get("handle"))
     if handle is None:
         return _fail(ToolErrorCode.NOT_FOUND, "unknown process handle")
+    stdout, stderr = handle.stdout.text(), handle.stderr.text()
+    cursor = input.get("cursor") or {}
+    limit = input.get("max_chars", 16000)
+    if not isinstance(cursor, dict) or not isinstance(limit, int) or not 1 <= limit <= 64000:
+        return _fail(ToolErrorCode.INVALID_ARGUMENT, "Invalid cursor or max_chars")
+    offsets = [cursor.get("stdout", 0), cursor.get("stderr", 0)]
+    if any(not isinstance(n, int) or n < 0 for n in offsets):
+        return _fail(ToolErrorCode.INVALID_ARGUMENT, "Cursor offsets must be nonnegative integers")
+    if offsets[0] > len(stdout) or offsets[1] > len(stderr):
+        return _fail(ToolErrorCode.CONFLICT, "Cursor does not belong to this output snapshot")
+    out = stdout[offsets[0] : offsets[0] + limit]
+    err = stderr[offsets[1] : offsets[1] + limit]
     return _ok(
         {
             "handle": handle.id,
             "running": handle.exit_code is None,
             "exit_code": handle.exit_code,
-            "stdout": handle.stdout.text(),
-            "stderr": handle.stderr.text(),
+            "stdout": out,
+            "stderr": err,
+            "cursor": {"stdout": offsets[0] + len(out), "stderr": offsets[1] + len(err)},
+            "has_more": offsets[0] + len(out) < len(stdout) or offsets[1] + len(err) < len(stderr),
             "truncated": handle.stdout.truncated or handle.stderr.truncated,
         }
     )
@@ -276,7 +302,7 @@ def process_signal(input: dict, ctx: ToolContext) -> ToolResult:
     if handle is None:
         return _fail(ToolErrorCode.NOT_FOUND, "unknown process handle")
     if handle.exit_code is not None:
-        return _fail(ToolErrorCode.NOT_FOUND, "process already exited")
+        return _ok({"handle": handle.id, "state": "exited", "exit_code": handle.exit_code})
     name = input.get("signal")
     if not isinstance(name, str) or not name.strip():
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "signal must be a non-empty string")
@@ -287,7 +313,13 @@ def process_signal(input: dict, ctx: ToolContext) -> ToolResult:
             ToolErrorCode.INVALID_ARGUMENT,
             f"unsupported signal {name!r} on this platform",
         )
-    return _ok({"handle": handle.id, "signal": name.strip().upper()})
+    return _ok(
+        {
+            "handle": handle.id,
+            "signal": name.strip().upper(),
+            "state": "exited" if handle.process.poll() is not None else "signal_requested",
+        }
+    )
 
 
 def process_list(input: dict, ctx: ToolContext) -> ToolResult:
@@ -296,6 +328,10 @@ def process_list(input: dict, ctx: ToolContext) -> ToolResult:
         return _ok({"processes": []})
     entries = []
     for handle in registry.list():
+        if handle.process.poll() is not None:
+            handle.exit_code = handle.process.returncode
+        if input.get("running_only") and handle.exit_code is not None:
+            continue
         entries.append(
             {
                 "handle": handle.id,
@@ -313,7 +349,9 @@ def process_list(input: dict, ctx: ToolContext) -> ToolResult:
 
 
 def _classify_shell_like(input: dict) -> ClassifiedAction:
-    return ClassifiedAction("shell.exec", str(input.get("command") or ""))
+    from rinari.tools.definition import command_text
+
+    return ClassifiedAction("shell.exec", command_text(input))
 
 
 def _classify_process_local(input: dict) -> ClassifiedAction:
@@ -332,10 +370,16 @@ def process_tools() -> list[ToolDefinition]:
                 "type": "object",
                 "properties": {
                     "command": {"type": "string"},
+                    "argv": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "maxItems": 256,
+                    },
                     "cwd": {"type": "string"},
                     "env": {"type": "object"},
                 },
-                "required": ["command"],
+                "oneOf": [{"required": ["command"]}, {"required": ["argv"]}],
             },
             risk=RISK_HIGH,
             side_effects=SIDE_EFFECT_LOCAL_REVERSIBLE,
@@ -366,10 +410,22 @@ def process_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="process.output",
-            description="Read accumulated stdout/stderr of a started process.",
+            description=(
+                "Read bounded stdout/stderr. Pass the returned cursor to receive only new output."
+            ),
             input_schema={
                 "type": "object",
-                "properties": {"handle": {"type": "string"}},
+                "properties": {
+                    "handle": {"type": "string"},
+                    "cursor": {
+                        "type": "object",
+                        "properties": {
+                            "stdout": {"type": "integer", "minimum": 0},
+                            "stderr": {"type": "integer", "minimum": 0},
+                        },
+                    },
+                    "max_chars": {"type": "integer", "minimum": 1, "maximum": 64000},
+                },
                 "required": ["handle"],
             },
             risk=RISK_LOW,
@@ -405,7 +461,7 @@ def process_tools() -> list[ToolDefinition]:
         ToolDefinition(
             name="process.list",
             description="List processes started in this session.",
-            input_schema={"type": "object", "properties": {}},
+            input_schema={"type": "object", "properties": {"running_only": {"type": "boolean"}}},
             risk=RISK_LOW,
             side_effects=SIDE_EFFECT_NONE,
             idempotent=True,

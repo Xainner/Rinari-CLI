@@ -101,13 +101,6 @@ def fetch(
     started = time.monotonic()
     try:
         response, body, truncated = _read_bounded(client, url)
-    except httpx.StreamConsumed:
-        # Test seam (httpx.MockTransport) serves pre-built responses without a
-        # raw stream; fall back to a full read and truncate the same way.
-        response = client.get(url)
-        raw = response.content
-        body = raw[:MAX_RESPONSE_BYTES]
-        truncated = len(raw) > MAX_RESPONSE_BYTES
     except httpx.TimeoutException as exc:
         raise WebRequestError(
             "TIMEOUT",
@@ -148,6 +141,9 @@ def _read_bounded(client: httpx.Client, url: str) -> tuple[httpx.Response, bytes
         error = map_status(response.status_code)
         if error is not None:
             raise error
+        if response.is_stream_consumed:
+            raw = response.content
+            return response, raw[:MAX_RESPONSE_BYTES], len(raw) > MAX_RESPONSE_BYTES
         body = bytearray()
         truncated = False
         for chunk in response.iter_raw():
@@ -155,7 +151,7 @@ def _read_bounded(client: httpx.Client, url: str) -> tuple[httpx.Response, bytes
             if len(body) > MAX_RESPONSE_BYTES:
                 truncated = True
                 break
-    return response, bytes(body), truncated
+    return response, bytes(body[:MAX_RESPONSE_BYTES]), truncated
 
 
 # -- search --------------------------------------------------------------------

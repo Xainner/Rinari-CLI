@@ -194,6 +194,14 @@ class MemoryRepository:
             ),
         )
 
+    def episodic_match(self, session_id, project_root, summary, outcome):
+        row = self._db.query_one(
+            "SELECT id FROM episodic_memory WHERE session_ref = ? AND project_root = ? "
+            "AND summary = ? AND outcome = ? LIMIT 1",
+            (session_id, project_root, summary, outcome),
+        )
+        return dict(row) if row else None
+
     def episodic_list(self, project_root: str | None = None, *, limit: int = 20) -> list[dict]:
         if project_root:
             rows = self._db.query(

@@ -28,8 +28,8 @@ def _base(ctx: ToolContext, path: Any) -> tuple[Path | None, ToolResult | None]:
     return _resolve_read(ctx, path or ".")
 
 
-def _as_fs_read(path: Any):
-    return ClassifiedAction("fs.read", str(path) if path else "")
+def _as_fs_read(arguments: dict):
+    return ClassifiedAction("fs.read", str(arguments.get("path") or "."))
 
 
 def _err(code: ToolErrorCode, message: str) -> ToolResult:
@@ -43,18 +43,24 @@ def search_files(input: dict, ctx: ToolContext) -> ToolResult:
     pattern = input.get("pattern")
     if not isinstance(pattern, str) or not pattern:
         return _err(ToolErrorCode.INVALID_ARGUMENT, "pattern must be a non-empty string")
-    matches: list[str] = []
+    from rinari.tools.file_search import file_matches
+
     try:
-        for path in base.glob(pattern):
-            if path.is_file():
-                matches.append(str(path))
-            if len(matches) >= 500:
-                break
+        return _ok(
+            file_matches(
+                base,
+                pattern,
+                ctx,
+                limit=min(500, max(1, int(input.get("limit", 500)))),
+                offset=max(0, int(input.get("offset", 0))),
+            )
+        )
+    except ValueError as exc:
+        return _err(ToolErrorCode.INVALID_ARGUMENT, str(exc))
     except OSError as exc:
         return _err(
             ToolErrorCode.PERMISSION_DENIED, f"Glob failed at {base}: {exc.__class__.__name__}"
         )
-    return _ok({"root": str(base), "pattern": pattern, "matches": sorted(matches)})
 
 
 def search_regex(input: dict, ctx: ToolContext) -> ToolResult:
@@ -64,17 +70,9 @@ def search_regex(input: dict, ctx: ToolContext) -> ToolResult:
     pattern = input.get("pattern")
     if not isinstance(pattern, str) or not pattern:
         return _err(ToolErrorCode.INVALID_ARGUMENT, "pattern must be a non-empty regex")
-    try:
-        return _ok(
-            core.regex_search(
-                base,
-                pattern,
-                include=input.get("include"),
-                max_results=int(input.get("max_results", 100)),
-            )
-        )
-    except ValueError as exc:
-        return _err(ToolErrorCode.INVALID_ARGUMENT, str(exc))
+    from rinari.tools.text_search import search_text
+
+    return search_text(base, input, ctx)
 
 
 def search_symbols(input: dict, ctx: ToolContext) -> ToolResult:

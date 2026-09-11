@@ -74,9 +74,15 @@ def walk_files(root: Path, include: str | None = None, max_files: int = DEFAULT_
     count = 0
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = sorted(
-            d for d in dirnames if d not in SKIP_DIRS and not d.endswith(".egg-info")
+            d
+            for d in dirnames
+            if d not in SKIP_DIRS
+            and not d.endswith(".egg-info")
+            and not (Path(dirpath) / d).is_symlink()
         )
         for filename in sorted(filenames):
+            if (Path(dirpath) / filename).is_symlink():
+                continue
             if include and not fnmatch.fnmatch(filename, include):
                 continue
             yield Path(dirpath) / filename
@@ -107,6 +113,8 @@ def _read_lines(path: Path) -> list[str] | None:
     if not is_text_file(path):
         return None
     try:
+        if path.stat().st_size > 2 * 1024 * 1024:
+            return None
         return path.read_text(encoding="utf-8").splitlines()
     except (UnicodeDecodeError, OSError):
         return None

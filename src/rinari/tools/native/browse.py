@@ -68,9 +68,10 @@ def _manager(ctx: ToolContext) -> BrowserManager | None:
 
 def _cancelled_fn(ctx: ToolContext) -> Callable[[], bool] | None:
     token = getattr(ctx, "cancellation", None)
-    if token is None:
-        return None
-    return lambda: bool(token.cancelled)
+    return lambda: (
+        bool(token and token.cancelled)
+        or (ctx.deadline_at is not None and time.time() >= ctx.deadline_at)
+    )
 
 
 def _need_manager(ctx: ToolContext) -> tuple[BrowserManager | None, ToolResult | None]:
@@ -274,6 +275,15 @@ def browser_snapshot(input: dict, ctx: ToolContext) -> ToolResult:
     if error is not None:
         return error
     try:
+        if input.get("format") == "semantic":
+            snap = manager.a11y_tree(target, cancelled=_cancelled_fn(ctx))
+            import json
+
+            snap["snapshot_id"] = hashlib.sha256(
+                json.dumps(snap, sort_keys=True).encode()
+            ).hexdigest()
+            snap["target_id"] = target
+            return _ok(snap)
         snap = manager.snapshot(target, cancelled=_cancelled_fn(ctx))
     except BrowserError as exc:
         code = _CODE_MAP.get(exc.code, ToolErrorCode.UNKNOWN)
@@ -753,9 +763,16 @@ def browse_tools() -> list[ToolDefinition]:
             name="browser.snapshot",
             description=(
                 "Bounded DOM snapshot (outer HTML) of the page; truncated output is "
-                "spilled to an artifact with the first 8 KiB returned."
+                "spilled to an artifact with the first 8 KiB returned. Prefer format=semantic "
+                "for compact roles/names and element_ids usable as click selectors."
             ),
-            input_schema=optional_target,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "target_id": {"type": "string"},
+                    "format": {"type": "string", "enum": ["html", "semantic"], "default": "html"},
+                },
+            },
             risk=RISK_LOW,
             side_effects=SIDE_EFFECT_NONE,
             classify=_read_classify,
@@ -1066,7 +1083,23 @@ def browse_tools() -> list[ToolDefinition]:
             capabilities=("browser.mutate",),
         ),
     ]
-    return [replace(tool, always_loaded=False) for tool in tools]
+    non_repeatable = {
+        "browser.click",
+        "browser.type",
+        "browser.drag",
+        "browser.evaluate",
+        "browser.open",
+        "browser.upload",
+        "browser.download",
+    }
+    return [
+        replace(
+            tool,
+            always_loaded=False,
+            idempotent=tool.idempotent and tool.name not in non_repeatable,
+        )
+        for tool in tools
+    ]
 
 
 __all__ = ["browse_tools"]

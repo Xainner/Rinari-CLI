@@ -48,6 +48,7 @@ class ChatMessage:
     tool_calls: tuple[ToolCall, ...] = ()
     tool_call_id: str | None = None
     name: str | None = None
+    images: tuple[Any, ...] = ()
 
     @classmethod
     def system(cls, content: str) -> ChatMessage:
@@ -123,6 +124,7 @@ class ProviderCapabilities:
     structured_output: bool = False
     max_context_tokens: int | None = None
     reasoning_effort: bool = False
+    vision: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)

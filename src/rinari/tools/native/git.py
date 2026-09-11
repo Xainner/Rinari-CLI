@@ -8,6 +8,7 @@ remain reachable only through `shell.exec` behind the approval gate
 from __future__ import annotations
 
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -53,7 +54,7 @@ def _run_git(ctx: ToolContext, input: dict, *args: str) -> tuple[int, str, bool]
                 raise TypeError()
             resolved = ctx.sandbox.resolve(input["path"], base=ctx.cwd)
             ctx.sandbox.assert_readable(resolved)
-            root: str = str(resolved)
+            root: str = str(resolved.parent if resolved.is_file() else resolved)
         except SandboxViolationError as exc:
             return _fail(ToolErrorCode.SANDBOX_VIOLATION, exc.message)
         except TypeError:
@@ -61,11 +62,18 @@ def _run_git(ctx: ToolContext, input: dict, *args: str) -> tuple[int, str, bool]
     else:
         root = str(ctx.project_root) if ctx.project_root is not None else str(ctx.cwd)
     try:
+        if ctx.cancellation:
+            ctx.cancellation.throw_if_cancelled()
+        timeout = GIT_TIMEOUT_S
+        if ctx.deadline_at is not None:
+            timeout = min(timeout, ctx.deadline_at - time.time())
+            if timeout <= 0:
+                return _fail(ToolErrorCode.TIMEOUT, "Git deadline exhausted")
         process = subprocess.run(
             ["git", *args],
             cwd=root,
             capture_output=True,
-            timeout=GIT_TIMEOUT_S,
+            timeout=timeout,
         )
     except FileNotFoundError:
         return _fail(ToolErrorCode.DEPENDENCY_ERROR, "git executable not found")
@@ -85,21 +93,26 @@ def _truncated(out: str) -> bool:
 
 
 def git_status(input: dict, ctx: ToolContext) -> ToolResult:
-    result = _run_git(ctx, input, "status", "--porcelain", "--branch")
+    result = _run_git(ctx, input, "status", "--porcelain=v1", "-z", "--branch")
     if isinstance(result, ToolResult):
         return result
     _, out, _ = result
-    base = ctx.project_root if ctx.project_root is not None else ctx.cwd
+    base = (
+        ctx.sandbox.resolve(input["path"], base=ctx.cwd)
+        if input.get("path")
+        else ctx.project_root or ctx.cwd
+    )
     branch: str | None = None
     files: list[dict[str, str]] = []
-    for line in out.splitlines():
+    records = iter(out.split("\0"))
+    for line in records:
         if line.startswith("## "):
             branch = line[3:].split(" ")[0]
         elif line:
             raw_path = line[3:]
-            if " -> " in raw_path and line[:2].startswith(("R", "C")):
-                raw_path = raw_path.split(" -> ", 1)[1]
-            entry = {"status": line[:2].strip(), "path": raw_path.strip().strip('"')}
+            entry = {"status": line[:2].strip(), "path": raw_path}
+            if any(char in line[:2] for char in "RC"):
+                entry["original_path"] = next(records, "")
             entry["ownership"] = _ownership_tag(ctx, base, entry["path"])
             files.append(entry)
     return _ok(
@@ -107,7 +120,8 @@ def git_status(input: dict, ctx: ToolContext) -> ToolResult:
             "branch": branch,
             "dirty": bool(files),
             "files": files[:200],
-            "truncated": _truncated(out),
+            "truncated": len(files) > 200,
+            "total_files": len(files),
             "ownership_legend": {
                 "user": "unchanged since before the session (user work)",
                 "modified-in-session": "user change, further modified during the session",
@@ -131,10 +145,19 @@ def _ownership_tag(ctx: ToolContext, base: Path, rel_path: str) -> str:
 
 
 def git_diff(input: dict, ctx: ToolContext) -> ToolResult:
-    args = ["diff", "--no-color", "--stat=200"]
+    args = ["diff", "--no-color", "--no-ext-diff", "--no-textconv"]
+    if input.get("stat", False):
+        args.append("--stat=200")
     if input.get("cached", False):
         args.append("--cached")
-    if input.get("path"):
+    if input.get("files"):
+        files = input["files"]
+        if not isinstance(files, list) or not all(
+            isinstance(p, str) and not p.startswith(":") for p in files
+        ):
+            return _fail(ToolErrorCode.INVALID_ARGUMENT, "files must be literal path strings")
+        args += ["--", *files]
+    elif input.get("path"):
         args += ["--", str(input["path"])]
     result = _run_git(ctx, input, *args)
     if isinstance(result, ToolResult):
@@ -150,20 +173,41 @@ def git_log(input: dict, ctx: ToolContext) -> ToolResult:
         limit = max(1, min(int(limit), 200))
     except (TypeError, ValueError):
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "limit must be an integer")
-    result = _run_git(ctx, input, "log", f"-n{limit}", "--oneline", "--decorate", "--no-color")
+    offset = max(0, int(input.get("offset", 0)))
+    result = _run_git(
+        ctx,
+        input,
+        "log",
+        f"-n{limit}",
+        f"--skip={offset}",
+        "--format=%H%x00%aI%x00%s%x00",
+        "--no-color",
+    )
     if isinstance(result, ToolResult):
         if "not have any commits yet" in result.error.message:
             return _ok({"entries": [], "truncated": False})
         return result
     _, out, _ = result
     bound, truncated = _bound(out)
-    return _ok({"entries": [line for line in bound.splitlines() if line], "truncated": truncated})
+    parts = bound.split("\0")
+    commits = [
+        {"hash": parts[i].strip(), "date": parts[i + 1], "subject": parts[i + 2]}
+        for i in range(0, len(parts) - 2, 3)
+    ]
+    return _ok(
+        {
+            "entries": [f"{c['hash'][:8]} {c['subject']}" for c in commits],
+            "commits": commits,
+            "truncated": truncated,
+            "next_offset": offset + len(commits) if len(commits) == limit else None,
+        }
+    )
 
 
 def git_show(input: dict, ctx: ToolContext) -> ToolResult:
     ref = input.get("ref") or "HEAD"
-    if not isinstance(ref, str) or not ref.strip():
-        return _fail(ToolErrorCode.INVALID_ARGUMENT, "ref must be a non-empty string")
+    if not isinstance(ref, str) or not ref.strip() or ref.startswith("-"):
+        return _fail(ToolErrorCode.INVALID_ARGUMENT, "ref must be a revision, not an option")
     result = _run_git(ctx, input, "show", "--stat", "--no-color", ref)
     if isinstance(result, ToolResult):
         return result
@@ -218,6 +262,8 @@ def git_tools() -> list[ToolDefinition]:
                 "properties": {
                     "path": {"type": "string"},
                     "cached": {"type": "boolean"},
+                    "stat": {"type": "boolean", "default": False},
+                    "files": {"type": "array", "items": {"type": "string"}, "maxItems": 100},
                 },
             },
             risk=RISK_LOW,
@@ -233,6 +279,7 @@ def git_tools() -> list[ToolDefinition]:
                 "properties": {
                     "path": {"type": "string"},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+                    "offset": {"type": "integer", "minimum": 0},
                 },
             },
             risk=RISK_LOW,

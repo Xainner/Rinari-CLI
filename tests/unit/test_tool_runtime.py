@@ -75,6 +75,19 @@ def _runtime(ctx, tmp_path, *, answer="n", secrets=()):
 # -- schema validator ------------------------------------------------------
 
 
+def test_git_status_preserves_delimited_paths(project, monkeypatch):
+    from rinari.tools.native import git
+
+    tmp_path, root, _ = project
+    output = "## main\0R  nueva ñ.txt\0vieja -> nombre.txt\0?? espacio final \0"
+    monkeypatch.setattr(git, "_run_git", lambda *args: (0, output, False))
+    result = git.git_status({}, _ctx(tmp_path, root))
+    assert result.data["files"][0]["path"] == "nueva ñ.txt"
+    assert result.data["files"][0]["original_path"] == "vieja -> nombre.txt"
+    assert result.data["files"][1]["path"] == "espacio final "
+    assert result.data["total_files"] == 2
+
+
 def test_schema_validations() -> None:
     schema = {
         "type": "object",
@@ -106,13 +119,17 @@ def test_registry_search_and_manifest() -> None:
     found = registry.search("search text files")
     assert any(t.name == "fs.search_text" for t in found)
     schemas = registry.for_model()
-    assert {s.name for s in schemas} == set(registry.names())
+    from rinari.tools.availability import availability
+
+    assert {s.name for s in schemas} == {
+        name for name in registry.names() if availability(name)["available"] is not False
+    }
     manifest = registry.manifests()
     names = [n["name"] for n in manifest["namespaces"]]
     assert "fs" in names and "shell" in names and "git" in names
     described = registry.describe("fs.read")
     assert described["risk"] == "low"
-    assert described["input_schema"]["required"] == ["path"]
+    assert "path" in described["input_schema"]["properties"]
 
 
 # -- pipeline: validation & policy -------------------------------------------
@@ -512,3 +529,46 @@ def test_full_read_scope_still_requires_sensitive_read_approval(project):
     assert not denied.execute("fs.read", {"path": str(secret)}, ctx).ok
     approved, _ = _runtime(ctx, tmp_path, answer="y")
     assert approved.execute("fs.read", {"path": str(secret)}, ctx).ok
+
+
+def test_line_range_beyond_initial_megabyte(project):
+    from rinari.tools.native.fs import fs_read_lines
+
+    tmp_path, root, _ = project
+    path = root / "large.txt"
+    path.write_text(("x" * 1000 + "\n") * 1100 + "última\n", encoding="utf-8")
+    result = fs_read_lines({"path": str(path), "start": 1101, "end": 1101}, _ctx(tmp_path, root))
+    assert result.ok
+    assert result.data["lines"] == [{"line": 1101, "text": "última"}]
+
+
+def test_read_utf8_boundary_is_not_binary(tmp_path):
+    from rinari.tools.native.fs import read_text_bounded
+
+    p = tmp_path / "unicode.txt"
+    p.write_bytes("año".encode())
+    result = read_text_bounded(p, max_bytes=2)
+    assert result.text == "a"
+    assert result.truncated
+
+
+def test_patch_precondition_preserves_newer_content(project):
+    from rinari.tools.native.fs import fs_patch, fs_read
+
+    tmp_path, root, _ = project
+    p = root / "a.txt"
+    p.write_bytes(b"hello\r\nworld\r\n")
+    ctx = _ctx(tmp_path, root)
+    before = fs_read({"path": str(p)}, ctx)
+    p.write_bytes(b"hello\r\nnewer\r\n")
+    result = fs_patch(
+        {
+            "path": str(p),
+            "old_string": "hello",
+            "new_string": "hi",
+            "expected_hash": before.data["sha256"],
+        },
+        ctx,
+    )
+    assert not result.ok
+    assert p.read_bytes() == b"hello\r\nnewer\r\n"

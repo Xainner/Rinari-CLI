@@ -10,7 +10,12 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import difflib
+import hashlib
+import json
+import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -79,6 +84,8 @@ class ToolRuntime:
         self._emit = event_sink
         self.spill_threshold_bytes = spill_threshold_bytes
         self._network_event_log = network_event_log
+        self._receipts = OrderedDict()
+        self._receipt_lock = threading.RLock()
 
     # ------------------------------------------------------------------
 
@@ -98,7 +105,33 @@ class ToolRuntime:
             requested["tool_call_id"] = tool_call_id
         requested.update(trace or {})
         self._event("ToolRequested", requested)
-        result = self._execute_inner(tool_name, arguments, ctx, tool_call_id)
+        request_id = arguments.get("request_id")
+        tool = self.registry.get(tool_name)
+        if request_id and (not isinstance(request_id, str) or len(request_id) > 128):
+            result = self._error(ctx, ToolErrorCode.INVALID_ARGUMENT, "request_id must be a string")
+        elif request_id and tool and tool.manifest.get("supports_request_id"):
+            clean = {k: v for k, v in arguments.items() if k != "request_id"}
+            fingerprint = hashlib.sha256(json.dumps(clean, sort_keys=True).encode()).hexdigest()
+            key = (ctx.session_id, str(ctx.cwd), tool_name, request_id)
+            with self._receipt_lock:
+                previous = self._receipts.get(key)
+                if previous:
+                    result = (
+                        previous[1]
+                        if previous[0] == fingerprint
+                        else self._error(
+                            ctx,
+                            ToolErrorCode.CONFLICT,
+                            "request_id was already used with different arguments",
+                        )
+                    )
+                else:
+                    result = self._execute_inner(tool_name, clean, ctx, tool_call_id)
+                    self._receipts[key] = (fingerprint, result)
+                    if len(self._receipts) > 256:
+                        self._receipts.popitem(last=False)
+        else:
+            result = self._execute_inner(tool_name, arguments, ctx, tool_call_id)
         duration_ms = (time.monotonic() - started) * 1000.0
         completed = {
             "tool": tool_name,
@@ -139,62 +172,94 @@ class ToolRuntime:
                 ToolErrorCode.TOOL_NOT_FOUND,
                 f"Unknown tool: {tool_name}",
                 retryable=False,
-                details=", ".join(self.registry.names()),
+                details={
+                    "suggestions": difflib.get_close_matches(tool_name, self.registry.names(), n=5),
+                    "next_action": "Search registered tools with capability.search.",
+                },
             )
         if tool.handler is None:
             return self._error(ctx, ToolErrorCode.UNKNOWN, f"Tool {tool_name} has no handler")
+
+        if tool_name.startswith("web.") and arguments.get("source_id"):
+            from rinari.tools.native.web import source_snapshot
+
+            snapshot = source_snapshot(ctx, arguments["source_id"])
+            if snapshot is None:
+                return self._error(
+                    ctx, ToolErrorCode.NOT_FOUND, "Source snapshot expired; reopen its URL"
+                )
+            arguments = {**arguments, "url": snapshot.url}
 
         errors = validate_against(tool.input_schema, arguments)
         if errors:
             return self._error(ctx, ToolErrorCode.INVALID_ARGUMENT, "; ".join(errors[:5]))
 
-        action = tool.classify_action(arguments)
-        scope = scope_from_context(ctx)
-        self._event("PolicyChecked", {"tool": tool_name, "capability": action.capability})
-        decision = self.policy.decide(
-            action.capability,
-            scope,
-            path=action.fs_path,
-            command=action.command,
-            host=action.target if action.capability == CAPABILITY_NETWORK else None,
-            risk=tool.risk,
-            risk_class=tool.side_effects,
-        )
-        self._event(
-            "PolicyDecision",
-            {
-                "tool": tool_name,
-                "capability": action.capability,
-                "action": decision.action.value,
-                "reason": decision.reason,
-            },
-        )
-        if action.capability == CAPABILITY_NETWORK and self._network_event_log is not None:
-            with contextlib.suppress(Exception):  # audit must never sink the tool call
-                self._network_event_log(
-                    ctx.session_id,
-                    tool_name,
-                    decision.target or str(action.target or ""),
-                    decision.action.value,
-                    decision.reason,
-                )
-        if decision.action is PolicyAction.DENY:
-            return self._error(ctx, ToolErrorCode.POLICY_DENIED, decision.reason)
-        if decision.action is PolicyAction.ASK:
-            granted, ctx = self._request_approval(tool, decision, ctx, tool_call_id)
-            if not granted:
-                return self._error(ctx, ToolErrorCode.APPROVAL_DENIED, decision.reason)
+        try:
+            actions = tool.classify_actions(arguments)
+        except (TypeError, ValueError, KeyError) as exc:
+            return self._error(ctx, ToolErrorCode.INVALID_ARGUMENT, str(exc))
+        for action in actions:
+            scope = scope_from_context(ctx)
+            if tool_name.startswith("channel.") and ctx.channel_host is None:
+                return self._error(ctx, ToolErrorCode.PERMISSION_DENIED, "No channel binding")
+            self._event("PolicyChecked", {"tool": tool_name, "capability": action.capability})
+            decision = self.policy.decide(
+                action.capability,
+                scope,
+                path=action.fs_path,
+                command=action.command,
+                host=action.target if action.capability == CAPABILITY_NETWORK else None,
+                risk=tool.risk,
+                risk_class=tool.side_effects,
+            )
+            self._event(
+                "PolicyDecision",
+                {
+                    "tool": tool_name,
+                    "capability": action.capability,
+                    "action": decision.action.value,
+                    "reason": decision.reason,
+                },
+            )
+            if action.capability == CAPABILITY_NETWORK and self._network_event_log is not None:
+                with contextlib.suppress(Exception):  # audit must never sink the tool call
+                    self._network_event_log(
+                        ctx.session_id,
+                        tool_name,
+                        decision.target or str(action.target or ""),
+                        decision.action.value,
+                        decision.reason,
+                    )
+            if decision.action is PolicyAction.DENY:
+                return self._error(ctx, ToolErrorCode.POLICY_DENIED, decision.reason)
+            if decision.action is PolicyAction.ASK:
+                granted, ctx = self._request_approval(tool, decision, ctx, tool_call_id)
+                if not granted:
+                    return self._error(ctx, ToolErrorCode.APPROVAL_DENIED, decision.reason)
 
         cancellation = ctx.cancellation
         if cancellation is not None:
             cancellation.throw_if_cancelled()
 
-        call_ctx = self._deadline_ctx(ctx, tool)
+        call_ctx = dataclasses.replace(self._deadline_ctx(ctx, tool), tool_call_id=tool_call_id)
         attempts = 2 if tool.idempotent else 1
         attempt = 0
         while True:
+            if call_ctx.deadline_at is not None and time.time() >= call_ctx.deadline_at:
+                return self._error(ctx, ToolErrorCode.TIMEOUT, "Tool execution deadline exhausted")
             attempt += 1
             result = self._invoke_handler(tool, arguments, call_ctx, ctx, tool_call_id)
+            if result.ok and tool_name.startswith("web.") and isinstance(result.data, dict):
+                from rinari.tools.native.web import snapshot_id
+
+                snapshot = next(
+                    (v[1] for v in ctx.web_snapshots.values() if v[1].url == arguments.get("url")),
+                    None,
+                )
+                if snapshot is not None and tool_name != "web.download":
+                    result = dataclasses.replace(
+                        result, data={**result.data, "source_id": snapshot_id(snapshot)}
+                    )
             if result.ok and tool.output_schema:
                 # P0.5: the contract is enforced, not decorative — dynamic
                 # sources (plugins/MCP/OpenAPI) must honor their schema.
@@ -206,7 +271,11 @@ class ToolRuntime:
                         f"tool {tool_name} output violates its output_schema: "
                         + "; ".join(output_errors[:5]),
                     )
-            if result.ok or attempt >= attempts or not self._retryable_result(tool, result):
+            if (
+                result.ok
+                or attempt >= attempts
+                or not self._retryable_result(tool, result, arguments)
+            ):
                 break
             if cancellation is not None:
                 cancellation.throw_if_cancelled()
@@ -225,8 +294,16 @@ class ToolRuntime:
         {ToolErrorCode.NETWORK_ERROR, ToolErrorCode.RATE_LIMITED},
     )
 
-    def _retryable_result(self, tool: ToolDefinition, result: ToolResult) -> bool:
+    def _retryable_result(
+        self, tool: ToolDefinition, result: ToolResult, arguments: dict | None = None
+    ) -> bool:
         if not tool.idempotent:
+            return False
+        if tool.name == "http.request":
+            # The HTTP adapter owns method-aware retries. Never multiply its
+            # attempts or replay an ambiguous POST at this outer layer.
+            return False
+        if tool.side_effects != "none":
             return False
         if tool.side_effects in self._NO_RETRY_SIDE_EFFECTS:
             return False
@@ -245,7 +322,10 @@ class ToolRuntime:
         """
         if not tool.timeout_ms:
             return ctx
-        return dataclasses.replace(ctx, deadline_at=time.time() + tool.timeout_ms / 1000.0)
+        deadline = time.time() + tool.timeout_ms / 1000.0
+        if ctx.deadline_at is not None:
+            deadline = min(deadline, ctx.deadline_at)
+        return dataclasses.replace(ctx, deadline_at=deadline)
 
     def _invoke_handler(
         self,
@@ -256,6 +336,9 @@ class ToolRuntime:
         tool_call_id: str,
     ) -> ToolResult:
         observation = None
+        from rinari.shared.execution_scope import execution_context
+
+        scope_token = execution_context.set(call_ctx)
         try:
             if call_ctx.change_tracker is not None:
                 observation = call_ctx.change_tracker.before_tool(tool.name, arguments, call_ctx)
@@ -277,13 +360,28 @@ class ToolRuntime:
             return self._error(ctx, code, exc.message, retryable=exc.retryable)
         except RinariError as exc:
             return self._error(ctx, ToolErrorCode.UNKNOWN, exc.message)
+        except TimeoutError:
+            return self._error(ctx, ToolErrorCode.TIMEOUT, "Tool execution deadline exhausted")
+        except (ValueError, TypeError, KeyError) as exc:
+            return self._error(
+                ctx,
+                ToolErrorCode.INVALID_ARGUMENT,
+                f"Invalid tool arguments ({type(exc).__name__})",
+            )
         except OSError as exc:
             return self._error(
                 ctx,
                 ToolErrorCode.NOT_FOUND,
                 f"filesystem operation failed: {exc.__class__.__name__}",
             )
+        except Exception as exc:
+            return self._error(
+                ctx,
+                ToolErrorCode.UNKNOWN,
+                f"Tool failed ({type(exc).__name__}); inspect engine diagnostics",
+            )
         finally:
+            execution_context.reset(scope_token)
             if call_ctx.change_tracker is not None:
                 with contextlib.suppress(Exception):
                     call_ctx.change_tracker.after_tool(observation)
@@ -324,7 +422,7 @@ class ToolRuntime:
         )
         if not outcome.granted:
             return False, ctx
-        if decision.capability == "fs.read" and decision.target:
+        if decision.capability == "fs.read" and decision.target and tool.side_effects == "none":
             target = Path(decision.target).resolve()
             sandbox = FilesystemSandbox(
                 ctx.sandbox.read_root,
@@ -392,6 +490,18 @@ class ToolRuntime:
                     "fs.read_lines on the source file, before editing."
                 )
                 data["text_preview"] = text[:1536]
+        elif isinstance(data, (list, tuple)):
+            data = self._redact_payload(list(data))
+        if spill_ref is None and isinstance(data, (dict, list)):
+            serialized = json.dumps(data, ensure_ascii=False, default=str)
+            if len(serialized.encode("utf-8")) > cap:
+                spill_ref = self._spill(tool_call_id or "tool", serialized, ctx)
+                truncated = True
+                data = {
+                    "summary": "Large structured result; read the full JSON artifact",
+                    "artifact": spill_ref.uri,
+                    "preview": serialized[: min(1536, cap)],
+                }
         if spill_ref is not None and not isinstance(data, dict):
             data = {
                 "summary": (f"output exceeded {cap} bytes; spilled to artifact"),
@@ -401,6 +511,15 @@ class ToolRuntime:
         return dataclasses.replace(
             result,
             data=data,
+            error=(
+                dataclasses.replace(
+                    result.error,
+                    message=self._redactor.redact(result.error.message),
+                    details=self._redact_payload(result.error.details),
+                )
+                if result.error
+                else None
+            ),
             artifacts=tuple(artifacts),
             truncated=result.truncated or truncated,
         )

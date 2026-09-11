@@ -417,6 +417,8 @@ def build_agent_session(
     question_prompt=None,
     activity_sink=None,
     reasoning_effort: str | None = None,
+    remote_target: dict | None = None,
+    channel_host=None,
 ) -> AgentSession:
     def preparing(stage: str) -> None:
         if activity_sink is not None:
@@ -442,7 +444,7 @@ def build_agent_session(
         )
     token = CancellationToken()
     network_policy = services.network.policy()
-    hook_engine = _build_hook_engine(services, root)
+    hook_engine = _build_hook_engine(services, root) if remote_target is None else None
     # model_caller is the eval seam: a scripted/caller-equivalent object that
     # satisfies invoke/invoke_stream/capabilities. Production never passes it.
     caller = model_caller if model_caller is not None else _caller_for(services, record)
@@ -461,7 +463,7 @@ def build_agent_session(
         read_profile=read_profile,
         sandbox=sandbox,
         limits=ProcessLimits(timeout_s=300, max_output_bytes=128 * 1024),
-        artifact_root=home / ".rinari" / "artifacts",
+        artifact_root=services.ctx.layout.artifacts_dir,
         clock=services.ctx.clock,
         cancellation=token,
         output_sink=_live_output_sink(interactive if live_output is None else live_output),
@@ -469,7 +471,7 @@ def build_agent_session(
         processes=ProcessRegistry(),
         pty=_build_pty_registry(),
         worktree=_ensure_worktree_baseline(services, record),
-        private_roots=(services.changes.blobs.root,),
+        private_roots=(services.changes.blobs.root, services.ctx.layout.root / "ssh"),
         lsp=_build_lsp_manager(root),
         validation=services.verification,
         memory=services.memory,
@@ -480,9 +482,17 @@ def build_agent_session(
         browser=_build_browser_manager(record.id, home),
         mcp=services.mcp,
         exposure=ToolExposure(),
+        channel_host=channel_host,
     )
     orchestrator = _build_orchestrator(
-        services, record, root, token, tool_ctx, policy, gateway, activity_sink
+        services,
+        record,
+        root,
+        token,
+        replace(tool_ctx, channel_host=None),
+        policy,
+        gateway,
+        activity_sink,
     )
     preparing("agents")
     tools = _build_tools(
@@ -492,6 +502,8 @@ def build_agent_session(
         token=token,
         approval_prompt=approval_prompt,
         questions_enabled=question_prompt is not None,
+        remote_target=remote_target,
+        channel_host=channel_host,
         network_policy=network_policy,
         root=root,
         hook_engine=hook_engine,
@@ -530,6 +542,22 @@ def build_agent_session(
         assembler_base=build_assembler_context(services, record, profile),
         history=_restore_history(services, record),
     )
+    if channel_host is not None:
+        context.assembler_base = replace(
+            context.assembler_base,
+            runtime_policy=context.assembler_base.runtime_policy + "\n"
+            "Originating owner conversation has channel tools discoverable via capability.search. "
+            "To deliver an existing file, locate it using available tools, "
+            "import it with artifact.import, then call channel.send_attachment "
+            "with the returned URI. Do not inspect visual content just to send "
+            "a file, and never regenerate to repair a delivery. Query uncertain "
+            "deliveries with channel.delivery_get before considering another send. "
+            "Receiving an image permits conversation about it, not unrequested "
+            "video generation. Original attachment URIs may be used as references; "
+            "ask when the intended image is ambiguous. Narrate meaningful progress "
+            "naturally. The host delivers the final answer; do not duplicate it with "
+            "channel.reply.",
+        )
     services.context.restore_compact_state(context)
     preparing("context")
     if record.kind == "PROJECT" and root is not None and root.is_dir():
@@ -696,38 +724,58 @@ def _build_tools(
     orchestrator=None,
     approval_prompt: AnswerPrompt | None = None,
     questions_enabled: bool = False,
+    remote_target: dict | None = None,
+    channel_host=None,
 ) -> ToolRuntime:
+    from rinari.application.ssh_targets import TargetStore
+    from rinari.tools.native.ssh import ssh_tools
+
     registry = ToolRegistry()
-    registry.register_all(
-        tool for tool in all_native_tools() if questions_enabled or tool.name != "user.ask"
-    )
-    # Extension tool sources normalize into the same registry (harness.md 108-110).
-    with contextlib.suppress(Exception):
-        registry.register_all(_plugin_tools(services, root))
-    with contextlib.suppress(Exception):
-        registry.register_all(_mcp_tools(services, root))
-    with contextlib.suppress(Exception):
-        for row in services.api.list():
-            if row.get("enabled"):
-                registry.register_all(
-                    services.api.tool_definitions(row["name"], row.get("scope") or "global")
-                )
-    # Phase 6: skill tools + orchestrator tools join the same registry.
-    with contextlib.suppress(Exception):
-        from rinari.skills.tools import SkillToolHost, skill_tools
+    if remote_target is not None:
+        registry.register_all(ssh_tools(TargetStore(services.ctx.layout.root), remote_target))
+    else:
+        registry.register_all(
+            tool for tool in all_native_tools() if questions_enabled or tool.name != "user.ask"
+        )
+        # Extension tool sources normalize into the same registry (harness.md 108-110).
+        with registry.loading("plugins"):
+            registry.register_all(_plugin_tools(services, root))
+        with registry.loading("mcp"):
+            registry.register_all(_mcp_tools(services, root))
+        with registry.loading("openapi"):
+            for row in services.api.list():
+                if row.get("enabled"):
+                    registry.register_all(
+                        services.api.tool_definitions(row["name"], row.get("scope") or "global")
+                    )
+        # Phase 6: skill tools + orchestrator tools join the same registry.
+        with registry.loading("skills"):
+            from rinari.skills.tools import SkillToolHost, skill_tools
 
-        registry.register_all(skill_tools(SkillToolHost(service=services.skills, project=root)))
-    if orchestrator is not None:
-        with contextlib.suppress(Exception):
-            from rinari.agents.tools import AgentToolHost, agent_tools
+            registry.register_all(skill_tools(SkillToolHost(service=services.skills, project=root)))
+        if orchestrator is not None:
+            with registry.loading("agents"):
+                from rinari.agents.tools import AgentToolHost, agent_tools
 
-            registry.register_all(agent_tools(AgentToolHost(orchestrator=orchestrator)))
-    # Unified capability search sees whatever is registered above it, so it
-    # is added last (harness.md: search across native/plugin/MCP/OpenAPI/browser).
-    from rinari.capability_search import capability_activation_tools, capability_search_tool
+                registry.register_all(agent_tools(AgentToolHost(orchestrator=orchestrator)))
+        # Unified capability search sees whatever is registered above it, so it
+        # is added last (harness.md: search across native/plugin/MCP/OpenAPI/browser).
+        from rinari.capability_search import capability_activation_tools, capability_search_tool
 
-    registry.register(capability_search_tool(registry))
-    registry.register_all(capability_activation_tools(registry))
+        registry.register(capability_search_tool(registry))
+        registry.register_all(capability_activation_tools(registry))
+        registry.register_all(ssh_tools(TargetStore(services.ctx.layout.root)))
+
+    if channel_host is not None:
+        from rinari.capability_search import capability_activation_tools, capability_search_tool
+        from rinari.tools.native.artifact_import import artifact_import_tools
+        from rinari.tools.native.channel import channel_tools
+        registry.register_all(channel_tools(channel_host))
+        registry.register_all(
+            artifact_import_tools(services.artifacts, remote_target=remote_target)
+        )
+        registry.register(capability_search_tool(registry))
+        registry.register_all(capability_activation_tools(registry))
 
     def ask(request) -> str:
         if approval_prompt is not None:
@@ -968,11 +1016,31 @@ def _message_to_record(
         name=msg.name,
         created_at=ts,
         turn_id=turn_id,
+        images=[{"uri": i.uri, "sha256": i.sha256} for i in msg.images] or None,
     )
 
 
 def _restore_history(services: ServiceContainer, record: SessionRecord) -> list[ChatMessage]:
-    return [_record_to_message(rec) for rec in services.ctx.message_repo.list(record.id)]
+    from rinari.models.images import references
+    records = services.ctx.message_repo.list(record.id)
+    result = []
+    remaining = 4
+    for rec in reversed(records):
+        message = _record_to_message(rec)
+        if rec.images:
+            message = replace(message, content=(message.content or "") + "\nAdjuntos: " +
+                              ", ".join(i["uri"] for i in rec.images))
+            if remaining >= len(rec.images):
+                try:
+                    message = replace(
+                        message,
+                        images=references(services.artifacts, record.id, rec.images),
+                    )
+                    remaining -= len(rec.images)
+                except Exception:
+                    message = replace(message, content=message.content + " (archivo no disponible)")
+        result.append(message)
+    return list(reversed(result))
 
 
 def _persist_new_messages(

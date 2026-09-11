@@ -210,7 +210,7 @@ class BrowserManager:
 
     def launch(self, command: str | None = None, port: int | None = None) -> str:
         if self.connected:
-            raise BrowserError("BROWSER_PROTOCOL", "browser is already connected")
+            return self._endpoint or ""
         cmd = command or self._command_cfg or os.environ.get(ENV_COMMAND)
         if not cmd:
             cmd = next((c for c in DEFAULT_COMMAND_CANDIDATES if shutil.which(c)), None)
@@ -492,6 +492,9 @@ class BrowserManager:
             kept.append(
                 {
                     "node_id": node.get("nodeId"),
+                    "element_id": "node:" + str(node["backendDOMNodeId"])
+                    if node.get("backendDOMNodeId")
+                    else None,
                     "role": (node.get("role") or {}).get("value"),
                     "name": _short_name((node.get("name") or {}).get("value")),
                     "value": _short_name(node.get("value")),
@@ -534,6 +537,26 @@ class BrowserManager:
         if x is None and y is None:
             if not selector:
                 raise BrowserError("INVALID_ARGUMENT", "Provide a selector or x/y coordinates")
+            if selector.startswith("node:"):
+                try:
+                    node_id = int(selector[5:])
+                except ValueError:
+                    raise BrowserError(
+                        "INVALID_ARGUMENT", "Use an element_id from a fresh snapshot"
+                    ) from None
+                box = self.call(
+                    target_id,
+                    "DOM.getBoxModel",
+                    {"backendNodeId": node_id},
+                    domain="DOM",
+                    cancelled=cancelled,
+                )
+                quad = box.get("model", {}).get("content", [])
+                if len(quad) != 8:
+                    raise BrowserError(
+                        "TARGET_NOT_FOUND", "Element has no visible box; refresh snapshot"
+                    )
+                return sum(quad[::2]) / 4, sum(quad[1::2]) / 4
             out = self.evaluate(target_id, _JS_POINT % json.dumps(selector), cancelled=cancelled)
             point = out.get("value") or {}
             return float(point["x"]), float(point["y"])

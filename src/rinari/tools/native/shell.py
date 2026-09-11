@@ -7,6 +7,7 @@ bounded and spilled by the runtime when it exceeds the threshold.
 
 from __future__ import annotations
 
+import codecs
 import contextlib
 import os
 import subprocess
@@ -43,6 +44,7 @@ def _fail(
 
 
 def _drain(stream, buffer: _BoundedBuffer, name: str, sink=None) -> None:
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     try:
         while True:
             chunk = stream.read(65536)
@@ -51,7 +53,14 @@ def _drain(stream, buffer: _BoundedBuffer, name: str, sink=None) -> None:
             buffer.write(chunk)
             if sink is not None:
                 with contextlib.suppress(Exception):  # display never breaks the drain
-                    sink(name, chunk.decode("utf-8", errors="replace"))
+                    text = decoder.decode(chunk, final=False)
+                    if text:
+                        sink(name, text)
+        if sink is not None:
+            with contextlib.suppress(Exception):
+                tail = decoder.decode(b"", final=True)
+                if tail:
+                    sink(name, tail)
     except (OSError, ValueError):
         pass
 
@@ -97,13 +106,26 @@ class _BoundedBuffer:
         return len(data)
 
     def text(self) -> str:
-        return b"".join(self.chunks).decode("utf-8", errors="replace")
+        return codecs.getincrementaldecoder("utf-8")(errors="replace").decode(
+            b"".join(self.chunks), final=False
+        )
 
 
 def shell_exec(input: dict, ctx: ToolContext) -> ToolResult:
-    command = input.get("command")
-    if not isinstance(command, str) or not command.strip():
-        return _fail(ToolErrorCode.INVALID_ARGUMENT, "command must be a non-empty string")
+    command = input.get("argv") if "argv" in input else input.get("command")
+    if isinstance(command, list):
+        if not command or not all(isinstance(s, str) and "\0" not in s for s in command):
+            return _fail(
+                ToolErrorCode.INVALID_ARGUMENT, "argv must be non-empty strings without NUL"
+            )
+    elif not isinstance(command, str) or not command.strip():
+        return _fail(ToolErrorCode.INVALID_ARGUMENT, "command or argv is required")
+    if "argv" in input and "command" in input:
+        return _fail(ToolErrorCode.INVALID_ARGUMENT, "Use command or argv, not both")
+    if input.get("background"):
+        from rinari.tools.native.process import process_start
+
+        return process_start(input, ctx)
     if ctx.cancellation is not None:
         ctx.cancellation.throw_if_cancelled()
 
@@ -138,7 +160,7 @@ def shell_exec(input: dict, ctx: ToolContext) -> ToolResult:
     stderr = _BoundedBuffer(max_bytes)
 
     kwargs: dict[str, Any] = {
-        "shell": True,
+        "shell": not isinstance(command, list),
         # shell.exec is deliberately non-interactive. In particular this
         # prevents ssh from inheriting an unusable stdin and waiting forever.
         "stdin": subprocess.DEVNULL,
@@ -231,7 +253,9 @@ def shell_tools() -> list[ToolDefinition]:
         ToolDefinition(
             name="shell.exec",
             description=(
-                "Run a command in the session working directory. Returns exit code and "
+                "Run command or argv in the session working directory. Prefer argv for literal "
+                "arguments without shell quoting; background=true returns a process handle. "
+                "Returns exit code and "
                 "bounded stdout/stderr. Use for builds, tests, git, and anything without a "
                 "dedicated structured tool. This is non-interactive (stdin is closed). "
                 "On Windows the command runs through the configured Windows command shell; "
@@ -242,11 +266,18 @@ def shell_tools() -> list[ToolDefinition]:
                 "type": "object",
                 "properties": {
                     "command": {"type": "string"},
+                    "argv": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "maxItems": 256,
+                    },
+                    "background": {"type": "boolean", "default": False},
                     "cwd": {"type": "string"},
                     "timeout_s": {"type": "number", "minimum": 1},
                     "env": {"type": "object"},
                 },
-                "required": ["command"],
+                "oneOf": [{"required": ["command"]}, {"required": ["argv"]}],
             },
             risk=RISK_HIGH,
             side_effects=SIDE_EFFECT_LOCAL_REVERSIBLE,

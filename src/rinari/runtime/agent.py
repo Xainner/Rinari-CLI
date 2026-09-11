@@ -106,6 +106,7 @@ class AgentContext:
     compact_state_text: str | None = None
     dropped_total: int = 0
     compacted: bool = False
+    pending_images: tuple[Any, ...] = ()
 
 
 class AgentLoop:
@@ -154,13 +155,26 @@ class AgentLoop:
         turn_index: int | None = None,
     ) -> TurnResult:
         cancel = cancel if cancel is not None else CancellationToken()
+        self._tools.registry.context = ctx.tool_ctx
         loop = loop if loop is not None else LoopDetector()
         governor = governor if governor is not None else TurnGovernor()
         started_payload: dict = {"preview": user_message[:200]}
         if turn_index is not None:
             started_payload["turn_index"] = turn_index
         self._emit(ctx.session_id, EVENT_TURN_STARTED, started_payload)
-        ctx.history.append(ChatMessage.user(user_message))
+        images, ctx.pending_images = ctx.pending_images, ()
+        has_images = images or any(m.images for m in ctx.history)
+        if has_images and self._provider.capabilities().vision is not True:
+            from rinari.shared.errors import InvalidUsageError
+            raise InvalidUsageError(
+                "Vision must be enabled for the selected model before using images"
+            )
+        if images:
+            user_message += (
+                "\n\nAdjuntos originales disponibles para herramientas:\n"
+                + "\n".join(i.uri for i in images)
+            )
+        ctx.history.append(ChatMessage(role="user", content=user_message, images=images))
         # Hierarchical ledger (P0.10): the turn's meter becomes the parent
         # budget visible to agent.spawn, so subagent cost aggregates here.
         if (
@@ -300,7 +314,9 @@ class AgentLoop:
                     # Etapa C: execution plan groups (serial baseline; the
                     # plan is traced so a concurrent executor can adopt it).
                     "execution_plan": schedule(
-                        [tc.name for tc in response.tool_calls], self._tools.registry
+                        [tc.name for tc in response.tool_calls],
+                        self._tools.registry,
+                        [tc.arguments for tc in response.tool_calls],
                     ),
                 },
             )

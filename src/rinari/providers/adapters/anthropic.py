@@ -270,7 +270,16 @@ def _convert_to_anthropic(
             else:
                 converted.append({"role": "assistant", "content": message.content or ""})
             continue
-        converted.append({"role": "user", "content": message.content or ""})
+        content = message.content or ""
+        if message.images:
+            content = [{"type": "text", "text": content}] + [
+                {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/jpeg", "data": i.encoded()},
+                }
+                for i in message.images
+            ]
+        converted.append({"role": "user", "content": content})
     return system, _merge_adjacent(converted)
 
 

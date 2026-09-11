@@ -88,6 +88,7 @@ def _merge_capabilities(
         "structured_output": bool,
         "max_context_tokens": int,
         "reasoning_effort": bool,
+        "vision": bool,
     }
     changes: dict[str, Any] = {}
     for key, kind in fields.items():
@@ -153,7 +154,7 @@ class ModelRouter:
             "streaming": merged.streaming,
             "structured_output": merged.structured_output,
             "reasoning": merged.reasoning_effort,
-            "vision": None,
+            "vision": merged.vision,
             "max_context_window": merged.max_context_tokens,
         }
         return {

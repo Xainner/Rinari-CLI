@@ -1833,3 +1833,132 @@ It uses the common ToolRuntime and is available in PLAN without authorizing
 filesystem mutations. Unsupported hosts omit it from model exposure.
 The [interactive workspace contract](desktop/06-interactive-workspace.md)
 defines question schemas, explicit replies, skips, cancellation and recovery.
+
+
+## Implemented SSH inspection contract (2026-09-10)
+
+`ssh.inspect({target_id, section})` reads a registered Linux destination through OpenSSH.
+Default section: `hardware`. Sections: `system`, `cpu`, `memory`, `disks`, `gpu` (NVIDIA), or `hardware` to collect
+all sections over one connection and report individual command outcomes. A unique
+registered name or a static alias from ~/.ssh/config can identify a destination.
+Static aliases reuse the configured identity and known_hosts with strict checking.
+Match, Include and proxy configurations require a registered target or the shell;
+the resolver never executes configuration directives.
+Only fixed commands under
+`/usr/bin` run; no model-controlled command string, paths, environment or connection flags.
+Registered destinations use installation-owned identities and immutable
+IP/port/user/Ed25519 host-key records; aliases use existing OpenSSH files.
+Every call uses Tool Runtime network policy/approval, a network guard, bounded output,
+cancellation and deadline. Strict host-key checking never learns a replacement key.
+Transport or remote-command nonzero exits are failures, not successful inspection.
+
+A destination-bound Engine operation registers only this tool with its target ID pinned
+in the schema and handler; local shell/filesystem/extension/agent tools and execution
+hooks are unavailable for that operation. This is an initial read-only Linux inspection
+contract, not general remote shell or a PC runner. See `durable-operations.md` for dispatch.
+
+## Tool efficiency contract (2026-09-10, local implementation)
+
+CLI inspection and Engine `tool.list` share the 105 built-in definitions. Inspection
+does not imply a tool has its required session host, platform support or credentials.
+Dynamic integrations are still loaded when constructing the session registry.
+
+`capability.search` accepts `load=true` to activate matches in the same call.
+`loaded` identifies activated schemas; `load_error` explains absent exposure or an
+exceeded budget. `capability.activate` rejects an over-budget request before mutation.
+No-match searches return no fabricated fallback tool. Optional integration loading
+failures leave a source diagnostic instead of silently disappearing.
+
+ToolRuntime preserves inherited deadlines and never automatically replays tools
+with side effects. HTTP retries remain method-aware in the HTTP adapter, without
+an additional outer retry. Long model observations remain valid JSON.
+
+`fs.write` and `fs.patch` accept `expected_hash` (SHA-256, or `missing` for creation)
+and replace a file atomically. Reads return a hash only when the content is complete.
+`fs.read_lines` streams to the requested range; unknown total line counts are null.
+`fs.list` supports offset/limit/revision and reports a next offset. `fs.diff` refuses
+to claim a complete comparison when either input exceeds its reading limit.
+
+`process.output` accepts and returns separate stdout/stderr character cursors with
+`max_chars` and `has_more`. `pty.write(submit_line=false)` sends literal input.
+Web reads reuse bounded session snapshots for 30 seconds; `refresh=true` bypasses
+reuse, and downloads always refresh. Network policy remains enforced on cache hits.
+
+### Contracts and bounded composition
+
+All 105 registered built-ins now expose input and output schemas. Output fields
+are optional for alternative adapter success shapes and allow additive fields;
+extension-owned schemas are never replaced. Known platform/service prerequisites
+filter model exposure; inspection availability is not a permission grant.
+
+Side-effecting built-ins may expose `request_id`: repeating the same arguments in
+the same live runtime reuses a receipt; changed arguments conflict. Receipts retain
+the last 256 requests and are not durable exactly-once guarantees across restarts.
+
+- `fs.read` / `fs.stat` accept `paths` (1–16), authorize every path first, and use
+  up to four pure read workers with ordered per-file results.
+- `fs.patch(files=[{path, expected_hash?, edits:[{old_string,new_string}]}])`
+  validates all files/permissions before mutation. Each file is bounded to 1 MiB.
+  Failures trigger conflict-aware rollback with explicit restoration status;
+  this is not an OS-level multi-file transaction.
+- `fs.glob` / `search.files` share traversal, ignore and pagination semantics.
+  Literal and regex searches share bounded workers; regex runs in a cancellable
+  subprocess, with ripgrep when available and a bounded Python fallback.
+- `shell.exec` and `process.start` accept `argv` for literal arguments.
+  `shell.exec(background=true)` starts the existing process service. Process cwd
+  defaults to the session, stdin is closed, and `process.list(running_only=true)`
+  filters completed handles.
+- PTY reads use the pump buffer with character cursors, avoiding competing reads
+  from the descriptor. Termination escalates TERM to KILL. Windows sessions omit
+  the POSIX PTY tools and use process tools; ConPTY is not implemented.
+- Git status preserves NUL-delimited filenames/renames, diff returns patches by
+  default, and log returns structured commits with pagination.
+- Web results carry `source_id`; derived reads accept that ID and reuse the exact
+  bounded snapshot. `web.sources` without URLs lists cached provenance without
+  requests. Evicted IDs return a clear error. `web.search(queries=[...])` groups
+  up to four queries. SSE supports explicit `last_event_id` resume.
+- Browser launch reuses an active connection. Semantic snapshots expose backend
+  node IDs usable for clicks/drag points. Existing console/network event drains
+  remain incremental. Arbitrary page execution still uses browser policy.
+- Memory updates accept optimistic `expected_version`; repeated identical episodic
+  records deduplicate persistently. General chats do not inherit project memory.
+- Context retrieval accepts a token budget; pins preserve absolute file origin,
+  list pagination and missing-file state.
+- Verification records include a bounded workspace metadata revision; a changed
+  workspace invalidates older evidence. This detects freshness, not fabrication
+  of model-declared evidence or adversarial preservation of file metadata.
+- LSP avoids unchanged document notifications, bounds document reads, and observes
+  cancellation/deadlines. Columns explicitly use UTF-16; callers can set
+  `column_encoding=unicode` to convert a Unicode code-point input column.
+  `lsp.diagnostics(include_state=true)` distinguishes waiting/received diagnostics
+  and whether the reported version matches. Stale versioned notifications are rejected.
+- Agent wait accepts several IDs and returns when one finishes; state mutations
+  use the shared receipts. Skill activation/deactivation is repeat-safe.
+
+General tool-call execution remains serial to preserve shared policy/budget/event
+ordering; parallelism is limited to the authorized pure filesystem batch. Browser
+console/network events are drained rather than backed by a durable cursor store.
+Web snapshots and receipts expire with their live runtime. Dynamic MCP/plugin/
+OpenAPI support still depends on configured services and credentials.
+
+Partial failures preserve their data in model observations. Structured lists and
+nested objects exceeding the inline limit spill to a complete JSON artifact;
+redaction applies before both the preview and artifact are emitted. SSH failures
+retain partial sections and classify authentication, host-key and transport errors.
+
+## Channel tools and visual references (Gateway integration)
+
+A trusted operation host may supply a channel binding. `artifact.import` imports an
+existing authorized local file or a pinned SSH destination file by streaming, without
+interpreting visual content. The record retains MIME, size, SHA-256 and a stable URI.
+`channel.send_attachment`, `channel.reply` and `channel.delivery_get` are discovered
+through capability.search and use the normal runtime for policy, cancellation,
+classification and events. A channel host is mandatory and is removed from child
+agent contexts. Remote jobs gain these capabilities without gaining local shell tools.
+
+The host owns durable delivery fingerprints and receipts. Runtime deduplication is
+not delivery persistence. On an uncertain outcome, query the receipt; never generate
+a replacement or automatically send again. Receiving an image does not authorize video
+generation. Visual provider content is materialized only at the adapter boundary from
+validated, session-scoped image references; events/history contain references, not
+base64. Original files remain distinct from reduced visual inputs.

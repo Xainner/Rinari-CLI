@@ -95,6 +95,7 @@ class LspManager:
         self.root = Path(root)
         self.specs: dict[str, LspServerSpec] = {}
         self._entries: dict[str, LspClient | Exception] = {}
+        self._document_hashes: dict[str, str] = {}
         self._torn_down = False
         # Language servers are child processes; guarantee their shutdown when
         # the CLI process ends from any exit path (REPL, one-shot, crash).
@@ -169,14 +170,25 @@ class LspManager:
         return client, language
 
     def _ensure_open(self, client: LspClient, path: Path, language: str) -> None:
+        import hashlib
+
         try:
+            if path.stat().st_size > 2 * 1024 * 1024:
+                raise LspError("Document exceeds 2 MiB; use bounded file/search tools")
             text = Path(path).read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
             raise LspError(f"cannot read {path}: {exc.__class__.__name__}") from exc
-        if client.is_document_open(client.uri_for(path)):
+        uri = client.uri_for(path)
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        if client.is_document_open(uri) and self._document_hashes.get(uri) == digest:
+            return
+        if client.is_document_open(uri):
             client.change_document(path, text)
         else:
             client.open_document(path, text, language)
+        if len(self._document_hashes) >= 256:
+            self._document_hashes.pop(next(iter(self._document_hashes)))
+        self._document_hashes[uri] = digest
 
     @staticmethod
     def _position(line: int, column: int) -> dict:
@@ -390,3 +402,8 @@ class LspManager:
                 }
             )
         return out
+
+    def diagnostics_snapshot(self, path: Path) -> dict:
+        rows = self.diagnostics(path)
+        client, _ = self._require(path, "diagnostics")
+        return {"diagnostics": rows, **client.diagnostics_state(path)}

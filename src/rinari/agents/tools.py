@@ -19,6 +19,7 @@ delegate.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 
@@ -39,12 +40,12 @@ def _agent_tools(host: AgentToolHost):
 
     orch = host.orchestrator
 
-    def _err(code: str, message: str):
+    def _err(code: str | None, message: str):
         return ToolResult(
             ok=False,
             error=ToolErrorInfo(
                 ToolErrorCode.RESOURCE_EXHAUSTED
-                if code.startswith("LIMIT")
+                if (code or "").startswith("LIMIT")
                 else ToolErrorCode.UNKNOWN,
                 message,
             ),
@@ -86,12 +87,52 @@ def _agent_tools(host: AgentToolHost):
         )
 
     def wait(arguments, ctx):
+        if "agent_ids" in arguments:
+            ids = arguments["agent_ids"]
+            deadline = time.time() + min(float(arguments.get("timeout_s", 300)), 600)
+            if ctx.deadline_at is not None:
+                deadline = min(deadline, ctx.deadline_at)
+            while True:
+                if ctx.cancellation:
+                    ctx.cancellation.throw_if_cancelled()
+                rows = []
+                terminal = False
+                for agent_id in ids:
+                    result = orch.result(agent_id)
+                    rows.append(
+                        {
+                            "agent_id": agent_id,
+                            "result": _result_dict(result) if result else None,
+                            "state": orch.status(agent_id)["state"],
+                        }
+                    )
+                    terminal |= result is not None
+                if terminal or time.time() >= deadline:
+                    return ToolResult(
+                        ok=True, data={"agents": rows, "timed_out": not terminal}, origin="agents"
+                    )
+                time.sleep(0.05)
         agent_id = str((arguments or {}).get("agent_id") or "")
         timeout = float((arguments or {}).get("timeout_s", 300) or 300)
-        try:
-            result = orch.wait(agent_id, timeout_s=min(timeout, 600))
-        except Exception as exc:
-            return _err(getattr(exc, "code", ""), str(exc))
+        deadline = time.time() + min(timeout, 600)
+        if ctx.deadline_at is not None:
+            deadline = min(deadline, ctx.deadline_at)
+        while True:
+            if ctx.cancellation:
+                ctx.cancellation.throw_if_cancelled()
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return ToolResult(
+                    ok=True,
+                    data={"agent_id": agent_id, "status": "waiting", "timed_out": True},
+                    origin="agents",
+                )
+            try:
+                result = orch.wait(agent_id, timeout_s=min(remaining, 0.25))
+                break
+            except Exception as exc:
+                if getattr(exc, "code", "") != "AGENT_NOT_TERMINAL":
+                    return _err(getattr(exc, "code", ""), str(exc))
         return ToolResult(ok=True, data=_result_dict(result), origin="agents")
 
     def status(arguments, ctx):
@@ -173,6 +214,8 @@ def _agent_tools(host: AgentToolHost):
                 "required": ["agent", "objective"],
             },
             capabilities=write,
+            side_effects="local_reversible",
+            idempotent=False,
             classify=lambda _i: ClassifiedAction("state.write"),
             handler=spawn,
         ),
@@ -183,9 +226,16 @@ def _agent_tools(host: AgentToolHost):
                 "type": "object",
                 "properties": {
                     "agent_id": {"type": "string"},
+                    "agent_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "maxItems": 8,
+                        "uniqueItems": True,
+                    },
                     "timeout_s": {"type": "number"},
                 },
-                "required": ["agent_id"],
+                "oneOf": [{"required": ["agent_id"]}, {"required": ["agent_ids"]}],
             },
             capabilities=read,
             classify=lambda _i: ClassifiedAction("state.read"),
@@ -214,6 +264,8 @@ def _agent_tools(host: AgentToolHost):
                 "required": ["agent_id", "text"],
             },
             capabilities=write,
+            side_effects="local_reversible",
+            idempotent=False,
             classify=lambda _i: ClassifiedAction("state.write"),
             handler=message,
         ),
@@ -226,6 +278,8 @@ def _agent_tools(host: AgentToolHost):
                 "required": ["agent_id"],
             },
             capabilities=write,
+            side_effects="local_reversible",
+            idempotent=False,
             classify=lambda _i: ClassifiedAction("state.write"),
             handler=cancel,
         ),

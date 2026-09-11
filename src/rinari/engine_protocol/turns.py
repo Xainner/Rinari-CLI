@@ -32,6 +32,7 @@ from rinari.cli.agent_runtime import build_agent_session, run_turn
 from rinari.engine_protocol import errors
 from rinari.engine_protocol.errors import EngineProtocolError
 from rinari.engine_protocol.messages import event
+from rinari.engine_protocol.operations import OperationStore
 from rinari.policy.approvals import ApprovalRequest
 from rinari.shared.clock import now_iso
 from rinari.shared.errors import CancelledError, RinariError
@@ -59,6 +60,10 @@ class _ActiveTurn:
     started_at: float = field(default_factory=time.time)
     status: str = "running"
     mode: str | None = None
+    remote_target: dict | None = None
+    channel: dict | None = None
+    operation_id: str = ""
+    attachments: list | None = None
     preparation_stage: str | None = None
     activities: dict[str, dict[str, Any]] = field(default_factory=dict)
     activity_keys: dict[str, int] = field(default_factory=dict)
@@ -107,6 +112,7 @@ class TurnManager:
 
     def __init__(self, services: ServiceContainer, user_home: Path | None = None) -> None:
         self._services = services
+        self.operations = OperationStore(services.ctx.layout.root)
         self._user_home = user_home if user_home is not None else Path.home()
         self._events: queue.Queue[dict[str, Any]] = queue.Queue()
         self._turns: dict[str, _ActiveTurn] = {}
@@ -120,6 +126,8 @@ class TurnManager:
         from rinari.engine_protocol.questions import QuestionBroker
 
         self.questions = QuestionBroker(services, self.has_active_turn)
+        from rinari.engine_protocol.channels import ChannelBroker
+        self.channels = ChannelBroker()
 
     # -- outbox ----------------------------------------------------------
 
@@ -237,7 +245,16 @@ class TurnManager:
     # -- turn lifecycle ----------------------------------------------------
 
     def start_turn(
-        self, session_id: str, message: str, reasoning_effort: str | None = None
+        self,
+        session_id: str,
+        message: str,
+        reasoning_effort: str | None = None,
+        *,
+        turn_id: str | None = None,
+        remote_target: dict | None = None,
+        channel: dict | None = None,
+        operation_id: str = "",
+        attachments: list | None = None,
     ) -> dict[str, Any]:
         record = self._services.sessions.show(session_id)
         if record.state in {SESSION_STATE_CLOSED, SESSION_STATE_ARCHIVED}:
@@ -246,12 +263,16 @@ class TurnManager:
                 f"Session {record.id} is closed; resume it before starting turns.",
                 details={"session_id": record.id},
             )
-        turn_id = self._services.ctx.ids.new("turn")
+        turn_id = turn_id or self._services.ctx.ids.new("turn")
         turn = _ActiveTurn(
             turn_id=turn_id,
             session_id=record.id,
             session=None,
             done=threading.Event(),
+            remote_target=remote_target,
+            channel=channel,
+            operation_id=operation_id,
+            attachments=attachments,
         )
         with self._lock:
             record = self._services.sessions.show(session_id)
@@ -282,6 +303,60 @@ class TurnManager:
             self._threads[turn_id] = thread
         thread.start()
         return {"status": "started", "turn_id": turn_id, "session_id": record.id}
+
+    def start_operation(
+        self,
+        operation_id: str,
+        session_id: str,
+        message: str,
+        reasoning_effort: str | None = None,
+        remote_target: dict | None = None,
+        channel: dict | None = None,
+        attachments: list | None = None,
+    ) -> dict[str, Any]:
+        with self._lock:
+            turn_id = self._services.ctx.ids.new("turn")
+            operation, claimed = self.operations.claim(
+                operation_id,
+                session_id,
+                message,
+                reasoning_effort,
+                turn_id,
+                remote_target,
+                channel,
+                attachments,
+            )
+            if claimed:
+                try:
+                    self.start_turn(
+                        session_id,
+                        message,
+                        reasoning_effort,
+                        turn_id=turn_id,
+                        remote_target=remote_target,
+                        channel=channel,
+                        operation_id=operation_id,
+                        attachments=attachments,
+                    )
+                except Exception:
+                    # Dispatch may have reached a worker: never label this retryable.
+                    self.operations.finish(turn_id, "uncertain")
+                    raise
+            return self.operations.get(operation_id) or operation
+
+    def cancel_operation(self, operation_id: str) -> dict[str, Any]:
+        with self._lock:
+            operation = self.operations.get(operation_id)
+            if operation is None:
+                raise EngineProtocolError(errors.INVALID_PARAMS, "Unknown operation")
+            turn = self._turns.get(operation["turn_id"])
+            if turn is not None and not turn.done.is_set():
+                turn.cancel_requested.set()
+                turn.status = "cancelling"
+                if turn.session is not None:
+                    turn.session.token.cancel()
+                self.operations.finish(turn.turn_id, "cancelling")
+            return self.operations.get(operation_id) or operation
 
     def cancel_turn(self, session_id: str) -> dict[str, Any]:
         with self._lock:
@@ -369,6 +444,13 @@ class TurnManager:
             if turn.cancel_requested.is_set():
                 agent_session.token.cancel()
             self._activity_cb(turn)("turn.preparing", {"stage": "session_lock"})
+            if turn.attachments:
+                from rinari.models.images import references
+                turn.session.context.pending_images = references(
+                    self._services.artifacts,
+                    turn.session_id,
+                    turn.attachments,
+                )
             result = run_turn(
                 agent_session,
                 message,
@@ -479,6 +561,10 @@ class TurnManager:
                     ),
                     activity_sink=self._activity_cb(turn),
                     reasoning_effort=reasoning_effort,
+                    **({"remote_target": turn.remote_target} if turn.remote_target else {}),
+                    **({"channel_host": lambda tool, args, ctx: self.channels.call(
+                        turn, self._activity_cb(turn), tool, args, ctx
+                    )} if turn.channel else {}),
                 )
                 if abandoned.is_set():
                     session.end()
@@ -669,6 +755,8 @@ class TurnManager:
                 elif event_name == "model.content.completed":
                     current = {**current, "content": str(safe.get("content") or "")}
                 turn.activities[activity_key] = {**current, **safe, "event": event_name}
+            if event_name in {"turn.completed", "turn.failed", "turn.cancelled", "turn.stopped"}:
+                self.operations.finish(turn.turn_id, event_name.removeprefix("turn."))
             if event_name != "model.content.delta":
                 self._persist_activity(event_name, safe)
             self._emit(event(event_name, safe))
@@ -897,6 +985,9 @@ class TurnManager:
                     errors.INVALID_PARAMS,
                     f"Decision {decision!r} is not available for this approval.",
                 )
+            if pending.decided.is_set():
+                return {"status": "resolved", "approval_id": approval_id,
+                        "decision": pending.decision}
             pending.decision = decision
             pending.decided.set()
         return {"status": "resolved", "approval_id": approval_id, "decision": decision}

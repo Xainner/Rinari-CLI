@@ -38,6 +38,8 @@ def plugin_row_view(row: dict, diagnostics: list[dict] | None = None) -> dict[st
 
 
 def tool_row_view(tool: Any) -> dict[str, Any]:
+    from rinari.tools.availability import availability
+
     return {
         "name": tool.name,
         "description": tool.description,
@@ -47,4 +49,7 @@ def tool_row_view(tool: Any) -> dict[str, Any]:
         "side_effects": tool.side_effects,
         "namespace": tool.namespace,
         "always_loaded": tool.always_loaded,
+        "availability": availability(tool.name),
+        "input_schema": tool.input_schema,
+        "output_schema": tool.output_schema,
     }

@@ -16,6 +16,11 @@ def engine_version() -> str:
 
 
 CAPABILITIES: dict[str, bool] = {
+    "tool_contracts_v1": True,
+    "durable_operations_v1": True,
+    "channel_tools_v1": True,
+    "image_attachments_v1": True,
+    "ssh_targets_v1": True,
     "plan_read_scope_v1": True,
     "web_preview_v1": True,
     "desktop_workspace_v1": True,

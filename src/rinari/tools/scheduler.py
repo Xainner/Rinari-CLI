@@ -17,7 +17,7 @@ from typing import Any
 from rinari.tools.definition import SIDE_EFFECT_NONE
 
 
-def is_parallelizable(tool: Any) -> bool:
+def is_parallelizable(tool: Any, arguments: dict | None = None) -> bool:
     """READ_ONLY + idempotent + independent resources → may share a group."""
     if tool is None:
         return False
@@ -26,19 +26,23 @@ def is_parallelizable(tool: Any) -> bool:
     if not bool(getattr(tool, "idempotent", False)):
         return False
     try:
-        capability = tool.classify_action({}).capability
+        actions = tool.classify_actions(arguments or {})
     except Exception:
         return False
-    return capability != "network.outbound"
+    return all(action.capability != "network.outbound" for action in actions)
 
 
-def schedule(names: list[str], registry: Any) -> list[list[str]]:
+def schedule(
+    names: list[str], registry: Any, arguments: list[dict] | None = None
+) -> list[list[str]]:
     """Group consecutive parallelizable calls; everything else runs alone."""
     groups: list[list[str]] = []
     current: list[str] = []
-    for name in names:
+    for index, name in enumerate(names):
         tool = registry.get(name)
-        if tool is not None and is_parallelizable(tool):
+        if tool is not None and is_parallelizable(
+            tool, arguments[index] if arguments is not None else None
+        ):
             current.append(name)
             continue
         if current:

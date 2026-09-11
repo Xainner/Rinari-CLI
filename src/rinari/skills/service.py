@@ -140,6 +140,8 @@ class SkillService:
         manifest = self.get(name, project)
         rec = self._session(session_id)
         current = tuple(rec.active_skills or ())
+        if (manifest.name, manifest.version) in current:
+            return manifest
         current = tuple(pair for pair in current if pair[0] != name)
         updated = replace(rec, active_skills=(*current, (manifest.name, manifest.version)))
         self._ctx.session_repo.update(updated)

@@ -221,3 +221,95 @@ def test_unknown_tools_run_serially_alone() -> None:
     reg.register_all([_sched_tool("fs.read")])
     groups = schedule(["fs.read", "nope.missing"], reg)
     assert groups == [["fs.read"], ["nope.missing"]]
+
+
+@pytest.mark.parametrize(
+    "name,effect",
+    [
+        ("http.request", SIDE_EFFECT_NONE),
+        ("browser.click", "remote-reversible"),
+        ("browser.type", "remote-reversible"),
+        ("browser.evaluate", "remote-reversible"),
+    ],
+)
+def test_ambiguous_operations_are_not_replayed(project, name, effect):
+    tmp_path, root = project
+    calls = []
+
+    def handler(args, ctx):
+        calls.append(args)
+        return ToolResult(
+            ok=False,
+            error=ToolErrorInfo(ToolErrorCode.NETWORK_ERROR, "response lost", retryable=True),
+        )
+
+    tool = _def(name, handler, idempotent=True, side_effects=effect)
+    rt = _runtime([tool])
+    assert not rt.execute(name, _args(root), _ctx(tmp_path, root)).ok
+    assert len(calls) == 1
+
+
+def test_deadline_never_extends_parent(project):
+    import time
+    from dataclasses import replace
+
+    tmp_path, root = project
+    ctx = replace(_ctx(tmp_path, root), deadline_at=time.time() - 1)
+    calls = []
+    tool = _def("test.deadline", lambda a, c: calls.append(a), timeout_ms=30000)
+    rt = _runtime([tool])
+    assert rt._deadline_ctx(ctx, tool).deadline_at == ctx.deadline_at
+    assert rt.execute(tool.name, _args(root), ctx).error.code == ToolErrorCode.TIMEOUT
+    assert not calls
+
+
+def test_long_observation_remains_valid_json():
+    import json
+
+    result = ToolResult(ok=True, data={"text": 'ñ"\\n' * 5000})
+    encoded = result.to_model_text("fs.read")
+    decoded = json.loads(encoded)
+    assert decoded["truncated"] is True
+    assert len(encoded) <= result.OBSERVATION_INLINE_BUDGET
+
+
+def test_builtin_catalog_covers_session_tools_without_executing_them():
+    from rinari.tools.catalog import builtin_catalog
+
+    registry = builtin_catalog()
+    assert len(registry.names()) == 105
+    assert {"ssh.inspect", "skills.activate", "agent.spawn", "capability.search"} <= set(
+        registry.names()
+    )
+    result = registry.get("ssh.inspect").handler(
+        {"target_id": "unconfigured", "section": "hardware"}, None
+    )
+    assert result.error.code == ToolErrorCode.DEPENDENCY_ERROR
+
+
+@pytest.mark.parametrize(
+    "schema,value",
+    [
+        ({"type": "string", "minLength": 1}, ""),
+        ({"type": "string", "maxLength": 2}, "long"),
+        ({"type": "array", "maxItems": 1}, [1, 2]),
+        ({"type": "array", "uniqueItems": True}, [1, 1]),
+        ({"type": "number"}, float("nan")),
+        ({"type": ["string", "null"]}, 123),
+    ],
+)
+def test_schema_limits_reject_invalid_calls(schema, value):
+    from rinari.tools.schema import validate_against
+
+    assert validate_against(schema, value)
+
+
+def test_hardware_sections_preserve_partial_results():
+    from rinari.tools.native.ssh import hardware_results
+
+    output = "RINARI_SECTION_cpu\nRyzen\nRINARI_EXIT_0\nRINARI_SECTION_gpu\nRINARI_EXIT_127\n"
+    sections = hardware_results(output)
+    assert sections["cpu"]["ok"]
+    assert not sections["gpu"]["ok"]
+    assert sections["gpu"]["exit_code"] == 127
+    assert not sections["memory"]["ok"]

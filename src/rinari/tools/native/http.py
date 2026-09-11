@@ -140,6 +140,10 @@ def http_request(input: dict, ctx: ToolContext) -> ToolResult:
         return denied
 
     token = ctx.cancellation
+    if ctx.deadline_at is not None:
+        timeout_s = min(timeout_s, ctx.deadline_at - time.time())
+        if timeout_s <= 0:
+            return _fail(ToolErrorCode.TIMEOUT, "HTTP deadline exhausted")
     is_cancelled = (lambda: bool(getattr(token, "cancelled", False))) if token is not None else None
     try:
         resp = request(
@@ -221,6 +225,12 @@ def http_sse(input: dict, ctx: ToolContext) -> ToolResult:
         return denied
 
     started = time.monotonic()
+    if ctx.deadline_at is not None:
+        timeout_s = min(timeout_s, ctx.deadline_at - time.time())
+        if timeout_s <= 0:
+            return _fail(ToolErrorCode.TIMEOUT, "SSE deadline exhausted")
+    if input.get("last_event_id"):
+        headers = {**(headers or {}), "Last-Event-ID": str(input["last_event_id"])}
     deadline = started + timeout_s
     state = {"timed_out": False}
 
@@ -232,6 +242,8 @@ def http_sse(input: dict, ctx: ToolContext) -> ToolResult:
             client_factory=_client_factory(ctx),
             timeout_s=timeout_s,
         ):
+            if ctx.cancellation:
+                ctx.cancellation.throw_if_cancelled()
             yield line
             if time.monotonic() >= deadline:
                 state["timed_out"] = True
@@ -327,6 +339,7 @@ def http_tools() -> list[ToolDefinition]:
                     "query": {"type": "object"},
                     "auth": {"type": "object"},
                     "event_filter": {"type": "string"},
+                    "last_event_id": {"type": "string", "maxLength": 1024},
                     "max_events": {
                         "type": "integer",
                         "minimum": 1,

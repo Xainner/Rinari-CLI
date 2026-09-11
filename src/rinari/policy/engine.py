@@ -354,6 +354,14 @@ class PolicyEngine:
                 risk=risk,
                 risk_class=risk_class,
             )
+        if capability in {"channel.send_attachment", "channel.reply", "channel.delivery_get"}:
+            return PolicyDecision(
+                action=PolicyAction.ALLOW if scope.profile is not PermissionProfile.READ_ONLY
+                or capability == "channel.delivery_get" else PolicyAction.DENY,
+                capability=capability,
+                reason="Host-bound reply to the originating owner conversation",
+                risk=risk, risk_class=risk_class,
+            )
         if capability == CAPABILITY_SHELL:
             return self._shell(scope, command, risk, risk_class)
         return PolicyDecision(

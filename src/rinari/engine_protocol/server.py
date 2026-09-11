@@ -144,6 +144,8 @@ class EngineServer:
         self._model_jobs: dict[str, dict[str, Any]] = {}
         self._model_jobs_lock = threading.Lock()
         self._dispatcher.register("engine.info", self._engine_info)
+        self._dispatcher.register("target.list", self._target_list)
+        self._dispatcher.register("target.add", self._target_add)
         self._dispatcher.register("session.list", self._session_list)
         self._dispatcher.register("session.get", self._session_get)
         self._dispatcher.register("session.create", self._session_create)
@@ -175,12 +177,17 @@ class EngineServer:
         self._dispatcher.register("session.permission.get", self._session_permission_get)
         self._dispatcher.register("session.permission.set", self._session_permission_set)
         self._dispatcher.register("session.turn.start", self._turn_start)
+        self._dispatcher.register("operation.start", self._operation_start)
+        self._dispatcher.register("operation.get", self._operation_get)
+        self._dispatcher.register("operation.cancel", self._operation_cancel)
         self._dispatcher.register("session.turn.cancel", self._turn_cancel)
         self._dispatcher.register("turn.changes.get", self._turn_changes_get)
         self._dispatcher.register("turn.changes.review", self._turn_changes_review)
         self._dispatcher.register("turn.changes.undo.preview", self._turn_changes_undo_preview)
         self._dispatcher.register("turn.changes.undo", self._turn_changes_undo)
         self._dispatcher.register("approval.resolve", self._approval_resolve)
+        self._dispatcher.register("channel.resolve", self._turns.channels.resolve)
+        self._dispatcher.register("channel.pending", lambda params: self._turns.channels.list())
         self._dispatcher.register("task.tree", self._task_tree)
         self._dispatcher.register("task.get", self._task_get)
         self._dispatcher.register("verification.latest", self._verification_latest)
@@ -235,6 +242,8 @@ class EngineServer:
         self._dispatcher.register("plugin.diagnostics", self._plugin_diagnostics)
         self._dispatcher.register("tool.list", self._tool_list)
         self._dispatcher.register("policy.get", self._policy_get)
+        from rinari.engine_protocol.media import register_media
+        register_media(self._dispatcher, self._services)
         self._dispatcher.register("artifact.list", self._artifact_list)
         self._dispatcher.register("artifact.read", self._artifact_read)
         self._dispatcher.register("artifact.export", self._artifact_export)
@@ -1546,9 +1555,11 @@ class EngineServer:
         return {"reports": self._services.plugins.doctor()}
 
     def _tool_list(self, params: dict[str, Any]) -> dict[str, Any]:
-        from rinari.tools.native import all_native_tools
+        from rinari.tools.catalog import builtin_catalog
 
-        return {"tools": [tool_row_view(t) for t in all_native_tools()]}
+        catalog = builtin_catalog()
+        tools = [catalog.get(name) for name in catalog.names()]
+        return {"tools": [tool_row_view(t) for t in tools]}
 
     def _policy_get(self, params: dict[str, Any]) -> dict[str, Any]:
         from rinari.application.session_service import profile_for_mode
@@ -1750,6 +1761,63 @@ class EngineServer:
         return self._turns.start_turn(
             session_id, _message_with_attachments(message, attachments), reasoning_effort
         )
+
+    def _target_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        from rinari.application.ssh_targets import TargetStore
+
+        return {"targets": TargetStore(self._services.ctx.layout.root).list()}
+
+    def _target_add(self, params: dict[str, Any]) -> dict[str, Any]:
+        from rinari.application.ssh_targets import TargetStore
+
+        try:
+            return {"target": TargetStore(self._services.ctx.layout.root).add(params)}
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise EngineProtocolError(
+                INVALID_PARAMS, "Invalid or conflicting SSH destination"
+            ) from exc
+
+    def _operation_start(self, params: dict[str, Any]) -> dict[str, Any]:
+        from rinari.engine_protocol.channels import validate_channel
+        operation_id = self._need_str(params, "operation_id")
+        if len(operation_id) > 128:
+            raise EngineProtocolError(INVALID_PARAMS, "Operation identity too long")
+        message = self._need_str(params, "message")
+        if not message.strip():
+            raise EngineProtocolError(INVALID_PARAMS, "Empty message")
+        effort = params.get("reasoning_effort")
+        if effort is not None and effort not in ("low", "medium", "high"):
+            raise EngineProtocolError(INVALID_PARAMS, "Invalid reasoning effort")
+        from rinari.application.ssh_targets import TargetStore
+
+        remote_target = None
+        target_id = params.get("target_id", "gateway")
+        if target_id != "gateway":
+            remote_target = TargetStore(self._services.ctx.layout.root).get(target_id)
+            if remote_target is None or remote_target["revision"] != params.get("target_revision"):
+                raise EngineProtocolError(INVALID_PARAMS, "Unknown or changed destination")
+            if self._services.sessions.show(self._need_str(params, "session_id")).kind != "CHAT":
+                raise EngineProtocolError(INVALID_PARAMS, "SSH operations require a chat session")
+        if "attachments" in params:
+            from rinari.models.images import references
+            try:
+                references(
+                    self._services.artifacts,
+                    self._need_str(params, "session_id"),
+                    params["attachments"],
+                )
+            except ValueError as exc:
+                raise EngineProtocolError(INVALID_PARAMS, str(exc)) from exc
+        return self._turns.start_operation(
+            operation_id, self._need_str(params, "session_id"), message, effort, remote_target,
+            validate_channel(params.get("channel")), params.get("attachments")
+        )
+
+    def _operation_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        return {"operation": self._turns.operations.get(self._need_str(params, "operation_id"))}
+
+    def _operation_cancel(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._turns.cancel_operation(self._need_str(params, "operation_id"))
 
     def _turn_cancel(self, params: dict[str, Any]) -> dict[str, Any]:
         session_id = params.get("session_id")
