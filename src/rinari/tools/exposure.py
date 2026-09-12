@@ -132,10 +132,15 @@ class ToolExposure:
     # -- views ----------------------------------------------------------
     @staticmethod
     def _visible(registry: Any) -> list[Any]:
+        from rinari.tools.availability import availability
+
         tools: list[Any] = []
         for name in registry.names():
             tool = registry.get(name)
-            if tool is not None:
+            if (
+                tool is not None
+                and availability(name, getattr(registry, "context", None))["available"] is not False
+            ):
                 tools.append(tool)
         return tools
 

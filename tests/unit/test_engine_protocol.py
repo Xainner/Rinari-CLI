@@ -127,6 +127,75 @@ def test_engine_info(server) -> None:
     assert info["capabilities"]["projects"] is True
 
 
+def test_personal_memory_protocol_is_engine_authority(server) -> None:
+    info = server.handle_line(_req("mem-info", "engine.info"))
+    assert info["result"]["capabilities"]["personal_memory_v1"] is True
+
+    created = server.handle_line(
+        _req(
+            "mem-create",
+            "memory.remember",
+            {"topic": "language", "text": "Prefers Spanish", "kind": "preference"},
+        )
+    )
+    assert created["ok"] is True
+    record = created["result"]["record"]
+    assert record["revision"] == 1
+
+    listed = server.handle_line(_req("mem-list", "memory.list", {"limit": 10}))
+    assert listed["result"]["count"] == 1
+    found = server.handle_line(_req("mem-search", "memory.search", {"query": "Spanish"}))
+    assert found["result"]["records"][0]["id"] == record["id"]
+
+    updated = server.handle_line(
+        _req(
+            "mem-update",
+            "memory.update",
+            {"id": record["id"], "expected_revision": 1, "text": "Prefers Spanish responses"},
+        )
+    )
+    assert updated["ok"] is True
+    assert updated["result"]["record"]["revision"] == 2
+    stale = server.handle_line(
+        _req(
+            "mem-stale",
+            "memory.update",
+            {"id": record["id"], "expected_revision": 1, "text": "stale"},
+        )
+    )
+    assert stale["error"]["code"] == "CONFLICT"
+
+    forgotten = server.handle_line(
+        _req(
+            "mem-forget",
+            "memory.forget",
+            {"id": record["id"], "expected_revision": 2},
+        )
+    )
+    assert forgotten["result"]["forgotten"] is True
+    missing = server.handle_line(_req("mem-missing", "memory.get", {"id": record["id"]}))
+    assert missing["error"]["code"] == "NOT_FOUND"
+    recreated = server.handle_line(
+        _req(
+            "mem-recreate",
+            "memory.remember",
+            {"topic": "language", "text": "Prefers Spanish responses", "kind": "preference"},
+        )
+    )
+    assert recreated["error"]["code"] == "INVALID_USAGE"
+
+
+def test_personal_memory_protocol_rejects_unsafe_fields(server) -> None:
+    unknown = server.handle_line(
+        _req("mem-unknown", "memory.remember", {"topic": "x", "text": "y", "scope": "project"})
+    )
+    assert unknown["error"]["code"] == "INVALID_PARAMS"
+    secret_topic = server.handle_line(
+        _req("mem-secret", "memory.remember", {"topic": "password=longsecret123", "text": "x"})
+    )
+    assert secret_topic["ok"] is False
+
+
 def test_session_create_get_list_roundtrip(server, tmp_path) -> None:
     created = server.handle_line(
         _req("c1", "session.create", {"cwd": str(tmp_path), "chat": True, "title": "proto"})

@@ -15,15 +15,14 @@ app = typer.Typer(help="Inspect and test the tool registry.", no_args_is_help=Tr
 
 
 def _registry():
-    from rinari.tools.native import all_native_tools
-    from rinari.tools.registry import ToolRegistry
+    from rinari.tools.catalog import builtin_catalog
 
-    registry = ToolRegistry()
-    registry.register_all(all_native_tools())
-    return registry
+    return builtin_catalog()
 
 
 def _tool_row(tool) -> dict:
+    from rinari.tools.availability import availability
+
     return {
         "name": tool.name,
         "description": tool.description,
@@ -33,6 +32,7 @@ def _tool_row(tool) -> dict:
         "side_effects": tool.side_effects,
         "namespace": tool.namespace,
         "always_loaded": tool.always_loaded,
+        "availability": availability(tool.name),
     }
 
 
@@ -103,7 +103,7 @@ def show(
     typer.echo(f"{tool.name}  risk={tool.risk}  namespace={tool.namespace or '-'}")
     typer.echo(f"  {tool.description}")
     typer.echo(f"  capabilities: {', '.join(tool.capabilities) or '-'}")
-    typer.echo(f"  side effects: {', '.join(tool.side_effects) or '-'}")
+    typer.echo(f"  side effects: {tool.side_effects or '-'}")
     typer.echo(f"  idempotent: {tool.idempotent}  timeout: {tool.timeout_ms}ms")
     typer.echo(f"  input schema: {json.dumps(tool.input_schema, sort_keys=True)}")
 

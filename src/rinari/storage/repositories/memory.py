@@ -25,8 +25,8 @@ class MemoryRepository:
             """
             INSERT INTO user_memory (
                 id, kind, topic, text, provenance, confidence,
-                superseded_by, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                superseded_by, created_at, updated_at, revision
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 row["id"],
@@ -38,11 +38,14 @@ class MemoryRepository:
                 row.get("superseded_by"),
                 row["created_at"],
                 row["updated_at"],
+                row.get("revision", 1),
             ),
         )
 
     def user_get(self, memory_id: str) -> dict | None:
-        row = self._db.query_one("SELECT * FROM user_memory WHERE id = ?", (memory_id,))
+        row = self._db.query_one(
+            "SELECT * FROM user_memory WHERE id = ? AND superseded_by IS NULL", (memory_id,)
+        )
         return dict(row) if row else None
 
     def user_live(self) -> list[dict]:
@@ -79,8 +82,28 @@ class MemoryRepository:
         assignments = ", ".join(f"{key} = ?" for key in fields)
         params = (*fields.values(), updated_at, memory_id)
         self._db.execute(
-            f"UPDATE user_memory SET {assignments}, updated_at = ? WHERE id = ?",
+            f"UPDATE user_memory SET {assignments}, updated_at = ?, "
+            "revision = revision + 1 WHERE id = ?",
             tuple(params),
+        )
+
+    def suppression_exists(self, text_hash: str) -> bool:
+        row = self._db.query_one(
+            "SELECT 1 FROM memory_suppressions WHERE text_hash = ?",
+            (text_hash,),
+        )
+        return row is not None
+
+    def suppression_insert(
+        self, *, topic_hash: str, text_hash: str, created_at: str
+    ) -> None:
+        self._db.execute(
+            """
+            INSERT OR IGNORE INTO memory_suppressions
+                (topic_hash, text_hash, created_at)
+            VALUES (?, ?, ?)
+            """,
+            (topic_hash, text_hash, created_at),
         )
 
     def user_delete(self, memory_id: str) -> bool:
@@ -193,6 +216,14 @@ class MemoryRepository:
                 row["created_at"],
             ),
         )
+
+    def episodic_match(self, session_id, project_root, summary, outcome):
+        row = self._db.query_one(
+            "SELECT id FROM episodic_memory WHERE session_ref = ? AND project_root = ? "
+            "AND summary = ? AND outcome = ? LIMIT 1",
+            (session_id, project_root, summary, outcome),
+        )
+        return dict(row) if row else None
 
     def episodic_list(self, project_root: str | None = None, *, limit: int = 20) -> list[dict]:
         if project_root:

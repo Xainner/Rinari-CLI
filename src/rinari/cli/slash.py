@@ -45,6 +45,9 @@ _HELP = """\
 /trace [n]             last n session events (default 15)
 /new                   start a new session (same context)
 /resume [id]           resume a session by id
+/attach <path>         attach a file to the next turn
+/attach --ocr <path>   use image OCR text instead of vision
+/attach --vision <path> explicitly try a model with unknown vision support
 Ctrl+C                 cancel turn (again: exit)
 """
 
@@ -90,11 +93,41 @@ def handle(session: AgentSession, console: Console, message: str) -> SlashOutcom
     parts = message.split()
     command = parts[0].lower()
     arg = parts[1].strip() if len(parts) > 1 and parts[1].strip() else None
+    rest = message.partition(" ")[2].strip()
 
     if command in ("/exit", "/quit"):
         return _EXIT
     if command == "/help":
         console.print(_HELP)
+        return _STAY
+    if command == "/attach":
+        if not rest:
+            raise InvalidUsageError("Usage: /attach <path>")
+        from rinari.artifacts.attachments import prepare_attachments
+
+        options = {}
+        if rest.startswith("--ocr "):
+            options["ocr"] = True
+            rest = rest[6:].strip()
+        elif rest.startswith("--vision "):
+            session.context.allow_unconfirmed_vision = True
+            rest = rest[9:].strip()
+        try:
+            prepared = prepare_attachments(
+                session.services.artifacts,
+                session.record.id,
+                [{"path": rest.strip('"'), **options}],
+                cancellation=session.token,
+            )
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise InvalidUsageError(f"Could not prepare attachment: {exc}") from exc
+        for item in prepared:
+            session.pending_attachments.append(item.reference())
+            console.print(
+                f"Ready: {item.name} ({item.kind}, {item.source.byte_count} bytes)", markup=False
+            )
+            if item.warning:
+                console.print(item.warning, markup=False)
         return _STAY
     if command == "/status":
         snap = build_snapshot(session)

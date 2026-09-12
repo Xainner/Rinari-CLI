@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import codecs
+import mimetypes
 from pathlib import Path
 
 from rinari.tools.definition import (
@@ -56,11 +58,35 @@ def artifact_read(input: dict, ctx: ToolContext) -> ToolResult:
         maximum = min(MAX_ARTIFACT_SLICE, max(1, int(input.get("max_bytes", 8192))))
     except (TypeError, ValueError):
         return _error(ToolErrorCode.INVALID_ARGUMENT, "start_byte/max_bytes must be integers")
-    size = path.stat().st_size
-    with path.open("rb") as handle:
-        handle.seek(min(start, size))
-        chunk = handle.read(maximum)
-    end = min(size, start + len(chunk))
+    try:
+        size = path.stat().st_size
+        start = min(start, size)
+        with path.open("rb") as handle:
+            handle.seek(start)
+            chunk = handle.read(maximum)
+            decoder = codecs.getincrementaldecoder("utf-8")()
+            text = decoder.decode(chunk, final=start + len(chunk) >= size)
+            # Complete the last code point, at most three additional bytes.
+            # A tiny requested slice must still advance without corrupting UTF-8.
+            while decoder.getstate()[0]:
+                extra = handle.read(1)
+                chunk += extra
+                text += decoder.decode(extra, final=not extra)
+        if "\0" in text:
+            return _error(
+                ToolErrorCode.INVALID_ARGUMENT, "Artifact is binary; use export to open it."
+            )
+    except UnicodeDecodeError:
+        return _error(
+            ToolErrorCode.INVALID_ARGUMENT,
+            "Artifact is not UTF-8 text or start_byte is inside a character; "
+            "use a returned cursor.",
+        )
+    except OSError as exc:
+        return _error(
+            ToolErrorCode.NOT_FOUND, f"Artifact could not be read: {exc.__class__.__name__}"
+        )
+    end = start + len(chunk)
     return ToolResult(
         ok=True,
         data={
@@ -70,7 +96,8 @@ def artifact_read(input: dict, ctx: ToolContext) -> ToolResult:
             "size_bytes": size,
             "truncated": end < size,
             "next_start_byte": end if end < size else None,
-            "text": chunk.decode("utf-8", errors="replace"),
+            "text": text,
+            "encoding": "utf-8",
         },
     )
 
@@ -79,9 +106,19 @@ def artifact_metadata(input: dict, ctx: ToolContext) -> ToolResult:
     path, error = _path_for(input.get("uri"), ctx)
     if error is not None:
         return error
+    try:
+        stat = path.stat()
+    except OSError:
+        return _error(ToolErrorCode.NOT_FOUND, "Artifact is no longer available")
     return ToolResult(
         ok=True,
-        data={"uri": input["uri"], "name": path.name, "size_bytes": path.stat().st_size},
+        data={
+            "uri": input["uri"],
+            "name": path.name,
+            "size_bytes": stat.st_size,
+            "mime_type": mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+            "modified_ns": stat.st_mtime_ns,
+        },
     )
 
 
@@ -91,7 +128,8 @@ def artifact_tools() -> list[ToolDefinition]:
             name="artifact.read",
             description=(
                 "Read a bounded byte slice from an artifact:// URI produced by a prior tool. "
-                "Use next_start_byte to continue."
+                "Use next_start_byte to continue. UTF-8 only; a slice can extend up to "
+                "three bytes to complete its last character."
             ),
             input_schema={
                 "type": "object",

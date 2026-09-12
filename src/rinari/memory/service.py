@@ -16,15 +16,25 @@ Design rules (AGENTS.md 21, harness.md section 69):
 
 from __future__ import annotations
 
+import hashlib
 import re
 
 from rinari.application.context import AppContext
 from rinari.shared.clock import now_iso
-from rinari.shared.errors import InvalidUsageError
+from rinari.shared.errors import ConflictError, InvalidUsageError, NotFoundError
 
 MEM_MAX_TEXT = 4096
 MEM_MAX_SUMMARY = 400
 MEM_MAX_PROVENANCE = 256
+MEM_PROMPT_MAX_CHARS = 12000
+
+
+class MemoryConflictError(ConflictError, InvalidUsageError):
+    """Optimistic concurrency failure with a protocol-stable error type."""
+
+
+class MemoryNotFoundError(NotFoundError, InvalidUsageError):
+    """Requested live memory record is absent."""
 
 # Heuristic secret detection. These are recall-oriented patterns (catch real
 # secrets, tolerate some false positives: a rejected memory is cheap, a
@@ -62,6 +72,14 @@ def _normalize_topic(topic: str) -> str:
 
 def _normalize_text(text: str) -> str:
     return " ".join(text.strip().lower().split())
+
+
+def _suppression_hashes(topic: str, text: str) -> tuple[str, str]:
+    """Return minimal hashes used to keep an explicitly forgotten pair out."""
+    return (
+        hashlib.sha256(_normalize_topic(topic).encode("utf-8")).hexdigest(),
+        hashlib.sha256(_normalize_text(text).encode("utf-8")).hexdigest(),
+    )
 
 
 def find_sensitive_match(text: str, known_secrets: list[str] | tuple[str, ...] = ()) -> str | None:
@@ -104,10 +122,27 @@ class MemoryService:
 
     @staticmethod
     def _require(text: str, field: str) -> str:
+        if not isinstance(text, str):
+            raise InvalidUsageError(f"{field} must be a string")
         cleaned = text.strip()
         if not cleaned:
             raise InvalidUsageError(f"{field} is required")
         return cleaned
+
+    def _bounded(self, value: str, field: str, maximum: int) -> str:
+        cleaned = self._require(value, field)
+        if len(cleaned) > maximum:
+            raise InvalidUsageError(f"memory {field} exceeds {maximum} characters")
+        return cleaned
+
+    @staticmethod
+    def _confidence(value: float) -> float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise InvalidUsageError("confidence must be between 0 and 1")
+        result = float(value)
+        if not 0.0 <= result <= 1.0:
+            raise InvalidUsageError("confidence must be between 0 and 1")
+        return result
 
     def _remember(
         self,
@@ -121,93 +156,98 @@ class MemoryService:
         confidence: float,
     ) -> dict:
         """Shared remember path for user/project with conflict supersede."""
-        topic_n = self._require(topic, "topic")[:128]
-        text = self._require(text, "text")
-        if len(text) > MEM_MAX_TEXT:
-            raise InvalidUsageError(
-                "memory text exceeds 4096 characters",
-                hint="Store a shorter fact; keep details in artifacts.",
-            )
-        provenance = (provenance or "agent").strip()[:MEM_MAX_PROVENANCE]
+        topic_n = self._bounded(topic, "topic", 128)
+        text = self._bounded(text, "text", MEM_MAX_TEXT)
+        if provenance is None:
+            provenance = "agent"
+        provenance = self._bounded(provenance, "provenance", MEM_MAX_PROVENANCE)
+        confidence = self._confidence(confidence)
+        self._check_sensitive(topic_n, "topic")
         self._check_sensitive(text)
         self._check_sensitive(provenance, "provenance")
-        now = self._now()
-        memory_id = self._ctx.ids.new(f"mem-{store}")
+        _, text_hash = _suppression_hashes(topic_n, text)
+        with self.repo._db.transaction():
+            if store == "user" and self.repo.suppression_exists(text_hash):
+                raise InvalidUsageError(
+                    "this memory was explicitly forgotten and cannot be recreated automatically"
+                )
+            now = self._now()
+            memory_id = self._ctx.ids.new(f"mem-{store}")
 
-        prefix = _normalize_topic(topic_n)
-        if store == "user":
-            active = [
-                row
-                for row in self.repo.user_live()
-                if row["kind"] == kind and _normalize_topic(row["topic"]) == prefix
-            ]
-        else:
-            active = [
-                row
-                for row in self.repo.project_live(root)
-                if row["kind"] == kind and _normalize_topic(row["topic"]) == prefix
-            ]
-
-        action = "created"
-        normalized = _normalize_text(text)
-        for row in active:
-            if _normalize_text(row["text"]) == normalized:
-                # Idempotent re-statement: refresh, do not duplicate.
-                if store == "user":
-                    self.repo.user_update(
-                        row["id"],
-                        {"provenance": provenance, "confidence": confidence},
-                        now,
-                    )
-                else:
-                    self.repo.project_update(
-                        root,
-                        row["id"],
-                        {"provenance": provenance, "confidence": confidence},
-                        now,
-                    )
-                action = "refreshed"
-                return {"id": row["id"], "store": store, "kind": kind, "action": action}
+            prefix = _normalize_topic(topic_n)
             if store == "user":
-                self.repo.user_supersede(row["id"], memory_id, now)
+                active = [
+                    row
+                    for row in self.repo.user_live()
+                    if row["kind"] == kind and _normalize_topic(row["topic"]) == prefix
+                ]
             else:
-                self.repo.project_supersede(root, row["id"], memory_id, now)
-            action = "superseded"
+                active = [
+                    row
+                    for row in self.repo.project_live(root)
+                    if row["kind"] == kind and _normalize_topic(row["topic"]) == prefix
+                ]
 
-        if store == "user":
-            self.repo.user_insert(
-                {
-                    "id": memory_id,
-                    "kind": kind,
-                    "topic": topic_n,
-                    "text": text,
-                    "provenance": provenance,
-                    "confidence": confidence,
-                    "created_at": now,
-                    "updated_at": now,
-                }
-            )
-        else:
-            self.repo.project_insert(
-                {
-                    "id": memory_id,
-                    "project_root": root,
-                    "kind": kind,
-                    "topic": topic_n,
-                    "text": text,
-                    "provenance": provenance,
-                    "confidence": confidence,
-                    "created_at": now,
-                    "updated_at": now,
-                }
-            )
-        return {
-            "id": memory_id,
-            "store": store,
-            "kind": kind,
-            "topic": topic_n,
-            "action": action,
-        }
+            action = "created"
+            normalized = _normalize_text(text)
+            for row in active:
+                if _normalize_text(row["text"]) == normalized:
+                    # Idempotent re-statement: refresh, do not duplicate.
+                    if store == "user":
+                        self.repo.user_update(
+                            row["id"],
+                            {"provenance": provenance, "confidence": confidence},
+                            now,
+                        )
+                    else:
+                        self.repo.project_update(
+                            root,
+                            row["id"],
+                            {"provenance": provenance, "confidence": confidence},
+                            now,
+                        )
+                    action = "refreshed"
+                    return {"id": row["id"], "store": store, "kind": kind, "action": action}
+                if store == "user":
+                    self.repo.user_supersede(row["id"], memory_id, now)
+                else:
+                    self.repo.project_supersede(root, row["id"], memory_id, now)
+                action = "superseded"
+
+            if store == "user":
+                self.repo.user_insert(
+                    {
+                        "id": memory_id,
+                        "kind": kind,
+                        "topic": topic_n,
+                        "text": text,
+                        "provenance": provenance,
+                        "confidence": confidence,
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+                )
+            else:
+                self.repo.project_insert(
+                    {
+                        "id": memory_id,
+                        "project_root": root,
+                        "kind": kind,
+                        "topic": topic_n,
+                        "text": text,
+                        "provenance": provenance,
+                        "confidence": confidence,
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+                )
+            return {
+                "id": memory_id,
+                "store": store,
+                "kind": kind,
+                "topic": topic_n,
+                "action": action,
+            }
 
     # -- user memory -------------------------------------------------------------
 
@@ -251,32 +291,78 @@ class MemoryService:
         topic: str | None = None,
         confidence: float | None = None,
         provenance: str | None = None,
+        expected_version: str | None = None,
+        expected_revision: int | None = None,
     ) -> dict:
-        existing = self.repo.user_get(memory_id)
-        if existing is None:
-            raise InvalidUsageError(f"user memory not found: {memory_id}")
-        fields: dict = {}
-        if text is not None:
-            text = self._require(text, "text")
-            self._check_sensitive(text)
-            fields["text"] = text
-        if topic is not None:
-            topic = self._require(topic, "topic")
-            fields["topic"] = topic[:128]
-        if confidence is not None:
-            if not 0.0 <= float(confidence) <= 1.0:
-                raise InvalidUsageError("confidence must be between 0 and 1")
-            fields["confidence"] = float(confidence)
-        if provenance is not None:
-            provenance = provenance.strip()[:MEM_MAX_PROVENANCE]
-            self._check_sensitive(provenance, "provenance")
-            fields["provenance"] = provenance
-        if fields:
-            self.repo.user_update(memory_id, fields, self._now())
-        return self.repo.user_get(memory_id)
+        with self.repo._db.transaction():
+            existing = self.repo.user_get(memory_id)
+            if existing is None:
+                raise MemoryNotFoundError(f"user memory not found: {memory_id}")
+            if expected_version is not None and existing.get("updated_at") != expected_version:
+                raise MemoryConflictError("memory version conflict; recall the current record")
+            if (
+                expected_revision is not None
+                and int(existing.get("revision", 1)) != expected_revision
+            ):
+                raise MemoryConflictError("memory revision conflict; recall the current record")
+            fields: dict = {}
+            if text is not None:
+                text = self._require(text, "text")
+                if len(text) > MEM_MAX_TEXT:
+                    raise InvalidUsageError("memory text exceeds 4096 characters")
+                self._check_sensitive(text)
+                fields["text"] = text
+            if topic is not None:
+                topic = self._require(topic, "topic")
+                if len(topic) > 128:
+                    raise InvalidUsageError("memory topic exceeds 128 characters")
+                self._check_sensitive(topic, "topic")
+                fields["topic"] = topic
+            if confidence is not None:
+                if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+                    raise InvalidUsageError("confidence must be between 0 and 1")
+                if not 0.0 <= float(confidence) <= 1.0:
+                    raise InvalidUsageError("confidence must be between 0 and 1")
+                fields["confidence"] = float(confidence)
+            if provenance is not None:
+                provenance = self._bounded(provenance, "provenance", MEM_MAX_PROVENANCE)
+                self._check_sensitive(provenance, "provenance")
+                fields["provenance"] = provenance
+            next_topic = fields.get("topic", existing["topic"])
+            next_text = fields.get("text", existing["text"])
+            _, text_hash = _suppression_hashes(next_topic, next_text)
+            if self.repo.suppression_exists(text_hash):
+                raise InvalidUsageError(
+                    "this memory was explicitly forgotten and cannot be recreated automatically"
+                )
+            fields = {k: v for k, v in fields.items() if existing.get(k) != v}
+            if fields:
+                self.repo.user_update(memory_id, fields, self._now())
+            return self.repo.user_get(memory_id)
 
-    def forget_user(self, memory_id: str) -> bool:
-        return self.repo.user_delete(memory_id)
+    def forget_user(self, memory_id: str, *, expected_revision: int | None = None) -> bool:
+        with self.repo._db.transaction():
+            existing = self.repo.user_get(memory_id)
+            if existing is None:
+                return False
+            if (
+                expected_revision is not None
+                and int(existing.get("revision", 1)) != expected_revision
+            ):
+                raise MemoryConflictError("memory revision conflict; recall the current record")
+            topic_hash, text_hash = _suppression_hashes(existing["topic"], existing["text"])
+            self.repo.suppression_insert(
+                topic_hash=topic_hash, text_hash=text_hash, created_at=self._now()
+            )
+            normalized = _normalize_text(existing["text"])
+            forgotten = False
+            # A prior version allowed the same text under different topics.
+            # Forgetting the content must remove every live user duplicate so
+            # search and prompt retrieval cannot surface it through a label.
+            for row in self.repo.user_live():
+                if _normalize_text(row["text"]) == normalized:
+                    forgotten = self.repo.user_delete(row["id"]) or forgotten
+            return forgotten
 
     # -- project memory ------------------------------------------------------------
 
@@ -325,28 +411,37 @@ class MemoryService:
         topic: str | None = None,
         confidence: float | None = None,
         provenance: str | None = None,
+        expected_version: str | None = None,
     ) -> dict:
-        existing = self.repo.project_get(project_root, memory_id)
-        if existing is None:
-            raise InvalidUsageError(f"project memory not found: {memory_id}")
-        fields: dict = {}
-        if text is not None:
-            text = self._require(text, "text")
-            self._check_sensitive(text)
-            fields["text"] = text
-        if topic is not None:
-            fields["topic"] = self._require(topic, "topic")[:128]
-        if confidence is not None:
-            if not 0.0 <= float(confidence) <= 1.0:
-                raise InvalidUsageError("confidence must be between 0 and 1")
-            fields["confidence"] = float(confidence)
-        if provenance is not None:
-            provenance = provenance.strip()[:MEM_MAX_PROVENANCE]
-            self._check_sensitive(provenance, "provenance")
-            fields["provenance"] = provenance
-        if fields:
-            self.repo.project_update(project_root, memory_id, fields, self._now())
-        return self.repo.project_get(project_root, memory_id)
+        with self.repo._db.transaction():
+            existing = self.repo.project_get(project_root, memory_id)
+            if existing is None:
+                raise InvalidUsageError(f"project memory not found: {memory_id}")
+            if expected_version is not None and existing.get("updated_at") != expected_version:
+                raise InvalidUsageError("memory version conflict; recall the current record")
+            fields: dict = {}
+            if text is not None:
+                text = self._bounded(text, "text", MEM_MAX_TEXT)
+                self._check_sensitive(text)
+                fields["text"] = text
+            if topic is not None:
+                topic = self._bounded(topic, "topic", 128)
+                self._check_sensitive(topic, "topic")
+                fields["topic"] = topic
+            if confidence is not None:
+                if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+                    raise InvalidUsageError("confidence must be between 0 and 1")
+                if not 0.0 <= float(confidence) <= 1.0:
+                    raise InvalidUsageError("confidence must be between 0 and 1")
+                fields["confidence"] = float(confidence)
+            if provenance is not None:
+                provenance = self._bounded(provenance, "provenance", MEM_MAX_PROVENANCE)
+                self._check_sensitive(provenance, "provenance")
+                fields["provenance"] = provenance
+            fields = {k: v for k, v in fields.items() if existing.get(k) != v}
+            if fields:
+                self.repo.project_update(project_root, memory_id, fields, self._now())
+            return self.repo.project_get(project_root, memory_id)
 
     def forget_project(self, project_root: str, memory_id: str) -> bool:
         return self.repo.project_delete(project_root, memory_id)
@@ -367,19 +462,28 @@ class MemoryService:
         provenance = (provenance or "agent").strip()[:MEM_MAX_PROVENANCE]
         self._check_sensitive(summary, "summary")
         self._check_sensitive(outcome, "outcome")
-        memory_id = self._ctx.ids.new("mem-episo")
-        self.repo.episodic_insert(
-            {
-                "id": memory_id,
-                "session_ref": session_id,
-                "project_root": project_root or "",
-                "summary": summary,
-                "outcome": outcome,
-                "provenance": provenance,
-                "created_at": self._now(),
-            }
-        )
-        return {"id": memory_id, "session_ref": session_id, "summary_chars": len(summary)}
+        with self.repo._db.transaction():
+            existing = self.repo.episodic_match(session_id, project_root or "", summary, outcome)
+            if existing:
+                return {
+                    "id": existing["id"],
+                    "session_ref": session_id,
+                    "summary_chars": len(summary),
+                    "deduplicated": True,
+                }
+            memory_id = self._ctx.ids.new("mem-episo")
+            self.repo.episodic_insert(
+                {
+                    "id": memory_id,
+                    "session_ref": session_id,
+                    "project_root": project_root or "",
+                    "summary": summary,
+                    "outcome": outcome,
+                    "provenance": provenance,
+                    "created_at": self._now(),
+                }
+            )
+            return {"id": memory_id, "session_ref": session_id, "summary_chars": len(summary)}
 
     def search_episodic(
         self, project_root: str = "", query: str = "", *, limit: int = 10
@@ -441,31 +545,86 @@ class MemoryService:
 
     # -- prompt segment ------------------------------------------------------------------
 
-    def prompt_segment(self, project_root: str | None) -> str | None:
+    @staticmethod
+    def _prompt_tokens(query: str) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(re.findall(r"[\wÀ-ÿ]{2,}", query.lower())))
+
+    @staticmethod
+    def _prompt_rank(row: dict, tokens: tuple[str, ...]) -> tuple[int, int, str, str]:
+        if not tokens:
+            return (0, 0, str(row.get("updated_at", "")), str(row.get("id", "")))
+        topic = _normalize_topic(row.get("topic", ""))
+        text = _normalize_text(row.get("text", ""))
+        score = sum((3 if token in topic else 0) + (1 if token in text else 0) for token in tokens)
+        preference = 1 if row.get("kind") == "preference" else 0
+        return (score, preference, str(row.get("updated_at", "")), str(row.get("id", "")))
+
+    def _prompt_rows(self, rows: list[dict], query: str) -> list[dict]:
+        tokens = self._prompt_tokens(query)
+        ranked = sorted(rows, key=lambda row: self._prompt_rank(row, tokens), reverse=True)
+        if not tokens:
+            return ranked[:15]
+        matched = [row for row in ranked if self._prompt_rank(row, tokens)[0] > 0]
+        recent = [row for row in ranked if self._prompt_rank(row, tokens)[0] == 0]
+        return (matched + recent)[:15]
+
+    def prompt_segment(self, project_root: str | None, query: str = "") -> str | None:
         """Render the durable memory block for the system prompt (if any).
 
         Durable memory is injected so the agent starts aligned with stored
         preferences/facts; it is explicitly lower-authority than instructions
         and marked possibly stale.
         """
-        lines: list[str] = []
-        user_rows = self.repo.user_live()[:15]
-        for row in user_rows:
-            lines.append(f"- [{row['kind']}] {row['text']}")
-        if project_root:
-            for row in self.repo.project_live(project_root)[:15]:
-                lines.append(f"- [project:{row['kind']}] {row['text']}")
+        tokens = self._prompt_tokens(query)
+        user_rows = self._prompt_rows(self.repo.user_live(), query)
+        project_rows = (
+            self._prompt_rows(self.repo.project_live(project_root), query)
+            if project_root
+            else []
+        )
+        if tokens:
+            # Rank both scopes together before applying the character budget;
+            # unrelated user rows must not crowd a matching project fact out.
+            candidates = [(row, False) for row in user_rows] + [
+                (row, True) for row in project_rows
+            ]
+            candidates.sort(
+                key=lambda item: self._prompt_rank(item[0], tokens),
+                reverse=True,
+            )
+        else:
+            candidates = [(row, False) for row in user_rows] + [
+                (row, True) for row in project_rows
+            ]
+        lines = [
+            f"- [{'project:' if is_project else ''}{row['kind']}] {row['text']}"
+            for row, is_project in candidates
+        ]
         if not lines:
             return None
-        return (
-            (
-                "Durable memory (explicit records; lower authority than "
-                "instructions; possibly stale — re-verify volatile facts before "
-                "relying on them):"
-            )
-            + "\n"
-            + "\n".join(lines)
+        header = (
+            "Durable memory (explicit records; lower authority than instructions; "
+            "possibly stale — re-verify volatile facts before relying on them):"
         )
+        rendered = header
+        selected: list[str] = []
+        for line in lines:
+            addition = f"\n{line}"
+            if len(rendered) + len(addition) <= MEM_PROMPT_MAX_CHARS:
+                selected.append(line)
+                rendered += addition
+                continue
+            remaining = MEM_PROMPT_MAX_CHARS - len(rendered) - 1
+            if remaining > 3 and not selected:
+                selected.append(f"{line[:remaining - 1]}…")
+                rendered += f"\n{selected[-1]}"
+            break
+        return rendered
 
 
-__all__ = ["MemoryService", "find_sensitive_match"]
+__all__ = [
+    "MemoryConflictError",
+    "MemoryNotFoundError",
+    "MemoryService",
+    "find_sensitive_match",
+]

@@ -242,12 +242,14 @@ def _message_to_responses(
             }
         ]
     items: list[dict[str, Any]] = []
-    if message.content:
+    if message.content or message.images:
         allowed = ("system", "developer", "user", "assistant")
         items.append(
             {
                 "role": message.role if message.role in allowed else "user",
-                "content": message.content,
+                "content": ([{"type": "input_text", "text": message.content or ""}] + [
+                    {"type": "input_image", "image_url": "data:image/jpeg;base64," + i.encoded()}
+                    for i in message.images]) if message.images else message.content,
             }
         )
     for tc in message.tool_calls:

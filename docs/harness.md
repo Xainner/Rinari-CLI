@@ -2941,6 +2941,14 @@ secret value
 guess about user preference
 ```
 
+The Gateway may expose only this user namespace through the negotiated
+`personal_memory_v1` Engine Protocol capability. Its panel API uses the same
+`MemoryService` authority as the CLI; it does not create a second memory store.
+Updates and forget operations carry a record revision for optimistic conflict
+detection. Forgetting keeps only minimal hashes to prevent automatic recreation;
+conversation history, compaction summaries, and backups are separate retention
+surfaces and are not claimed to be erased by this operation.
+
 ---
 
 # 71. Project Memory
@@ -9170,3 +9178,19 @@ It is:
 > **A persistent, multi-provider, project-aware agent runtime where Rinari can operate as the same AI identity in both ordinary chat and high-autonomy software-engineering sessions, with tools, skills, policies, context, memory, sessions, and verification wired together as explicit subsystems.**
 
 That is the architecture the implementation should converge toward.
+
+## Gateway channel extension
+
+The trusted operation context can advertise `channel_tools_v1` and image attachments.
+Channel capabilities are native ToolDefinitions whose execution delegates over the
+existing private Engine Protocol. They do not constitute a parallel executor. The
+channel broker waits in the turn worker while protocol resolution and cancellation
+continue on the reader. The parent binding is not inherited by subordinate agents.
+Gateway binds installation, owner conversation and operation, owns outbox persistence,
+and reconciles quoted owner approvals using allow_once/deny. Model output cannot
+choose recipient identities or manufacture authority.
+
+Image references are stored in migration 0025. OpenAI-compatible, Responses and
+Anthropic adapters emit actual visual content only with explicit vision capability.
+Original artifact URIs remain available to tools, independently of provider-side
+thumbnail encoding. Attachment hashes participate in operation idempotency.

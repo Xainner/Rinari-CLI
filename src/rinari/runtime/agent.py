@@ -106,6 +106,10 @@ class AgentContext:
     compact_state_text: str | None = None
     dropped_total: int = 0
     compacted: bool = False
+    pending_images: tuple[Any, ...] = ()
+    pending_attachments: tuple[dict[str, Any], ...] = ()
+    pending_display_content: str | None = None
+    allow_unconfirmed_vision: bool = False
 
 
 class AgentLoop:
@@ -154,13 +158,25 @@ class AgentLoop:
         turn_index: int | None = None,
     ) -> TurnResult:
         cancel = cancel if cancel is not None else CancellationToken()
+        self._tools.registry.context = ctx.tool_ctx
         loop = loop if loop is not None else LoopDetector()
         governor = governor if governor is not None else TurnGovernor()
         started_payload: dict = {"preview": user_message[:200]}
         if turn_index is not None:
             started_payload["turn_index"] = turn_index
         self._emit(ctx.session_id, EVENT_TURN_STARTED, started_payload)
-        ctx.history.append(ChatMessage.user(user_message))
+        images, ctx.pending_images = ctx.pending_images, ()
+        has_images = bool(images) or any(message.images for message in ctx.history)
+        vision = getattr(self._provider.capabilities(), "vision", None) if has_images else None
+        if (has_images and vision is False) or (images and vision is None and not ctx.allow_unconfirmed_vision):
+            from rinari.shared.errors import InvalidUsageError
+            raise InvalidUsageError("Vision must be enabled for the selected model before using images")
+        if images:
+            user_message += "\n\nAdjuntos originales disponibles para herramientas:\n" + "\n".join(i.uri for i in images)
+        metadata, ctx.pending_attachments = ctx.pending_attachments, ()
+        display, ctx.pending_display_content = ctx.pending_display_content, None
+        ctx.history.append(ChatMessage(role="user", content=user_message, images=images,
+                                       attachments=metadata, display_content=display))
         # Hierarchical ledger (P0.10): the turn's meter becomes the parent
         # budget visible to agent.spawn, so subagent cost aggregates here.
         if (
@@ -300,7 +316,9 @@ class AgentLoop:
                     # Etapa C: execution plan groups (serial baseline; the
                     # plan is traced so a concurrent executor can adopt it).
                     "execution_plan": schedule(
-                        [tc.name for tc in response.tool_calls], self._tools.registry
+                        [tc.name for tc in response.tool_calls],
+                        self._tools.registry,
+                        [tc.arguments for tc in response.tool_calls],
                     ),
                 },
             )
@@ -470,7 +488,13 @@ class AgentLoop:
                                 if result.error is not None
                                 else None
                             ),
-                            "result": result.to_model_text(call.name)[:2000],
+                            # The model observation is intentionally private to
+                            # AgentLoop.  Desktop/CLI activity receives the
+                            # original structured result so it can render a
+                            # command card without showing escaped JSON.
+                            "presentation": _tool_activity_presentation(
+                                call.name, call.arguments, result
+                            ),
                         },
                     )
                 tool_seq += 1
@@ -844,6 +868,61 @@ def _turn_completed_payload(
     if turn_index is not None:
         payload["turn_index"] = turn_index
     return payload
+
+
+def _tool_activity_presentation(tool: str, arguments: dict, result: ToolResult) -> dict:
+    """Return presentation-safe structured data for tool activity.
+
+    ``ToolResult.to_model_text`` remains the model contract.  It is deliberately
+    not used here: its JSON envelope and model truncation rules made command
+    output unreadable in Code and hid the distinction between stdout/stderr.
+    """
+
+    data = result.data if isinstance(result.data, dict) else {}
+    preserved = result.presentation if isinstance(result.presentation, dict) else {}
+    presentation: dict[str, object] = {
+        "kind": "command" if tool in {"shell.exec", "process.output", "process.start"} else "tool",
+        "tool": tool,
+        "status": "success" if result.ok else "failed",
+        "truncated": bool(result.truncated or data.get("truncated", False)),
+        "stderr_warning": False,
+        "artifacts": [artifact.uri for artifact in result.artifacts],
+    }
+    presentation.update(preserved)
+    presentation["tool"] = tool
+    presentation["artifacts"] = [artifact.uri for artifact in result.artifacts]
+    if tool == "shell.exec" or {"stdout", "stderr", "exit_code"} & data.keys():
+        presentation.update(
+            {
+                "command": data.get("command") or preserved.get("command") or arguments.get("command") or arguments.get("argv"),
+                "cwd": data.get("cwd") or preserved.get("cwd") or arguments.get("cwd"),
+                "exit_code": data.get("exit_code", preserved.get("exit_code")),
+                "stdout": data.get("stdout", preserved.get("stdout", "")) or "",
+                "stderr": data.get("stderr", preserved.get("stderr", "")) or "",
+                "running": data.get("running", preserved.get("running", False)),
+            }
+        )
+        presentation["stderr_warning"] = bool(
+            result.ok
+            and presentation.get("exit_code") == 0
+            and presentation.get("stderr")
+        )
+        exit_code = data.get("exit_code")
+        if not isinstance(exit_code, int):
+            exit_code = presentation.get("exit_code")
+        if isinstance(exit_code, int) and exit_code != 0:
+            presentation["status"] = "failed"
+        elif result.ok and exit_code == 0:
+            presentation["status"] = "success"
+    else:
+        presentation["data"] = data
+    if result.error is not None:
+        presentation["error"] = {
+            "code": result.error.code.value,
+            "message": result.error.message,
+            "retryable": result.error.retryable,
+        }
+    return presentation
 
 
 _BUDGET_REASONS = {

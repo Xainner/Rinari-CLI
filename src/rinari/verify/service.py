@@ -50,6 +50,10 @@ class VerificationService:
         session_ref: str | None = None,
     ) -> dict:
         project_root = str(self._root(path))
+        from rinari.verify.revision import PREFIX, revision
+
+        marker = revision(Path(project_root)) or "unknown"
+        detail = f"{PREFIX}{marker}\n{detail}"
         return record_validation(
             self._ctx.validation_repo,
             project_root=project_root,
@@ -153,6 +157,14 @@ class VerificationService:
                 report["id"] = task["id"]
                 tasks.append(report)
         records = self._ctx.validation_repo.list(project_root, limit=200)
+        from rinari.verify.revision import PREFIX, revision
+
+        current = revision(Path(project_root))
+        records = [
+            r
+            for r in records
+            if current and str(r.get("detail", "")).startswith(f"{PREFIX}{current}\n")
+        ]
         if record_ids is not None:
             records = [record for record in records if record.get("id") in record_ids]
         return evaluate_gate(

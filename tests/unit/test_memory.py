@@ -55,6 +55,15 @@ def test_update_and_forget_user(mem):
     assert mem.list_user() == []
 
 
+def test_forgetting_text_suppresses_live_duplicate_topics(mem):
+    first = mem.remember_user("Same content", topic="first")
+    mem.remember_user("Same content", topic="second")
+    row = mem.get_user(first["id"])
+    assert mem.forget_user(first["id"], expected_revision=row["revision"])
+    assert mem.search_user("Same content") == []
+    assert mem.list_user() == []
+
+
 def test_sensitive_filter_rejects_secrets(mem):
     for sample in (
         "key is sk-" + "a" * 32,
@@ -145,6 +154,17 @@ def test_prompt_segment_rendering(mem):
     assert "[project:fact] Main branch is protected" in segment
     # project memory is namespaced: other projects do not leak into the block
     assert "Main branch" not in (mem.prompt_segment("/other") or "")
+
+
+def test_prompt_segment_prefers_relevant_older_records_and_has_budget(mem):
+    for index in range(20):
+        mem.remember_user(f"Unrelated recent note {index}", topic=f"note-{index}")
+    mem.remember_user("Saturno runs Ubuntu with an NVIDIA GPU", topic="saturno hardware")
+
+    segment = mem.prompt_segment(None, query="revisa el hardware de saturno")
+    assert segment is not None
+    assert "Saturno runs Ubuntu" in segment
+    assert len(segment) <= 12000
 
 
 def test_kind_validation(mem):

@@ -131,6 +131,7 @@ class LspClient:
         self._next_id = 0
         self._pending: dict[int, queue.Queue] = {}
         self._diagnostics: dict[str, list[dict]] = {}
+        self._diagnostic_versions: dict[str, int | None] = {}
         self._doc_versions: dict[str, int] = {}
         self._alive = threading.Event()
         self._inbox: queue.Queue = queue.Queue(maxsize=64)
@@ -228,7 +229,13 @@ class LspClient:
             params = message.get("params") or {}
             uri = params.get("uri")
             if isinstance(uri, str):
-                self._diagnostics[uri] = list(params.get("diagnostics") or [])
+                with self._lock:
+                    version = params.get("version")
+                    current = self._doc_versions.get(uri)
+                    if current is None or (version is not None and version != current):
+                        return
+                    self._diagnostics[uri] = list(params.get("diagnostics") or [])
+                    self._diagnostic_versions[uri] = version
         with contextlib.suppress(queue.Full):
             self._inbox.put_nowait(message)
 
@@ -248,6 +255,13 @@ class LspClient:
         if not self.alive:
             raise LspServerCrashed(f"server {self.spec.name} is not running")
         deadline = timeout if timeout is not None else self.spec.request_timeout
+        import time
+
+        from rinari.shared.execution_scope import execution_context
+
+        context = execution_context.get()
+        if context and context.deadline_at is not None:
+            deadline = min(deadline, max(0, context.deadline_at - time.time()))
         with self._lock:
             self._next_id += 1
             request_id = self._next_id
@@ -258,7 +272,20 @@ class LspClient:
                 {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params or {}}
             )
             try:
-                item = waiter.get(timeout=deadline)
+                end = time.monotonic() + deadline
+                while True:
+                    if context and context.cancellation:
+                        if context.cancellation.cancelled:
+                            self.notify("$/cancelRequest", {"id": request_id})
+                        context.cancellation.throw_if_cancelled()
+                    remaining = end - time.monotonic()
+                    if remaining <= 0:
+                        raise queue.Empty
+                    try:
+                        item = waiter.get(timeout=min(remaining, 0.1))
+                        break
+                    except queue.Empty:
+                        continue
             except queue.Empty:
                 raise LspRequestTimeout(f"no answer to {method} within {deadline}s") from None
         finally:
@@ -288,6 +315,8 @@ class LspClient:
         with self._lock:
             self._doc_versions[uri] = self._doc_versions.get(uri, 0) + 1
             version = self._doc_versions[uri]
+            self._diagnostics.pop(uri, None)
+            self._diagnostic_versions.pop(uri, None)
         self.notify(
             "textDocument/didOpen",
             {
@@ -305,6 +334,8 @@ class LspClient:
         with self._lock:
             self._doc_versions[uri] = self._doc_versions.get(uri, 0) + 1
             version = self._doc_versions[uri]
+            self._diagnostics.pop(uri, None)
+            self._diagnostic_versions.pop(uri, None)
         self.notify(
             "textDocument/didChange",
             {
@@ -319,10 +350,23 @@ class LspClient:
             if uri in self._doc_versions:
                 self._doc_versions.pop(uri, None)
                 self._diagnostics.pop(uri, None)
+                self._diagnostic_versions.pop(uri, None)
         self.notify("textDocument/didClose", {"textDocument": {"uri": uri}})
 
     def diagnostics(self, path: Path) -> list[dict]:
         return list(self._diagnostics.get(self.uri_for(path), []))
+
+    def diagnostics_state(self, path: Path) -> dict:
+        uri = self.uri_for(path)
+        with self._lock:
+            reported = self._diagnostic_versions.get(uri)
+            current = self._doc_versions.get(uri)
+            return {
+                "status": "received" if uri in self._diagnostics else "waiting",
+                "document_version": current,
+                "reported_version": reported,
+                "version_verified": reported is not None and reported == current,
+            }
 
     def is_document_open(self, uri: str) -> bool:
         return uri in self._doc_versions

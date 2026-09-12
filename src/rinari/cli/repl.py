@@ -19,6 +19,7 @@ import time
 
 import typer
 from rich.console import Console
+from rich.panel import Panel
 from rich.text import Text
 
 from rinari.cli import agent_runtime, render, slash
@@ -62,12 +63,28 @@ def render_tool_event(
     if phase == "start":
         label = render.tool_label(name, detail)
         state["label"] = label
+        state["arguments"] = detail if isinstance(detail, dict) else {}
         active = render.symbol(render.SYMBOL_ACTIVE, ascii_=ascii_)
         console.print(Text(f"{active} {label}", style=render.tool_style(name)), highlight=False)
     else:
         from rinari.tools.definition import ToolResult
+        from rinari.runtime.agent import _tool_activity_presentation
 
         label = state.pop("label", name)
+        arguments = state.pop("arguments", {})
+        if isinstance(detail, ToolResult) and name in {
+            "shell.exec",
+            "process.output",
+            "process.start",
+        }:
+            _render_command_result(
+                console, _tool_activity_presentation(name, arguments, detail), ascii_=ascii_
+            )
+            if detail.error:
+                console.print(
+                    Text(f"{detail.error.code.value}: {detail.error.message}", style="red")
+                )
+            return
         if isinstance(detail, ToolResult) and not detail.ok and detail.error is not None:
             retryable = detail.error.retryable
             glyph = render.SYMBOL_RETRY if retryable else render.SYMBOL_FAIL
@@ -83,12 +100,67 @@ def render_tool_event(
                 ),
                 highlight=False,
             )
+            if (
+                isinstance(detail, ToolResult)
+                and isinstance(detail.data, dict)
+                and name in {"shell.exec", "process.output"}
+            ):
+                _render_command_result(console, detail.data, ascii_=ascii_)
         else:
             sym = render.symbol(render.SYMBOL_OK, ascii_=ascii_)
             ms = f" ({detail.duration_ms:.0f}ms)" if isinstance(detail, ToolResult) else ""
             line = Text(f"  {sym} ", style="green")
             line.append(f"{label} · {elapsed():.0f}s{ms}", style="dim")
             console.print(line, highlight=False)
+            if (
+                isinstance(detail, ToolResult)
+                and isinstance(detail.data, dict)
+                and name in {"shell.exec", "process.output"}
+            ):
+                _render_command_result(console, detail.data, ascii_=ascii_)
+
+
+def _render_command_result(console: Console, data: dict, *, ascii_: bool) -> None:
+    """Render shell output as a readable Rich card, preserving stderr."""
+
+    command = data.get("command")
+    if isinstance(command, list):
+        command = " ".join(str(part) for part in command)
+    command = str(command or "")
+    cwd = str(data.get("cwd") or "")
+    exit_code = data.get("exit_code")
+    stdout = str(data.get("stdout") or "")
+    stderr = str(data.get("stderr") or "")
+    header = Text("Shell", style="bold")
+    if cwd:
+        header.append(f" · {cwd}", style="dim")
+    if isinstance(exit_code, int):
+        header.append(f" · exit {exit_code}", style="red" if exit_code else "green")
+    body = []
+    if command:
+        prompt = "PS> " if ":\\" in cwd else "$ "
+        body.append(Text(prompt + command, style="cyan"))
+    if stdout:
+        body.append(Text("stdout\n" + stdout.rstrip("\n"), style="white"))
+    if stderr:
+        body.append(Text("stderr\n" + stderr.rstrip("\n"), style="yellow"))
+        if exit_code == 0:
+            body.append(
+                Text(
+                    "Process exited successfully but wrote to stderr; task outcome is not verified.",
+                    style="yellow",
+                )
+            )
+    if data.get("truncated"):
+        body.append(Text("Visible output truncated. Full captured output:", style="dim"))
+    for uri in data.get("artifacts", []):
+        body.append(Text(str(uri), style="cyan"))
+    if data.get("capture_truncated"):
+        body.append(Text("Execution capture reached its 50 MiB limit.", style="yellow"))
+    if body:
+        from rich.console import Group
+
+        console.print(Panel(Group(*body), title=header, border_style="dim", expand=False))
 
 
 def run_repl(
@@ -235,6 +307,7 @@ def run_repl(
 
         _start_status()
         try:
+            message = agent_runtime.prepare_attachment_message(session, message)
             result = agent_runtime.run_turn(session, message, on_delta=_delta, on_tool=_tool)
         except KeyboardInterrupt:
             _stop_status()

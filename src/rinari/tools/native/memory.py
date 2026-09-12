@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from rinari.memory.service import MemoryConflictError, MemoryNotFoundError
 from rinari.tools.definition import (
     RISK_LOW,
     SIDE_EFFECT_LOCAL_DESTRUCTIVE,
@@ -45,7 +46,7 @@ def _service(ctx: ToolContext):
 
 
 def _project_root(ctx: ToolContext) -> Path | None:
-    root = ctx.project_root if ctx.project_root is not None else ctx.cwd
+    root = ctx.project_root if ctx.kind == "PROJECT" else None
     if root is None or not Path(root).is_dir():
         return None
     return Path(root).resolve()
@@ -65,7 +66,13 @@ def _optional_str(input: dict, key: str, *, max_len: int) -> tuple[str | None, T
         return None, None
     if not isinstance(value, str):
         return None, _fail(ToolErrorCode.INVALID_ARGUMENT, f"{key} must be a string")
-    return value.strip()[:max_len], None
+    cleaned = value.strip()
+    if len(cleaned) > max_len:
+        return None, _fail(
+            ToolErrorCode.INVALID_ARGUMENT,
+            f"{key} exceeds the maximum length of {max_len} characters",
+        )
+    return cleaned, None
 
 
 def memory_remember(input: dict, ctx: ToolContext) -> ToolResult:
@@ -79,13 +86,21 @@ def memory_remember(input: dict, ctx: ToolContext) -> ToolResult:
     text = input.get("text")
     if not isinstance(topic, str) or not topic.strip():
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "topic is required")
+    if len(topic.strip()) > 128:
+        return _fail(ToolErrorCode.INVALID_ARGUMENT, "topic exceeds 128 characters")
     if not isinstance(text, str) or not text.strip():
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "text is required")
+    if len(text.strip()) > 4096:
+        return _fail(ToolErrorCode.INVALID_ARGUMENT, "text exceeds 4096 characters")
     provenance = input.get("provenance")
     if provenance is not None and not isinstance(provenance, str):
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "provenance must be a string")
     confidence = input.get("confidence", 1.0)
-    if not isinstance(confidence, (int, float)) or not 0.0 <= float(confidence) <= 1.0:
+    if (
+        isinstance(confidence, bool)
+        or not isinstance(confidence, (int, float))
+        or not 0.0 <= float(confidence) <= 1.0
+    ):
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "confidence must be a number 0..1")
 
     if scope == "user":
@@ -194,6 +209,16 @@ def memory_update(input: dict, ctx: ToolContext) -> ToolResult:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "scope must be user or project")
     if not isinstance(memory_id, str) or not memory_id:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "id is required")
+    expected_revision = input.get("expected_revision")
+    if scope == "user" and (
+        isinstance(expected_revision, bool)
+        or not isinstance(expected_revision, int)
+        or expected_revision < 1
+    ):
+        return _fail(
+            ToolErrorCode.INVALID_ARGUMENT,
+            "expected_revision is required for user memory updates",
+        )
     text, err = _optional_str(input, "text", max_len=4096)
     if err is not None:
         return err
@@ -201,7 +226,9 @@ def memory_update(input: dict, ctx: ToolContext) -> ToolResult:
     if err is not None:
         return err
     confidence = input.get("confidence")
-    if confidence is not None and not isinstance(confidence, (int, float)):
+    if confidence is not None and (
+        isinstance(confidence, bool) or not isinstance(confidence, (int, float))
+    ):
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "confidence must be a number 0..1")
     provenance, err = _optional_str(input, "provenance", max_len=256)
     if err is not None:
@@ -209,7 +236,13 @@ def memory_update(input: dict, ctx: ToolContext) -> ToolResult:
     try:
         if scope == "user":
             row = service.update_user(
-                memory_id, text=text, topic=topic, confidence=confidence, provenance=provenance
+                memory_id,
+                text=text,
+                topic=topic,
+                confidence=confidence,
+                provenance=provenance,
+                expected_version=input.get("expected_version"),
+                expected_revision=expected_revision,
             )
         else:
             root = _project_root(ctx)
@@ -225,9 +258,17 @@ def memory_update(input: dict, ctx: ToolContext) -> ToolResult:
                 topic=topic,
                 confidence=confidence,
                 provenance=provenance,
+                expected_version=input.get("expected_version"),
             )
+    except MemoryConflictError as exc:
+        return _fail(ToolErrorCode.CONFLICT, exc.message)
+    except MemoryNotFoundError as exc:
+        return _fail(ToolErrorCode.NOT_FOUND, exc.message)
     except Exception as exc:
-        return _fail(ToolErrorCode.NOT_FOUND, getattr(exc, "message", str(exc)))
+        return _fail(
+            ToolErrorCode.VALIDATION_FAILED,
+            getattr(exc, "message", str(exc)),
+        )
     return _ok(row)
 
 
@@ -241,9 +282,19 @@ def memory_forget(input: dict, ctx: ToolContext) -> ToolResult:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "scope must be user, project, or pattern")
     if not isinstance(memory_id, str) or not memory_id:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "id is required")
+    expected_revision = input.get("expected_revision")
+    if scope == "user" and (
+        isinstance(expected_revision, bool)
+        or not isinstance(expected_revision, int)
+        or expected_revision < 1
+    ):
+        return _fail(
+            ToolErrorCode.INVALID_ARGUMENT,
+            "expected_revision is required for user memory deletion",
+        )
     try:
         if scope == "user":
-            forgotten = service.forget_user(memory_id)
+            forgotten = service.forget_user(memory_id, expected_revision=expected_revision)
         elif scope == "pattern":
             forgotten = service.forget_pattern(memory_id)
         else:
@@ -254,8 +305,10 @@ def memory_forget(input: dict, ctx: ToolContext) -> ToolResult:
                     "project memory requires a PROJECT session with a project root",
                 )
             forgotten = service.forget_project(str(root), memory_id)
+    except MemoryConflictError as exc:
+        return _fail(ToolErrorCode.CONFLICT, exc.message)
     except Exception as exc:
-        return _fail(ToolErrorCode.UNKNOWN, getattr(exc, "message", str(exc)))
+        return _fail(ToolErrorCode.VALIDATION_FAILED, getattr(exc, "message", str(exc)))
     return _ok({"scope": scope, "id": memory_id, "forgotten": forgotten})
 
 
@@ -362,6 +415,15 @@ def memory_tools() -> list[ToolDefinition]:
                 "properties": {
                     "scope": {"type": "string", "enum": ["user", "project"]},
                     "id": {"type": "string"},
+                    "expected_version": {
+                        "type": "string",
+                        "description": "updated_at from recall; reject a concurrent update",
+                    },
+                    "expected_revision": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "revision from recall; required for user memory",
+                    },
                     "text": {"type": "string"},
                     "topic": {"type": "string"},
                     "confidence": {"type": "number", "minimum": 0, "maximum": 1},
@@ -388,6 +450,11 @@ def memory_tools() -> list[ToolDefinition]:
                 "properties": {
                     "scope": {"type": "string", "enum": ["user", "project", "pattern"]},
                     "id": {"type": "string"},
+                    "expected_revision": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "revision from recall; required for user memory",
+                    },
                 },
                 "required": ["scope", "id"],
             },

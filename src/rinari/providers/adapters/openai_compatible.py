@@ -288,6 +288,10 @@ def _message_to_openai(
     msg: dict[str, Any] = {"role": message.role}
     if message.content is not None:
         msg["content"] = message.content
+    if message.images:
+        msg["content"] = [{"type": "text", "text": message.content or ""}] + [
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + i.encoded()}}
+            for i in message.images]
     if message.tool_calls:
         msg["tool_calls"] = [
             {

@@ -327,3 +327,27 @@ def test_tool_rejects_bad_positions(proj) -> None:
     result = lsp_definition({"path": "src/mod.py", "line": 0}, _ctx(proj, manager))
     assert not result.ok
     assert result.error.code is ToolErrorCode.INVALID_ARGUMENT
+
+
+def test_diagnostic_versions_reject_stale_notifications(proj, monkeypatch):
+    client = LspClient(_spec(), proj)
+    monkeypatch.setattr(client, "notify", lambda *args: None)
+    path = proj / "src/mod.py"
+    client.open_document(path, "one", "python")
+
+    def publish(version):
+        client._on_message(
+            {
+                "method": "textDocument/publishDiagnostics",
+                "params": {"uri": path.as_uri(), "version": version, "diagnostics": []},
+            }
+        )
+
+    publish(1)
+    assert client.diagnostics_state(path)["version_verified"]
+    client.change_document(path, "two")
+    assert client.diagnostics_state(path)["status"] == "waiting"
+    publish(1)
+    assert client.diagnostics_state(path)["status"] == "waiting"
+    publish(2)
+    assert client.diagnostics_state(path)["version_verified"]

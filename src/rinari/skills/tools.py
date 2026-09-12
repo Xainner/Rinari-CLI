@@ -133,7 +133,7 @@ def skill_tools(host: SkillToolHost):
             )
         return ToolResult(
             ok=True,
-            data={"name": name, "active": not removed},
+            data={"name": name, "active": False, "removed": removed},
             origin="skills",
         )
 
@@ -175,6 +175,7 @@ def skill_tools(host: SkillToolHost):
                 "required": ["name"],
             },
             capabilities=write,
+            side_effects="local_reversible",
             classify=lambda _i: ClassifiedAction("state.write"),
             handler=activate,
         ),
@@ -187,6 +188,7 @@ def skill_tools(host: SkillToolHost):
                 "required": ["name"],
             },
             capabilities=write,
+            side_effects="local_reversible",
             classify=lambda _i: ClassifiedAction("state.write"),
             handler=deactivate,
         ),

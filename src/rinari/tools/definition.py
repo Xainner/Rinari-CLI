@@ -84,6 +84,11 @@ class ToolResult:
     side_effects: tuple[str, ...] = ()
     truncated: bool = False
     origin: str = "native"
+    # Presentation-only data is kept separate from the model observation so a
+    # spilled command result still retains its exit code and visible preview.
+    presentation: Any = None
+    # Internal capture only; runtime redacts and spills it before publication.
+    captured_output: Any = None
 
     # Inline budget for the serialized observation envelope. Large outputs
     # should already have spilled to artifacts upstream; this is the last
@@ -105,6 +110,8 @@ class ToolResult:
         if self.ok:
             envelope["data"] = self.data
         else:
+            if self.data is not None:
+                envelope["data"] = self.data
             err = self.error
             envelope["error"] = {
                 "code": err.code.value if err is not None else "UNKNOWN",
@@ -128,7 +135,27 @@ class ToolResult:
             )
         if len(text) <= len(self.truncation_mark()) + self.OBSERVATION_INLINE_BUDGET:
             return text
-        return text[: self.OBSERVATION_INLINE_BUDGET] + self.truncation_mark()
+        compact: dict[str, Any] = {"ok": self.ok, "truncated": True}
+        if tool:
+            compact["tool"] = tool
+        if self.error:
+            compact["error"] = {
+                "code": self.error.code.value,
+                "message": self.error.message[:300],
+                "retryable": self.error.retryable,
+            }
+        if self.artifacts:
+            compact["artifacts"] = [a.uri for a in self.artifacts[:4]]
+        compact["notice"] = "[output truncated]"
+        preview = text
+        while True:
+            compact["preview"] = preview
+            encoded = json.dumps(compact, ensure_ascii=False, default=str)
+            if len(encoded) <= self.OBSERVATION_INLINE_BUDGET or not preview:
+                return encoded
+            preview = preview[
+                : max(0, len(preview) - (len(encoded) - self.OBSERVATION_INLINE_BUDGET))
+            ]
 
     @staticmethod
     def truncation_mark() -> str:
@@ -229,6 +256,21 @@ class ToolContext:
     # it. Sync handlers cannot be preempted; the runtime narrows this per
     # call from ToolDefinition.timeout_ms. None means no deadline.
     deadline_at: float | None = None
+    # Public web snapshots only, bounded and scoped to the runtime session.
+    web_snapshots: dict[str, Any] = field(default_factory=dict)
+    channel_host: Any = None
+    tool_call_id: str = ""
+
+
+def command_text(arguments: dict) -> str:
+    import subprocess
+
+    argv = arguments.get("argv")
+    return (
+        subprocess.list2cmdline(argv)
+        if isinstance(argv, list)
+        else str(arguments.get("command") or "")
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,13 +314,20 @@ class ToolDefinition:
         if self.name in ("fs.write", "fs.patch"):
             return ClassifiedAction("fs.write", str(input.get("path") or ""))
         if self.name == "shell.exec":
-            return ClassifiedAction("shell.exec", str(input.get("command") or ""))
+            return ClassifiedAction("shell.exec", command_text(input))
         if self.name.startswith("git."):
             return ClassifiedAction("git.local", self.project_target(input))
         if "network.outbound" in self.capabilities or self.namespace in ("web", "http", "browser"):
             target = input.get("url") or input.get("href") or input.get("host") or ""
             return ClassifiedAction("network.outbound", str(target))
         return ClassifiedAction(self.name)
+
+    def classify_actions(self, arguments: dict) -> list[ClassifiedAction]:
+        if self.name in {"fs.read", "fs.stat"} and "paths" in arguments:
+            return [ClassifiedAction("fs.read", path) for path in arguments["paths"]]
+        if self.name == "fs.patch" and "files" in arguments:
+            return [ClassifiedAction("fs.write", row["path"]) for row in arguments["files"]]
+        return [self.classify_action(arguments)]
 
     @staticmethod
     def project_target(input: dict[str, Any]) -> str | None:

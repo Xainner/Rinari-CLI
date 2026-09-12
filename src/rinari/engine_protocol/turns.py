@@ -32,6 +32,7 @@ from rinari.cli.agent_runtime import build_agent_session, run_turn
 from rinari.engine_protocol import errors
 from rinari.engine_protocol.errors import EngineProtocolError
 from rinari.engine_protocol.messages import event
+from rinari.engine_protocol.operations import OperationStore
 from rinari.policy.approvals import ApprovalRequest
 from rinari.shared.clock import now_iso
 from rinari.shared.errors import CancelledError, RinariError
@@ -43,6 +44,7 @@ PREPARATION_TIMEOUT_S = 20.0
 PREPARATION_POLL_S = 0.05
 MAX_DELTA_CHARS = 8000
 MAX_DETAIL_CHARS = 2000
+MAX_STREAM_CHARS = 64_000
 MAX_QUEUE_DEPTH = 20
 MAX_QUEUE_MESSAGE_CHARS = 32768
 DECISIONS = ("deny", "allow_once", "allow_session")
@@ -59,6 +61,13 @@ class _ActiveTurn:
     started_at: float = field(default_factory=time.time)
     status: str = "running"
     mode: str | None = None
+    remote_target: dict | None = None
+    channel: dict | None = None
+    operation_id: str = ""
+    attachments: list | None = None
+    display_message: str | None = None
+    attachment_metadata: list | None = None
+    allow_unconfirmed_vision: bool = False
     preparation_stage: str | None = None
     activities: dict[str, dict[str, Any]] = field(default_factory=dict)
     activity_keys: dict[str, int] = field(default_factory=dict)
@@ -102,11 +111,64 @@ def _safe_detail(value: Any) -> Any:
     return text
 
 
+def _safe_structured(value: Any, *, depth: int = 0, budget: int = MAX_DETAIL_CHARS) -> Any:
+    """Bound structured presentation data while retaining its JSON shape."""
+
+    if depth > 5:
+        return "[nested data truncated]"
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return value if len(value) <= budget else value[:budget] + "…[truncated]"
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= 64:
+                result["[additional fields]"] = "[truncated]"
+                break
+            result[str(key)] = _safe_structured(item, depth=depth + 1, budget=budget)
+        try:
+            if len(json.dumps(result, ensure_ascii=False, default=str)) > budget:
+                result["[presentation] truncated"] = True
+                while len(json.dumps(result, ensure_ascii=False, default=str)) > budget and len(result) > 1:
+                    result.pop(next(iter(result)))
+        except (TypeError, ValueError):
+            return _safe_detail(value)
+        return result
+    if isinstance(value, (list, tuple)):
+        result = [_safe_structured(item, depth=depth + 1, budget=budget) for item in value[:64]]
+        if len(value) > 64:
+            result.append("[additional items truncated]")
+        return result
+    return _safe_detail(value)
+
+
+def _safe_presentation(value: dict[str, Any], max_stream_chars: int = 64_000) -> dict[str, Any]:
+    """Bound UI-facing tool data without converting it into model JSON."""
+
+    result: dict[str, Any] = {}
+    for key, item in value.items():
+        if key in {"stdout", "stderr"} and isinstance(item, str):
+            result[key] = item[:max_stream_chars]
+            if len(item) > max_stream_chars:
+                result["truncated"] = True
+        elif key == "data":
+            result[key] = _safe_structured(item)
+        elif key == "error" and isinstance(item, dict):
+            result[key] = _safe_structured(item)
+        elif key == "artifacts" and isinstance(item, list):
+            result[key] = [str(uri) for uri in item[:32]]
+        else:
+            result[key] = item
+    return result
+
+
 class TurnManager:
     """Owns turn worker threads, the event outbox, and pending approvals."""
 
     def __init__(self, services: ServiceContainer, user_home: Path | None = None) -> None:
         self._services = services
+        self.operations = OperationStore(services.ctx.layout.root)
         self._user_home = user_home if user_home is not None else Path.home()
         self._events: queue.Queue[dict[str, Any]] = queue.Queue()
         self._turns: dict[str, _ActiveTurn] = {}
@@ -120,6 +182,8 @@ class TurnManager:
         from rinari.engine_protocol.questions import QuestionBroker
 
         self.questions = QuestionBroker(services, self.has_active_turn)
+        from rinari.engine_protocol.channels import ChannelBroker
+        self.channels = ChannelBroker()
 
     # -- outbox ----------------------------------------------------------
 
@@ -237,7 +301,19 @@ class TurnManager:
     # -- turn lifecycle ----------------------------------------------------
 
     def start_turn(
-        self, session_id: str, message: str, reasoning_effort: str | None = None
+        self,
+        session_id: str,
+        message: str,
+        reasoning_effort: str | None = None,
+        *,
+        turn_id: str | None = None,
+        remote_target: dict | None = None,
+        channel: dict | None = None,
+        operation_id: str = "",
+        attachments: list | None = None,
+        display_message: str | None = None,
+        attachment_metadata: list | None = None,
+        allow_unconfirmed_vision: bool = False,
     ) -> dict[str, Any]:
         record = self._services.sessions.show(session_id)
         if record.state in {SESSION_STATE_CLOSED, SESSION_STATE_ARCHIVED}:
@@ -246,12 +322,19 @@ class TurnManager:
                 f"Session {record.id} is closed; resume it before starting turns.",
                 details={"session_id": record.id},
             )
-        turn_id = self._services.ctx.ids.new("turn")
+        turn_id = turn_id or self._services.ctx.ids.new("turn")
         turn = _ActiveTurn(
             turn_id=turn_id,
             session_id=record.id,
             session=None,
             done=threading.Event(),
+            remote_target=remote_target,
+            channel=channel,
+            operation_id=operation_id,
+            attachments=attachments,
+            display_message=display_message,
+            attachment_metadata=attachment_metadata,
+            allow_unconfirmed_vision=allow_unconfirmed_vision,
         )
         with self._lock:
             record = self._services.sessions.show(session_id)
@@ -262,7 +345,7 @@ class TurnManager:
                         f"Session {record.id} already has a running turn.",
                         details={"turn_id": active.turn_id, "session_id": record.id},
                     )
-            record = self._services.sessions.name_from_first_message(record.id, message)
+            record = self._services.sessions.name_from_first_message(record.id, display_message or message)
             self._turns[turn_id] = turn
             turn.mode = record.mode
         self._activity_cb(turn)(
@@ -270,7 +353,8 @@ class TurnManager:
             {
                 "reasoning_effort": reasoning_effort,
                 "mode": record.mode,
-                "message": message,
+                "message": display_message or message,
+                "attachments": attachment_metadata or [],
             },
         )
         thread = threading.Thread(
@@ -282,6 +366,61 @@ class TurnManager:
             self._threads[turn_id] = thread
         thread.start()
         return {"status": "started", "turn_id": turn_id, "session_id": record.id}
+
+    def start_operation(
+        self,
+        operation_id: str,
+        session_id: str,
+        message: str,
+        reasoning_effort: str | None = None,
+        remote_target: dict | None = None,
+        channel: dict | None = None,
+        attachments: list | None = None,
+        *,
+        attachment_metadata: list | None = None,
+        display_message: str | None = None,
+        allow_unconfirmed_vision: bool = False,
+    ) -> dict[str, Any]:
+        with self._lock:
+            turn_id = self._services.ctx.ids.new("turn")
+            operation, claimed = self.operations.claim(
+                operation_id, session_id, message, reasoning_effort, turn_id, remote_target, channel,
+                attachment_metadata or attachments
+            )
+            if claimed:
+                try:
+                    self.start_turn(
+                        session_id,
+                        message,
+                        reasoning_effort,
+                        turn_id=turn_id,
+                        remote_target=remote_target,
+                        channel=channel,
+                        operation_id=operation_id,
+                        attachments=attachments,
+                        attachment_metadata=attachment_metadata,
+                        display_message=display_message,
+                        allow_unconfirmed_vision=allow_unconfirmed_vision,
+                    )
+                except Exception:
+                    # Dispatch may have reached a worker: never label this retryable.
+                    self.operations.finish(turn_id, "uncertain")
+                    raise
+            return self.operations.get(operation_id) or operation
+
+    def cancel_operation(self, operation_id: str) -> dict[str, Any]:
+        with self._lock:
+            operation = self.operations.get(operation_id)
+            if operation is None:
+                raise EngineProtocolError(errors.INVALID_PARAMS, "Unknown operation")
+            turn = self._turns.get(operation["turn_id"])
+            if turn is not None and not turn.done.is_set():
+                turn.cancel_requested.set()
+                turn.status = "cancelling"
+                if turn.session is not None:
+                    turn.session.token.cancel()
+                self.operations.finish(turn.turn_id, "cancelling")
+            return self.operations.get(operation_id) or operation
 
     def cancel_turn(self, session_id: str) -> dict[str, Any]:
         with self._lock:
@@ -369,6 +508,12 @@ class TurnManager:
             if turn.cancel_requested.is_set():
                 agent_session.token.cancel()
             self._activity_cb(turn)("turn.preparing", {"stage": "session_lock"})
+            if turn.attachments:
+                from rinari.models.images import references
+                turn.session.context.pending_images = references(self._services.artifacts, turn.session_id, turn.attachments)
+            turn.session.context.pending_attachments = tuple(turn.attachment_metadata or ())
+            turn.session.context.pending_display_content = turn.display_message
+            turn.session.context.allow_unconfirmed_vision = turn.allow_unconfirmed_vision
             result = run_turn(
                 agent_session,
                 message,
@@ -479,6 +624,10 @@ class TurnManager:
                     ),
                     activity_sink=self._activity_cb(turn),
                     reasoning_effort=reasoning_effort,
+                    **({"remote_target": turn.remote_target} if turn.remote_target else {}),
+                    **({"channel_host": lambda tool, args, ctx: self.channels.call(
+                        turn, self._activity_cb(turn), tool, args, ctx
+                    )} if turn.channel else {}),
                 )
                 if abandoned.is_set():
                     session.end()
@@ -643,6 +792,9 @@ class TurnManager:
                 safe["arguments"] = _safe_detail(safe["arguments"])
             if "result" in safe:
                 safe["result"] = _safe_detail(safe["result"])
+            presentation = safe.get("presentation")
+            if isinstance(presentation, dict):
+                safe["presentation"] = _safe_presentation(presentation)
             occurred_at = now_iso(self._services.ctx.clock)
             safe["occurred_at"] = occurred_at
             activity_key = self._activity_key(turn, event_name, safe)
@@ -668,12 +820,37 @@ class TurnManager:
                     current = {**current, "content": str(current.get("content") or "") + delta}
                 elif event_name == "model.content.completed":
                     current = {**current, "content": str(safe.get("content") or "")}
+                elif event_name == "tool.output.delta":
+                    stream = safe.get("stream")
+                    delta = str(safe.get("delta") or "")
+                    if stream in {"stdout", "stderr"} and delta:
+                        presentation = dict(current.get("presentation") or {})
+                        presentation.setdefault("kind", "command")
+                        presentation.setdefault("tool", safe.get("tool"))
+                        presentation["status"] = "running"
+                        existing = str(presentation.get(stream) or "")
+                        sequences = dict(presentation.get("stream_sequences") or {})
+                        sequence = safe.get("stream_seq")
+                        previous = sequences.get(stream, 0)
+                        if not isinstance(sequence, int) or sequence > previous:
+                            combined = existing + delta
+                            if len(combined) > MAX_STREAM_CHARS:
+                                combined = combined[:MAX_STREAM_CHARS]
+                                presentation["truncated"] = True
+                            presentation[stream] = combined
+                            if isinstance(sequence, int):
+                                sequences[stream] = sequence
+                        presentation["stream_sequences"] = sequences
+                        current = {**current, "presentation": presentation}
                 turn.activities[activity_key] = {**current, **safe, "event": event_name}
+            if event_name in {"turn.completed", "turn.failed", "turn.cancelled", "turn.stopped"}:
+                self.operations.finish(turn.turn_id, event_name.removeprefix("turn."))
             if event_name != "model.content.delta":
                 self._persist_activity(event_name, safe)
             self._emit(event(event_name, safe))
 
         return _on_activity
+
 
     def _activity_key(self, turn: _ActiveTurn, event_name: str, payload: dict[str, Any]) -> str:
         if payload.get("tool_call_id"):
@@ -897,6 +1074,9 @@ class TurnManager:
                     errors.INVALID_PARAMS,
                     f"Decision {decision!r} is not available for this approval.",
                 )
+            if pending.decided.is_set():
+                return {"status": "resolved", "approval_id": approval_id,
+                        "decision": pending.decision}
             pending.decision = decision
             pending.decided.set()
         return {"status": "resolved", "approval_id": approval_id, "decision": decision}

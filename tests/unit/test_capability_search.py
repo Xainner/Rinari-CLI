@@ -1,11 +1,13 @@
 """Unified capability search tests (phase 5).
 
 Deterministic: ToolRegistry with synthetic definitions spanning sources,
-ranking checks (reliability x risk), browser fallback, and the
+ranking checks (reliability x risk), absent capabilities, and the
 `capability.search` tool executed through the ToolRuntime policy path.
 """
 
 from __future__ import annotations
+
+from dataclasses import replace
 
 from rinari.capability_search import (
     SOURCE_BROWSER,
@@ -88,11 +90,10 @@ def test_risk_demotion_prefers_safe_routes():
     assert by["web.fetch"] > by["browser.open"]
 
 
-def test_no_match_yields_browser_fallback():
+def test_no_match_does_not_invent_browser_capability():
     r = _registry()
     results = search_capabilities(r, "completely-unknown-service")
-    assert results[-1]["source"] == SOURCE_BROWSER
-    assert results[-1]["score"] == 0.0
+    assert results == []
 
 
 def test_limit_respected():
@@ -146,3 +147,32 @@ def test_capability_search_requires_query(tmp_path):
     result = runtime.execute("capability.search", {}, _ctx(tmp_path))
     assert result.ok is False
     assert result.error.code.value == "INVALID_ARGUMENT"
+
+
+def test_search_load_respects_budget(tmp_path):
+    from rinari.tools.exposure import ToolExposure
+
+    registry = _registry()
+    ctx = _ctx(tmp_path)
+    ctx = replace(ctx, exposure=ToolExposure(max_schema_count=100))
+    tool = capability_search_tool(registry)
+    result = tool.handler({"query": "read files", "load": True}, ctx)
+    assert result.data["loaded"]
+    ctx = replace(ctx, exposure=ToolExposure(max_schema_count=0))
+    result = tool.handler({"query": "read files", "load": True}, ctx)
+    assert result.data["loaded"] == []
+    assert "budget" in result.data["load_error"]
+    assert not ctx.exposure.activated
+
+
+def test_activation_budget_failure_is_atomic(tmp_path):
+    from rinari.capability_search import capability_activation_tools
+    from rinari.tools.exposure import ToolExposure
+
+    registry = _registry()
+    ctx = _ctx(tmp_path)
+    ctx = replace(ctx, exposure=ToolExposure(max_schema_count=0))
+    result = capability_activation_tools(registry)[0].handler({"names": ["fs.read"]}, ctx)
+    assert not result.ok
+    assert result.error.code.value == "RESOURCE_EXHAUSTED"
+    assert not ctx.exposure.activated

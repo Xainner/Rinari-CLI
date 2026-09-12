@@ -7,6 +7,7 @@ bounded and spilled by the runtime when it exceeds the threshold.
 
 from __future__ import annotations
 
+import codecs
 import contextlib
 import os
 import subprocess
@@ -26,6 +27,7 @@ from rinari.tools.definition import (
 
 DEFAULT_TIMEOUT_S = 60.0
 MAX_OUTPUT_BYTES = 1_000_000
+MAX_CAPTURE_BYTES = 50 * 1024 * 1024
 
 
 def _ok(data: Any) -> ToolResult:
@@ -42,16 +44,30 @@ def _fail(
     )
 
 
-def _drain(stream, buffer: _BoundedBuffer, name: str, sink=None) -> None:
+def _drain(stream, buffer: _BoundedBuffer, name: str, sink=None, capture=None) -> None:
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     try:
         while True:
-            chunk = stream.read(65536)
+            # BufferedReader.read(n) may wait for n bytes or EOF.  A process
+            # that prints a short line and then waits would therefore never
+            # reach the live sink.  read1 asks the pipe for whatever is
+            # available now while retaining the bounded drain.
+            reader = getattr(stream, "read1", stream.read)
+            chunk = reader(65536)
             if not chunk:
                 break
-            buffer.write(chunk)
-            if sink is not None:
+            admitted = capture.write(name, chunk) if capture is not None else chunk
+            buffer.write(admitted)
+            if sink is not None and admitted:
                 with contextlib.suppress(Exception):  # display never breaks the drain
-                    sink(name, chunk.decode("utf-8", errors="replace"))
+                    text = decoder.decode(admitted, final=False)
+                    if text:
+                        sink(name, text)
+        if sink is not None:
+            with contextlib.suppress(Exception):
+                tail = decoder.decode(b"", final=True)
+                if tail:
+                    sink(name, tail)
     except (OSError, ValueError):
         pass
 
@@ -78,6 +94,33 @@ def _kill_tree(process: subprocess.Popen) -> None:
             process.kill()
 
 
+class _ExecutionCapture:
+    """A shared byte budget for both output streams, independent of UI limits."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.remaining = MAX_CAPTURE_BYTES
+        self.streams = {"stdout": [], "stderr": []}
+        self.truncated = False
+
+    def write(self, name: str, chunk: bytes) -> bytes:
+        with self.lock:
+            admitted = chunk[: self.remaining]
+            self.remaining -= len(admitted)
+            self.streams[name].append(admitted) if admitted else None
+            self.truncated |= len(admitted) < len(chunk)
+            return admitted
+
+    def result(self) -> dict:
+        return {
+            **{
+                name: b"".join(chunks).decode("utf-8", errors="replace")
+                for name, chunks in self.streams.items()
+            },
+            "truncated": self.truncated,
+        }
+
+
 class _BoundedBuffer:
     def __init__(self, max_bytes: int) -> None:
         self._max = max_bytes
@@ -97,13 +140,26 @@ class _BoundedBuffer:
         return len(data)
 
     def text(self) -> str:
-        return b"".join(self.chunks).decode("utf-8", errors="replace")
+        return codecs.getincrementaldecoder("utf-8")(errors="replace").decode(
+            b"".join(self.chunks), final=False
+        )
 
 
 def shell_exec(input: dict, ctx: ToolContext) -> ToolResult:
-    command = input.get("command")
-    if not isinstance(command, str) or not command.strip():
-        return _fail(ToolErrorCode.INVALID_ARGUMENT, "command must be a non-empty string")
+    command = input.get("argv") if "argv" in input else input.get("command")
+    if isinstance(command, list):
+        if not command or not all(isinstance(s, str) and "\0" not in s for s in command):
+            return _fail(
+                ToolErrorCode.INVALID_ARGUMENT, "argv must be non-empty strings without NUL"
+            )
+    elif not isinstance(command, str) or not command.strip():
+        return _fail(ToolErrorCode.INVALID_ARGUMENT, "command or argv is required")
+    if "argv" in input and "command" in input:
+        return _fail(ToolErrorCode.INVALID_ARGUMENT, "Use command or argv, not both")
+    if input.get("background"):
+        from rinari.tools.native.process import process_start
+
+        return process_start(input, ctx)
     if ctx.cancellation is not None:
         ctx.cancellation.throw_if_cancelled()
 
@@ -136,9 +192,10 @@ def shell_exec(input: dict, ctx: ToolContext) -> ToolResult:
     max_bytes = min(ctx.limits.max_output_bytes, MAX_OUTPUT_BYTES)
     stdout = _BoundedBuffer(max_bytes)
     stderr = _BoundedBuffer(max_bytes)
+    capture = _ExecutionCapture()
 
     kwargs: dict[str, Any] = {
-        "shell": True,
+        "shell": not isinstance(command, list),
         # shell.exec is deliberately non-interactive. In particular this
         # prevents ssh from inheriting an unusable stdin and waiting forever.
         "stdin": subprocess.DEVNULL,
@@ -164,13 +221,13 @@ def shell_exec(input: dict, ctx: ToolContext) -> ToolResult:
     if process.stdout is not None:
         readers.append(
             threading.Thread(
-                target=_drain, args=(process.stdout, stdout, "stdout", sink), daemon=True
+                target=_drain, args=(process.stdout, stdout, "stdout", sink, capture), daemon=True
             )
         )
     if process.stderr is not None:
         readers.append(
             threading.Thread(
-                target=_drain, args=(process.stderr, stderr, "stderr", sink), daemon=True
+                target=_drain, args=(process.stderr, stderr, "stderr", sink, capture), daemon=True
             )
         )
     for reader in readers:
@@ -209,21 +266,26 @@ def shell_exec(input: dict, ctx: ToolContext) -> ToolResult:
     exit_code = process.returncode if process.returncode is not None else -1
     data = {
         "command": command,
+        "cwd": cwd,
         "exit_code": exit_code,
         "stdout": stdout.text(),
         "stderr": stderr.text(),
         "truncated": stdout.truncated or stderr.truncated,
     }
     if cancelled:
-        return _fail(ToolErrorCode.CANCELLED, "Command cancelled", data=data)
-    if timed_out:
-        return _fail(
+        result = _fail(ToolErrorCode.CANCELLED, "Command cancelled", data=data)
+    elif timed_out:
+        result = _fail(
             ToolErrorCode.TIMEOUT,
             f"Command exceeded {timeout_s:.0f}s and was terminated",
             retryable=True,
             data=data,
         )
-    return _ok(data)
+    else:
+        result = _ok(data)
+    from dataclasses import replace
+
+    return replace(result, captured_output=capture.result() if data["truncated"] else None)
 
 
 def shell_tools() -> list[ToolDefinition]:
@@ -231,7 +293,9 @@ def shell_tools() -> list[ToolDefinition]:
         ToolDefinition(
             name="shell.exec",
             description=(
-                "Run a command in the session working directory. Returns exit code and "
+                "Run command or argv in the session working directory. Prefer argv for literal "
+                "arguments without shell quoting; background=true returns a process handle. "
+                "Returns exit code and "
                 "bounded stdout/stderr. Use for builds, tests, git, and anything without a "
                 "dedicated structured tool. This is non-interactive (stdin is closed). "
                 "On Windows the command runs through the configured Windows command shell; "
@@ -242,11 +306,18 @@ def shell_tools() -> list[ToolDefinition]:
                 "type": "object",
                 "properties": {
                     "command": {"type": "string"},
+                    "argv": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "maxItems": 256,
+                    },
+                    "background": {"type": "boolean", "default": False},
                     "cwd": {"type": "string"},
                     "timeout_s": {"type": "number", "minimum": 1},
                     "env": {"type": "object"},
                 },
-                "required": ["command"],
+                "oneOf": [{"required": ["command"]}, {"required": ["argv"]}],
             },
             risk=RISK_HIGH,
             side_effects=SIDE_EFFECT_LOCAL_REVERSIBLE,

@@ -166,17 +166,20 @@ def root_session(
     prompt: list[str] = typer.Argument(
         None, help="Prompt for the session (runs one agent turn, then the REPL if attached)."
     ),
+    attach: list[str] = typer.Option(
+        None, "--attach", help="Attach a file to the first turn; repeat for multiple files."
+    ),
 ) -> None:
     """Hidden: root default-command target (see main())."""
     text = " ".join(prompt or ()).strip() if prompt else None
     try:
-        start_flow(ctx, text, forced_chat=False, command="session.start")
+        start_flow(ctx, text, forced_chat=False, command="session.start", attachments=attach or [])
     except RinariError as err:
         fail(ctx, "session.start", err)
 
 
 ROOT_FLAG_TOKENS = {"-h", "--help", "-V", "--version", "--json", "--no-banner", "--no-progress"}
-ROOT_VALUE_TOKENS = {"--config"}
+ROOT_VALUE_TOKENS = {"--config", "--attach"}
 
 
 def dispatch_root_command(args: list[str]) -> list[str]:

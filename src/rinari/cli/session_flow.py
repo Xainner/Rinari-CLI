@@ -127,11 +127,11 @@ def _interactive() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
 
 
-def start_flow(ctx: typer.Context, prompt: str | None, forced_chat: bool, command: str) -> None:
+def start_flow(ctx: typer.Context, prompt: str | None, forced_chat: bool, command: str, attachments: list[str] | None = None) -> None:
     """Start (or, after /new, restart) a session for the current context."""
     params = get_params(ctx)
     while True:
-        restart = _run_session(ctx, prompt, forced_chat, command, params)
+        restart = _run_session(ctx, prompt, forced_chat, command, params, attachments or [])
         if restart is None or not restart.startswith("new"):
             return
         # /new: fresh session in the same context, prompt dropped.
@@ -145,6 +145,7 @@ def _run_session(
     forced_chat: bool,
     command: str,
     params,
+    attachments: list[str],
 ) -> str | None:
     with services(ctx) as s:
         try:
@@ -160,8 +161,9 @@ def _run_session(
         if is_json(ctx):
             if prompt:
                 session = agent_runtime.build_agent_session(s, started.session, interactive=False)
+                session.pending_attachments.extend(attachments)
                 try:
-                    data["turn"] = _turn_dict(agent_runtime.run_turn(session, prompt))
+                    data["turn"] = _turn_dict(agent_runtime.run_turn(session, agent_runtime.prepare_attachment_message(session, prompt)))
                 except RinariError as err:
                     fail(ctx, command, err)
                 finally:
@@ -174,9 +176,10 @@ def _run_session(
         if not params.no_banner:
             _print_header(data, started.created, started.warnings)
         session = agent_runtime.build_agent_session(s, started.session, interactive=True)
+        session.pending_attachments.extend(attachments)
         if prompt is not None and not _interactive():
             try:
-                result = agent_runtime.run_turn(session, prompt)
+                result = agent_runtime.run_turn(session, agent_runtime.prepare_attachment_message(session, prompt))
             finally:
                 session.end()
             typer.echo()

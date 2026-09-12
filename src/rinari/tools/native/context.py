@@ -8,6 +8,7 @@ model-visible every turn via the pinned-context prompt segment.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from rinari.tools.definition import (
@@ -69,7 +70,24 @@ def context_retrieve(input: dict, ctx: ToolContext) -> ToolResult:
         results = service.retrieve(ctx.session_id, query, str(root) if root else None, limit=limit)
     except Exception as exc:
         return _fail(ToolErrorCode.UNKNOWN, getattr(exc, "message", str(exc)))
-    return _ok({"query": query, "count": len(results), "results": results})
+    budget = max(128, min(16000, int(input.get("max_tokens", 4000))))
+    kept = []
+    used = 0
+    for row in results:
+        cost = (len(json.dumps(row, ensure_ascii=False)) + 3) // 4
+        if used + cost > budget:
+            continue
+        kept.append(row)
+        used += cost
+    return _ok(
+        {
+            "query": query,
+            "count": len(kept),
+            "results": kept,
+            "tokens_estimate": used,
+            "truncated": len(kept) < len(results),
+        }
+    )
 
 
 def context_pin(input: dict, ctx: ToolContext) -> ToolResult:
@@ -84,6 +102,15 @@ def context_pin(input: dict, ctx: ToolContext) -> ToolResult:
         )
     if not isinstance(ref, str) or not ref.strip():
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "ref is required")
+    if source == "file":
+        from rinari.tools.native.fs import _resolve_read
+
+        path, error = _resolve_read(ctx, ref)
+        if error is not None:
+            return error
+        if not path.is_file():
+            return _fail(ToolErrorCode.NOT_FOUND, "Cannot pin a missing file")
+        ref = str(path)
     label = input.get("label", "")
     if not isinstance(label, str):
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "label must be a string")
@@ -107,6 +134,10 @@ def context_unpin(input: dict, ctx: ToolContext) -> ToolResult:
     if not isinstance(ref, str) or not ref.strip():
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "ref is required")
     forgotten = service.unpin(ctx.session_id, source, ref.strip())
+    if not forgotten and source == "file":
+        forgotten = service.unpin(
+            ctx.session_id, source, str(ctx.sandbox.resolve(ref, base=ctx.cwd))
+        )
     return _ok({"source": source, "ref": ref.strip(), "unpinned": forgotten})
 
 
@@ -115,7 +146,20 @@ def context_list_pins(input: dict, ctx: ToolContext) -> ToolResult:
     if service is None:
         return _fail(ToolErrorCode.DEPENDENCY_ERROR, "context service unavailable")
     pins = service.list_pins(ctx.session_id)
-    return _ok({"count": len(pins), "pins": pins})
+    offset = max(0, int(input.get("offset", 0)))
+    limit = min(100, max(1, int(input.get("limit", 50))))
+    rows = pins[offset : offset + limit]
+    for row in rows:
+        if row.get("source") == "file":
+            path = ctx.sandbox.resolve(row["ref"], base=ctx.cwd)
+            row["exists"] = path.is_file()
+    return _ok(
+        {
+            "count": len(pins),
+            "pins": rows,
+            "next_offset": offset + len(rows) if offset + len(rows) < len(pins) else None,
+        }
+    )
 
 
 def context_tools() -> list[ToolDefinition]:
@@ -133,6 +177,7 @@ def context_tools() -> list[ToolDefinition]:
                 "properties": {
                     "query": {"type": "string"},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                    "max_tokens": {"type": "integer", "minimum": 128, "maximum": 16000},
                 },
             },
             risk=RISK_LOW,
@@ -191,7 +236,13 @@ def context_tools() -> list[ToolDefinition]:
         ToolDefinition(
             name="context.list_pins",
             description="List the pinned context items for this session.",
-            input_schema={"type": "object", "properties": {}},
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "offset": {"type": "integer", "minimum": 0},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                },
+            },
             risk=RISK_LOW,
             side_effects=SIDE_EFFECT_NONE,
             idempotent=True,

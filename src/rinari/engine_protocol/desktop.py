@@ -21,6 +21,8 @@ class DesktopWorkspace:
         if not isinstance(ref, str) or not ref:
             raise EngineProtocolError(INVALID_PARAMS, "session_id is required.")
         record = self.services.sessions.show(ref)
+        if self.server._attachment_jobs.has_pending(record.id):
+            raise EngineProtocolError("SESSION_BUSY", "Finish or cancel attachment preparation before moving.")
         if self.server._previews.busy(record.id):
             raise EngineProtocolError(
                 "SESSION_BUSY", "Close the development preview before moving."

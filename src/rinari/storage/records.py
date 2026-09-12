@@ -123,6 +123,9 @@ class SessionMessageRecord:
     name: str | None = None
     created_at: str = ""
     turn_id: str | None = None
+    images: list[dict[str, str]] | None = None
+    attachments: list[dict[str, Any]] | None = None
+    display_content: str | None = None
 
 
 @dataclass(slots=True)
