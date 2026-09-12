@@ -16,7 +16,11 @@
     "filePreview",
     "webPreview",
     "toolAvailability",
-    "toolSummary"
+    "toolSummary",
+    "browserPage",
+    "browserView",
+    "managedProcess",
+    "processOutput"
   ],
   "$defs": {
     "webPreview": {
@@ -322,6 +326,13 @@
         "memory.remember",
         "memory.update",
         "memory.forget",
+        "memory.candidates.list",
+        "memory.candidate.resolve",
+        "conversation.memory.status",
+        "conversation.memory.exclude",
+        "conversation.delete",
+        "memory.ledger.export",
+        "memory.ledger.import",
         "usage.get",
         "session.close",
         "channel.pending",
@@ -335,7 +346,11 @@
         "attachment.prepare.start",
         "attachment.prepare.get",
         "attachment.prepare.cancel",
-        "model.vision.set"
+        "model.vision.set",
+        "browser.view.get",
+        "workspace.process.list",
+        "workspace.process.read",
+        "workspace.process.stop"
       ]
     },
     "event": {
@@ -383,7 +398,8 @@
         "turn.changes.undo.completed",
         "turn.changes.undo.conflict",
         "workspace.changed",
-        "channel.requested"
+        "channel.requested",
+        "agent.activity"
       ]
     },
     "attachment": {
@@ -953,6 +969,130 @@
         "sha256": {
           "type": "string",
           "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "browserPage": {
+      "type": "object",
+      "required": [
+        "target_id",
+        "title",
+        "url"
+      ],
+      "properties": {
+        "target_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      }
+    },
+    "browserView": {
+      "type": "object",
+      "required": [
+        "state",
+        "session_id"
+      ],
+      "properties": {
+        "state": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "instance": {
+          "type": "string"
+        },
+        "image": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "target_id": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        },
+        "pages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/browserPage"
+          }
+        }
+      }
+    },
+    "managedProcess": {
+      "type": "object",
+      "required": [
+        "id",
+        "kind",
+        "command",
+        "cwd",
+        "running",
+        "can_stop"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "command": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "running": {
+          "type": "boolean"
+        },
+        "can_stop": {
+          "type": "boolean"
+        },
+        "pid": {
+          "type": "integer"
+        },
+        "started_at": {
+          "type": "number"
+        },
+        "exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      }
+    },
+    "processOutput": {
+      "type": "object",
+      "required": [
+        "process",
+        "stdout",
+        "stderr",
+        "truncated"
+      ],
+      "properties": {
+        "process": {
+          "$ref": "#/$defs/managedProcess"
+        },
+        "stdout": {
+          "type": "string"
+        },
+        "stderr": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
         }
       }
     }

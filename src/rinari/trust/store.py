@@ -1,7 +1,7 @@
 """Project trust: grants, identity fingerprints, and revalidation (phase 3).
 
 Trust is granted per canonical project path. Each grant captures an identity
-fingerprint of the project (Git HEAD + remotes when it is a repository, the
+fingerprint of the project (Git directory identity + remotes for a repository, the
 `.rinari/project.toml` marker otherwise) so a later change of identity makes
 the entry *need revalidation* instead of silently staying active.
 """
@@ -38,16 +38,19 @@ class TrustStatus:
 def fingerprint_for(root: Path) -> str:
     """Stable identity digest for a project directory.
 
-    Git repositories are fingerprinted by HEAD + sorted remotes (so a
-    re-cloned copy of a different remote is not the same identity).
+    Git repositories use their directory identity and sorted remotes. Commits
+    and branch switches are normal work, not changes of project identity.
     Marker-only projects fingerprint the marker file; plain directories
     fall back to their canonical path.
     """
     root = Path(root).expanduser().resolve()
     if (root / ".git").exists():
-        head = _git(root, ["rev-parse", "HEAD"]).strip()
-        remotes = _git(root, ["remote", "-v"]).strip()
-        return _sha256(f"head={head}\nremotes={remotes}")
+        directory = _git(root, ["rev-parse", "--absolute-git-dir"]).strip()
+        git_dir = Path(directory) if directory else root / ".git"
+        info = git_dir.stat()
+        identity = f"{git_dir.resolve()}:{info.st_dev}:{info.st_ino}"
+        remotes = "\n".join(sorted(_git(root, ["remote", "-v"]).strip().splitlines()))
+        return "git-v2:" + _sha256(f"directory={identity}\nremotes={remotes}")
     marker = root / ".rinari" / "project.toml"
     if marker.is_file():
         try:
@@ -116,6 +119,14 @@ class TrustService:
                 trusted_at=entry.trusted_at,
             )
         current = fingerprint_for(raw)
+        # Upgrade old grants only when their original identity still matches.
+        # An already-invalid grant must still be confirmed by the user.
+        if current.startswith("git-v2:") and not (entry.fingerprint or "").startswith("git-v2:"):
+            head = _git(raw, ["rev-parse", "HEAD"]).strip()
+            remotes = _git(raw, ["remote", "-v"]).strip()
+            if entry.fingerprint == _sha256(f"head={head}\nremotes={remotes}"):
+                entry.fingerprint = current
+                self._ctx.trust_repo.upsert(entry)
         state = STATE_TRUSTED if current == entry.fingerprint else STATE_REVALIDATION
         return TrustStatus(
             path=str(raw),

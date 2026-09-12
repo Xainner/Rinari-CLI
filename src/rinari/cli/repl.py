@@ -67,8 +67,8 @@ def render_tool_event(
         active = render.symbol(render.SYMBOL_ACTIVE, ascii_=ascii_)
         console.print(Text(f"{active} {label}", style=render.tool_style(name)), highlight=False)
     else:
-        from rinari.tools.definition import ToolResult
         from rinari.runtime.agent import _tool_activity_presentation
+        from rinari.tools.definition import ToolResult
 
         label = state.pop("label", name)
         arguments = state.pop("arguments", {})
@@ -147,7 +147,8 @@ def _render_command_result(console: Console, data: dict, *, ascii_: bool) -> Non
         if exit_code == 0:
             body.append(
                 Text(
-                    "Process exited successfully but wrote to stderr; task outcome is not verified.",
+                    "Process exited successfully but wrote to stderr; task outcome is not "
+                    "verified.",
                     style="yellow",
                 )
             )

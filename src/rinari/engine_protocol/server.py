@@ -144,6 +144,7 @@ class EngineServer:
         self._model_jobs: dict[str, dict[str, Any]] = {}
         self._model_jobs_lock = threading.Lock()
         self._dispatcher.register("engine.info", self._engine_info)
+        self._dispatcher.register("browser.view.get", self._turns.browser_view)
         self._dispatcher.register("target.list", self._target_list)
         self._dispatcher.register("target.add", self._target_add)
         self._dispatcher.register("session.list", self._session_list)
@@ -155,6 +156,12 @@ class EngineServer:
         from rinari.engine_protocol.preview import WebPreviews
 
         self._previews = WebPreviews(self._desktop)
+        from rinari.engine_protocol.processes import DesktopProcesses
+
+        self._process_tasks = DesktopProcesses(self)
+        self._dispatcher.register("workspace.process.list", self._process_tasks.list)
+        self._dispatcher.register("workspace.process.read", self._process_tasks.read)
+        self._dispatcher.register("workspace.process.stop", self._process_tasks.stop)
         self._dispatcher.register("workspace.preview.start", self._previews.start)
         self._dispatcher.register("workspace.preview.status", self._previews.status)
         self._dispatcher.register("workspace.preview.stop", self._previews.stop)
@@ -243,6 +250,7 @@ class EngineServer:
         self._dispatcher.register("tool.list", self._tool_list)
         self._dispatcher.register("policy.get", self._policy_get)
         from rinari.engine_protocol.media import register_media
+
         self._attachment_jobs = register_media(self._dispatcher, self._services)
         self._dispatcher.register("artifact.list", self._artifact_list)
         self._dispatcher.register("artifact.read", self._artifact_read)
@@ -254,6 +262,13 @@ class EngineServer:
         self._dispatcher.register("memory.remember", self._memory_remember)
         self._dispatcher.register("memory.update", self._memory_update)
         self._dispatcher.register("memory.forget", self._memory_forget)
+        self._dispatcher.register("memory.candidates.list", self._memory_candidates_list)
+        self._dispatcher.register("memory.candidate.resolve", self._memory_candidate_resolve)
+        self._dispatcher.register("conversation.memory.status", self._conversation_memory_status)
+        self._dispatcher.register("conversation.memory.exclude", self._conversation_memory_exclude)
+        self._dispatcher.register("conversation.delete", self._conversation_delete)
+        self._dispatcher.register("memory.ledger.export", self._memory_ledger_export)
+        self._dispatcher.register("memory.ledger.import", self._memory_ledger_import)
         self._dispatcher.register("usage.get", self._usage_get)
         self._dispatcher.register("session.queue.add", self._queue_add)
         self._dispatcher.register("session.queue.list", self._queue_list)
@@ -385,6 +400,8 @@ class EngineServer:
             )
         result = self._services.sessions.close(ref)
         self._previews.stop_session(record.id)
+        self._turns.close_browser(record.id)
+        self._turns.close_processes(record.id)
         return {"session": session_to_dict(result)}
 
     def _session_delete(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -415,8 +432,12 @@ class EngineServer:
             checkpoints_removed, checkpoints_kept = len(checkpoint_ids), 0
         else:
             checkpoints_removed, checkpoints_kept = 0, len(checkpoint_ids)
+        memory_cleanup = self._services.memory.delete_conversation(record.id)
+        self._services.memory.invalidate_compact_state(record.id)
         sid = self._services.sessions.delete(record.id)
         self._previews.stop_session(record.id)
+        self._turns.close_browser(record.id)
+        self._turns.close_processes(record.id)
         if cascade:
             artifacts_removed = self._services.artifacts.gc(session_id=sid)
             artifacts_kept = 0
@@ -432,6 +453,7 @@ class EngineServer:
                 "artifacts_removed": artifacts_removed,
                 "artifacts_kept": artifacts_kept,
             },
+            "memory": memory_cleanup,
         }
 
     def _session_branch(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -546,12 +568,14 @@ class EngineServer:
         record = self._services.sessions.show(ref)
         stored = self._services.ctx.message_repo.list(record.id)
         total = len(stored)
+        stored, redacted = self._services.memory.redact_history(stored)
         window = stored[-limit:] if total > limit else stored
         return {
             "session_id": record.id,
             "messages": [message_to_dict(item) for item in window],
             "total": total,
             "has_more": total > len(window),
+            "redacted": redacted,
         }
 
     # -- personal memory --------------------------------------------------
@@ -608,6 +632,11 @@ class EngineServer:
         return {"scope": "user", "record": row}
 
     def _memory_remember(self, params: dict[str, Any]) -> dict[str, Any]:
+        if self._turns.has_active_turns():
+            raise EngineProtocolError(
+                TURN_RUNNING,
+                "Finish active turns before changing durable personal memory.",
+            )
         self._memory_reject_unknown(
             params,
             {"topic", "text", "kind", "provenance", "confidence"},
@@ -637,6 +666,11 @@ class EngineServer:
             or not 0 <= confidence <= 1
         ):
             raise EngineProtocolError(INVALID_PARAMS, "Param 'confidence' must be between 0 and 1.")
+        if self._services.memory.requires_owner_consent(topic, text) and provenance != "panel":
+            raise EngineProtocolError(
+                "PERMISSION_DENIED",
+                "Sensitive personal memory requires explicit owner approval.",
+            )
         result = self._services.memory.remember_user(
             text,
             kind=kind,
@@ -648,6 +682,11 @@ class EngineServer:
         return {"scope": "user", "record": row, "action": result.get("action", "created")}
 
     def _memory_update(self, params: dict[str, Any]) -> dict[str, Any]:
+        if self._turns.has_active_turns():
+            raise EngineProtocolError(
+                TURN_RUNNING,
+                "Finish active turns before changing durable personal memory.",
+            )
         self._memory_reject_unknown(
             params, {"id", "expected_revision", "text", "topic", "confidence", "provenance"}
         )
@@ -675,8 +714,7 @@ class EngineServer:
         ):
             raise EngineProtocolError(INVALID_PARAMS, "Param 'topic' must be max 128 chars.")
         if "provenance" in fields and (
-            not isinstance(fields["provenance"], str)
-            or len(fields["provenance"]) > 256
+            not isinstance(fields["provenance"], str) or len(fields["provenance"]) > 256
         ):
             raise EngineProtocolError(INVALID_PARAMS, "Param 'provenance' must be max 256 chars.")
         if "confidence" in fields and (
@@ -688,8 +726,12 @@ class EngineServer:
         from rinari.memory.service import MemoryConflictError, MemoryNotFoundError
 
         try:
+            existing = self._services.memory.get_user(memory_id)
             row = self._services.memory.update_user(
-                memory_id, expected_revision=expected_revision, **fields
+                memory_id,
+                expected_revision=expected_revision,
+                owner_consent=bool(existing and existing.get("provenance") == "panel"),
+                **fields,
             )
         except MemoryConflictError as exc:
             raise EngineProtocolError("CONFLICT", exc.message) from exc
@@ -700,6 +742,11 @@ class EngineServer:
         return {"scope": "user", "record": row}
 
     def _memory_forget(self, params: dict[str, Any]) -> dict[str, Any]:
+        if self._turns.has_active_turns():
+            raise EngineProtocolError(
+                TURN_RUNNING,
+                "Finish active turns before forgetting durable personal memory.",
+            )
         self._memory_reject_unknown(params, {"id", "expected_revision"})
         memory_id = self._memory_id(params)
         expected_revision = params.get("expected_revision")
@@ -714,6 +761,13 @@ class EngineServer:
         from rinari.memory.service import MemoryConflictError
 
         try:
+            existing = self._services.memory.get_user(memory_id)
+            for source in self._services.memory.repo.sources_for_memory(memory_id, live_only=True):
+                if self._turns.has_active_turn(source["session_id"]):
+                    raise EngineProtocolError(
+                        TURN_RUNNING,
+                        "Cancel the active conversation turn before forgetting its memory.",
+                    )
             forgotten = self._services.memory.forget_user(
                 memory_id, expected_revision=expected_revision
             )
@@ -721,7 +775,134 @@ class EngineServer:
             raise EngineProtocolError("CONFLICT", exc.message) from exc
         if not forgotten:
             raise EngineProtocolError("NOT_FOUND", "Personal memory record not found.")
+        if existing:
+            for source in self._services.memory.repo.sources_for_memory(memory_id):
+                self._services.memory.invalidate_compact_state(source["session_id"])
         return {"scope": "user", "id": memory_id, "forgotten": True}
+
+    @staticmethod
+    def _conversation_id(params: dict[str, Any]) -> str:
+        value = (params or {}).get("session_id") or (params or {}).get("ref")
+        if not isinstance(value, str) or not value:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'session_id' is required.")
+        return value
+
+    def _memory_candidates_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        params = params or {}
+        unknown = set(params) - {"status", "limit"}
+        if unknown:
+            raise EngineProtocolError(INVALID_PARAMS, "Unknown candidate parameter.")
+        status = params.get("status", "pending")
+        if status is not None and status not in ("pending", "accepted", "denied"):
+            raise EngineProtocolError(INVALID_PARAMS, "Invalid candidate status.")
+        limit = self._memory_limit(params)
+        rows = self._services.memory.list_candidates(status=status, limit=limit)
+        return {"candidates": rows, "count": len(rows)}
+
+    def _memory_candidate_resolve(self, params: dict[str, Any]) -> dict[str, Any]:
+        if self._turns.has_active_turns():
+            raise EngineProtocolError(
+                TURN_RUNNING,
+                "Finish active turns before resolving a memory candidate.",
+            )
+        params = params or {}
+        if set(params) != {"id", "decision"}:
+            raise EngineProtocolError(INVALID_PARAMS, "Candidate id and decision are required.")
+        candidate_id = params.get("id")
+        decision = params.get("decision")
+        if not isinstance(candidate_id, str) or not candidate_id:
+            raise EngineProtocolError(INVALID_PARAMS, "Candidate id is required.")
+        if decision not in ("allow_once", "deny"):
+            raise EngineProtocolError(INVALID_PARAMS, "Decision must be allow_once or deny.")
+        from rinari.memory.service import MemoryNotFoundError
+
+        try:
+            row = self._services.memory.resolve_candidate(candidate_id, decision)
+        except MemoryNotFoundError as exc:
+            raise EngineProtocolError("NOT_FOUND", exc.message) from exc
+        except InvalidUsageError as exc:
+            raise EngineProtocolError("INVALID_PARAMS", exc.message) from exc
+        return {"candidate": row}
+
+    def _memory_ledger_export(self, params: dict[str, Any]) -> dict[str, Any]:
+        if params:
+            raise EngineProtocolError(INVALID_PARAMS, "memory.ledger.export takes no parameters.")
+        ledger = self._services.memory.export_privacy_ledger()
+        return {
+            "ledger": ledger,
+            "ledger_digest": self._services.memory.privacy_ledger_digest(ledger),
+        }
+
+    def _memory_ledger_import(self, params: dict[str, Any]) -> dict[str, Any]:
+        if set(params or {}) != {"ledger", "ledger_digest"}:
+            raise EngineProtocolError(INVALID_PARAMS, "ledger and ledger_digest are required.")
+        digest = params.get("ledger_digest")
+        if not isinstance(digest, str) or len(digest) != 64:
+            raise EngineProtocolError(INVALID_PARAMS, "ledger_digest must be a SHA-256 hex digest.")
+        try:
+            return self._services.memory.import_privacy_ledger(params["ledger"], digest)
+        except InvalidUsageError as exc:
+            raise EngineProtocolError(INVALID_PARAMS, exc.message) from exc
+
+    def _conversation_memory_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        session_id = self._conversation_id(params)
+        record = self._services.sessions.show(session_id)
+        status = self._services.memory.conversation_control(record.id)
+        status["session_id"] = record.id
+        return status
+
+    def _conversation_memory_exclude(self, params: dict[str, Any]) -> dict[str, Any]:
+        session_id = self._conversation_id(params)
+        record = self._services.sessions.show(session_id)
+        if self._turns.has_active_turn(record.id):
+            raise EngineProtocolError(
+                TURN_RUNNING, "Cancel the active turn before changing memory controls."
+            )
+        result = self._services.memory.exclude_conversation(record.id)
+        self._services.memory.invalidate_compact_state(record.id)
+        return result
+
+    def _conversation_delete(self, params: dict[str, Any]) -> dict[str, Any]:
+        if set(params or {}) - {"session_id", "ref", "cascade"}:
+            raise EngineProtocolError(INVALID_PARAMS, "Unknown conversation delete parameter.")
+        if "cascade" in (params or {}) and not isinstance(params["cascade"], bool):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'cascade' must be a boolean.")
+        session_id = self._conversation_id(params)
+        # Recovery may retry this RPC after the session row was removed but
+        # before the Gateway recorded its completion.  A durable deleted
+        # control is the idempotency tombstone; report success without
+        # attempting to recreate or re-delete the missing conversation.
+        control = self._services.memory.conversation_control(session_id)
+        try:
+            self._services.sessions.show(session_id)
+        except NotFoundError:
+            if control.get("mode") == "deleted":
+                return {
+                    "deleted": {"id": session_id},
+                    "cascade": {
+                        "queue_dropped": 0,
+                        "checkpoints_removed": 0,
+                        "checkpoints_kept": 0,
+                        "artifacts_removed": 0,
+                        "artifacts_kept": 0,
+                    },
+                    "memory": {
+                        "session_id": session_id,
+                        "mode": "deleted",
+                        "memories_removed": 0,
+                        "episodic_removed": 0,
+                    },
+                    "conversation_deleted": True,
+                    "idempotent": True,
+                }
+            raise
+        # This endpoint is intentionally separate from session.delete so a
+        # caller cannot accidentally remove a conversation while only asking
+        # to forget a memory. It still uses the canonical session deletion
+        # path after removing derived memory and episodic records.
+        params = {"ref": session_id, "cascade": bool((params or {}).get("cascade", False))}
+        result = self._session_delete(params)
+        return {**result, "conversation_deleted": True}
 
     def _session_timeline(self, params: dict[str, Any]) -> dict[str, Any]:
         """Return persisted narrative turns, newest page first but chronological."""
@@ -742,6 +923,13 @@ class EngineServer:
         self._turns.questions.list(record.id)  # Reconcile orphaned waits after restart.
         events = [row for row in self._services.ctx.event_repo.list(record.id) if row.turn_id]
         messages = self._services.ctx.message_repo.list(record.id)
+        messages, _redacted = self._services.memory.redact_history(messages)
+        redacted_turns = {
+            row.turn_id
+            for row in self._services.ctx.message_repo.list(record.id)
+            if row.id in self._services.memory.repo.suppressed_message_ids(record.id)
+            and row.turn_id
+        }
 
         by_turn: dict[str, dict[str, Any]] = {}
         order: list[str] = []
@@ -767,6 +955,8 @@ class EngineServer:
                 turn["mode"] = payload.get("mode")
                 turn["started_at"] = payload.get("occurred_at") or row.created_at
                 turn["user_message"] = str(payload.get("message") or "")
+                if turn_id in redacted_turns:
+                    turn["user_message"] = "[contenido omitido por privacidad]"
                 continue
             if event_name in {
                 "turn.completed",
@@ -780,6 +970,8 @@ class EngineServer:
                 continue
             payload["event"] = event_name
             payload["activity_seq"] = row.activity_seq or payload.get("activity_seq")
+            if turn_id in redacted_turns and event_name == "model.content.completed":
+                payload["content"] = "[contenido omitido por privacidad]"
             turn["items"].append(payload)
             if event_name == "model.content.completed" and payload.get("output_kind") == "final":
                 turn["final_response"] = str(payload.get("content") or "")
@@ -789,8 +981,13 @@ class EngineServer:
                 continue
             if message.role == "user" and not by_turn[message.turn_id]["user_message"]:
                 by_turn[message.turn_id]["user_message"] = message.content or ""
+                if message.turn_id in redacted_turns:
+                    by_turn[message.turn_id]["user_message"] = "[contenido omitido por privacidad]"
 
         selected = [by_turn[item] for item in order]
+        for turn in selected:
+            if turn["turn_id"] in redacted_turns:
+                turn["final_response"] = "[contenido omitido por privacidad]"
         if before is not None:
             selected = [item for item in selected if item["turn_index"] < before]
         has_more = len(selected) > limit
@@ -1397,9 +1594,20 @@ class EngineServer:
             if effort is None:
                 clear_effort = True
                 effort = None
-            elif effort not in ("low", "medium", "high"):
+            elif effort not in (
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra",
+            ):
                 raise EngineProtocolError(
-                    INVALID_PARAMS, "Param 'effort' must be low, medium, high or null."
+                    INVALID_PARAMS,
+                    "Param 'effort' must be none, minimal, low, medium, high, xhigh, max, "
+                    "ultra or null.",
                 )
         else:
             effort = None
@@ -1791,9 +1999,16 @@ class EngineServer:
             with path.open("rb") as stream:
                 digest = hashlib.file_digest(stream, "sha256").hexdigest()
             record = ArtifactRecord(
-                id=name, session_ref=session_id, project_root="", namespace=namespace,
-                name=name, content_type="text/plain", sha256=digest, byte_count=size,
-                storage_path=f"{session_id}/{namespace}/{name}", provenance="runtime-spill",
+                id=name,
+                session_ref=session_id,
+                project_root="",
+                namespace=namespace,
+                name=name,
+                content_type="text/plain",
+                sha256=digest,
+                byte_count=size,
+                storage_path=f"{session_id}/{namespace}/{name}",
+                provenance="runtime-spill",
             )
         path = self._services.artifacts._storage_path(record.storage_path)
         with path.open("rb") as stream:
@@ -1953,24 +2168,35 @@ class EngineServer:
         if not isinstance(message, str) or not message.strip():
             raise EngineProtocolError(INVALID_PARAMS, "Param 'message' must be a non-empty string.")
         reasoning_effort = params.get("reasoning_effort")
-        if reasoning_effort is not None and reasoning_effort not in ("low", "medium", "high"):
+        if reasoning_effort is not None and reasoning_effort not in (
+            "none",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra",
+        ):
             raise EngineProtocolError(
-                INVALID_PARAMS, "Param 'reasoning_effort' must be low, medium, high or null."
+                INVALID_PARAMS,
+                "Param 'reasoning_effort' must be none, minimal, low, medium, high, xhigh, "
+                "max, ultra or null.",
             )
         attachments = params.get("attachments", [])
         if not isinstance(attachments, list):
             raise EngineProtocolError(INVALID_PARAMS, "Param 'attachments' must be a list.")
         try:
             attachment_context, image_refs, attachment_metadata = _prepare_turn_attachments(
-                self._services, session_id, attachments,
+                self._services,
+                session_id,
+                attachments,
                 allow_unconfirmed_vision=params.get("allow_unconfirmed_vision") is True,
             )
         except EngineProtocolError:
             raise
         enriched = (
-            f"{attachment_context}\n\nUser request:\n{message}"
-            if attachment_context
-            else message
+            f"{attachment_context}\n\nUser request:\n{message}" if attachment_context else message
         )
         return self._turns.start_turn(
             session_id,
@@ -1999,6 +2225,13 @@ class EngineServer:
 
     def _operation_start(self, params: dict[str, Any]) -> dict[str, Any]:
         from rinari.engine_protocol.channels import validate_channel
+
+        memory_origin = params.get("memory_origin", "automation")
+        if memory_origin not in {"interactive", "owner_channel", "automation"}:
+            raise EngineProtocolError(
+                INVALID_PARAMS,
+                "Param 'memory_origin' must be interactive, owner_channel or automation.",
+            )
         operation_id = self._need_str(params, "operation_id")
         if len(operation_id) > 128:
             raise EngineProtocolError(INVALID_PARAMS, "Operation identity too long")
@@ -2006,7 +2239,16 @@ class EngineServer:
         if not message.strip():
             raise EngineProtocolError(INVALID_PARAMS, "Empty message")
         effort = params.get("reasoning_effort")
-        if effort is not None and effort not in ("low", "medium", "high"):
+        if effort is not None and effort not in (
+            "none",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra",
+        ):
             raise EngineProtocolError(INVALID_PARAMS, "Invalid reasoning effort")
         from rinari.application.ssh_targets import TargetStore
 
@@ -2020,18 +2262,26 @@ class EngineServer:
                 raise EngineProtocolError(INVALID_PARAMS, "SSH operations require a chat session")
         session_id = self._need_str(params, "session_id")
         attachment_context, image_refs, metadata = _prepare_turn_attachments(
-            self._services, session_id, params.get("attachments", []),
+            self._services,
+            session_id,
+            params.get("attachments", []),
             allow_unconfirmed_vision=params.get("allow_unconfirmed_vision") is True,
         )
         enriched = (
-            f"{attachment_context}\n\nUser request:\n{message}"
-            if attachment_context else message
+            f"{attachment_context}\n\nUser request:\n{message}" if attachment_context else message
         )
         return self._turns.start_operation(
-            operation_id, session_id, enriched, effort, remote_target,
-            validate_channel(params.get("channel")), image_refs,
-            attachment_metadata=metadata, display_message=message,
+            operation_id,
+            session_id,
+            enriched,
+            effort,
+            remote_target,
+            validate_channel(params.get("channel")),
+            image_refs,
+            attachment_metadata=metadata,
+            display_message=message,
             allow_unconfirmed_vision=params.get("allow_unconfirmed_vision") is True,
+            memory_origin=memory_origin,
         )
 
     def _operation_get(self, params: dict[str, Any]) -> dict[str, Any]:

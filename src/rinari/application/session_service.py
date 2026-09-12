@@ -304,6 +304,22 @@ class SessionService:
         not modified in any way.
         """
         source = self._resolve(ref)
+        # A fork copies message content into a new session with new message
+        # identifiers.  Copying a privacy-retired source would otherwise
+        # bypass its source tombstones and let the new session extract it
+        # again.  Until source-to-fork mappings are persisted, fail closed for
+        # this case and for any privacy-retired ancestor.
+        ancestor = source
+        while ancestor is not None:
+            control = self._ctx.memory_repo.control(ancestor.id)
+            if (control is not None and control.get("mode") != "auto") or (
+                self._ctx.memory_repo.suppressed_message_ids(ancestor.id)
+            ):
+                raise ConflictError(
+                    "This conversation cannot be forked after a memory privacy action."
+                )
+            parent_id = ancestor.forked_from
+            ancestor = self._ctx.session_repo.get(parent_id) if parent_id else None
         now = self._now()
         record = SessionRecord(
             id=self._ctx.ids.new("ses"),
@@ -511,7 +527,9 @@ class SessionService:
             self._append_event(record.id, EVENT_SESSION_CLOSED, {})
         return record
 
-    def name_from_first_message(self, ref: str, message: str) -> SessionRecord:
+    def name_from_first_message(
+        self, ref: str, message: str, *, title_factory=None
+    ) -> SessionRecord:
         """Give an untouched session a bounded, Unicode-safe first-message title."""
         record = self._resolve(ref)
         defaults = {
@@ -531,6 +549,21 @@ class SessionService:
         if len(clean) > 72:
             prefix = clean[:69]
             clean = (prefix.rsplit(" ", 1)[0] or prefix) + "…"
+        if title_factory is not None:
+            try:
+                generated = title_factory(message)
+                if isinstance(generated, str):
+                    generated = generated.strip().strip('"').strip()
+                    if generated and len(generated) <= 160 and '\n' not in generated:
+                        clean = generated
+            except Exception:
+                # Naming is optional metadata; provider failure must not lose the turn.
+                pass
+        latest = self._resolve(ref)
+        if latest.title != record.title or any(
+            e.type == EVENT_SESSION_RENAMED for e in self._ctx.event_repo.list(record.id)
+        ):
+            return latest
         return self.rename(ref, clean)
 
     def rename(self, ref: str, title: str) -> SessionRecord:

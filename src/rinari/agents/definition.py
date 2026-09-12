@@ -2,9 +2,9 @@
 
 Per harness.md 111-115: the main agent is the coordinator; each subagent
 gets a bounded objective, a tool allowlist, a permission profile, a budget,
-a context scope, and a structured output contract. Read-only specialists
-(Explore, Reviewer, Verifier) default to the read-only profile; Researcher
-gets no local writes by default either.
+a context scope, and a structured output contract. Roles describe objectives.
+Permissions and tools inherit from the session unless an agent explicitly
+narrows its scope.
 """
 
 from __future__ import annotations
@@ -13,7 +13,8 @@ from dataclasses import dataclass, field
 
 READ_ONLY = "read-only"
 WORKSPACE = "workspace"
-VALID_PROFILES = (READ_ONLY, WORKSPACE)
+INHERIT = "inherit"
+VALID_PROFILES = (INHERIT, READ_ONLY, WORKSPACE)
 
 # Hard multi-agent defaults (harness.md 115): no recursive agent explosion.
 MAX_CONCURRENT = 4
@@ -34,7 +35,7 @@ class AgentDefinition:
     description: str
     objective: str  # what this agent is for; the spawn goal is bounded into it
     tool_allowlist: tuple[str, ...] = ()  # empty = all available tools
-    profile: str = READ_ONLY  # "read-only" | "workspace"
+    profile: str = INHERIT  # "read-only" | "workspace"
     context_scope: str = "project"  # "project" | "none" (CHAT subagents)
     budget: AgentBudget = field(default_factory=AgentBudget)
     can_delegate: bool = False  # may itself spawn subagents (depth+1)
@@ -60,23 +61,6 @@ BUILTIN_AGENTS: dict[str, AgentDefinition] = {
             "Answer the scoped question using read-only repository tools. "
             "Return findings with file:line references; do not modify anything."
         ),
-        tool_allowlist=(
-            "fs.read",
-            "fs.read_lines",
-            "fs.list",
-            "fs.glob",
-            "fs.stat",
-            "fs.diff",
-            "search.*",
-            "git.status",
-            "git.log",
-            "git.show",
-            "git.branch",
-            "context.*",
-            "skills.list",
-            "skills.show",
-        ),
-        profile=READ_ONLY,
     ),
     "reviewer": AgentDefinition(
         name="reviewer",
@@ -86,20 +70,6 @@ BUILTIN_AGENTS: dict[str, AgentDefinition] = {
             "violations. Return severity-ranked findings with file:line evidence. "
             "Read-only: never modify code."
         ),
-        tool_allowlist=(
-            "git.status",
-            "git.diff",
-            "git.log",
-            "git.show",
-            "fs.read",
-            "fs.read_lines",
-            "fs.search_text",
-            "fs.stat",
-            "search.*",
-            "skills.list",
-            "skills.show",
-        ),
-        profile=READ_ONLY,
     ),
     # The debugger is NOT on the harness 112 read-only list: reproducing a defect
     # requires running commands, so it maps to the workspace profile. Its
@@ -113,21 +83,6 @@ BUILTIN_AGENTS: dict[str, AgentDefinition] = {
             "root cause with a minimal experiment. Report mechanism + repro. "
             "You may run read-only commands and scripts; do not edit project files."
         ),
-        tool_allowlist=(
-            "fs.read",
-            "fs.read_lines",
-            "fs.list",
-            "fs.glob",
-            "fs.stat",
-            "fs.search_text",
-            "search.*",
-            "shell.exec",
-            "process.*",
-            "git.status",
-            "git.log",
-            "git.show",
-        ),
-        profile=WORKSPACE,
     ),
     "researcher": AgentDefinition(
         name="researcher",
@@ -138,17 +93,6 @@ BUILTIN_AGENTS: dict[str, AgentDefinition] = {
             "Answer the research question with cited evidence (web + local docs). "
             "Distinguish cited facts from inference. No local file writes."
         ),
-        tool_allowlist=(
-            "web.*",
-            "http.request",
-            "fs.read",
-            "fs.read_lines",
-            "fs.list",
-            "fs.glob",
-            "fs.search_text",
-            "search.*",
-        ),
-        profile=READ_ONLY,
     ),
     "implementer": AgentDefinition(
         name="implementer",
@@ -158,27 +102,6 @@ BUILTIN_AGENTS: dict[str, AgentDefinition] = {
             "tests, and leave the workspace with a verified, self-contained change. "
             "Stay inside the scope; report exactly what changed and how it was verified."
         ),
-        tool_allowlist=(
-            "fs.read",
-            "fs.read_lines",
-            "fs.write",
-            "fs.patch",
-            "fs.list",
-            "fs.glob",
-            "fs.stat",
-            "fs.search_text",
-            "fs.diff",
-            "search.*",
-            "shell.exec",
-            "process.*",
-            "git.status",
-            "git.diff",
-            "skills.list",
-            "skills.show",
-            "skills.activate",
-            "skills.deactivate",
-        ),
-        profile=WORKSPACE,
     ),
     "verifier": AgentDefinition(
         name="verifier",
@@ -190,25 +113,6 @@ BUILTIN_AGENTS: dict[str, AgentDefinition] = {
             "inspect the final diff, and decide DONE / IMPLEMENTED_UNVERIFIED / "
             "PARTIAL / BLOCKED / FAILED with the evidence table. Read-only."
         ),
-        tool_allowlist=(
-            "fs.read",
-            "fs.read_lines",
-            "fs.list",
-            "fs.glob",
-            "fs.stat",
-            "fs.search_text",
-            "fs.diff",
-            "search.*",
-            "shell.exec",
-            "git.status",
-            "git.diff",
-            "git.log",
-            # verify.evaluate only: plan/record are state.write, which the
-            # read-only profile denies. The verdict contract is the summary
-            # + parseable validation block (harness 112: Verifier = no writes).
-            "verify.evaluate",
-        ),
-        profile=READ_ONLY,
     ),
 }
 
@@ -219,6 +123,7 @@ def builtin_agents() -> dict[str, AgentDefinition]:
 
 __all__ = [
     "BUILTIN_AGENTS",
+    "INHERIT",
     "MAX_CONCURRENT",
     "MAX_DEPTH",
     "MAX_TOTAL",

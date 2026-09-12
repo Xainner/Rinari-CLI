@@ -259,6 +259,10 @@ class ToolContext:
     # Public web snapshots only, bounded and scoped to the runtime session.
     web_snapshots: dict[str, Any] = field(default_factory=dict)
     channel_host: Any = None
+    # Engine-private owner message provenance for a memory tool write.  The
+    # model cannot set this through a tool schema; the session host may attach
+    # it only after validating a persisted owner message.
+    memory_source: dict[str, str] | None = None
     tool_call_id: str = ""
 
 

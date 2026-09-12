@@ -168,15 +168,29 @@ class AgentLoop:
         images, ctx.pending_images = ctx.pending_images, ()
         has_images = bool(images) or any(message.images for message in ctx.history)
         vision = getattr(self._provider.capabilities(), "vision", None) if has_images else None
-        if (has_images and vision is False) or (images and vision is None and not ctx.allow_unconfirmed_vision):
+        if (has_images and vision is False) or (
+            images and vision is None and not ctx.allow_unconfirmed_vision
+        ):
             from rinari.shared.errors import InvalidUsageError
-            raise InvalidUsageError("Vision must be enabled for the selected model before using images")
+
+            raise InvalidUsageError(
+                "Vision must be enabled for the selected model before using images"
+            )
         if images:
-            user_message += "\n\nAdjuntos originales disponibles para herramientas:\n" + "\n".join(i.uri for i in images)
+            user_message += "\n\nAdjuntos originales disponibles para herramientas:\n" + "\n".join(
+                i.uri for i in images
+            )
         metadata, ctx.pending_attachments = ctx.pending_attachments, ()
         display, ctx.pending_display_content = ctx.pending_display_content, None
-        ctx.history.append(ChatMessage(role="user", content=user_message, images=images,
-                                       attachments=metadata, display_content=display))
+        ctx.history.append(
+            ChatMessage(
+                role="user",
+                content=user_message,
+                images=images,
+                attachments=metadata,
+                display_content=display,
+            )
+        )
         # Hierarchical ledger (P0.10): the turn's meter becomes the parent
         # budget visible to agent.spawn, so subagent cost aggregates here.
         if (
@@ -894,7 +908,10 @@ def _tool_activity_presentation(tool: str, arguments: dict, result: ToolResult) 
     if tool == "shell.exec" or {"stdout", "stderr", "exit_code"} & data.keys():
         presentation.update(
             {
-                "command": data.get("command") or preserved.get("command") or arguments.get("command") or arguments.get("argv"),
+                "command": data.get("command")
+                or preserved.get("command")
+                or arguments.get("command")
+                or arguments.get("argv"),
                 "cwd": data.get("cwd") or preserved.get("cwd") or arguments.get("cwd"),
                 "exit_code": data.get("exit_code", preserved.get("exit_code")),
                 "stdout": data.get("stdout", preserved.get("stdout", "")) or "",
@@ -903,9 +920,7 @@ def _tool_activity_presentation(tool: str, arguments: dict, result: ToolResult) 
             }
         )
         presentation["stderr_warning"] = bool(
-            result.ok
-            and presentation.get("exit_code") == 0
-            and presentation.get("stderr")
+            result.ok and presentation.get("exit_code") == 0 and presentation.get("stderr")
         )
         exit_code = data.get("exit_code")
         if not isinstance(exit_code, int):

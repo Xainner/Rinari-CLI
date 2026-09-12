@@ -157,6 +157,9 @@ class ModelRouter:
             "vision": merged.vision,
             "max_context_window": merged.max_context_tokens,
         }
+        levels = self.reasoning_levels(self._models.resolve(model_id))
+        if levels is not None:
+            matrix["reasoning_levels"] = levels
         return {
             "capabilities": matrix,
             "supports_tools": bool(matrix["tools"]),
@@ -176,6 +179,27 @@ class ModelRouter:
         if model.provider_id != provider.id:
             return base
         return _merge_capabilities(base, model.capabilities)
+
+    @staticmethod
+    def reasoning_levels(model):
+        metadata = model.capabilities or {}
+        levels = metadata.get("reasoning_levels")
+        if levels is None and isinstance(metadata.get("reasoning"), dict):
+            levels = metadata["reasoning"].get("supported_efforts")
+        return levels if isinstance(levels, list) else None
+
+    def _validate_reasoning(self, provider, model, request):
+        effort = request.reasoning_effort
+        if effort is None:
+            return
+        levels = self.reasoning_levels(model)
+        if not self.capabilities(provider, model.id).reasoning_effort:
+            raise InvalidUsageError("This model does not support configurable reasoning.")
+        if levels is not None and effort not in levels:
+            raise InvalidUsageError(
+                f"Reasoning level {effort!r} is not supported by model {model.alias!r}.",
+                hint=f"Supported levels: {', '.join(levels)}",
+            )
 
     def _resolve_model(self, provider: ProviderRecord, model_id: str | None):
         if model_id is None:
@@ -200,6 +224,7 @@ class ModelRouter:
     ) -> ModelResponse:
         model = self._resolve_model(provider, model_id)
         request = replace(request, model=model.provider_model_id)
+        self._validate_reasoning(provider, model, request)
         real_by_alias = _alias_map_for_request(provider.endpoint, request)
         transport = _resolve_transport(provider, model)
         return _unalias_response(
@@ -215,6 +240,7 @@ class ModelRouter:
     ) -> ModelResponse:
         model = self._resolve_model(provider, model_id)
         request = replace(request, model=model.provider_model_id)
+        self._validate_reasoning(provider, model, request)
         real_by_alias = _alias_map_for_request(provider.endpoint, request)
         transport = _resolve_transport(provider, model)
         adapter = self.adapter(provider)

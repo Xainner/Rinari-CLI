@@ -45,7 +45,7 @@ def test_import_quota_and_ssh_transfer_integrity(app_ctx, tmp_path):
         [sys.executable, "-c", _REMOTE, str(path.resolve()), "10000"], capture_output=True
     )
     assert result.returncode == 0, result.stderr
-    header, payload = result.stdout.split(b"\n", 1)
+    _header, payload = result.stdout.split(b"\n", 1)
     assert payload[:-64] == content
     assert payload[-64:] == hashlib.sha256(content).hexdigest().encode()
 

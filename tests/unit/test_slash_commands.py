@@ -394,4 +394,4 @@ def test_repl_run_turn_and_status_rail(env, monkeypatch, capsys) -> None:
     out = capsys.readouterr().out
     assert "ok" in out  # model answer streamed
     assert "answer" in out  # status rail line
-    assert "1m/0t" in out  # model/tool call counts on the rail
+    assert "2m/0t" in out  # Automatic title + conversational reply, without tool calls.

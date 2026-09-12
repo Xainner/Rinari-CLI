@@ -366,7 +366,7 @@ class AgentOrchestrator:
         return state
 
     def _prepare_worktree(self, definition: AgentDefinition, agent_id: str, requested: bool):
-        writer = definition.profile == "workspace"
+        writer = definition.profile in {"workspace", "inherit"}
         if not (writer and requested and self._worktrees is not None and self._project_root()):
             return None
         try:
@@ -471,6 +471,8 @@ class AgentOrchestrator:
             "session_id": self._session_id,
             "state": state["state"],
             "status": result.status if result else None,
+            "summary": result.summary if result else None,
+            "error": result.error if result else None,
         }
 
     def _emit_hook(self, event: str, payload: dict) -> None:

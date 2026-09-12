@@ -63,8 +63,8 @@ def test_builtin_agents_six():
         ["explore", "reviewer", "debugger", "researcher", "implementer", "verifier"]
     )
     for name in ("explore", "reviewer", "verifier"):
-        assert BUILTIN_AGENTS[name].profile == "read-only"
-    assert BUILTIN_AGENTS["implementer"].profile == "workspace"
+        assert BUILTIN_AGENTS[name].profile == "inherit"
+    assert BUILTIN_AGENTS["implementer"].profile == "inherit"
 
 
 def test_registry_lists_builtins_without_project():
@@ -230,7 +230,7 @@ def test_spawn_wait_result_roundtrip():
     assert agent_id.startswith("agt_")
     status = orch.status(agent_id)
     assert status["agent"] == "explore"
-    assert status["profile"] == "read-only"
+    assert status["profile"] == "inherit"
     result = orch.wait(agent_id)
     assert result.ok is True
     assert "done: find the entry point" in result.summary
@@ -596,26 +596,26 @@ def _run_subagent(monkeypatch, git_repo: Path, definition: AgentDefinition, mode
     return runner.run(spec)
 
 
-class _ParentCtx:
-    def __init__(self, root: Path, clock):
-        from rinari.tools.native.process import ProcessRegistry
+def _ParentCtx(root: Path, clock):
+    from rinari.policy.engine import PermissionProfile
+    from rinari.policy.sandbox import FilesystemSandbox, ProcessLimits
+    from rinari.tools.definition import ToolContext
+    from rinari.tools.native.process import ProcessRegistry
 
-        self.kind = "PROJECT"
-        self.cwd = root
-        self.project_root = root
-        self.user_home = root
-        self.clock = clock
-        self.artifact_root = root / "artifacts"
-        self.cancellation = CancellationToken()
-        self.web = None
-        self.network = None
-        self.credentials = None
-        self.validation = None
-        self.memory = None
-        self.context_retrieval = None
-        self.lsp = None
-        self.project_trusted = True
-        self.processes = ProcessRegistry()
+    return ToolContext(
+        session_id="parent",
+        kind="PROJECT",
+        cwd=root,
+        project_root=root,
+        user_home=root,
+        clock=clock,
+        artifact_root=root / "artifacts",
+        cancellation=CancellationToken(),
+        processes=ProcessRegistry(),
+        profile=PermissionProfile.WORKSPACE,
+        limits=ProcessLimits(),
+        sandbox=FilesystemSandbox(root, (root,)),
+    )
 
 
 class _NoopAssembler:
@@ -668,9 +668,11 @@ def test_subagent_run_attaches_parent_ledger(tmp_path, monkeypatch, git_repo):
 
 
 def test_read_only_subagent_denied_write(tmp_path, monkeypatch, git_repo):
+    from dataclasses import replace
+
     from rinari.agents.definition import BUILTIN_AGENTS
 
-    reviewer = BUILTIN_AGENTS["reviewer"]
+    reviewer = replace(BUILTIN_AGENTS["reviewer"], profile="read-only", tool_allowlist=("fs.read",))
     # Allowlist isolation: write tools simply do not exist in its registry.
     assert reviewer.allows("fs.read") is True
     assert reviewer.allows("fs.write") is False
@@ -997,3 +999,123 @@ def test_subagent_effort_reaches_model_request(monkeypatch, git_repo):
 def test_subagent_unset_effort_inherits(monkeypatch, git_repo):
     model = _run_effort_subagent(monkeypatch, git_repo, effort_for=None)
     assert [r.reasoning_effort for r in model.requests] == [None] * len(model.requests)
+
+
+@pytest.mark.parametrize(
+    "parent_profile,restriction,expected",
+    [
+        ("full-access", "inherit", "full-access"),
+        ("workspace", "inherit", "workspace"),
+        ("read-only", "workspace", "read-only"),
+        ("full-access", "read-only", "read-only"),
+    ],
+)
+def test_child_inherits_permission_ceiling(tmp_path, parent_profile, restriction, expected):
+    from dataclasses import replace
+
+    from rinari.agents.runtime import SubagentRuntimeConfig, make_subagent_runner
+    from rinari.policy.engine import PermissionProfile, PolicyEngine
+    from rinari.policy.sandbox import FilesystemSandbox
+
+    parent = replace(
+        _ParentCtx(tmp_path, FakeClock()),
+        profile=PermissionProfile(parent_profile),
+        sandbox=FilesystemSandbox(
+            tmp_path, (tmp_path,), unrestricted=parent_profile == "full-access"
+        ),
+    )
+    config = SubagentRuntimeConfig(None, None, CancellationToken(), PolicyEngine(), None, parent)
+    runner = make_subagent_runner(config)
+    spec = SubagentRunSpec(
+        agent_id="a",
+        definition=AgentDefinition("custom", "", "", profile=restriction),
+        objective="inspect",
+        project_root=tmp_path,
+        session_id="parent",
+    )
+    ctx = runner._build_tool_ctx(spec)
+    assert ctx.profile.value == expected
+    assert ctx.sandbox.unrestricted == (expected == "full-access")
+    assert ctx.network is parent.network
+    assert ctx.processes is not parent.processes
+    if expected == "read-only":
+        assert ctx.sandbox.write_roots == ()
+    ctx.browser.close()
+
+
+def test_child_uses_parent_ssh_catalog_and_session_grants(tmp_path):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from rinari.agents.runtime import SubagentRuntimeConfig, make_subagent_runner
+    from rinari.application.ssh_targets import TargetStore
+    from rinari.policy.approvals import ApprovalEngine, ApprovalRequest
+    from rinari.policy.engine import PolicyEngine
+    from rinari.tools.native.ssh import ssh_tools
+    from rinari.tools.registry import ToolRegistry
+
+    registry = ToolRegistry()
+    registry.register_all(ssh_tools(TargetStore(tmp_path)))
+    prompts = []
+    approvals = ApprovalEngine(prompt=lambda request: prompts.append(request) or "s")
+    runtime = SimpleNamespace(registry=registry, approvals=approvals)
+    config = SubagentRuntimeConfig(
+        None,
+        None,
+        CancellationToken(),
+        PolicyEngine(),
+        None,
+        _ParentCtx(tmp_path, FakeClock()),
+        parent_runtime=lambda: runtime,
+    )
+    runner = make_subagent_runner(config)
+    spec = SubagentRunSpec(
+        agent_id="a",
+        definition=AgentDefinition("custom", "", ""),
+        objective="inspect",
+        project_root=tmp_path,
+        session_id="parent",
+    )
+    child_registry = runner._build_registry(spec)
+    assert "ssh.inspect" in child_registry.names()
+    assert "capability.search" in child_registry.names()
+    restricted = replace(spec, definition=replace(spec.definition, tool_allowlist=("ssh.status",)))
+    assert "ssh.inspect" not in runner._build_registry(restricted).names()
+    request = ApprovalRequest("network", "SSH inspect", target="casa3090", session_id="child")
+    assert runner._approvals(spec).check(request).granted
+    assert runner._approvals(spec).check(request).granted
+    assert len(prompts) == 1
+    assert prompts[0].session_id == "parent"
+    assert "custom" in prompts[0].description
+    spec.token.cancel()
+    assert prompts[0].cancellation.cancelled
+
+
+def test_child_activity_contains_output_without_parent_model_collision(git_repo, monkeypatch):
+    from rinari.agents.runtime import SubagentRuntimeConfig, make_subagent_runner
+    from rinari.policy.engine import PolicyEngine
+
+    emitted = []
+    config = SubagentRuntimeConfig(
+        _AnswerModel("fs.read", {"path": str(git_repo / "app.py")}, "child result"),
+        None,
+        CancellationToken(),
+        PolicyEngine(),
+        None,
+        _ParentCtx(git_repo, FakeClock()),
+        activity_sink=lambda name, payload: emitted.append((name, payload)),
+    )
+    monkeypatch.setattr("rinari.agents.runtime._make_assembler", lambda: _NoopAssembler())
+    spec = SubagentRunSpec(
+        agent_id="a",
+        definition=AgentDefinition("custom", "", ""),
+        objective="inspect",
+        project_root=git_repo,
+        session_id="parent",
+    )
+    result = make_subagent_runner(config).run(spec)
+    assert result.status == "completed"
+    assert emitted and all(name == "agent.activity" for name, _ in emitted)
+    assert all(payload["agent_id"] == "a" for _, payload in emitted)
+    assert any(payload["child_event"] == "tool.completed" for _, payload in emitted)
+    assert any(payload.get("content") == "child result" for _, payload in emitted)

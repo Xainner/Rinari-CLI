@@ -28,30 +28,23 @@ import base64
 import contextlib
 import json
 import os
-import shutil
 import socket
 import subprocess
+import threading
 import time
 import urllib.request
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from rinari.browser.cdp import CdpError, CdpSession
-from rinari.browser.ws import WsError
+from rinari.browser.discovery import CANDIDATES, find_browser
 
 ENV_ENDPOINT = "RINARI_BROWSER_CDP"
 ENV_COMMAND = "RINARI_BROWSER_COMMAND"
-DEFAULT_COMMAND_CANDIDATES = (
-    "chromium",
-    "chromium-browser",
-    "google-chrome",
-    "google-chrome-stable",
-    "chrome",
-    "headless_shell",
-    "msedge",
-)
+DEFAULT_COMMAND_CANDIDATES = CANDIDATES
 
 MAX_SNAPSHOT_CHARS = 256 * 1024
 MAX_SCREENSHOT_BYTES = 4 * 1024 * 1024
@@ -160,6 +153,17 @@ class BrowserManager:
         self._domains: set[tuple[str, str]] = set()
         self._download_dir: Path | None = None
         self._download_base: set[str] = set()
+        self._executable: str | None = None
+        self._last_error: str | None = None
+        self._last_exit_code: int | None = None
+        self._stderr = bytearray()
+        self._stderr_lock = threading.Lock()
+        self._stderr_reader: threading.Thread | None = None
+        self._generation = 0
+        self._elements: dict[str, tuple[str | None, int]] = {}
+        # A desktop turn builds a new runtime. Never share Chromium's singleton
+        # profile with a previous runtime (or another engine process).
+        self._profile_instance = uuid.uuid4().hex
 
     # -- state ----------------------------------------------------------------
 
@@ -170,7 +174,7 @@ class BrowserManager:
 
     @property
     def profile_dir(self) -> Path:
-        return self._home_root / "browser" / "profiles" / self.session_id
+        return self._home_root / "browser" / "profiles" / self.session_id / self._profile_instance
 
     def status(self) -> dict[str, Any]:
         state = (
@@ -184,7 +188,38 @@ class BrowserManager:
             "managed": self._process is not None,
             "headless": self._headless,
             "targets": len(self.targets()) if self.connected else 0,
+            "diagnostics": self.diagnostics(),
         }
+
+    def diagnostics(self) -> dict[str, Any]:
+        with self._stderr_lock:
+            stderr = self._stderr.decode("utf-8", "replace")
+        return {"executable": self._executable, "last_error": self._last_error,
+                "profile_dir": str(self.profile_dir), "headless": self._headless,
+                "stderr": stderr, "stderr_limit_bytes": 16384,
+                "process_exit_code": self._process.poll() if self._process
+                else self._last_exit_code}
+
+    def _drain_stderr(self, process: subprocess.Popen) -> None:
+        assert process.stderr is not None
+        try:
+            while chunk := process.stderr.read1(1024):
+                with self._stderr_lock:
+                    self._stderr.extend(chunk)
+                    del self._stderr[:-16384]
+        finally:
+            process.stderr.close()
+
+    def _disconnect(self) -> None:
+        if self._session is not None:
+            self._session.close()
+        self._session = None
+        self._attached.clear()
+        self._domains.clear()
+        self._download_dir = None
+        self._download_base.clear()
+        self._generation += 1
+        self._elements.clear()
 
     def _raise_if_cancelled(self, cancelled: Callable[[], bool] | None) -> None:
         fn = cancelled if cancelled is not None else None
@@ -194,16 +229,20 @@ class BrowserManager:
     # -- lifecycle ------------------------------------------------------------
 
     def connect(self, endpoint: str | None = None) -> str:
-        target = endpoint or self._endpoint_cfg or os.environ.get(ENV_ENDPOINT)
+        target = endpoint or self._endpoint_cfg or os.environ.get(ENV_ENDPOINT) or self._endpoint
         if not target:
             raise BrowserError(
                 "BROWSER_DEPENDENCY",
                 "No CDP endpoint available; pass a ws:// endpoint or use browser.launch",
             )
+        if self._endpoint and target != self._endpoint:
+            self.close()
+        else:
+            self._disconnect()
         if not self._ensure_session(target):
             raise BrowserError(
                 "BROWSER_DEPENDENCY",
-                f"Could not reach the CDP endpoint {target}",
+                f"Could not reach the CDP endpoint {target}: {self._last_error}",
                 retryable=True,
             )
         return self._endpoint or target
@@ -211,13 +250,17 @@ class BrowserManager:
     def launch(self, command: str | None = None, port: int | None = None) -> str:
         if self.connected:
             return self._endpoint or ""
-        cmd = command or self._command_cfg or os.environ.get(ENV_COMMAND)
+        external = self._endpoint_cfg or os.environ.get(ENV_ENDPOINT)
+        if external and command is None:
+            return self.connect(external)
+        self.close()
+        configured = command or self._command_cfg or os.environ.get(ENV_COMMAND)
+        cmd = find_browser(configured)
         if not cmd:
-            cmd = next((c for c in DEFAULT_COMMAND_CANDIDATES if shutil.which(c)), None)
-        if not cmd or not shutil.which(cmd):
             raise BrowserError(
                 "BROWSER_DEPENDENCY",
-                "No Chromium-family browser found; install Chromium/Chrome or set "
+                f"Browser executable unavailable ({configured or 'automatic discovery'}); "
+                "install Edge/Chromium/Chrome or set "
                 f"{ENV_COMMAND} (searched: {', '.join(DEFAULT_COMMAND_CANDIDATES)})",
             )
         port = port or _pick_free_port()
@@ -225,7 +268,7 @@ class BrowserManager:
         profile.mkdir(parents=True, exist_ok=True)
         argv = [
             cmd,
-            "--headless=new" if self._headless else "--headless=false",
+            *(["--headless=new"] if self._headless else []),
             f"--remote-debugging-port={port}",
             f"--user-data-dir={profile}",
             "--no-first-run",
@@ -235,9 +278,20 @@ class BrowserManager:
             "about:blank",
         ]
         try:
+            self._executable = cmd
+            self._last_error = None
+            self._last_exit_code = None
+            with self._stderr_lock:
+                self._stderr.clear()
             self._process = subprocess.Popen(
-                argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                argv, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             )
+            self._stderr_reader = threading.Thread(
+                target=self._drain_stderr, args=(self._process,), daemon=True,
+                name="rinari-browser-stderr",
+            )
+            self._stderr_reader.start()
         except OSError as exc:
             raise BrowserError(
                 "BROWSER_LAUNCH_FAILED", f"Could not start the browser: {exc}"
@@ -246,7 +300,8 @@ class BrowserManager:
         if not self._ensure_session(endpoint, deadline_s=25.0):
             self._kill_process()
             raise BrowserError(
-                "BROWSER_LAUNCH_FAILED", f"Browser did not open the CDP endpoint {endpoint}"
+                "BROWSER_LAUNCH_FAILED",
+                f"Browser did not open the CDP endpoint {endpoint}: {self._last_error}",
             )
         return endpoint
 
@@ -265,42 +320,86 @@ class BrowserManager:
             closed.append("browser-process")
         self._endpoint = None
         self._download_dir = None
+        self._download_base.clear()
+        self._generation += 1
+        self._elements.clear()
         return {"closed": closed}
 
     def _kill_process(self) -> None:
         process, self._process = self._process, None
         if process is None:
             return
-        with contextlib.suppress(OSError):
-            process.terminate()
+        # Edge may hand off to another process and exit its original launcher.
+        # CDP Browser.close shuts down the owned browser and releases its profile
+        # even when the original Popen PID has already exited.
+        if self._endpoint:
+            control = None
+            try:
+                control = CdpSession(self._browser_ws_url(self._endpoint), timeout_s=2)
+                control.start()
+                control.send("Browser.close")
+                end = time.monotonic() + 3
+                while time.monotonic() < end:
+                    try:
+                        self._browser_ws_url(self._endpoint)
+                    except Exception:
+                        break
+                    time.sleep(0.05)
+            except Exception:
+                pass  # Fall back to terminating the owned process tree.
+            finally:
+                if control is not None:
+                    control.close()
+        if process.poll() is None and os.name == "nt":
+            # Chromium is a process tree. Killing only its parent can leave a
+            # profile lock behind and make the next launch immediately exit.
+            with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+                subprocess.run(
+                    ["taskkill.exe", "/PID", str(process.pid), "/T", "/F"],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, timeout=10,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+        if process.poll() is None:
+            with contextlib.suppress(OSError):
+                process.terminate()
         try:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             with contextlib.suppress(OSError):
                 process.kill()
+            process.wait(timeout=5)
+        if self._stderr_reader is not None:
+            self._stderr_reader.join(timeout=2)
+            self._stderr_reader = None
+        self._last_exit_code = process.poll()
 
     def _ensure_session(self, endpoint: str, deadline_s: float = 5.0) -> bool:
-        ws_url = None
         end = time.monotonic() + deadline_s
         while time.monotonic() < end:
+            session = None
             try:
                 ws_url = self._browser_ws_url(endpoint)
-                break
-            except Exception:
+                session = CdpSession(ws_url, timeout_s=min(self._timeout_s, deadline_s))
+                session.start()
+                session.send("Target.getTargets")
+                self._session = session
+                self._endpoint = endpoint
+                self._last_error = None
+                return True
+            except Exception as exc:
+                self._last_error = str(exc)[:2048]
+                if session is not None:
+                    session.close()
+                if self._process is not None and self._process.poll() not in (None, 0):
+                    return False
                 time.sleep(0.25)
-        if ws_url is None:
-            return False
-        try:
-            session = CdpSession(ws_url, timeout_s=self._timeout_s)
-            session.start()
-        except (WsError, CdpError):
-            return False
-        self._session = session
-        self._endpoint = endpoint
-        return True
+        return False
 
     @staticmethod
     def _browser_ws_url(endpoint: str) -> str:
+        if "/devtools/" in endpoint:
+            return endpoint
         http = endpoint.strip().replace("ws://", "http://").replace("wss://", "https://")
         if http.endswith("/"):
             http = http.rstrip("/")
@@ -337,17 +436,12 @@ class BrowserManager:
             if not infos:
                 raise BrowserError("TARGET_NOT_FOUND", "no page target; open one first")
             target_id = infos[0]["targetId"]
-        if domain is not None and (target_id, domain) not in self._domains:
+        if target_id not in self._attached:
             result = session.send("Target.attachToTarget", {"targetId": target_id, "flatten": True})
             self._attached[target_id] = result["sessionId"]
+        if domain is not None and (target_id, domain) not in self._domains:
             session.send(f"{domain}.enable", {}, session_id=self._attached[target_id])
             self._domains.add((target_id, domain))
-        else:
-            if target_id not in self._attached:
-                result = session.send(
-                    "Target.attachToTarget", {"targetId": target_id, "flatten": True}
-                )
-                self._attached[target_id] = result["sessionId"]
         return session, self._attached[target_id]
 
     def targets(self) -> list[dict[str, Any]]:
@@ -488,13 +582,17 @@ class BrowserManager:
         )
         nodes = result.get("nodes", [])
         kept: list[dict[str, Any]] = []
+        self._elements = {key: value for key, value in self._elements.items()
+                          if value[0] != target_id}
         for node in nodes[:max_nodes]:
+            backend_id = node.get("backendDOMNodeId")
+            element_id = f"node:{self._generation}:{backend_id}" if backend_id else None
+            if element_id:
+                self._elements[element_id] = (target_id, int(backend_id))
             kept.append(
                 {
                     "node_id": node.get("nodeId"),
-                    "element_id": "node:" + str(node["backendDOMNodeId"])
-                    if node.get("backendDOMNodeId")
-                    else None,
+                    "element_id": element_id,
                     "role": (node.get("role") or {}).get("value"),
                     "name": _short_name((node.get("name") or {}).get("value")),
                     "value": _short_name(node.get("value")),
@@ -538,12 +636,12 @@ class BrowserManager:
             if not selector:
                 raise BrowserError("INVALID_ARGUMENT", "Provide a selector or x/y coordinates")
             if selector.startswith("node:"):
-                try:
-                    node_id = int(selector[5:])
-                except ValueError:
+                reference = self._elements.get(selector)
+                if reference is None or reference[0] != target_id:
                     raise BrowserError(
                         "INVALID_ARGUMENT", "Use an element_id from a fresh snapshot"
-                    ) from None
+                    )
+                node_id = reference[1]
                 box = self.call(
                     target_id,
                     "DOM.getBoxModel",
@@ -824,13 +922,18 @@ class BrowserManager:
         session, session_id = self._session_for(target_id, "Runtime")
         events = session.events(
             session_id=session_id,
-            methods={"Runtime.consoleAPICalled"},
+            methods={"Runtime.consoleAPICalled", "Runtime.exceptionThrown"},
             limit=limit,
             wait_s=0.5,
         )
         out: list[dict[str, Any]] = []
         for event in events:
             params = event.get("params", {})
+            if event.get("method") == "Runtime.exceptionThrown":
+                out.append({"type": "error", "text": _exception_text(
+                    params.get("exceptionDetails", {}),
+                )})
+                continue
             text = " ".join(_arg_text(arg) for arg in params.get("args", []))
             out.append({"type": params.get("type", "log"), "text": text[:500]})
         return out[:limit]

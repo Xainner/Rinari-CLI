@@ -38,6 +38,12 @@ TABLES_AFTER_MIGRATIONS = {
     "episodic_memory",
     "pattern_memory",
     "memory_suppressions",
+    "memory_sources",
+    "memory_source_suppressions",
+    "memory_conversation_controls",
+    "memory_candidates",
+    "memory_privacy_ledger",
+    "memory_record_suppressions",
     "context_pins",
     "network_rules",
     "network_events",
@@ -96,6 +102,7 @@ def test_migrate_fresh_database_applies_all(db):
         26,
         27,
         28,
+        29,
     ]
     assert _table_names(db) == TABLES_AFTER_MIGRATIONS
 
@@ -104,7 +111,7 @@ def test_migrate_is_idempotent(db):
     runner = MigrationRunner(db, FakeClock())
     runner.migrate()
     assert runner.migrate() == []
-    assert runner.current_version() == 28
+    assert runner.current_version() == 29
 
 
 def test_migrations_are_replayed_from_on_disk(db, tmp_path):

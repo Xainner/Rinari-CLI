@@ -1,27 +1,13 @@
 """Production SubagentRunner: scoped AgentLoop per subagent (phase 6).
 
-Isolation guarantees (harness.md 111-115, AGENTS.md 19):
-
-- tool allowlist: the subagent's ToolRegistry contains only the tools its
-  AgentDefinition allows (never the whole parent registry);
-- permission profile: read-only agents get PermissionProfile.READ_ONLY
-  (any write is denied by the policy engine, not by prompt text);
-- writes are confined: writer subagents run in their own worktree, which is
-  the only writable root; without a worktree a writer may use the project
-  root (single-writer sessions only);
-- budgets: per-agent model/tool/wall ceilings via the injected BudgetMeter;
-- cancellation: a child token linked to the parent session token
-  (propagates both directions: parent cancel kills in-flight subagents);
-- approvals: subagents never inherit approval prompts — an ASK decision
-  resolves to deny (a subagent cannot silently gain consent the user never
-  gave for its actions);
-- output: a structured AgentResult (evidence refs, files changed,
-  validation block) — reporting, not a new trusted system prompt.
+Children inherit the parent catalog and permission ceiling. Explicit agent
+restrictions narrow that scope. Approvals route through the parent's consent
+surface; budgets and cancellation remain linked to the spawning turn.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -88,6 +74,8 @@ class SubagentRuntimeConfig:
     runtime_policy: str = ""
     event_sink: Any = None
     hook_sink: Any = None
+    parent_runtime: Any = None  # late-bound parent ToolRuntime
+    activity_sink: Any = None
     project_instructions: Any = ()
     parent_profile: str = "workspace"
     caller_for: Any = None  # (agent_name) -> ModelCaller | None; None = inherit
@@ -102,11 +90,14 @@ class _SubagentRunner:
         cfg = self._config
         definition = spec.definition
         tool_ctx = self._build_tool_ctx(spec)
+        self._activity(
+            spec, "agent.context", {"cwd": str(tool_ctx.cwd), "profile": tool_ctx.profile.value}
+        )
         registry = self._build_registry(spec)
         runtime = ToolRuntime(
             registry,
             cfg.policy,
-            ApprovalEngine(prompt=None),  # subagents never prompt; ASK -> deny
+            self._approvals(spec),
             clock=cfg.parent_session_ctx.clock,
             event_sink=(
                 (lambda event, payload: cfg.event_sink(spec.session_id, event, payload))
@@ -139,6 +130,7 @@ class _SubagentRunner:
             _make_assembler(),
             event_sink=cfg.event_sink,
             hook_sink=cfg.hook_sink,
+            activity_sink=lambda event, payload: self._activity(spec, event, payload),
             reasoning_effort=effort,
         )
         base = self._assembler_base(spec, definition)
@@ -206,6 +198,14 @@ class _SubagentRunner:
         if error:
             status = "failed"
 
+        import contextlib
+
+        if tool_ctx.browser is not None:
+            with contextlib.suppress(Exception):
+                tool_ctx.browser.close()
+        for process in tool_ctx.processes.list():
+            with contextlib.suppress(Exception):
+                tool_ctx.processes.kill(process)
         files_changed = self._collect_files(spec, content)
         patch, branch, commit, conflicts = "", None, None, ()
         if spec.worktree is not None and cfg.worktrees is not None and status == "completed":
@@ -249,7 +249,26 @@ class _SubagentRunner:
     def _build_registry(self, spec: SubagentRunSpec) -> ToolRegistry:
         definition = spec.definition
         registry = ToolRegistry()
-        for tool in all_native_tools():
+        parent = self._config.parent_runtime() if self._config.parent_runtime else None
+        source = parent.registry if parent is not None else self._config.base_registry
+        tools = (
+            [source.get(name) for name in source.names()]
+            if source is not None
+            else all_native_tools()
+        )
+        for tool in tools:
+            if tool is None or tool.name.startswith(("agent.", "channel.", "capability.")):
+                continue
+            # Artifact import is the channel-bound half of attachment
+            # delivery. Children must not inherit it with a stale host binding.
+            if tool.name == "artifact.import":
+                continue
+            if definition.allows(tool.name):
+                registry.register(tool)
+        # Discovery closures must search the restricted child catalog.
+        from rinari.capability_search import capability_activation_tools, capability_search_tool
+
+        for tool in [capability_search_tool(registry), *capability_activation_tools(registry)]:
             if definition.allows(tool.name):
                 registry.register(tool)
         return registry
@@ -257,53 +276,98 @@ class _SubagentRunner:
     def _build_tool_ctx(self, spec: SubagentRunSpec):
         cfg = self._config
         parent_ctx = cfg.parent_session_ctx
-        from rinari.policy.sandbox import ProcessLimits
         from rinari.tools.native.process import ProcessRegistry
 
         definition = spec.definition
         worktree_path: Path | None = spec.worktree.path if spec.worktree else None
         cwd = worktree_path or (spec.project_root or parent_ctx.cwd)
-        read_only = definition.profile == "read-only"
-        if worktree_path is not None:
-            write_roots = (worktree_path,)
-        elif read_only:
-            write_roots = ()
-        else:
-            write_roots = (cwd,)
-        sandbox = cfg.sandbox_factory(
-            PermissionProfile.READ_ONLY if read_only else PermissionProfile.WORKSPACE,
-            cwd,
-            write_roots,
+        profile = parent_ctx.profile
+        rank = {
+            PermissionProfile.READ_ONLY: 0,
+            PermissionProfile.WORKSPACE: 1,
+            PermissionProfile.FULL_ACCESS: 2,
+        }
+        if definition.profile != "inherit":
+            requested = PermissionProfile(definition.profile)
+            if rank[requested] < rank[profile]:
+                profile = requested
+        from rinari.policy.sandbox import FilesystemSandbox
+        from rinari.tools.exposure import ToolExposure
+
+        parent_sandbox = parent_ctx.sandbox
+        sandbox = FilesystemSandbox(
+            read_root=cwd if worktree_path else parent_sandbox.read_root,
+            write_roots=()
+            if profile == PermissionProfile.READ_ONLY
+            else ((cwd,) if worktree_path else parent_sandbox.write_roots),
+            unrestricted=profile == PermissionProfile.FULL_ACCESS and parent_sandbox.unrestricted,
+            unrestricted_reads=parent_sandbox.unrestricted_reads or parent_sandbox.unrestricted,
+            approved_read_roots=parent_sandbox.approved_read_roots,
         )
-        from rinari.tools.definition import ToolContext
+        token = _LinkedToken(spec.token, getattr(parent_ctx, "cancellation", None))
+        from rinari.browser import BrowserManager
+        from rinari.tools.activity import activity_output_sink
 
-        parent_token = getattr(parent_ctx, "cancellation", None)
-        # The ctx-level token reflects the same cancellation surface as the
-        # turn-level linked token: orchestrator cancel or session cancel.
-        token = _LinkedToken(spec.token, parent_token)
-
-        return ToolContext(
+        browser = BrowserManager(
+            session_id=f"{spec.session_id}-{spec.agent_id}",
+            home_root=(parent_ctx.user_home or parent_ctx.artifact_root) / ".rinari",
+        )
+        return replace(
+            parent_ctx,
             session_id=f"{spec.session_id}::{spec.agent_id}",
-            kind=parent_ctx.kind,
             cwd=cwd,
             project_root=spec.project_root,
-            user_home=parent_ctx.user_home,
-            profile=PermissionProfile.READ_ONLY if read_only else PermissionProfile.WORKSPACE,
+            profile=profile,
             sandbox=sandbox,
-            limits=ProcessLimits(timeout_s=60, max_output_bytes=128 * 1024),
-            artifact_root=parent_ctx.artifact_root,
-            clock=parent_ctx.clock,
             cancellation=token,
             processes=ProcessRegistry(),
-            web=getattr(parent_ctx, "web", None),
-            network=getattr(parent_ctx, "network", None),
-            credentials=getattr(parent_ctx, "credentials", None),
-            validation=getattr(parent_ctx, "validation", None),
-            memory=getattr(parent_ctx, "memory", None),
-            context_retrieval=getattr(parent_ctx, "context_retrieval", None),
-            lsp=getattr(parent_ctx, "lsp", None),
-            project_trusted=getattr(parent_ctx, "project_trusted", False),
+            exposure=ToolExposure(),
+            browser=browser,
+            pty=None,
+            channel_host=None,
+            memory_source=None,
+            ask_user=None,
+            web_snapshots={},
+            change_tracker=None,
+            worktree=None,
+            output_sink=activity_output_sink(
+                lambda event, payload: self._activity(spec, event, payload)
+            ),
         )
+
+    def _approvals(self, spec):
+        parent = self._config.parent_runtime() if self._config.parent_runtime else None
+        if parent is None:
+            return ApprovalEngine(prompt=None)
+        cancellation = _LinkedToken(spec.token, self._config.parent_token)
+
+        class InheritedApprovals:
+            def check(self, request):
+                return parent.approvals.check(
+                    replace(
+                        request,
+                        session_id=spec.session_id,
+                        cancellation=cancellation,
+                        description=(
+                            f"[{spec.definition.name} · {spec.agent_id}] {request.description}"
+                        ),
+                    )
+                )
+
+        return InheritedApprovals()
+
+    def _activity(self, spec, event, payload):
+        if self._config.activity_sink is not None:
+            self._config.activity_sink(
+                "agent.activity",
+                {
+                    **payload,
+                    "agent_id": spec.agent_id,
+                    "agent": spec.definition.name,
+                    "child_event": event,
+                    "objective": spec.objective,
+                },
+            )
 
     def _assembler_base(self, spec: SubagentRunSpec, definition) -> Any:
         cfg = self._config

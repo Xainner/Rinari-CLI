@@ -92,6 +92,34 @@ def memory_remember(input: dict, ctx: ToolContext) -> ToolResult:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "text is required")
     if len(text.strip()) > 4096:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "text exceeds 4096 characters")
+    if scope == "user" and not service.extraction_allowed(ctx.session_id):
+        return _fail(
+            ToolErrorCode.PERMISSION_DENIED,
+            "memory is excluded for this conversation; owner must re-enable it explicitly",
+        )
+    if scope == "user":
+        source = getattr(ctx, "memory_source", None)
+        if not isinstance(source, dict) or source.get("session_id") != ctx.session_id:
+            return _fail(
+                ToolErrorCode.PERMISSION_DENIED,
+                "user memory writes require a validated owner-message source",
+            )
+        if source.get("text") != text.strip() or not source.get("message_id"):
+            return _fail(
+                ToolErrorCode.APPROVAL_REQUIRED,
+                "user memory must quote the validated owner message exactly",
+            )
+        candidate = service.capture_owner_message(
+            ctx.session_id, source["message_id"], source["text"]
+        )
+        if candidate is None:
+            return _fail(
+                ToolErrorCode.PERMISSION_DENIED,
+                "the owner-message source is unavailable or has been withdrawn",
+            )
+        if candidate.get("status") != "accepted":
+            return _ok({"pending": True, "candidate": candidate})
+        return _ok({"id": candidate["memory_id"], "candidate": candidate})
     provenance = input.get("provenance")
     if provenance is not None and not isinstance(provenance, str):
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "provenance must be a string")
@@ -209,6 +237,13 @@ def memory_update(input: dict, ctx: ToolContext) -> ToolResult:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "scope must be user or project")
     if not isinstance(memory_id, str) or not memory_id:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "id is required")
+    if scope == "user":
+        source = getattr(ctx, "memory_source", None)
+        if not isinstance(source, dict) or source.get("session_id") != ctx.session_id:
+            return _fail(
+                ToolErrorCode.PERMISSION_DENIED,
+                "user memory updates require a validated owner-message source",
+            )
     expected_revision = input.get("expected_revision")
     if scope == "user" and (
         isinstance(expected_revision, bool)
@@ -222,6 +257,13 @@ def memory_update(input: dict, ctx: ToolContext) -> ToolResult:
     text, err = _optional_str(input, "text", max_len=4096)
     if err is not None:
         return err
+    if scope == "user":
+        source = getattr(ctx, "memory_source", None)
+        if text is None or source.get("text") != text:
+            return _fail(
+                ToolErrorCode.APPROVAL_REQUIRED,
+                "user memory updates must quote the validated owner message exactly",
+            )
     topic, err = _optional_str(input, "topic", max_len=128)
     if err is not None:
         return err

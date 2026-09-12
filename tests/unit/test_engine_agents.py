@@ -61,7 +61,7 @@ def test_agent_list_has_builtins_with_empty_assignments(server) -> None:
     names = {a["name"] for a in result["agents"]}
     assert {"explore", "reviewer", "debugger", "researcher", "implementer", "verifier"} <= names
     explore = next(a for a in result["agents"] if a["name"] == "explore")
-    assert explore["profile"] == "read-only"
+    assert explore["profile"] == "inherit"
     assert explore["assignment"] == {
         "model": None,
         "fallback": None,
@@ -116,7 +116,9 @@ def test_agent_config_set_get_and_clear_effort(server) -> None:
     assert nulled["agent"]["assignment"]["effort"] is None
 
     bad = _err(
-        server.handle_line(_req("e4", "agent.config.set", {"agent": "explore", "effort": "ultra"}))
+        server.handle_line(
+            _req("e4", "agent.config.set", {"agent": "explore", "effort": "invalid"})
+        )
     )
     assert bad["code"] == "INVALID_PARAMS"
     # Rejected values never persist.
@@ -130,9 +132,23 @@ def test_agent_effort_store_roundtrip_and_coercion(services) -> None:
     assert store.get("explore").effort == "low"
     # Unknown values never persist: ValueError at set, None on foreign reads.
     with pytest.raises(ValueError):
-        store.set("explore", effort="ultra")
+        store.set("explore", effort="invalid")
     assert store.get("explore").effort == "low"
     assert store.set("explore", clear_effort=True).effort is None
+
+
+@pytest.mark.parametrize("effort", ["none", "minimal", "xhigh", "max", "ultra"])
+def test_extended_agent_effort_roundtrip(server, effort) -> None:
+    result = _ok(
+        server.handle_line(
+            _req("extended-set", "agent.config.set", {"agent": "explore", "effort": effort})
+        )
+    )
+    assert result["agent"]["assignment"]["effort"] == effort
+    current = _ok(
+        server.handle_line(_req("extended-get", "agent.config.get", {"agent": "explore"}))
+    )
+    assert current["agent"]["assignment"]["effort"] == effort
 
 
 def test_model_capabilities_matrix_with_unknowns(server) -> None:

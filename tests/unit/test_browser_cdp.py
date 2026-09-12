@@ -572,7 +572,114 @@ def test_ws_recv_timeout(fake_cdp) -> None:
     with pytest.raises(WsError) as exc_info:
         client.recv(timeout_s=0.3)
     assert exc_info.value.code == "WS_TIMEOUT"
+    assert not client.closed
     client.close()
+
+
+@pytest.mark.parametrize("split", [1, 2, 3, 5, 9])
+def test_ws_preserves_partial_frame_across_idle(split) -> None:
+    left, right = socket.socketpair()
+    client = WebSocketClient()
+    client._sock = left
+    payload = "Mañana".encode()
+    frame = b"\x81\x7e" + struct.pack(">H", len(payload)) + payload
+    try:
+        right.sendall(frame[:split])
+        with pytest.raises(WsError, match="Timed out"):
+            client.recv(timeout_s=0.02)
+        assert not client.closed
+        right.sendall(frame[split:])
+        assert client.recv(timeout_s=1) == "Mañana"
+    finally:
+        client.close()
+        right.close()
+
+
+def test_ws_preserves_fragmented_message_and_ping_across_idle() -> None:
+    left, right = socket.socketpair()
+    client = WebSocketClient()
+    client._sock = left
+    try:
+        right.sendall(b"\x01\x03uno\x89\x01x")
+        with pytest.raises(WsError, match="Timed out"):
+            client.recv(timeout_s=0.02)
+        right.sendall(b"\x80\x03dos")
+        assert client.recv(timeout_s=1) == "unodos"
+        assert right.recv(64)[0] == 0x8A  # masked pong from client
+    finally:
+        client.close()
+        right.close()
+
+
+def test_ws_preserves_frame_received_with_upgrade_headers() -> None:
+    left, right = socket.socketpair()
+    client = WebSocketClient()
+    client._sock = left
+    try:
+        right.sendall(b"HTTP/1.1 101 Switching Protocols\r\n\r\n\x81\x02ok")
+        assert client._read_http_response(left)[0] == 101
+        assert client.recv(timeout_s=1) == "ok"
+    finally:
+        client.close()
+        right.close()
+
+
+def test_cdp_idle_and_command_timeout_do_not_disconnect(fake_cdp) -> None:
+    session = _cdp_session(fake_cdp)
+    try:
+        time.sleep(1.2)
+        assert session.fatal is None
+        with pytest.raises(CdpError, match="timed out"):
+            session.send("Target.slow", timeout_s=0.02)
+        assert session.send("Target.getTargets")["targetInfos"]
+        assert session.fatal is None
+    finally:
+        session.close()
+
+
+def test_manager_reconnect_clears_target_and_element_references(tmp_path, fake_cdp) -> None:
+    manager = _manager(tmp_path)
+    try:
+        manager.connect(fake_cdp.base_url)
+        manager.evaluate("t1", "document.title")
+        old = manager._session
+        manager._elements["node:old"] = ("t1", 1)
+        manager.connect(fake_cdp.base_url)
+        assert old.closed
+        assert not manager._attached and not manager._domains and not manager._elements
+        with pytest.raises(BrowserError, match="fresh snapshot"):
+            manager.click("t1", selector="node:old")
+        assert manager.evaluate("t1", "document.title")["value"] == "Fake Title"
+    finally:
+        manager.close()
+
+
+def test_manager_keeps_one_target_session_for_all_domains(tmp_path, fake_cdp) -> None:
+    manager = _manager(tmp_path)
+    try:
+        manager.connect(fake_cdp.base_url)
+        manager.evaluate("t1", "document.title")
+        manager.screenshot("t1")
+        manager.a11y_tree("t1")
+        calls = [call for call in fake_cdp.commands if call[0] == "Target.attachToTarget"]
+        assert len(calls) == 1
+        assert manager.console_events("t1")
+    finally:
+        manager.close()
+
+
+def test_console_includes_uncaught_javascript_errors(tmp_path, fake_cdp) -> None:
+    manager = _manager(tmp_path)
+    try:
+        manager.connect(fake_cdp.base_url)
+        session, target_session = manager._session_for("t1", "Runtime")
+        session._events.put({
+            "method": "Runtime.exceptionThrown", "sessionId": target_session,
+            "params": {"exceptionDetails": {"exception": {"description": "Error: broken game"}}},
+        })
+        assert {"type": "error", "text": "Error: broken game"} in manager.console_events("t1")
+    finally:
+        manager.close()
 
 
 def test_ws_rejects_bad_accept_key() -> None:

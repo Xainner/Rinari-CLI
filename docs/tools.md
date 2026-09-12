@@ -1970,3 +1970,31 @@ a replacement or automatically send again. Receiving an image does not authorize
 generation. Visual provider content is materialized only at the adapter boundary from
 validated, session-scoped image references; events/history contain references, not
 base64. Original files remain distinct from reduced visual inputs.
+
+### Browser connection reliability
+
+Browser tools are discoverable with `capability.search` (`query: browser`,
+`load: true`). Search before concluding that browser testing is unavailable.
+An HTTP 200 is server evidence, not a functional or visual browser test.
+
+`browser.launch` respects an explicit executable or configured CDP endpoint.
+Automatic discovery checks PATH, then Windows installation directories and App
+Paths registry entries for Edge/Chrome. It uses a dedicated session profile.
+Each runtime gets a unique profile directory below its session directory. Code
+creates a runtime per turn and closes its owned browser at turn end, including
+when SessionEnd hooks fail. This avoids Chrome exit 21 from a prior runtime's
+profile lock. External browser connections are disconnected without terminating
+the external browser. A new turn starts fresh browser state.
+Launch/connect results and failures include bounded diagnostics (selected
+executable, last connection error and up to 16 KiB of browser stderr).
+
+Idle CDP connections remain open independently of command timeouts. An explicit
+`browser.connect` refreshes target sessions and invalidates old element IDs;
+obtain a new snapshot before acting. Recovery never replays clicks or typing.
+`browser.launch` cleans up a dead managed browser before relaunching, while
+closing an external connection does not terminate its browser process.
+
+Real local-browser regression (temporary profile, loopback page, 31-second idle,
+keyboard, capture, console, reconnect and relaunch): set
+`RINARI_TEST_REAL_BROWSER=1` and run
+`uv run pytest tests/e2e/test_browser_windows.py -q -s`.

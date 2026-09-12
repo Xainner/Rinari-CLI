@@ -94,6 +94,7 @@ class CdpSession:
         try:
             self._ws.send(json.dumps(message, separators=(",", ":")))
         except WsError as exc:
+            self._waiters.pop(request_id, None)
             raise _wrap_fatal(exc) from exc
         try:
             outcome = waiter.get(timeout=timeout_s or self._timeout_s)
@@ -183,6 +184,8 @@ class CdpSession:
                 try:
                     raw = self._ws.recv(timeout_s=1.0)
                 except WsError as exc:
+                    if exc.code == "WS_TIMEOUT":
+                        continue  # Reader polling is independent of command deadlines.
                     self._fail(exc)
                     return
                 if raw is None:

@@ -318,6 +318,7 @@ class WorktreeBaselineRepository:
 
 
 def _message_to_record(row: dict) -> SessionMessageRecord:
+    row = dict(row)
     return SessionMessageRecord(
         id=row["id"],
         session_id=row["session_id"],
@@ -329,7 +330,7 @@ def _message_to_record(row: dict) -> SessionMessageRecord:
         name=row["name"],
         created_at=row["created_at"],
         turn_id=row["turn_id"],
-        images=json.loads(row["images_json"]) if "images_json" in row.keys() and row["images_json"] else None,
-        attachments=json.loads(row["attachments_json"]) if "attachments_json" in row.keys() and row["attachments_json"] else None,
-        display_content=row["display_content"] if "display_content" in row.keys() else None,
+        images=json.loads(row["images_json"]) if row.get("images_json") else None,
+        attachments=json.loads(row["attachments_json"]) if row.get("attachments_json") else None,
+        display_content=row.get("display_content"),
     )
