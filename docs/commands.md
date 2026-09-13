@@ -817,7 +817,7 @@ Runs the verification planner and records structured validation results.
 
 ## `engine`
 
-Machine transport for desktop clients (Rinari Code Engine Protocol v1).
+Machine transport for desktop clients (Rinari Agent Engine Protocol v1).
 
 ```bash
 rinari engine --stdio
@@ -884,9 +884,13 @@ Slice 11 adds workflow: `session.queue.add/list/clear` (bounded FIFO,
 auto-runs after the live turn with normal turn boundaries + approvals,
 `session.queue.updated` events), `profile_bundle.list/get/create/apply/remove`
 (soul + mode + per-agent models applied through the existing setters with
-an applied-report; no policy invention), and `rinari code [path] [--session]`
-handoff (binary via RINARI_CODE_BIN/PATH, explicit --project/--session args
-for single-instance routing).
+an applied-report; no policy invention), and `rinari desktop [path] [--session id]`
+handoff to Rinari Agent (`rinari code` remains a compatibility alias).
+Binary resolution: explicit `--binary`, then `RINARI_AGENT_BIN`, then legacy
+`RINARI_CODE_BIN`, then `rinari-agent` on PATH, then legacy `rinari-code` on PATH.
+An invalid explicit path/environment override fails instead of silently launching
+another executable. Explicit --project/--session args preserve single-instance routing.
+`rinari agent` continues to execute autonomous tasks; it does not open the desktop.
 Post-v1 lifecycle: `session.close` (`ref` → state `closed`: hidden from
 default `session.list` unless `include_closed`, restorable via resume,
 rejects new turns with `SESSION_CLOSED`; rejected with `TURN_RUNNING`
@@ -1934,7 +1938,7 @@ Grant state, semantics, and revalidation:
 
 ```text
 store         trust_entries (canonical_path PK, fingerprint, trusted_at, updated_at)
-fingerprint   git HEAD + sorted remotes (git repos), .rinari/project.toml hash
+fingerprint   git directory identity + sorted remotes (git repos), .rinari/project.toml hash
               (marker projects), canonical path digest (plain directories)
 states        trusted | not-trusted | revalidation-required | not-found
 add           always captures a fresh fingerprint (re-grant after identity change)
@@ -4128,3 +4132,22 @@ different profiles
 without ever worrying that changing the active provider or model destroys previous setup.
 
 That persistence contract should be enforced in the service layer and covered by regression tests, not merely documented in CLI help.
+
+
+## Visión: política Hermes (2026-09-12)
+
+`rinari vision show` muestra la configuración compartida con Rinari Agent.
+`rinari vision set automatic --model <modelo>` prioriza el auxiliar explícito.
+`rinari vision set native` fuerza el principal; `rinari vision set auxiliary --model
+<modelo>` utiliza el auxiliar. Los nombres anteriores `conversation` y `dedicated`
+siguen siendo válidos y son los identificadores persistidos/protocolarios.
+
+`rinari vision capability <modelo> supported|unsupported|auto` declara o elimina
+una capacidad explícita. En automático, sin auxiliar, solo una capacidad verdadera
+habilita la ruta nativa. Capacidad desconocida requiere configuración. No existen
+confirmaciones visuales por mensaje: `--confirm-unknown` se acepta como obsoleto y
+se ignora. Se mantienen las aprobaciones de acceso a archivos.
+
+
+La política común de generación y concurrencia, incluida visión auxiliar, se
+documenta en [Ejecución de visión](vision-execution.md).

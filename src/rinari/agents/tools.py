@@ -108,6 +108,9 @@ def _agent_tools(host: AgentToolHost):
                     )
                     terminal |= result is not None
                 if terminal or time.time() >= deadline:
+                    for row in rows:
+                        if row["result"] is not None:
+                            orch.note_result_delivered(row["agent_id"])
                     return ToolResult(
                         ok=True, data={"agents": rows, "timed_out": not terminal}, origin="agents"
                     )
@@ -133,6 +136,7 @@ def _agent_tools(host: AgentToolHost):
             except Exception as exc:
                 if getattr(exc, "code", "") != "AGENT_NOT_TERMINAL":
                     return _err(getattr(exc, "code", ""), str(exc))
+        orch.note_result_delivered(agent_id)
         return ToolResult(ok=True, data=_result_dict(result), origin="agents")
 
     def status(arguments, ctx):
@@ -180,6 +184,7 @@ def _agent_tools(host: AgentToolHost):
                 data={"agent_id": agent_id, "state": state, "result": None},
                 origin="agents",
             )
+        orch.note_result_delivered(agent_id)
         return ToolResult(ok=True, data=_result_dict(r), origin="agents")
 
     def synthesize(arguments, ctx):
@@ -190,6 +195,8 @@ def _agent_tools(host: AgentToolHost):
             report = orch.synthesize([str(i) for i in ids])
         except Exception as exc:
             return _err(getattr(exc, "code", ""), str(exc))
+        for agent_id in ids:
+            orch.note_result_delivered(str(agent_id))
         return ToolResult(ok=True, data=report, origin="agents")
 
     read = ("state.read",)

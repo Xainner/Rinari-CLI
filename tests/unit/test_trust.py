@@ -2,7 +2,7 @@
 
 Regression contract:
 - trust is granted per canonical path and fingerprinted at grant time;
-- a fingerprint change (git HEAD/remote moved) demands revalidation;
+- commits preserve trust; changing remotes demands revalidation;
 - untrusted projects do NOT get their RINARI.md/AGENTS.md injected into the
   prompt, and session start warns the user explicitly.
 """
@@ -93,6 +93,36 @@ def test_untrusted_status_does_not_run_git_fingerprint(services, tmp_path, monke
     assert status.fingerprint is None
 
 
+def test_trust_survives_database_reopen_and_branch_switch(services, tmp_path):
+    from dataclasses import replace
+
+    from rinari.storage.db import Database
+    from rinari.storage.repositories.trust import TrustEntryRepository
+
+    repo = _git_repo(tmp_path)
+    services.trust.add(repo)
+    _git(repo, "checkout", "-q", "-b", "another-branch")
+    db = Database(services.ctx.db.path)
+    try:
+        ctx = replace(services.ctx, db=db, trust_repo=TrustEntryRepository(db))
+        assert trust_store.TrustService(ctx).status(repo).state == STATE_TRUSTED
+    finally:
+        db.close()
+
+
+def test_legacy_grant_upgrades_only_if_still_valid(services, tmp_path):
+    repo = _git_repo(tmp_path)
+    entry = services.trust.add(repo)
+    head = _git(repo, "rev-parse", "HEAD").strip()
+    entry.fingerprint = trust_store._sha256(f"head={head}\nremotes=")
+    services.ctx.trust_repo.upsert(entry)
+    assert services.trust.status(repo).state == STATE_TRUSTED
+    assert services.ctx.trust_repo.get(str(repo.resolve())).fingerprint.startswith("git-v2:")
+    entry.fingerprint = "old-invalid-fingerprint"
+    services.ctx.trust_repo.upsert(entry)
+    assert services.trust.status(repo).state == STATE_REVALIDATION
+
+
 def test_git_timeout_does_not_call_communicate_or_wait_forever(tmp_path, monkeypatch) -> None:
     class HungGit:
         def __init__(self) -> None:
@@ -121,10 +151,12 @@ def test_trust_revalidation_on_identity_change(services, tmp_path) -> None:
     services.trust.add(repo)
     assert services.trust.status(repo).state == STATE_TRUSTED
 
-    # New commit moves the identity fingerprint.
+    # New commits preserve the identity fingerprint.
     (repo / "b.txt").write_text("v2\n", encoding="utf-8")
     _git(repo, "add", "b.txt")
     _git(repo, "commit", "-q", "-m", "change")
+    assert services.trust.status(repo).state == STATE_TRUSTED
+    _git(repo, "remote", "add", "origin", "https://example.invalid/other.git")
     assert services.trust.status(repo).state == STATE_REVALIDATION
     assert not services.trust.is_trusted(repo)
 
@@ -189,6 +221,10 @@ def test_revalidation_warns_on_resume(services, tmp_path) -> None:
     (repo / "b.txt").write_text("v2\n", encoding="utf-8")
     _git(repo, "add", "b.txt")
     _git(repo, "commit", "-q", "-m", "move")
+
+    resumed = services.sessions.resume(record.id, cwd=repo)
+    assert not any("revalidation" in w for w in resumed.warnings)
+    _git(repo, "remote", "add", "origin", "https://example.invalid/other.git")
 
     started = services.sessions.resume(record.id, cwd=repo)
     assert any("revalidation" in w for w in started.warnings)

@@ -9,6 +9,7 @@ from pathlib import Path
 from rinari.tools.definition import (
     RISK_LOW,
     SIDE_EFFECT_NONE,
+    ClassifiedAction,
     ToolContext,
     ToolDefinition,
     ToolErrorCode,
@@ -53,6 +54,9 @@ def artifact_read(input: dict, ctx: ToolContext) -> ToolResult:
     path, error = _path_for(input.get("uri"), ctx)
     if error is not None:
         return error
+    if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}:
+        return _error(ToolErrorCode.INVALID_ARGUMENT,
+                      "This artifact is an image. Use fs.read_image with this artifact URI in path.")
     try:
         start = max(0, int(input.get("start_byte", 0)))
         maximum = min(MAX_ARTIFACT_SLICE, max(1, int(input.get("max_bytes", 8192))))
@@ -147,6 +151,7 @@ def artifact_tools() -> list[ToolDefinition]:
             risk=RISK_LOW,
             side_effects=SIDE_EFFECT_NONE,
             handler=artifact_read,
+            classify=lambda _: ClassifiedAction("state.read"),
             namespace="artifact",
         ),
         ToolDefinition(
@@ -160,6 +165,7 @@ def artifact_tools() -> list[ToolDefinition]:
             risk=RISK_LOW,
             side_effects=SIDE_EFFECT_NONE,
             handler=artifact_metadata,
+            classify=lambda _: ClassifiedAction("state.read"),
             namespace="artifact",
         ),
     ]

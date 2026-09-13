@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 
+from rinari.models.images import expand_tool_images
 from rinari.models.types import (
     ROLE_TOOL,
     ChatMessage,
@@ -129,7 +130,9 @@ class OpenAICompatibleAdapter(ProviderAdapter):
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": request.model,
-            "messages": [_message_to_openai(m, tool_aliases) for m in request.messages],
+            "messages": [
+                _message_to_openai(m, tool_aliases) for m in expand_tool_images(request.messages)
+            ],
             "stream": stream,
         }
         if request.tools:
@@ -291,7 +294,8 @@ def _message_to_openai(
     if message.images:
         msg["content"] = [{"type": "text", "text": message.content or ""}] + [
             {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + i.encoded()}}
-            for i in message.images]
+            for i in message.images
+        ]
     if message.tool_calls:
         msg["tool_calls"] = [
             {

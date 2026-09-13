@@ -110,7 +110,7 @@ def handle(session: AgentSession, console: Console, message: str) -> SlashOutcom
             options["ocr"] = True
             rest = rest[6:].strip()
         elif rest.startswith("--vision "):
-            session.context.allow_unconfirmed_vision = True
+            # Compatibility spelling: visual inputs no longer require consent.
             rest = rest[9:].strip()
         try:
             prepared = prepare_attachments(

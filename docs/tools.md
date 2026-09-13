@@ -1,5 +1,15 @@
 # Rinari CLI — Tools Catalog
 
+## Contexto de imágenes (Hermes, 2026-09-12)
+
+`fs.read_image` carga la referencia solicitada mediante la política visual del
+motor. No tiene un cupo de cuatro imágenes por sesión ni interpreta frases del
+usuario. El historial conserva originales; la proyección retira lotes de herramientas
+superados y la compactación retira adjuntos antiguos. El lote visual más reciente
+permanece completo. Las restricciones se validan por bytes y por límites declarados
+del proveedor/modelo, sin omisiones silenciosas. El modo auxiliar procesa un mensaje
+por operación y conserva un derivado recuperable; reproducir historia no lo reanaliza.
+
 > Catálogo maestro de tools para un agente CLI generalista.  
 > Las tools son capacidades atómicas o casi-atómicas que el runtime puede exponer al modelo.
 
@@ -67,6 +77,9 @@ PTY (Windows) `pty.start` devuelve `DEPENDENCY_ERROR` señalando `process.*`
 
 ### Read
 - `fs.read`
+- `fs.read_image` — view local PNG/JPEG/WebP pixels through the session's vision adapter;
+  preserves an immutable artifact for history and the desktop image viewer. List folders
+  first, then inspect up to four images per batch. Filesystem permissions apply.
 - `fs.read_lines`
 - `fs.read_binary`
 - `fs.head`
@@ -1859,7 +1872,7 @@ contract, not general remote shell or a PC runner. See `durable-operations.md` f
 
 ## Tool efficiency contract (2026-09-10, local implementation)
 
-CLI inspection and Engine `tool.list` share the 105 built-in definitions. Inspection
+CLI inspection and Engine `tool.list` share the 106 built-in definitions. Inspection
 does not imply a tool has its required session host, platform support or credentials.
 Dynamic integrations are still loaded when constructing the session registry.
 
@@ -1886,7 +1899,7 @@ reuse, and downloads always refresh. Network policy remains enforced on cache hi
 
 ### Contracts and bounded composition
 
-All 105 registered built-ins now expose input and output schemas. Output fields
+All 106 registered built-ins now expose input and output schemas. Output fields
 are optional for alternative adapter success shapes and allow additive fields;
 extension-owned schemas are never replaced. Known platform/service prerequisites
 filter model exposure; inspection availability is not a permission grant.
@@ -1970,3 +1983,31 @@ a replacement or automatically send again. Receiving an image does not authorize
 generation. Visual provider content is materialized only at the adapter boundary from
 validated, session-scoped image references; events/history contain references, not
 base64. Original files remain distinct from reduced visual inputs.
+
+### Browser connection reliability
+
+Browser tools are discoverable with `capability.search` (`query: browser`,
+`load: true`). Search before concluding that browser testing is unavailable.
+An HTTP 200 is server evidence, not a functional or visual browser test.
+
+`browser.launch` respects an explicit executable or configured CDP endpoint.
+Automatic discovery checks PATH, then Windows installation directories and App
+Paths registry entries for Edge/Chrome. It uses a dedicated session profile.
+Each runtime gets a unique profile directory below its session directory. Code
+creates a runtime per turn and closes its owned browser at turn end, including
+when SessionEnd hooks fail. This avoids Chrome exit 21 from a prior runtime's
+profile lock. External browser connections are disconnected without terminating
+the external browser. A new turn starts fresh browser state.
+Launch/connect results and failures include bounded diagnostics (selected
+executable, last connection error and up to 16 KiB of browser stderr).
+
+Idle CDP connections remain open independently of command timeouts. An explicit
+`browser.connect` refreshes target sessions and invalidates old element IDs;
+obtain a new snapshot before acting. Recovery never replays clicks or typing.
+`browser.launch` cleans up a dead managed browser before relaunching, while
+closing an external connection does not terminate its browser process.
+
+Real local-browser regression (temporary profile, loopback page, 31-second idle,
+keyboard, capture, console, reconnect and relaunch): set
+`RINARI_TEST_REAL_BROWSER=1` and run
+`uv run pytest tests/e2e/test_browser_windows.py -q -s`.

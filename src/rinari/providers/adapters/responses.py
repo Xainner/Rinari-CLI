@@ -20,6 +20,7 @@ from typing import Any
 
 import httpx
 
+from rinari.models.images import expand_tool_images
 from rinari.models.types import (
     ROLE_TOOL,
     ChatMessage,
@@ -193,7 +194,9 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         payload: dict[str, Any] = {
             "model": request.model,
             "input": [
-                item for m in request.messages for item in _message_to_responses(m, tool_aliases)
+                item
+                for m in expand_tool_images(request.messages)
+                for item in _message_to_responses(m, tool_aliases)
             ],
             "stream": stream,
         }
@@ -247,9 +250,18 @@ def _message_to_responses(
         items.append(
             {
                 "role": message.role if message.role in allowed else "user",
-                "content": ([{"type": "input_text", "text": message.content or ""}] + [
-                    {"type": "input_image", "image_url": "data:image/jpeg;base64," + i.encoded()}
-                    for i in message.images]) if message.images else message.content,
+                "content": (
+                    [{"type": "input_text", "text": message.content or ""}]
+                    + [
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/jpeg;base64," + i.encoded(),
+                        }
+                        for i in message.images
+                    ]
+                )
+                if message.images
+                else message.content,
             }
         )
     for tc in message.tool_calls:

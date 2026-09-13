@@ -31,6 +31,7 @@ class ProviderErrorCode(StrEnum):
     SERVER_ERROR = "SERVER_ERROR"
     STREAM_INTERRUPTED = "STREAM_INTERRUPTED"
     TIMEOUT = "TIMEOUT"
+    VISION_UNSUPPORTED = "VISION_UNSUPPORTED"
 
 
 class ProviderError(ProviderModelError):
@@ -119,6 +120,31 @@ def classify_http_error(
         return ProviderError(message, code=ProviderErrorCode.MODEL_NOT_FOUND, **common)
     if status == 408:
         return ProviderError(message, code=ProviderErrorCode.TIMEOUT, retryable=True, **common)
+    # Only an explicit modality rejection authorizes visual fallback. A generic
+    # 400, bad image encoding, quota or authentication failure does not.
+    if status in (400, 422):
+        error = payload.get("error", {}) if isinstance(payload, dict) else {}
+        code = str(error.get("code", "")) if isinstance(error, dict) else ""
+        text = detail.lower()
+        explicit = code in {
+            "vision_not_supported",
+            "unsupported_image_input",
+            "image_input_not_supported",
+        }
+        explicit = explicit or any(
+            phrase in text
+            for phrase in (
+                "does not support image",
+                "doesn't support image",
+                "image inputs are not supported",
+                "image input is not supported",
+                "does not support vision",
+                "only supports text input",
+                "image_url is only supported by certain models",
+            )
+        )
+        if explicit:
+            return ProviderError(message, code=ProviderErrorCode.VISION_UNSUPPORTED, **common)
     if status == 422:
         return ProviderError(message, code=ProviderErrorCode.INVALID_TOOL_ARGUMENTS, **common)
     if status == 429:

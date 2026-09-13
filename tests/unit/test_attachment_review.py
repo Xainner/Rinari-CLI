@@ -232,7 +232,7 @@ def test_pdf_visual_page_outside_selected_range_is_rejected(app_ctx, tmp_path, m
         (False, False, False),
         (False, True, False),
         (None, False, False),
-        (None, True, True),
+        (None, True, False),
     ],
 )
 def test_engine_revalidates_vision_before_send(

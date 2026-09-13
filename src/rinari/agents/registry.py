@@ -2,11 +2,8 @@
 
 Project agents are markdown files with the same frontmatter mechanics as
 skills: `<root>/.rinari/agents/<name>.md`. They only load for a trusted
-project (same rule as project skills/hooks). Built-in agents can never be
-shadowed with a wider profile: a project definition with the same name
-replaces the built-in, but its profile is downgraded to read-only unless it
-is the `implementer`/`verifier` class that declares `workspace` — recorded
-as a validation issue instead of silently inherited.
+project (same rule as project skills/hooks). Omitted tools/profile inherit
+the parent session; explicit restrictions narrow that scope at execution.
 """
 
 from __future__ import annotations
@@ -16,6 +13,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from rinari.agents.definition import (
+    INHERIT,
     READ_ONLY,
     VALID_PROFILES,
     AgentBudget,
@@ -99,7 +97,7 @@ class AgentRegistry:
             tools = tuple(str(t) for t in raw_tools if t)
         elif isinstance(raw_tools, str):
             tools = tuple(t.strip() for t in raw_tools.split(",") if t.strip())
-        profile = str(fields.get("profile") or READ_ONLY)
+        profile = str(fields.get("profile") or INHERIT)
         if profile not in VALID_PROFILES:
             raise SkillError(
                 "PROFILE_INVALID", f"agent profile invalid in {path.name}: {profile!r}"

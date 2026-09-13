@@ -50,9 +50,25 @@ def register_media(dispatcher, services):
         }
 
     def support(params):
-        record = services.sessions.show(params["session_id"])
-        vision = _caller_for(services, record).capabilities().vision
-        return {"vision": vision, "known": vision is not None}
+        if params.get("session_id"):
+            record = services.sessions.show(params["session_id"])
+        else:
+            from types import SimpleNamespace
+            model = services.models.resolve(params["model_id"])
+            record = SimpleNamespace(id="", model_id=model.id, provider_id=model.provider_id)
+        caller = _caller_for(services, record)
+        from rinari.runtime.vision import visual_status
+        decision = visual_status(caller)
+        vision = caller.capabilities().vision
+        destination = caller.destination() if decision.available and hasattr(caller, "destination") else None
+        return {"vision": vision, "known": vision is not None,
+                "confirmed_for_session": False,  # Deprecated, never authorizes routing.
+                "available": decision.available, "reason": decision.reason,
+                "model_id": record.model_id,
+                "destination_model_id": destination.model_id if destination else None,
+                "destination_model": services.models.resolve(destination.model_id).alias if destination else None,
+                "destination_provider": destination.provider.alias if destination else None,
+                "route": decision.route}
 
     def receive(params):
         session = services.sessions.show(params["session_id"])
@@ -116,6 +132,9 @@ def register_media(dispatcher, services):
         if type(max_bytes) is not int or max_bytes < 1:
             raise EngineProtocolError(INVALID_PARAMS, "max_bytes must be a positive integer")
         max_bytes = min(max_bytes, 512 * 1024)
+        max_dimension = params.get("max_dimension", 512)
+        if type(max_dimension) is not int or not 32 <= max_dimension <= 2048:
+            raise EngineProtocolError(INVALID_PARAMS, "max_dimension must be between 32 and 2048")
         path = services.artifacts._storage_path(record.storage_path)
         if record.content_type in {"image/png", "image/jpeg", "image/webp"}:
             from PIL import Image, ImageOps
@@ -124,7 +143,7 @@ def register_media(dispatcher, services):
             with Image.open(path) as source:
                 image = ImageOps.exif_transpose(source).convert("RGB")
                 try:
-                    image.thumbnail((512, 512))
+                    image.thumbnail((max_dimension, max_dimension))
                     while True:
                         buffer = io.BytesIO()
                         image.save(buffer, format="JPEG", quality=80)
@@ -197,6 +216,16 @@ def register_media(dispatcher, services):
         except ValueError as exc:
             raise EngineProtocolError(INVALID_PARAMS, str(exc)) from exc
 
+    from rinari.application.vision import settings, configure
+
+    def save_vision(params):
+        try:
+            return configure(services, params)
+        except ValueError as exc:
+            raise EngineProtocolError(INVALID_PARAMS, str(exc)) from exc
+
+    dispatcher.register("vision.settings.get", lambda params: settings(services))
+    dispatcher.register("vision.settings.set", save_vision)
     dispatcher.register("session.image_support", support)
     dispatcher.register("artifact.receive_image", receive)
     dispatcher.register("artifact.delete_media", delete)

@@ -344,3 +344,21 @@ def test_restore_compact_state_on_resume(app_ctx):
     service.restore_compact_state(context)
     assert context.compact_state_text is not None
     assert "resumed goal" in context.compact_state_text
+
+
+def test_reported_visual_pressure_can_compact_media_without_dropping_text(app_ctx):
+    from types import SimpleNamespace
+    from rinari.artifacts.store import ArtifactStore
+    from rinari.context.service import ContextService
+    from rinari.runtime.agent import AgentContext
+    history = [ChatMessage(role="user", content=str(n), images=(
+        SimpleNamespace(uri=f"artifact://s/media/{n}.png", sha256=str(n)),)) for n in range(3)]
+    context = AgentContext(session_id="visual-pressure", model_ref="m", tool_ctx=None,
+                           assembler_base=AssemblerContext(), history=list(history))
+    service = ContextService(app_ctx, ArtifactStore(app_ctx))
+    assert service.maybe_compact(context, session_id="visual-pressure", window_tokens=100_000,
+                                 used_input_tokens=90_000)
+    assert len(context.history) == 3
+    assert sum(len(m.images) for m in context.history) == 1
+    assert context.history[0].retired_images
+    assert sum(len(m.images) for m in history) == 3

@@ -17,7 +17,9 @@ Design rules (AGENTS.md 21, harness.md section 69):
 from __future__ import annotations
 
 import hashlib
+import json
 import re
+from dataclasses import dataclass
 
 from rinari.application.context import AppContext
 from rinari.shared.clock import now_iso
@@ -27,6 +29,19 @@ MEM_MAX_TEXT = 4096
 MEM_MAX_SUMMARY = 400
 MEM_MAX_PROVENANCE = 256
 MEM_PROMPT_MAX_CHARS = 12000
+MEM_SOURCE_QUOTE_MAX = 4096
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryCandidate:
+    """A bounded owner-message proposal before durable memory exists."""
+
+    topic: str
+    text: str
+    kind: str
+    confidence: float
+    classification: str
+    reason: str = ""
 
 
 class MemoryConflictError(ConflictError, InvalidUsageError):
@@ -35,6 +50,7 @@ class MemoryConflictError(ConflictError, InvalidUsageError):
 
 class MemoryNotFoundError(NotFoundError, InvalidUsageError):
     """Requested live memory record is absent."""
+
 
 # Heuristic secret detection. These are recall-oriented patterns (catch real
 # secrets, tolerate some false positives: a rejected memory is cheap, a
@@ -51,6 +67,10 @@ _SENSITIVE_PATTERNS: tuple[re.Pattern, ...] = (
     re.compile(
         r"(?i)(api[_-]?key|secret|access[_-]?key|token|password|passwd|bearer)\s*[:=]\s*['\"]?"
         r"[A-Za-z0-9_\-./+=]{12,}"
+    ),
+    re.compile(
+        r"(?i)\b(?:contrase(?:ña|na)|password|passwd|token|api[ _-]?key|clave privada)\b"
+        r"\s*(?:es|is|[:=])\s*[^\s,.;]{3,}"
     ),
     re.compile(r"(?i)\bauthorization\s*:\s*(bearer|basic)\s+[A-Za-z0-9_\-./+=]{8,}"),
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY"),
@@ -107,6 +127,22 @@ class MemoryService:
     def repo(self):
         return self._ctx.memory_repo
 
+    def _user_view(self, row: dict | None) -> dict | None:
+        if row is None:
+            return None
+        view = dict(row)
+        view["sources"] = [
+            {
+                "session_id": source["session_id"],
+                "message_id": source["message_id"],
+                "source_hash": source["source_hash"],
+                "created_at": source["created_at"],
+                "revoked_at": source["revoked_at"],
+            }
+            for source in self.repo.sources_for_memory(row["id"])
+        ]
+        return view
+
     # -- internals -------------------------------------------------------------
 
     def _now(self) -> str:
@@ -154,6 +190,7 @@ class MemoryService:
         text: str,
         provenance: str,
         confidence: float,
+        source: dict | None = None,
     ) -> dict:
         """Shared remember path for user/project with conflict supersede."""
         topic_n = self._bounded(topic, "topic", 128)
@@ -173,6 +210,10 @@ class MemoryService:
                 )
             now = self._now()
             memory_id = self._ctx.ids.new(f"mem-{store}")
+            if store == "user" and self.repo.record_suppression_exists(memory_id):
+                raise InvalidUsageError(
+                    "this memory record was explicitly forgotten and cannot be restored"
+                )
 
             prefix = _normalize_topic(topic_n)
             if store == "user":
@@ -206,6 +247,24 @@ class MemoryService:
                             {"provenance": provenance, "confidence": confidence},
                             now,
                         )
+                    if source is not None:
+                        existing_sources = self.repo.sources_for_memory(row["id"], live_only=True)
+                        if not any(
+                            item["session_id"] == source["session_id"]
+                            and item["message_id"] == source["message_id"]
+                            for item in existing_sources
+                        ):
+                            self.repo.source_insert(
+                                {
+                                    "id": self._ctx.ids.new("mem-source"),
+                                    "memory_id": row["id"],
+                                    "session_id": source["session_id"],
+                                    "message_id": source["message_id"],
+                                    "source_hash": source["source_hash"],
+                                    "quote": source["quote"][:MEM_SOURCE_QUOTE_MAX],
+                                    "created_at": now,
+                                }
+                            )
                     action = "refreshed"
                     return {"id": row["id"], "store": store, "kind": kind, "action": action}
                 if store == "user":
@@ -227,6 +286,18 @@ class MemoryService:
                         "updated_at": now,
                     }
                 )
+                if source is not None:
+                    self.repo.source_insert(
+                        {
+                            "id": self._ctx.ids.new("mem-source"),
+                            "memory_id": memory_id,
+                            "session_id": source["session_id"],
+                            "message_id": source["message_id"],
+                            "source_hash": source["source_hash"],
+                            "quote": source["quote"][:MEM_SOURCE_QUOTE_MAX],
+                            "created_at": now,
+                        }
+                    )
             else:
                 self.repo.project_insert(
                     {
@@ -259,6 +330,7 @@ class MemoryService:
         topic: str,
         provenance: str = "agent",
         confidence: float = 1.0,
+        source: dict | None = None,
     ) -> dict:
         if kind not in ("preference", "rule", "fact"):
             raise InvalidUsageError("user memory kind must be preference, rule, or fact")
@@ -270,18 +342,20 @@ class MemoryService:
             text=text,
             provenance=provenance,
             confidence=confidence,
+            source=source,
         )
 
     def search_user(
         self, query: str = "", *, kind: str | None = None, limit: int = 20
     ) -> list[dict]:
-        return self.repo.user_search(query, kind=kind, limit=limit)
+        rows = self.repo.user_search(query, kind=kind, limit=limit)
+        return [self._user_view(row) for row in rows]
 
     def list_user(self, *, limit: int = 100) -> list[dict]:
-        return self.repo.user_live()[: max(1, min(limit, 500))]
+        return [self._user_view(row) for row in self.repo.user_live()[: max(1, min(limit, 500))]]
 
     def get_user(self, memory_id: str) -> dict | None:
-        return self.repo.user_get(memory_id)
+        return self._user_view(self.repo.user_get(memory_id))
 
     def update_user(
         self,
@@ -293,6 +367,7 @@ class MemoryService:
         provenance: str | None = None,
         expected_version: str | None = None,
         expected_revision: int | None = None,
+        owner_consent: bool = False,
     ) -> dict:
         with self.repo._db.transaction():
             existing = self.repo.user_get(memory_id)
@@ -330,6 +405,10 @@ class MemoryService:
                 fields["provenance"] = provenance
             next_topic = fields.get("topic", existing["topic"])
             next_text = fields.get("text", existing["text"])
+            if not owner_consent and self.requires_owner_consent(next_topic, next_text):
+                raise InvalidUsageError(
+                    "sensitive personal memory requires explicit owner approval"
+                )
             _, text_hash = _suppression_hashes(next_topic, next_text)
             if self.repo.suppression_exists(text_hash):
                 raise InvalidUsageError(
@@ -341,6 +420,7 @@ class MemoryService:
             return self.repo.user_get(memory_id)
 
     def forget_user(self, memory_id: str, *, expected_revision: int | None = None) -> bool:
+        source_sessions: set[str] = set()
         with self.repo._db.transaction():
             existing = self.repo.user_get(memory_id)
             if existing is None:
@@ -354,15 +434,636 @@ class MemoryService:
             self.repo.suppression_insert(
                 topic_hash=topic_hash, text_hash=text_hash, created_at=self._now()
             )
+            now = self._now()
+            # A forgotten fact must not be extracted again from an owner
+            # message, including when the wording is paraphrased later by a
+            # deferred extractor. Keep only message ids and a hash; the quote
+            # is not copied into the suppression ledger.
             normalized = _normalize_text(existing["text"])
+            matching = [
+                row for row in self.repo.user_live() if _normalize_text(row["text"]) == normalized
+            ]
+            lineage_ids: set[str] = set()
+            for row in matching:
+                lineage_ids.update(self.repo.user_lineage_ids(row["id"]))
+            for lineage_id in lineage_ids:
+                self.repo.record_suppression_insert(lineage_id, now)
+                for source in self.repo.sources_for_memory(lineage_id, live_only=True):
+                    source_sessions.add(source["session_id"])
+                    self.repo.source_suppression_insert(
+                        source["session_id"], source["message_id"], now
+                    )
+                    self.repo.source_revoke(source["id"], now)
             forgotten = False
             # A prior version allowed the same text under different topics.
             # Forgetting the content must remove every live user duplicate so
             # search and prompt retrieval cannot surface it through a label.
-            for row in self.repo.user_live():
-                if _normalize_text(row["text"]) == normalized:
-                    forgotten = self.repo.user_delete(row["id"]) or forgotten
-            return forgotten
+            for row in matching:
+                forgotten = self.repo.user_delete(row["id"]) or forgotten
+            self.repo.ledger_advance()
+        for session_id in source_sessions:
+            self.invalidate_compact_state(session_id)
+        return forgotten
+
+    # -- selective extraction and conversation privacy -------------------------
+
+    @staticmethod
+    def _candidate_from_text(text: str) -> MemoryCandidate | None:
+        """Parse only explicit owner language; never infer a personal fact.
+
+        The allow-list intentionally covers ordinary assistant preferences.
+        Unknown topics become review candidates, so a later classifier or the
+        owner can decide without silently persisting a sensitive inference.
+        """
+        clean = " ".join((text or "").strip().split())
+        if not clean or len(clean) > MEM_SOURCE_QUOTE_MAX:
+            return None
+        lowered = clean.casefold()
+        patterns = (
+            (r"^(?:prefiero(?: que)?|i prefer)\s+(.+)$", "preference"),
+            (r"^(?:me gusta|i like)\s+(.+)$", "preference"),
+            (r"^(?:recuerda que|remember that)\s+(.+)$", "fact"),
+            (r"^(?:siempre|always)\s+(.+)$", "rule"),
+            (r"^(?:nunca|never)\s+(.+)$", "rule"),
+        )
+        match = None
+        kind = "preference"
+        for expression, candidate_kind in patterns:
+            match = re.match(expression, clean, re.IGNORECASE)
+            if match:
+                kind = candidate_kind
+                break
+        if match is None:
+            return None
+        value = " ".join(match.group(1).strip().split())
+        if not value:
+            return None
+        topic = "preferencias" if kind == "preference" else "reglas personales"
+        sensitive_markers = (
+            "salud",
+            "médic",
+            "medic",
+            "diabet",
+            "insulin",
+            "enfermed",
+            "terapia",
+            "diagnóst",
+            "diagnost",
+            "cardió",
+            "cardio",
+            "salario",
+            "sueldo",
+            "deuda",
+            "banco",
+            "financ",
+            "tarjeta",
+            "dinero",
+            "intim",
+            "sexual",
+            "pareja",
+            "embaraz",
+            "dirección",
+            "direccion",
+            "documento",
+            "identidad",
+            "pasaporte",
+            "seguro social",
+            "contraseña",
+            "contrasena",
+            "password",
+            "passwd",
+            "api key",
+            "apikey",
+            "token",
+            "private key",
+            "clave privada",
+        )
+        # This is intentionally a closed grammar. A substring match such as
+        # ``usar mi insulina`` must remain review-gated even though it contains
+        # a harmless-looking word like ``usar``.
+        benign = (
+            r"(?:respuestas?|mensajes?)\s+(?:breves?|cortos?|detallad[oa]s?|larg[oa]s?)",
+            r"(?:que\s+)?respondas?\s+(?:en\s+)?(?:español|castellano|inglés|ingles|english)",
+            r"(?:usar|usa|utiliza)\s+(?:español|castellano|inglés|ingles|english|markdown)",
+            r"formato\s+(?:markdown|texto\s+plano|json|tabla)",
+            r"tono\s+(?:formal|casual|amable|directo|profesional)",
+            r"idioma\s+(?:español|castellano|inglés|ingles|english)",
+            r"canal\s+(?:whatsapp|telegram|discord|panel)",
+            r"(?:habla|hablemos)\s+(?:en\s+)?(?:español|castellano|inglés|ingles|english)",
+            r"zona\s+horaria\s+UTC[+-](?:0\d|1[0-4])(?::[0-5]\d)?",
+            r"timezone\s+UTC[+-](?:0\d|1[0-4])(?::[0-5]\d)?",
+        )
+        if any(marker in lowered for marker in sensitive_markers):
+            return MemoryCandidate(topic, clean, kind, 0.55, "sensitive", "requires owner consent")
+        if any(re.fullmatch(pattern, value, flags=re.IGNORECASE) for pattern in benign):
+            if re.fullmatch(
+                r"(?:respuestas?|mensajes?)\s+(?:breves?|cortos?|detallad[oa]s?|larg[oa]s?)",
+                value,
+                flags=re.IGNORECASE,
+            ):
+                topic = "preferencias.longitud"
+            elif re.fullmatch(
+                r"(?:que\s+)?respondas?\s+(?:en\s+)?(?:español|castellano|inglés|ingles|english)"
+                r"|(?:usar|usa|utiliza)\s+(?:español|castellano|inglés|ingles|english)",
+                value,
+                flags=re.IGNORECASE,
+            ) or re.fullmatch(
+                r"(?:habla|hablemos)\s+(?:en\s+)?(?:español|castellano|inglés|ingles|english)",
+                value,
+                flags=re.IGNORECASE,
+            ):
+                topic = "preferencias.idioma"
+            elif re.fullmatch(
+                r"(?:usar|usa|utiliza)\s+markdown|formato\s+(?:markdown|texto\s+plano|json|tabla)",
+                value,
+                flags=re.IGNORECASE,
+            ):
+                topic = "preferencias.formato"
+            elif re.fullmatch(
+                r"tono\s+(?:formal|casual|amable|directo|profesional)",
+                value,
+                flags=re.IGNORECASE,
+            ):
+                topic = "preferencias.tono"
+            elif re.fullmatch(
+                r"canal\s+(?:whatsapp|telegram|discord|panel)",
+                value,
+                flags=re.IGNORECASE,
+            ):
+                topic = "preferencias.canal"
+            elif re.fullmatch(
+                r"(?:zona\s+horaria\s+UTC[+-](?:0\d|1[0-4])(?::[0-5]\d)?|"
+                r"timezone\s+UTC[+-](?:0\d|1[0-4])(?::[0-5]\d)?)",
+                value,
+                flags=re.IGNORECASE,
+            ):
+                topic = "preferencias.zona_horaria"
+            return MemoryCandidate(topic, clean, kind, 0.95, "safe_preference")
+        return MemoryCandidate(topic, clean, kind, 0.5, "review", "sensitivity is unknown")
+
+    @staticmethod
+    def _source_topic(session_id: str, message_id: str) -> str:
+        source = hashlib.sha256(f"{session_id}\x00{message_id}".encode()).hexdigest()[:24]
+        return f"source:{source}"
+
+    def capture_owner_message(self, session_id: str, message_id: str, text: str) -> dict | None:
+        """Capture an explicit owner preference or queue it for review.
+
+        This is called after normal message persistence, so a crash before the
+        call leaves a recoverable source message and a later retry is safe.
+        """
+        control = self.repo.control(session_id)
+        if control is not None and control.get("mode") != "auto":
+            return None
+        if self.repo.source_suppressed(session_id, message_id):
+            return None
+        source_message = next(
+            (row for row in self._ctx.message_repo.list(session_id) if row.id == message_id),
+            None,
+        )
+        if (
+            source_message is None
+            or source_message.role != "user"
+            or source_message.content != text
+        ):
+            return None
+        candidate = self._candidate_from_text(text)
+        if candidate is None:
+            return None
+        source_hash = hashlib.sha256(_normalize_text(text).encode("utf-8")).hexdigest()
+        with self.repo._db.transaction():
+            existing = self.repo._db.query_one(
+                "SELECT id FROM memory_candidates WHERE session_id = ? AND message_id = ?",
+                (session_id, message_id),
+            )
+            if existing:
+                return self.repo.candidate_get(str(existing["id"]))
+            candidate_id = self._ctx.ids.new("mem-candidate")
+            now = self._now()
+            candidate_topic = candidate.topic
+            if candidate.classification != "safe_preference":
+                candidate_topic = self._source_topic(session_id, message_id)
+                candidate = MemoryCandidate(
+                    candidate_topic,
+                    candidate.text,
+                    candidate.kind,
+                    candidate.confidence,
+                    candidate.classification,
+                    candidate.reason,
+                )
+            if candidate.classification == "safe_preference":
+                result = self.remember_user(
+                    candidate.text,
+                    kind=candidate.kind,
+                    topic=candidate.topic,
+                    provenance=f"session:{session_id}/message:{message_id}",
+                    confidence=candidate.confidence,
+                    source={
+                        "session_id": session_id,
+                        "message_id": message_id,
+                        "source_hash": source_hash,
+                        "quote": "",
+                    },
+                )
+                memory_id = result["id"]
+                status = "accepted"
+            else:
+                memory_id = None
+                status = "pending"
+            self.repo.candidate_insert(
+                {
+                    "id": candidate_id,
+                    "session_id": session_id,
+                    "message_id": message_id,
+                    "topic": candidate.topic,
+                    # Pending sensitive/unknown text is resolved from the
+                    # owner message after consent; do not duplicate it in a
+                    # durable candidate row before approval.
+                    "text": candidate.text if status == "accepted" else "",
+                    "kind": candidate.kind,
+                    "confidence": candidate.confidence,
+                    "classification": candidate.classification,
+                    "reason": candidate.reason,
+                    "status": status,
+                    "memory_id": memory_id,
+                    "created_at": now,
+                    "resolved_at": now if status == "accepted" else None,
+                }
+            )
+            return self.repo.candidate_get(candidate_id)
+
+    def list_candidates(self, *, status: str | None = "pending", limit: int = 100) -> list[dict]:
+        rows = self.repo.candidates(status=status, limit=limit)
+        # The owner panel may preview a pending candidate, but the durable
+        # row keeps no copy of sensitive/unknown text before consent.
+        for row in rows:
+            if not row.get("text") and row.get("status") == "pending":
+                source = next(
+                    (
+                        item
+                        for item in self._ctx.message_repo.list(row["session_id"])
+                        if item.id == row["message_id"]
+                    ),
+                    None,
+                )
+                row["text"] = source.content if source is not None else ""
+        return rows
+
+    def resolve_candidate(self, candidate_id: str, decision: str) -> dict:
+        if decision not in ("allow_once", "deny"):
+            raise InvalidUsageError("candidate decision must be allow_once or deny")
+        with self.repo._db.transaction():
+            candidate = self.repo.candidate_get(candidate_id)
+            if candidate is None:
+                raise MemoryNotFoundError(f"memory candidate not found: {candidate_id}")
+            if candidate["status"] != "pending":
+                return candidate
+            if decision == "deny":
+                self.repo.candidate_resolve(
+                    candidate_id, status="denied", memory_id=None, resolved_at=self._now()
+                )
+                return self.repo.candidate_get(candidate_id)
+            control = self.repo.control(candidate["session_id"])
+            if control is not None and control.get("mode") != "auto":
+                raise InvalidUsageError("memory extraction is excluded for this conversation")
+            if self.repo.source_suppressed(candidate["session_id"], candidate["message_id"]):
+                self.repo.candidate_resolve(
+                    candidate_id, status="denied", memory_id=None, resolved_at=self._now()
+                )
+                return self.repo.candidate_get(candidate_id)
+            source_row = self._ctx.message_repo.list(candidate["session_id"])
+            source_message = next(
+                (row for row in source_row if row.id == candidate["message_id"]), None
+            )
+            if source_message is None:
+                raise MemoryNotFoundError("source message not found")
+            parsed = self._candidate_from_text(source_message.content or "")
+            if parsed is None:
+                raise InvalidUsageError("source message is no longer an eligible memory candidate")
+            quote = source_message.content or ""
+            source_hash = hashlib.sha256(_normalize_text(quote).encode("utf-8")).hexdigest()
+            result = self.remember_user(
+                parsed.text,
+                kind=parsed.kind,
+                topic=(
+                    candidate["topic"]
+                    if candidate["topic"].startswith("source:")
+                    else parsed.topic
+                ),
+                provenance=f"session:{candidate['session_id']}/message:{candidate['message_id']}",
+                confidence=float(candidate["confidence"]),
+                source={
+                    "session_id": candidate["session_id"],
+                    "message_id": candidate["message_id"],
+                    "source_hash": source_hash,
+                    "quote": "",
+                },
+            )
+            self.repo.candidate_resolve(
+                candidate_id,
+                status="accepted",
+                memory_id=result["id"],
+                resolved_at=self._now(),
+            )
+            return self.repo.candidate_get(candidate_id)
+
+    def exclude_conversation(self, session_id: str) -> dict:
+        now = self._now()
+        removed = 0
+        with self.repo._db.transaction():
+            self.repo.set_control(session_id, "excluded", now)
+            source_rows = self.repo.sources_for_session(session_id, live_only=True)
+            memory_ids = {row["memory_id"] for row in source_rows}
+            self.repo.source_revoke_for_session(session_id, now)
+            for memory_id in memory_ids:
+                if not self.repo.sources_for_memory(memory_id, live_only=True):
+                    removed = int(self.repo.user_delete(memory_id)) + removed
+            self.repo._db.execute(
+                "UPDATE memory_candidates SET status = 'denied', resolved_at = ? "
+                "WHERE session_id = ? AND status = 'pending'",
+                (now, session_id),
+            )
+            self.repo.ledger_advance()
+        return {"session_id": session_id, "mode": "excluded", "memories_removed": removed}
+
+    def conversation_control(self, session_id: str) -> dict:
+        return self.repo.control(session_id) or {"session_id": session_id, "mode": "auto"}
+
+    def extraction_allowed(self, session_id: str) -> bool:
+        control = self.repo.control(session_id)
+        return control is None or control.get("mode") == "auto"
+
+    @staticmethod
+    def requires_owner_consent(topic: str, text: str) -> bool:
+        value = f"{topic} {text}".casefold()
+        markers = (
+            "salud",
+            "médic",
+            "medic",
+            "diabet",
+            "insulin",
+            "enfermed",
+            "diagnóst",
+            "diagnost",
+            "salario",
+            "sueldo",
+            "deuda",
+            "banco",
+            "financ",
+            "tarjeta",
+            "dinero",
+            "intim",
+            "sexual",
+            "pareja",
+            "embaraz",
+            "dirección",
+            "direccion",
+            "documento",
+            "pasaporte",
+            "contraseña",
+            "contrasena",
+            "password",
+            "token",
+            "private key",
+            "clave privada",
+        )
+        return any(marker in value for marker in markers)
+
+    def delete_conversation(self, session_id: str) -> dict:
+        """Remove conversation-derived data before the session rows disappear."""
+        now = self._now()
+        excluded = self.exclude_conversation(session_id)
+        with self.repo._db.transaction():
+            for message in self._ctx.message_repo.list(session_id):
+                self.repo.source_suppression_insert(session_id, message.id, now)
+            episodic = self.repo.delete_episodic_for_session(session_id)
+            self.repo.set_control(session_id, "deleted", now)
+            # Keep the minimal source suppression tombstones and deleted
+            # conversation control so stale backups cannot re-enable deferred
+            # extraction. Quotes/candidates/source rows are removed.
+            self.repo._db.execute("DELETE FROM memory_sources WHERE session_id = ?", (session_id,))
+            self.repo._db.execute(
+                "DELETE FROM memory_candidates WHERE session_id = ?", (session_id,)
+            )
+        return {
+            **excluded,
+            "session_id": session_id,
+            "mode": "deleted",
+            "episodic_removed": episodic,
+        }
+
+    def redact_history(self, records: list) -> tuple[list, int]:
+        suppressed = self.repo.suppressed_message_ids(records[0].session_id) if records else set()
+        if not suppressed:
+            return records, 0
+        kept = []
+        redacted = 0
+        hidden_turns: set[str] = set()
+        for record in records:
+            if record.id in suppressed:
+                redacted += 1
+                if record.turn_id:
+                    hidden_turns.add(record.turn_id)
+                continue
+            if record.turn_id in hidden_turns and record.role != "user":
+                redacted += 1
+                continue
+            if record.role == "user":
+                hidden_turns.discard(record.turn_id)
+            kept.append(record)
+        return kept, redacted
+
+    def invalidate_compact_state(self, session_id: str) -> None:
+        record = self._ctx.session_repo.get(session_id)
+        if record is None or record.compact_state is None:
+            return
+        record.compact_state = None
+        record.updated_at = self._now()
+        self._ctx.session_repo.update(record)
+
+    # -- backup/recovery privacy ledger ---------------------------------------
+
+    def export_privacy_ledger(self) -> dict:
+        """Return suppression metadata only; never export memory content."""
+        ledger = {
+            "version": 1,
+            "watermark": self.repo.ledger_watermark(),
+            "memory_suppressions": [
+                dict(row)
+                for row in self.repo._db.query(
+                    "SELECT topic_hash, text_hash, created_at FROM memory_suppressions "
+                    "ORDER BY topic_hash, text_hash"
+                )
+            ],
+            "record_suppressions": [
+                dict(row)
+                for row in self.repo._db.query(
+                    "SELECT memory_id, created_at FROM memory_record_suppressions "
+                    "ORDER BY memory_id"
+                )
+            ],
+            "source_suppressions": [
+                dict(row)
+                for row in self.repo._db.query(
+                    "SELECT session_id, message_id, created_at FROM memory_source_suppressions "
+                    "ORDER BY session_id, message_id"
+                )
+            ],
+            "conversation_controls": [
+                dict(row)
+                for row in self.repo._db.query(
+                    "SELECT session_id, mode, excluded_at, deleted_at "
+                    "FROM memory_conversation_controls ORDER BY session_id"
+                )
+            ],
+        }
+        return ledger
+
+    @staticmethod
+    def privacy_ledger_digest(ledger: dict) -> str:
+        return hashlib.sha256(
+            json.dumps(ledger, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    def import_privacy_ledger(self, ledger: dict, ledger_digest: str | None = None) -> dict:
+        if not isinstance(ledger, dict) or ledger.get("version") != 1:
+            raise InvalidUsageError("unsupported privacy ledger")
+        if ledger_digest is not None and ledger_digest != self.privacy_ledger_digest(ledger):
+            raise InvalidUsageError("privacy ledger digest mismatch")
+        watermark = ledger.get("watermark")
+        if isinstance(watermark, bool) or not isinstance(watermark, int) or watermark < 0:
+            raise InvalidUsageError("privacy ledger watermark is invalid")
+        memory_rows = ledger.get("memory_suppressions", [])
+        record_rows = ledger.get("record_suppressions", [])
+        source_rows = ledger.get("source_suppressions", [])
+        control_rows = ledger.get("conversation_controls", [])
+        if not all(
+            isinstance(item, dict)
+            for item in (*memory_rows, *record_rows, *source_rows, *control_rows)
+        ):
+            raise InvalidUsageError("privacy ledger rows are invalid")
+        input_digest = self.privacy_ledger_digest(ledger)
+        source_sessions_to_refresh: set[str] = set()
+        with self.repo._db.transaction():
+            for row in memory_rows:
+                if not all(
+                    isinstance(row.get(key), str) and row.get(key)
+                    for key in ("topic_hash", "text_hash", "created_at")
+                ):
+                    raise InvalidUsageError("privacy suppression row is invalid")
+                self.repo.suppression_insert(
+                    topic_hash=row["topic_hash"],
+                    text_hash=row["text_hash"],
+                    created_at=row["created_at"],
+                )
+            for row in record_rows:
+                if not all(
+                    isinstance(row.get(key), str) and row.get(key)
+                    for key in ("memory_id", "created_at")
+                ):
+                    raise InvalidUsageError("record suppression row is invalid")
+                self.repo.record_suppression_insert(row["memory_id"], row["created_at"])
+            for row in source_rows:
+                if not all(
+                    isinstance(row.get(key), str) and row.get(key)
+                    for key in ("session_id", "message_id", "created_at")
+                ):
+                    raise InvalidUsageError("source suppression row is invalid")
+                self.repo.source_suppression_insert(
+                    row["session_id"], row["message_id"], row["created_at"]
+                )
+                source_sessions_to_refresh.add(row["session_id"])
+                affected_ids = {
+                    item["memory_id"]
+                    for item in self.repo.sources_for_message(
+                        row["session_id"], row["message_id"], live_only=True
+                    )
+                }
+                for source in self.repo.sources_for_message(
+                    row["session_id"], row["message_id"], live_only=True
+                ):
+                    self.repo.source_revoke(source["id"], self._now())
+                for memory_id in affected_ids:
+                    if not self.repo.sources_for_memory(memory_id, live_only=True):
+                        self.repo.user_delete(memory_id)
+            for row in control_rows:
+                session_id = row.get("session_id")
+                mode = row.get("mode")
+                if (
+                    not isinstance(session_id, str)
+                    or not session_id
+                    or mode not in ("auto", "excluded", "deleted")
+                ):
+                    raise InvalidUsageError("conversation control row is invalid")
+                current = self.repo.control(session_id)
+                rank = {"auto": 0, "excluded": 1, "deleted": 2}
+                if current is None or rank[mode] >= rank.get(current.get("mode", "auto"), 0):
+                    self.repo.set_control(
+                        session_id,
+                        mode,
+                        row.get("excluded_at") or row.get("deleted_at") or self._now(),
+                    )
+                if mode in ("excluded", "deleted"):
+                    messages = self._ctx.message_repo.list(session_id)
+                    if mode == "deleted":
+                        for message in messages:
+                            self.repo.source_suppression_insert(session_id, message.id, self._now())
+                    source_rows_for_session = self.repo.sources_for_session(
+                        session_id, live_only=True
+                    )
+                    affected_ids = {item["memory_id"] for item in source_rows_for_session}
+                    self.repo.source_revoke_for_session(session_id, self._now())
+                    for memory_id in affected_ids:
+                        if not self.repo.sources_for_memory(memory_id, live_only=True):
+                            self.repo.user_delete(memory_id)
+                    self.repo._db.execute(
+                        "UPDATE memory_candidates SET status = 'denied', resolved_at = ? "
+                        "WHERE session_id = ? AND status = 'pending'",
+                        (self._now(), session_id),
+                    )
+                    if mode == "deleted":
+                        self.repo.delete_episodic_for_session(session_id)
+                        self.repo._db.execute(
+                            "DELETE FROM memory_sources WHERE session_id = ?", (session_id,)
+                        )
+                        self.repo._db.execute(
+                            "DELETE FROM memory_candidates WHERE session_id = ?", (session_id,)
+                        )
+                        self.repo._db.execute(
+                            "DELETE FROM session_events WHERE session_id = ?", (session_id,)
+                        )
+                        self.repo._db.execute(
+                            "DELETE FROM session_messages WHERE session_id = ?", (session_id,)
+                        )
+                        self.repo._db.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+                    source_sessions_to_refresh.add(session_id)
+            # A stale backup can contain a forgotten live or superseded row.
+            # Purge by record id first (edited records have different text
+            # hashes), then by normalized hash before any restored prompt can
+            # see it.  Source rows are revoked before their memory is removed.
+            record_ids = {row["memory_id"] for row in record_rows}
+            text_hashes = {row.get("text_hash") for row in memory_rows}
+            all_memories = [dict(row) for row in self.repo._db.query("SELECT * FROM user_memory")]
+            for memory in all_memories:
+                _, text_hash = _suppression_hashes(memory["topic"], memory["text"])
+                if memory["id"] not in record_ids and text_hash not in text_hashes:
+                    continue
+                for source in self.repo.sources_for_memory(memory["id"], live_only=True):
+                    self.repo.source_suppression_insert(
+                        source["session_id"], source["message_id"], self._now()
+                    )
+                    source_sessions_to_refresh.add(source["session_id"])
+                    self.repo.source_revoke(source["id"], self._now())
+                self.repo.user_delete(memory["id"])
+            applied = self.repo.ledger_set_max(watermark)
+        for session_id in source_sessions_to_refresh:
+            self.invalidate_compact_state(session_id)
+        return {
+            "ledger_digest": input_digest,
+            "state_digest": self.privacy_ledger_digest(self.export_privacy_ledger()),
+            "watermark": applied,
+            "imported": True,
+        }
 
     # -- project memory ------------------------------------------------------------
 
@@ -578,24 +1279,18 @@ class MemoryService:
         tokens = self._prompt_tokens(query)
         user_rows = self._prompt_rows(self.repo.user_live(), query)
         project_rows = (
-            self._prompt_rows(self.repo.project_live(project_root), query)
-            if project_root
-            else []
+            self._prompt_rows(self.repo.project_live(project_root), query) if project_root else []
         )
         if tokens:
             # Rank both scopes together before applying the character budget;
             # unrelated user rows must not crowd a matching project fact out.
-            candidates = [(row, False) for row in user_rows] + [
-                (row, True) for row in project_rows
-            ]
+            candidates = [(row, False) for row in user_rows] + [(row, True) for row in project_rows]
             candidates.sort(
                 key=lambda item: self._prompt_rank(item[0], tokens),
                 reverse=True,
             )
         else:
-            candidates = [(row, False) for row in user_rows] + [
-                (row, True) for row in project_rows
-            ]
+            candidates = [(row, False) for row in user_rows] + [(row, True) for row in project_rows]
         lines = [
             f"- [{'project:' if is_project else ''}{row['kind']}] {row['text']}"
             for row, is_project in candidates
@@ -616,7 +1311,7 @@ class MemoryService:
                 continue
             remaining = MEM_PROMPT_MAX_CHARS - len(rendered) - 1
             if remaining > 3 and not selected:
-                selected.append(f"{line[:remaining - 1]}…")
+                selected.append(f"{line[: remaining - 1]}…")
                 rendered += f"\n{selected[-1]}"
             break
         return rendered

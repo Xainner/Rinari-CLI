@@ -422,6 +422,8 @@ _TOOL_ARG_KEYS = (
 
 
 def tool_verb(name: str) -> str:
+    if name == "fs.read_image":
+        return "view image"
     if name in _TOOL_VERB_READ or name.startswith(("fs.read", "search.", "context.retrieve")):
         return "read"
     if name.startswith("fs."):

@@ -17,7 +17,7 @@ from typing import Any
 
 import tomli_w
 
-EFFORTS = ("low", "medium", "high")
+EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 
 
 @dataclass(frozen=True, slots=True)

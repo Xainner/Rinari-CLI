@@ -466,11 +466,6 @@ def prepare_attachments(
                 image_refs = ({"uri": source.uri(), "sha256": source.sha256},)
             elif kind == "pdf" and options.get("visual_pages"):
                 image_refs = _pdf_visuals(store, source, path, options, cancellation)
-            if sum(len(entry.images) for entry in prepared) + len(image_refs) > 4:
-                raise ValueError(
-                    "At most four images may be sent to the model; "
-                    "select fewer PDF pages or use OCR"
-                )
             _check_cancel(cancellation)
             clipped = extracted[:context_remaining]
             truncated = len(clipped) < len(extracted) or warning is not None
@@ -626,10 +621,10 @@ def _validate_pdf_options(options):
     visual = options.get("visual_pages", [])
     if (
         not isinstance(visual, list)
-        or len(visual) > 4
+        or len(visual) > MAX_PDF_PAGES
         or any(type(p) is not int or p < 1 for p in visual)
     ):
-        raise ValueError("Select at most four positive PDF page numbers for vision")
+        raise ValueError("Visual page selection exceeds the document preparation limit or contains invalid pages")
     if len(set(visual)) != len(visual):
         raise ValueError("Visual page numbers must be unique")
 

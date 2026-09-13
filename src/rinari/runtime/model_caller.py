@@ -52,10 +52,17 @@ class SessionModelGateway:
         return self._current
 
     def switch(self, caller: ModelCaller) -> None:
+        for name in ("activity_sink", "event_sink", "token", "budget_getter"):
+            if hasattr(self._current, name) and hasattr(caller, name):
+                setattr(caller, name, getattr(self._current, name))
         self._current = caller
 
     def capabilities(self) -> ProviderCapabilities:
         return self._current.capabilities()
+
+    def visual_decision(self):
+        from rinari.runtime.vision import visual_status
+        return visual_status(self._current)
 
     def invoke(self, request: ModelRequest) -> ModelResponse:
         return self._current.invoke(request)

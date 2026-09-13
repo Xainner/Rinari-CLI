@@ -243,6 +243,7 @@ def test_chat_stream_without_usage_marks_unavailable() -> None:
 
 
 def test_model_capabilities_override_adapter(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr("rinari.application.credentials._keyring_backend", lambda: None)
     from rinari.application.context import build_app_context
     from rinari.application.provider_service import AddProviderInput
     from rinari.application.services import build_services

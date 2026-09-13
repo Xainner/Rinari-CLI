@@ -44,6 +44,7 @@ from rinari.cli.commands import trust as trust_cmd
 from rinari.cli.commands import undo as undo_cmd
 from rinari.cli.commands import update_cmd as update_cmd
 from rinari.cli.commands import work as work_cmd
+from rinari.cli.commands import vision as vision_cmd
 from rinari.cli.deps import CliParams, fail, set_params
 from rinari.cli.session_flow import start_flow
 from rinari.shared.errors import RinariError
@@ -61,6 +62,7 @@ app.add_typer(providers_cmd.app, name="providers")
 app.add_typer(provider_cmd.app, name="provider")
 app.add_typer(models_cmd.app, name="models")
 app.add_typer(model_cmd.app, name="model")
+app.add_typer(vision_cmd.app, name="vision")
 app.add_typer(sessions_cmd.session_app, name="session")
 app.add_typer(trust_cmd.app, name="trust")
 app.add_typer(index_cmd.app, name="index")
@@ -83,7 +85,8 @@ app.add_typer(sandbox_cmd.app, name="sandbox")
 app.add_typer(secrets_cmd.app, name="secrets")
 app.add_typer(tools_cmd.app, name="tools")
 app.command("engine", help="Machine transport for desktop clients.")(engine_cmd.engine)
-app.command("code", help="Open this project in Rinari Code (desktop).")(code_cmd.code)
+app.command("desktop", help="Open this project in Rinari Agent (desktop).")(code_cmd.code)
+app.command("code", help="Compatibility alias for 'rinari desktop'.")(code_cmd.code)
 app.command("trace", help="Inspect a session's event trace.")(trace_cmd.trace)
 app.add_typer(logs_cmd.app, name="logs")
 app.add_typer(metrics_cmd.app, name="metrics")

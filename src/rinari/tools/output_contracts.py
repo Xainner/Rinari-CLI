@@ -13,6 +13,7 @@ FIELDS = {
     ),
     "artifact.metadata": "uri:s name:s size_bytes:i mime_type:s modified_ns:i",
     "fs.read": "path:s text:s size_bytes:i sha256:s? truncated:b",
+    "fs.read_image": "uri:s sha256:s name:s path:s width:i height:i mime_type:s size_bytes:i",
     "fs.read_lines": "path:s lines:a total_lines:i? next_line:i?",
     "fs.write": "path:s bytes_written:i sha256:s",
     "fs.patch": "path:s replacements:i sha256:s",

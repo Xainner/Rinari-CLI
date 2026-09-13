@@ -39,6 +39,8 @@ DEFAULT_MAX_TOKENS = 8192
 
 class AnthropicAdapter(ProviderAdapter):
     type = "anthropic"
+    default_max_tokens = DEFAULT_MAX_TOKENS
+    tool_image_transport = "tool-result"
 
     def __init__(self, *, client=None) -> None:
         super().__init__(client=client)
@@ -251,7 +253,10 @@ def _convert_to_anthropic(
                         {
                             "type": "tool_result",
                             "tool_use_id": message.tool_call_id,
-                            "content": message.content or "",
+                            "content": ([{"type": "text", "text": message.content or "Image loaded"}] + [
+                                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image.encoded()}}
+                                for image in message.images
+                            ]) if message.images else message.content or "",
                         }
                     ],
                 }
@@ -273,8 +278,12 @@ def _convert_to_anthropic(
         content = message.content or ""
         if message.images:
             content = [{"type": "text", "text": content}] + [
-                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": i.encoded()}}
-                for i in message.images]
+                {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/jpeg", "data": i.encoded()},
+                }
+                for i in message.images
+            ]
         converted.append({"role": "user", "content": content})
     return system, _merge_adjacent(converted)
 

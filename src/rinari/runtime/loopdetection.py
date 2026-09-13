@@ -80,24 +80,32 @@ class LoopDetector:
     def __init__(self, *, repeats: int = 3, window: int = 12) -> None:
         self._repeats = max(2, repeats)
         self._window = max(4, window)
-        self._actions: list[tuple[str, str]] = []  # (tool, canonical key)
+        self._actions: list[str] = []  # canonical tool and arguments
         self._errors: list[tuple[str, str]] = []  # (signature, tool)
         self._denials: dict[str, int] = {}
         self._rewrites: dict[tuple[str, str], int] = {}
+        self._last_rewrite: tuple[str, str] | None = None
         self._subagents: list[str] = []
-        self._nudged: set[str] = set()
+        self._nudged: set[tuple[str, object]] = set()
+        self._action_serial = 0
+        self._error_serial = 0
+        self._subagent_serial = 0
+        self._reported: dict[tuple[str, object], object] = {}
 
     # -- recorders -----------------------------------------------------------
 
     def record_tool(self, name: str, arguments: object) -> None:
+        self._action_serial += 1
         key = f"{name}|{_canonical_args(arguments)}"
         self._actions.append(key)
         del self._actions[: -self._window]
         path = _canonical_path(name, arguments)
+        self._last_rewrite = (name, path) if path is not None else None
         if path is not None:
             self._rewrites[(name, path)] = self._rewrites.get((name, path), 0) + 1
 
     def record_error(self, name: str, code: str, message: str) -> None:
+        self._error_serial += 1
         signature = _error_signature(code, message)
         self._errors.append((signature, name))
         del self._errors[: -self._window]
@@ -105,6 +113,7 @@ class LoopDetector:
             self._denials[name] = self._denials.get(name, 0) + 1
 
     def record_subagent(self, objective: str) -> None:
+        self._subagent_serial += 1
         self._subagents.append(objective)
         del self._subagents[: -self._window]
 
@@ -115,9 +124,34 @@ class LoopDetector:
             detail = _DETECTORS[kind](self)
             if detail is None:
                 continue
-            action = STOP if kind in self._nudged else NUDGE
+            # An unchanged historical signal is not a second occurrence.
+            evidence = (
+                (detail, self._error_serial)
+                if kind in (KIND_SAME_ERROR,)
+                else (detail, self._action_serial)
+                if kind in (KIND_SAME_TOOL, KIND_OSCILLATION)
+                else (detail, self._subagent_serial)
+                if kind == KIND_SUBAGENT
+                else detail
+            )
+            identity = (
+                kind,
+                self._last_rewrite
+                if kind == KIND_REWRITE
+                else self._actions[-1]
+                if kind == KIND_SAME_TOOL
+                else self._errors[-1]
+                if kind == KIND_SAME_ERROR
+                else self._subagents[-1]
+                if kind == KIND_SUBAGENT
+                else kind,
+            )
+            if self._reported.get(identity) == evidence:
+                continue
+            self._reported[identity] = evidence
+            action = STOP if identity in self._nudged else NUDGE
             if action == NUDGE:
-                self._nudged.add(kind)
+                self._nudged.add(identity)
             return LoopSignal(kind=kind, detail=detail, action=action)
         return None
 
@@ -150,7 +184,9 @@ def _oscillation(det: LoopDetector) -> str | None:
 
 
 def _rewrites(det: LoopDetector) -> str | None:
-    for (name, path), count in det._rewrites.items():
+    if det._last_rewrite is not None:
+        name, path = det._last_rewrite
+        count = det._rewrites[det._last_rewrite]
         if count >= det._repeats:
             return f"{path} rewritten by {name} {count} times"
     return None

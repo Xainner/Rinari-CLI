@@ -228,16 +228,16 @@ def test_approved_external_directory_can_be_listed(project) -> None:
 
 
 def test_git_timeout_returns_tool_error(project, monkeypatch) -> None:
-    import subprocess
+    from rinari.projects._git_process import GitCommandResult
 
     tmp_path, root, _ = project
     ctx = _ctx(tmp_path, root)
     runtime, _ = _runtime(ctx, tmp_path)
 
     def timeout(*args, **kwargs):
-        raise subprocess.TimeoutExpired("git", 30)
+        return GitCommandResult("", None, timed_out=True, error="git timed out")
 
-    monkeypatch.setattr("rinari.tools.native.git.subprocess.run", timeout)
+    monkeypatch.setattr("rinari.tools.native.git.run_git", timeout)
     result = runtime.execute("git.status", {}, ctx)
     assert not result.ok
     assert result.error.code is ToolErrorCode.TIMEOUT

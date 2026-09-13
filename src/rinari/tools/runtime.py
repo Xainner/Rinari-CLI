@@ -99,6 +99,10 @@ class ToolRuntime:
         trace: dict[str, Any] | None = None,
     ) -> ToolResult:
         started = time.monotonic()
+        if not isinstance(arguments, dict):
+            return self._error(
+                ctx, ToolErrorCode.INVALID_ARGUMENT, "Tool arguments must be an object"
+            )
         started_at = now_iso(self._ctx_clock())
         requested = {"tool": tool_name, "arguments": self._redact_payload(arguments)}
         if tool_call_id:

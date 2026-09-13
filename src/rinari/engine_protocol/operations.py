@@ -13,6 +13,8 @@ from typing import Any
 
 from rinari.engine_protocol.errors import INVALID_PARAMS, EngineProtocolError
 
+MEMORY_ORIGINS = frozenset({"interactive", "owner_channel", "automation"})
+
 
 class OperationStore:
     def __init__(self, root: Path) -> None:
@@ -20,13 +22,17 @@ class OperationStore:
         self.instance = uuid.uuid4().hex
         with self.connect() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1):
+            if version not in (0, 1, 2):
                 raise RuntimeError("Unsupported operation schema")
             db.execute("""CREATE TABLE IF NOT EXISTS operations (
                 operation_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL,
                 session_id TEXT NOT NULL, turn_id TEXT NOT NULL,
-                instance TEXT NOT NULL, state TEXT NOT NULL, updated REAL NOT NULL)""")
-            db.execute("PRAGMA user_version=1")
+                instance TEXT NOT NULL, state TEXT NOT NULL, updated REAL NOT NULL,
+                memory_origin TEXT)""")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(operations)")}
+            if "memory_origin" not in columns:
+                db.execute("ALTER TABLE operations ADD COLUMN memory_origin TEXT")
+            db.execute("PRAGMA user_version=2")
 
     @contextlib.contextmanager
     def connect(self):
@@ -49,9 +55,9 @@ class OperationStore:
         state = row["state"]
         if state in {"running", "cancelling"} and row["instance"] != self.instance:
             state = "uncertain"
-        return {key: row[key] for key in ("operation_id", "session_id", "turn_id", "updated")} | {
-            "state": state
-        }
+        return {
+            key: row[key] for key in ("operation_id", "session_id", "turn_id", "updated")
+        } | {"state": state, "memory_origin": row["memory_origin"]}
 
     def claim(
         self,
@@ -63,36 +69,61 @@ class OperationStore:
         remote_target: dict | None = None,
         channel: dict | None = None,
         attachments: list | None = None,
+        *,
+        memory_origin: str = "automation",
     ) -> tuple[dict[str, Any], bool]:
-        fingerprint = hashlib.sha256(
-            json.dumps(
+        if memory_origin not in MEMORY_ORIGINS:
+            raise EngineProtocolError(INVALID_PARAMS, "Invalid memory origin")
+
+        def fingerprint(origin: str | None) -> str:
+            parts = (
                 [session_id, message, reasoning_effort]
                 + ([remote_target] if remote_target else [])
                 + ([{"channel": channel}] if channel else [])
-                + ([{"attachments": attachments}] if attachments else []),
-                ensure_ascii=False,
-                sort_keys=True,
-            ).encode()
-        ).hexdigest()
+                + ([{"attachments": attachments}] if attachments else [])
+            )
+            if origin is not None:
+                parts.append({"memory_origin": origin})
+            return hashlib.sha256(
+                json.dumps(parts, ensure_ascii=False, sort_keys=True).encode()
+            ).hexdigest()
+
+        operation_fingerprint = fingerprint(memory_origin)
+        legacy_fingerprint = fingerprint(None)
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
                 "SELECT * FROM operations WHERE operation_id=?", (operation_id,)
             ).fetchone()
             if row:
-                if row["fingerprint"] != fingerprint:
+                # Rows created by schema v1 have no origin. They can be
+                # replayed only against their old identity fingerprint and
+                # are never re-executed; new rows require the origin to
+                # remain part of the operation identity.
+                if row["memory_origin"] is None:
+                    matches = row["fingerprint"] == legacy_fingerprint
+                else:
+                    matches = (
+                        row["fingerprint"] == operation_fingerprint
+                        and row["memory_origin"] == memory_origin
+                    )
+                if not matches:
                     raise EngineProtocolError(INVALID_PARAMS, "Operation identity conflict")
                 return self.project(row), False
             db.execute(
-                "INSERT INTO operations VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO operations "
+                "(operation_id,fingerprint,session_id,turn_id,instance,state,updated,"
+                "memory_origin) "
+                "VALUES (?,?,?,?,?,?,?,?)",
                 (
                     operation_id,
-                    fingerprint,
+                    operation_fingerprint,
                     session_id,
                     turn_id,
                     self.instance,
                     "running",
                     time.time(),
+                    memory_origin,
                 ),
             )
         return self.get(operation_id) or {}, True

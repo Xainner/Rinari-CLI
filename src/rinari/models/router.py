@@ -118,6 +118,23 @@ def _unalias_response(
     )
 
 
+def scheduled(method):
+    from functools import wraps
+
+    @wraps(method)
+    def wrapped(self, provider, model_id, request, *args, **kwargs):
+        from rinari.models.execution import destination_slot
+
+        home = getattr(getattr(self._providers, "_ctx", None), "home", None)
+        check = request.cancellation.throw_if_cancelled if request.cancellation else lambda: None
+        with destination_slot(home, provider.id, check):
+            if request.on_dispatched:
+                request.on_dispatched()
+            return method(self, provider, model_id, request, *args, **kwargs)
+
+    return wrapped
+
+
 class ModelRouter:
     def __init__(
         self,
@@ -157,6 +174,9 @@ class ModelRouter:
             "vision": merged.vision,
             "max_context_window": merged.max_context_tokens,
         }
+        levels = self.reasoning_levels(self._models.resolve(model_id))
+        if levels is not None:
+            matrix["reasoning_levels"] = levels
         return {
             "capabilities": matrix,
             "supports_tools": bool(matrix["tools"]),
@@ -177,6 +197,27 @@ class ModelRouter:
             return base
         return _merge_capabilities(base, model.capabilities)
 
+    @staticmethod
+    def reasoning_levels(model):
+        metadata = model.capabilities or {}
+        levels = metadata.get("reasoning_levels")
+        if levels is None and isinstance(metadata.get("reasoning"), dict):
+            levels = metadata["reasoning"].get("supported_efforts")
+        return levels if isinstance(levels, list) else None
+
+    def _validate_reasoning(self, provider, model, request):
+        effort = request.reasoning_effort
+        if effort is None:
+            return
+        levels = self.reasoning_levels(model)
+        if not self.capabilities(provider, model.id).reasoning_effort:
+            raise InvalidUsageError("This model does not support configurable reasoning.")
+        if levels is not None and effort not in levels:
+            raise InvalidUsageError(
+                f"Reasoning level {effort!r} is not supported by model {model.alias!r}.",
+                hint=f"Supported levels: {', '.join(levels)}",
+            )
+
     def _resolve_model(self, provider: ProviderRecord, model_id: str | None):
         if model_id is None:
             raise InvalidUsageError(
@@ -192,6 +233,31 @@ class ModelRouter:
             )
         return model
 
+    def generation_request(self, provider, model, request):
+        from rinari.models.execution import policy
+
+        home = getattr(getattr(self._providers, "_ctx", None), "home", None)
+        config = policy(home)
+        generation = {
+            **(provider.settings or {}).get("generation", {}),
+            **(model.settings or {}).get("generation", {}),
+        }
+        limit = config.get("models", {}).get(model.id, generation.get("max_tokens"))
+        if limit is None:
+            limit = self.adapter(provider).default_max_tokens
+        return replace(
+            request,
+            model=model.provider_model_id,
+            max_tokens=request.max_tokens if request.max_tokens is not None else limit,
+            temperature=request.temperature
+            if request.temperature is not None
+            else generation.get("temperature"),
+            reasoning_effort=request.reasoning_effort
+            if request.reasoning_effort is not None
+            else generation.get("reasoning_effort"),
+        )
+
+    @scheduled
     def invoke(
         self,
         provider: ProviderRecord,
@@ -199,13 +265,22 @@ class ModelRouter:
         request: ModelRequest,
     ) -> ModelResponse:
         model = self._resolve_model(provider, model_id)
-        request = replace(request, model=model.provider_model_id)
+        request = self.generation_request(provider, model, request)
+        self._validate_reasoning(provider, model, request)
+        from rinari.models.visual_context import prepare_visual_payload
+
+        constraints = {
+            **(provider.settings or {}).get("vision_limits", {}),
+            **(model.settings or {}).get("vision_limits", {}),
+        }
+        request = prepare_visual_payload(request, constraints)
         real_by_alias = _alias_map_for_request(provider.endpoint, request)
         transport = _resolve_transport(provider, model)
         return _unalias_response(
             self._adapter_invoke(provider, request, transport, real_by_alias), real_by_alias
         )
 
+    @scheduled
     def invoke_stream(
         self,
         provider: ProviderRecord,
@@ -214,7 +289,15 @@ class ModelRouter:
         on_delta: Callable[[str], None],
     ) -> ModelResponse:
         model = self._resolve_model(provider, model_id)
-        request = replace(request, model=model.provider_model_id)
+        request = self.generation_request(provider, model, request)
+        self._validate_reasoning(provider, model, request)
+        from rinari.models.visual_context import prepare_visual_payload
+
+        constraints = {
+            **(provider.settings or {}).get("vision_limits", {}),
+            **(model.settings or {}).get("vision_limits", {}),
+        }
+        request = prepare_visual_payload(request, constraints)
         real_by_alias = _alias_map_for_request(provider.endpoint, request)
         transport = _resolve_transport(provider, model)
         adapter = self.adapter(provider)
@@ -247,5 +330,6 @@ class ModelRouter:
                 provider.endpoint,
                 transport=transport,
                 tool_aliases=tool_aliases,
-            )
+            ),
+            attempts=1 if any(message.images for message in request.messages) else 3,
         )

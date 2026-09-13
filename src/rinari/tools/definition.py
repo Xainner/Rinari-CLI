@@ -89,6 +89,8 @@ class ToolResult:
     presentation: Any = None
     # Internal capture only; runtime redacts and spills it before publication.
     captured_output: Any = None
+    # Validated, immutable image references; never serialized as model text.
+    images: tuple[Any, ...] = ()
 
     # Inline budget for the serialized observation envelope. Large outputs
     # should already have spilled to artifacts upstream; this is the last
@@ -259,7 +261,14 @@ class ToolContext:
     # Public web snapshots only, bounded and scoped to the runtime session.
     web_snapshots: dict[str, Any] = field(default_factory=dict)
     channel_host: Any = None
+    # Engine-private owner message provenance for a memory tool write.  The
+    # model cannot set this through a tool schema; the session host may attach
+    # it only after validating a persisted owner message.
+    memory_source: dict[str, str] | None = None
     tool_call_id: str = ""
+    artifact_store: Any = None
+    vision_allowed: bool = False
+    image_slots: int | None = None  # Deprecated compatibility field; no session quota.
 
 
 def command_text(arguments: dict) -> str:

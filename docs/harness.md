@@ -1536,6 +1536,14 @@ rinari agent "implement issue #451"
 
 They all use the same detected project context.
 
+PLAN delivers an implementation-ready proposal grounded in permitted code/document
+inspection: scope and non-goals, ordered component-level changes, important design
+decisions, risks/compatibility, verification and observable acceptance criteria.
+The shared runtime adds this deliverable contract independently of Soul, for both
+desktop and CLI sessions in PLAN. Detail scales with the task; an explicit request
+for brevity remains respected. PLAN never executes the proposed implementation or
+claims its future validation already passed.
+
 ---
 
 # 24. Session Namespace
@@ -9194,3 +9202,26 @@ Image references are stored in migration 0025. OpenAI-compatible, Responses and
 Anthropic adapters emit actual visual content only with explicit vision capability.
 Original artifact URIs remain available to tools, independently of provider-side
 thumbnail encoding. Attachment hashes participate in operation idempotency.
+
+
+## Proyección multimodal por mensaje (2026-09-12)
+
+La política visual reside en el motor y utiliza como referencia Hermes commit
+`d595e636c83aa0b9606d4e914e1140ae9c796897`. Cada adjunto pertenece a su mensaje;
+las observaciones de herramientas conservan la llamada de origen. El auxiliar
+procesa mensajes individuales y persiste derivados inmutables, identificados por
+origen, consulta, destino y opciones. El replay reutiliza derivados y nunca inicia
+análisis históricos. La proyección mantiene referencias retiradas para recuperar
+originales/observaciones sin convertirlas en píxeles enviados. El texto original
+(display_content) identifica entradas del usuario frente a mensajes internos.
+
+El transporte visual del adaptador es independiente de la capacidad del modelo:
+Anthropic recibe imágenes dentro de tool_result; Chat/Responses usa observaciones
+multimodales tras el lote completo con referencias a las llamadas. ModelRouter
+valida el presupuesto de bytes y los límites declarados; no hay cuota universal
+por número de imágenes. La presión de contexto reportada puede compactar imágenes
+sin eliminar texto. Los originales persistidos no se modifican.
+
+
+La política común de generación y concurrencia, incluida visión auxiliar, se
+documenta en [Ejecución de visión](vision-execution.md).

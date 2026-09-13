@@ -127,8 +127,17 @@ class ContextService:
 
         tail_budget = int(window * tokens.POST_COMPACT_KEEP_RATIO)
         kept = engine.select_history(history, budget_tokens=tail_budget)
+        from rinari.models.types import ModelRequest
+        from rinari.models.visual_context import select_visual_context
+
+        kept = list(
+            select_visual_context(
+                ModelRequest(model="", messages=tuple(kept)), compact=True
+            ).messages
+        )
         dropped = len(history) - len(kept)
-        if dropped <= 0:
+        retired_media = sum(len(m.images) for m in history) - sum(len(m.images) for m in kept)
+        if dropped <= 0 and retired_media <= 0:
             return False
 
         # In-place: the loop holds this same list for the next request.
@@ -147,6 +156,7 @@ class ContextService:
                 "window_tokens": window,
                 "dropped_messages": dropped,
                 "kept_messages": len(kept),
+                "retired_images": retired_media,
             },
         )
         return True

@@ -49,6 +49,7 @@ class ChatMessage:
     tool_call_id: str | None = None
     name: str | None = None
     images: tuple[Any, ...] = ()
+    retired_images: tuple[Any, ...] = ()  # Projection-only handles, never sent as pixels.
     attachments: tuple[dict[str, Any], ...] = ()
     display_content: str | None = None
 
@@ -144,6 +145,8 @@ class ModelRequest:
     messages: tuple[ChatMessage, ...]
     tools: tuple[ToolSchema, ...] = ()
     temperature: float | None = None
+    cancellation: Any = None  # Runtime-only; never serialized to providers.
+    on_dispatched: Any = None
     max_tokens: int | None = None
     reasoning_effort: str | None = None
     json_response: bool = False

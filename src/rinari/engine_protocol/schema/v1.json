@@ -16,7 +16,17 @@
     "filePreview",
     "webPreview",
     "toolAvailability",
-    "toolSummary"
+    "toolSummary",
+    "browserPage",
+    "browserView",
+    "managedProcess",
+    "processOutput",
+    "viewedImage",
+    "attachmentPreviewOptions",
+    "visionSettings",
+    "visionActivity",
+    "visualRouteStatus",
+    "modelExecutionSettings"
   ],
   "$defs": {
     "webPreview": {
@@ -322,6 +332,13 @@
         "memory.remember",
         "memory.update",
         "memory.forget",
+        "memory.candidates.list",
+        "memory.candidate.resolve",
+        "conversation.memory.status",
+        "conversation.memory.exclude",
+        "conversation.delete",
+        "memory.ledger.export",
+        "memory.ledger.import",
         "usage.get",
         "session.close",
         "channel.pending",
@@ -335,7 +352,13 @@
         "attachment.prepare.start",
         "attachment.prepare.get",
         "attachment.prepare.cancel",
-        "model.vision.set"
+        "model.vision.set",
+        "browser.view.get",
+        "workspace.process.list",
+        "workspace.process.read",
+        "workspace.process.stop",
+        "vision.settings.get",
+        "vision.settings.set"
       ]
     },
     "event": {
@@ -383,7 +406,12 @@
         "turn.changes.undo.completed",
         "turn.changes.undo.conflict",
         "workspace.changed",
-        "channel.requested"
+        "channel.requested",
+        "agent.activity",
+        "vision.started",
+        "vision.completed",
+        "vision.failed",
+        "vision.cancelled"
       ]
     },
     "attachment": {
@@ -491,8 +519,7 @@
           "items": {
             "type": "integer",
             "minimum": 1
-          },
-          "maxItems": 4
+          }
         },
         "images": {
           "type": [
@@ -955,6 +982,385 @@
           "pattern": "^[a-f0-9]{64}$"
         }
       }
+    },
+    "browserPage": {
+      "type": "object",
+      "required": [
+        "target_id",
+        "title",
+        "url"
+      ],
+      "properties": {
+        "target_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      }
+    },
+    "browserView": {
+      "type": "object",
+      "required": [
+        "state",
+        "session_id"
+      ],
+      "properties": {
+        "state": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "instance": {
+          "type": "string"
+        },
+        "image": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "target_id": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        },
+        "pages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/browserPage"
+          }
+        }
+      }
+    },
+    "managedProcess": {
+      "type": "object",
+      "required": [
+        "id",
+        "kind",
+        "command",
+        "cwd",
+        "running",
+        "can_stop"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "command": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "running": {
+          "type": "boolean"
+        },
+        "can_stop": {
+          "type": "boolean"
+        },
+        "pid": {
+          "type": "integer"
+        },
+        "started_at": {
+          "type": "number"
+        },
+        "exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      }
+    },
+    "processOutput": {
+      "type": "object",
+      "required": [
+        "process",
+        "stdout",
+        "stderr",
+        "truncated"
+      ],
+      "properties": {
+        "process": {
+          "$ref": "#/$defs/managedProcess"
+        },
+        "stdout": {
+          "type": "string"
+        },
+        "stderr": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      }
+    },
+    "viewedImage": {
+      "type": "object",
+      "properties": {
+        "uri": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "width": {
+          "type": "integer"
+        },
+        "height": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "uri",
+        "name",
+        "path",
+        "width",
+        "height"
+      ]
+    },
+    "attachmentPreviewOptions": {
+      "type": "object",
+      "properties": {
+        "uri": {
+          "type": "string"
+        },
+        "max_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 524288
+        },
+        "max_dimension": {
+          "type": "integer",
+          "minimum": 32,
+          "maximum": 2048
+        }
+      },
+      "required": [
+        "uri"
+      ]
+    },
+    "visionSettings": {
+      "type": "object",
+      "required": [
+        "mode",
+        "model_id",
+        "confirm_unknown"
+      ],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "automatic",
+            "dedicated",
+            "conversation"
+          ]
+        },
+        "model_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "confirm_unknown": {
+          "type": "boolean",
+          "deprecated": true
+        },
+        "model_overrides": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "boolean"
+          }
+        },
+        "execution": {
+          "$ref": "#/$defs/modelExecutionSettings"
+        }
+      }
+    },
+    "visionActivity": {
+      "type": "object",
+      "required": [
+        "vision_id",
+        "route",
+        "provider_id",
+        "model_id",
+        "question",
+        "images"
+      ],
+      "properties": {
+        "vision_id": {
+          "type": "string"
+        },
+        "route": {
+          "type": "string",
+          "enum": [
+            "conversation",
+            "dedicated"
+          ]
+        },
+        "provider_id": {
+          "type": "string"
+        },
+        "model_id": {
+          "type": "string"
+        },
+        "question": {
+          "type": "string"
+        },
+        "images": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/viewedImage"
+          }
+        },
+        "analysis": {
+          "type": "string"
+        },
+        "artifact_uri": {
+          "type": "string"
+        },
+        "cached": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        },
+        "model_name": {
+          "type": "string"
+        },
+        "provider_name": {
+          "type": "string"
+        },
+        "attempt_id": {
+          "type": "integer"
+        },
+        "error_code": {
+          "type": "string"
+        },
+        "cache_key": {
+          "type": "string"
+        },
+        "origin": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool_call_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "partial": {
+          "type": "boolean"
+        },
+        "stop_reason": {
+          "type": "string"
+        }
+      }
+    },
+    "visualRouteStatus": {
+      "type": "object",
+      "required": [
+        "available",
+        "route",
+        "reason",
+        "model_id",
+        "vision"
+      ],
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "route": {
+          "type": "string",
+          "enum": [
+            "conversation",
+            "dedicated",
+            "unavailable"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "model_id": {
+          "type": "string"
+        },
+        "vision": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "destination_model_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "destination_model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "destination_provider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "modelExecutionSettings": {
+      "type": "object",
+      "properties": {
+        "max_concurrency": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "providers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "models": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      },
+      "required": [
+        "max_concurrency",
+        "providers",
+        "models"
+      ]
     }
   }
 }

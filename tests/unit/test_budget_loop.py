@@ -503,3 +503,39 @@ def test_answer_turn_reports_budget_snapshot(env) -> None:
     assert result.budget is not None
     assert result.budget["model_calls"] == 1
     assert result.budget["exhausted"] == []
+
+
+def test_historical_rewrite_warning_does_not_stop_progress():
+    det = LoopDetector()
+    for i in range(3):
+        det.record_tool("fs.write", {"path": "desc.ps1", "content": str(i)})
+    assert det.check().action == NUDGE
+    assert det.check() is None
+    det.record_tool("shell.exec", {"argv": ["pwsh", "-File", "desc.ps1"]})
+    assert det.check() is None
+    det.record_tool("fs.read", {"path": "resp.txt"})
+    assert det.check() is None
+    det.record_tool("fs.write", {"path": "desc.ps1", "content": "fourth"})
+    assert det.check().action == STOP
+
+
+def test_new_duplicate_subagent_escalates_but_checks_do_not():
+    det = LoopDetector()
+    for _ in range(3):
+        det.record_subagent("inspect image")
+    assert det.check().action == NUDGE
+    assert det.check() is None
+    det.record_tool("fs.read", {"path": "result"})
+    assert det.check() is None
+    det.record_subagent("inspect image")
+    assert det.check().action == STOP
+
+
+def test_independent_rewrite_targets_do_not_share_escalation():
+    det = LoopDetector()
+    for path in ("a.py", "b.py"):
+        for i in range(3):
+            det.record_tool("fs.write", {"path": path, "content": str(i)})
+        assert det.check().action == NUDGE
+    det.record_tool("fs.write", {"path": "b.py", "content": "fourth"})
+    assert det.check().action == STOP

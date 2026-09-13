@@ -7,12 +7,12 @@ remain reachable only through `shell.exec` behind the approval gate
 
 from __future__ import annotations
 
-import subprocess
 import time
 from pathlib import Path
 from typing import Any
 
 from rinari.policy.sandbox import SandboxViolationError
+from rinari.projects._git_process import run_git
 from rinari.tools.definition import (
     RISK_LOW,
     SIDE_EFFECT_NONE,
@@ -69,19 +69,20 @@ def _run_git(ctx: ToolContext, input: dict, *args: str) -> tuple[int, str, bool]
             timeout = min(timeout, ctx.deadline_at - time.time())
             if timeout <= 0:
                 return _fail(ToolErrorCode.TIMEOUT, "Git deadline exhausted")
-        process = subprocess.run(
-            ["git", *args],
-            cwd=root,
-            capture_output=True,
-            timeout=timeout,
-        )
+        if not Path(root).is_dir():
+            return _fail(ToolErrorCode.NOT_FOUND, f"Git working directory not found: {root}")
+        process = run_git(Path(root), list(args), timeout_s=timeout, cancellation=ctx.cancellation)
     except FileNotFoundError:
         return _fail(ToolErrorCode.DEPENDENCY_ERROR, "git executable not found")
-    except subprocess.TimeoutExpired:
-        return _fail(ToolErrorCode.TIMEOUT, "git command timed out", retryable=True)
-    out = process.stdout.decode("utf-8", errors="replace")
+    if process.timed_out:
+        return _fail(
+            ToolErrorCode.TIMEOUT, process.error or "git command timed out", retryable=True
+        )
+    if process.returncode is None:
+        return _fail(ToolErrorCode.DEPENDENCY_ERROR, process.error or "git could not start")
+    out = process.stdout
     if process.returncode != 0 and process.returncode != 1:
-        detail = process.stderr.decode("utf-8", errors="replace").strip()
+        detail = process.stderr.strip()
         if "not a git repository" in (out + detail).lower():
             return _fail(ToolErrorCode.NOT_FOUND, f"Not a git repository: {root}")
         return _fail(ToolErrorCode.UNKNOWN, f"git {args[0]} failed: {detail[:300]}")

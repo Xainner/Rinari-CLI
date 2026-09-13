@@ -224,3 +224,37 @@ def test_first_message_title_is_bounded(services, home):
     ).title
     assert len(title) <= 72
     assert title.endswith("…")
+
+
+def test_generated_title_and_manual_rename_during_generation(services, home):
+    _configure(services, home)
+    record = services.sessions.start(home).session
+    result = services.sessions.name_from_first_message(
+        record.id,
+        "Quiero que arregles el selector",
+        title_factory=lambda _: "Mejorar selector de modelos",
+    )
+    assert result.title == "Mejorar selector de modelos"
+    other = services.sessions.new(home, title="New chat", forced_chat=True)
+
+    def concurrent_rename(_):
+        services.sessions.rename(other.id, "Mi nombre manual")
+        return "Título generado"
+
+    result = services.sessions.name_from_first_message(
+        other.id, "Solicitud", title_factory=concurrent_rename
+    )
+    assert result.title == "Mi nombre manual"
+
+
+def test_title_generation_failure_keeps_fallback(services, home):
+    _configure(services, home)
+    record = services.sessions.start(home).session
+
+    def unavailable(_):
+        raise RuntimeError("Provider unavailable")
+
+    result = services.sessions.name_from_first_message(
+        record.id, "Revisar el proyecto", title_factory=unavailable
+    )
+    assert result.title == "Revisar el proyecto"

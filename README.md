@@ -12,7 +12,7 @@ Persistent sessions · Policy-controlled tools · Verifiable execution
 ![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
 [![License: MIT](https://img.shields.io/badge/License-MIT-8b5cf6)](LICENSE)
 
-[Quick start](#quick-start) · [Capabilities](#capabilities) · [Architecture](#architecture) · [Documentation](#documentation) · [Desktop client](https://github.com/Xainner/Rinari-Code)
+[Quick start](#quick-start) · [Capabilities](#capabilities) · [Architecture](#architecture) · [Documentation](#documentation) · [Desktop client](https://github.com/Xainner/Rinari-Agent)
 
 </div>
 
@@ -20,7 +20,7 @@ Persistent sessions · Policy-controlled tools · Verifiable execution
 
 Rinari connects language models to a durable execution environment: files, commands, Git, browsers, tools and project context. The harness owns permissions, approvals, budgets, cancellation and verification around the model loop.
 
-This repository contains **Rinari Engine** and its **terminal client**. [Rinari Code](https://github.com/Xainner/Rinari-Code) exposes the same engine through a native desktop workspace.
+This repository contains **Rinari Engine** and its **terminal client**. [Rinari Agent](https://github.com/Xainner/Rinari-Agent) exposes the same engine through a native desktop workspace.
 
 > **Status:** Active development. Interfaces and packaging may evolve before stable v1. See the [roadmap](TODO.md) for implementation status and remaining release gates.
 
@@ -96,7 +96,7 @@ Built-in agents provide specialized exploration, implementation, review and veri
 ```mermaid
 flowchart TD
     CLI["Rinari CLI · terminal"] --> Engine["Rinari Engine"]
-    Code["Rinari Code · desktop"] --> Protocol["Versioned stdio protocol"]
+    Code["Rinari Agent · desktop"] --> Protocol["Versioned stdio protocol"]
     Protocol --> Engine
     Engine --> Models["Providers & models"]
     Engine --> Runtime["Tool runtime & policy"]
@@ -156,6 +156,6 @@ Run `uv run pytest` for the full test suite. Follow [AGENTS.md](AGENTS.md) and t
 
 **One engine. Terminal and desktop.**
 
-[Rinari Code](https://github.com/Xainner/Rinari-Code) · [Issues](https://github.com/Xainner/Rinari-CLI/issues) · [MIT License](LICENSE)
+[Rinari Agent](https://github.com/Xainner/Rinari-Agent) · [Issues](https://github.com/Xainner/Rinari-CLI/issues) · [MIT License](LICENSE)
 
 </div>

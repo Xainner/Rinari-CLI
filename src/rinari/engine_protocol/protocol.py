@@ -16,6 +16,15 @@ def engine_version() -> str:
 
 
 CAPABILITIES: dict[str, bool] = {
+    "local_image_view_v1": True,
+    "vision_routing_v1": True,
+    "vision_routing_v2": True,
+            "vision_message_routing_v3": True,
+    "model_execution_policy_v1": True,
+    "desktop_processes_v1": True,
+    "agent_inheritance_v1": True,
+    "agent_activity_v1": True,
+    "browser_view_v1": True,
     "tool_contracts_v1": True,
     "durable_operations_v1": True,
     "channel_tools_v1": True,
@@ -45,4 +54,7 @@ CAPABILITIES: dict[str, bool] = {
     "permission_profiles_v2": True,
     "turn_changeset_v1": True,
     "personal_memory_v1": True,
+    "selective_memory_v1": True,
+    "memory_privacy_v1": True,
+    "personal_memory_controls_v1": True,
 }

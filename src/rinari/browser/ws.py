@@ -14,9 +14,11 @@ import base64
 import contextlib
 import hashlib
 import os
+import select
 import socket
 import struct
 import threading
+import time
 from urllib.parse import urlparse
 
 _GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -47,6 +49,10 @@ class WebSocketClient:
         self._sock: socket.socket | None = None
         self._lock = threading.Lock()
         self._closed = False
+        self._incoming = bytearray()
+        self._message = bytearray()
+        self._message_opcode: int | None = None
+        self._read_deadline: float | None = None
 
     @property
     def closed(self) -> bool:
@@ -61,8 +67,11 @@ class WebSocketClient:
         host = parsed.hostname
         port = parsed.port or 80
         path = parsed.path or "/"
-        if parsed.params:
-            path += "?" + parsed.params
+        if parsed.query:
+            path += "?" + parsed.query
+        self._incoming.clear()
+        self._message.clear()
+        self._message_opcode = None
         key = base64.b64encode(os.urandom(16)).decode("ascii")
         try:
             sock = socket.create_connection((host, port), timeout=self._timeout_s)
@@ -109,6 +118,8 @@ class WebSocketClient:
             sock.settimeout(2.0)
             sock.sendall(self._build_frame(OP_CLOSE, struct.pack(">H", 1000)))
         with contextlib.suppress(OSError):
+            sock.shutdown(socket.SHUT_RDWR)
+        with contextlib.suppress(OSError):
             sock.close()
 
     # -- I/O ----------------------------------------------------------------
@@ -129,10 +140,9 @@ class WebSocketClient:
         sock = self._sock
         if sock is None:
             raise WsError("WS_CLOSED", "Socket is closed")
-        if timeout_s is not None and timeout_s > 0:
-            sock.settimeout(timeout_s)
-        data = bytearray()
-        message_opcode: int | None = None
+        self._read_deadline = time.monotonic() + (timeout_s or self._timeout_s)
+        data = self._message
+        message_opcode = self._message_opcode
         try:
             while True:
                 opcode, fin, payload = self._read_frame(sock)
@@ -149,6 +159,7 @@ class WebSocketClient:
                     if opcode == OP_CONTINUATION:
                         raise WsError("WS_PROTOCOL", "Unsolicited continuation frame")
                     message_opcode = opcode
+                    self._message_opcode = opcode
                 elif opcode != OP_CONTINUATION:
                     raise WsError("WS_PROTOCOL", "New message before continuation finished")
                 data.extend(payload)
@@ -157,7 +168,7 @@ class WebSocketClient:
                 if fin:
                     break
         except TimeoutError as exc:
-            self._teardown()
+            # Inactivity is not disconnect. Keep partial frames AND message fragments.
             raise WsError("WS_TIMEOUT", "Timed out waiting for a frame", retryable=True) from exc
         except WsError:
             self._teardown()
@@ -165,12 +176,12 @@ class WebSocketClient:
         except OSError as exc:
             self._teardown()
             raise WsError("WS_CLOSED", f"Connection lost: {exc}", retryable=True) from exc
-        if timeout_s is not None and timeout_s > 0:
-            with contextlib.suppress(OSError):
-                sock.settimeout(self._timeout_s)
         if message_opcode not in (OP_TEXT, OP_BINARY):
             raise WsError("WS_PROTOCOL", f"Unsupported message opcode: {message_opcode:#x}")
-        return data.decode("utf-8", errors="replace")
+        result = data.decode("utf-8", errors="replace")
+        self._message.clear()
+        self._message_opcode = None
+        return result
 
     def _teardown(self) -> None:
         with self._lock:
@@ -199,28 +210,38 @@ class WebSocketClient:
         return bytes(header) + masked
 
     def _read_frame(self, sock: socket.socket) -> tuple[int, bool, bytes]:
-        b0, b1 = self._recv_exact(sock, 2)
+        self._fill(sock, 2)
+        b0, b1 = self._incoming[:2]
         fin = bool(b0 & 0x80)
         opcode = b0 & 0x0F
         if b1 & 0x80:
             raise WsError("WS_PROTOCOL", "Server frame is masked (RFC 6455 violation)")
         length = b1 & 0x7F
+        offset = 2
         if length == 126:
-            (length,) = struct.unpack(">H", self._recv_exact(sock, 2))
+            self._fill(sock, 4)
+            (length,) = struct.unpack(">H", self._incoming[2:4])
+            offset = 4
         elif length == 127:
-            (length,) = struct.unpack(">Q", self._recv_exact(sock, 8))
+            self._fill(sock, 10)
+            (length,) = struct.unpack(">Q", self._incoming[2:10])
+            offset = 10
         if length > self._max_message_bytes:
             raise WsError("WS_PROTOCOL", f"Frame too large: {length} bytes")
-        return opcode, fin, self._recv_exact(sock, length) if length else b""
+        self._fill(sock, offset + length)
+        payload = bytes(self._incoming[offset:offset + length])
+        del self._incoming[:offset + length]
+        return opcode, fin, payload
 
-    def _recv_exact(self, sock: socket.socket, n: int) -> bytes:
-        chunks = bytearray()
-        while len(chunks) < n:
-            chunk = sock.recv(n - len(chunks))
+    def _fill(self, sock: socket.socket, n: int) -> None:
+        while len(self._incoming) < n:
+            remaining = max(0, (self._read_deadline or time.monotonic()) - time.monotonic())
+            if not select.select([sock], [], [], remaining)[0]:
+                raise TimeoutError("No frame data before read deadline")
+            chunk = sock.recv(n - len(self._incoming))
             if not chunk:
                 raise WsError("WS_CLOSED", "Connection closed by peer")
-            chunks.extend(chunk)
-        return bytes(chunks)
+            self._incoming.extend(chunk)
 
     def _read_http_response(self, sock: socket.socket) -> tuple[int, dict[str, str]]:
         buf = bytearray()
@@ -231,7 +252,9 @@ class WebSocketClient:
             buf.extend(chunk)
             if len(buf) > 65536:
                 raise WsError("WS_PROTOCOL", "Handshake response too large")
-        head = bytes(buf.split(b"\r\n\r\n", 1)[0]).decode("iso-8859-1")
+        header, remainder = buf.split(b"\r\n\r\n", 1)
+        self._incoming.extend(remainder)
+        head = bytes(header).decode("iso-8859-1")
         lines = head.split("\r\n")
         parts = lines[0].split(" ", 2)
         status = int(parts[1])

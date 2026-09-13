@@ -127,7 +127,13 @@ def _interactive() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
 
 
-def start_flow(ctx: typer.Context, prompt: str | None, forced_chat: bool, command: str, attachments: list[str] | None = None) -> None:
+def start_flow(
+    ctx: typer.Context,
+    prompt: str | None,
+    forced_chat: bool,
+    command: str,
+    attachments: list[str] | None = None,
+) -> None:
     """Start (or, after /new, restart) a session for the current context."""
     params = get_params(ctx)
     while True:
@@ -163,7 +169,11 @@ def _run_session(
                 session = agent_runtime.build_agent_session(s, started.session, interactive=False)
                 session.pending_attachments.extend(attachments)
                 try:
-                    data["turn"] = _turn_dict(agent_runtime.run_turn(session, agent_runtime.prepare_attachment_message(session, prompt)))
+                    data["turn"] = _turn_dict(
+                        agent_runtime.run_turn(
+                            session, agent_runtime.prepare_attachment_message(session, prompt)
+                        )
+                    )
                 except RinariError as err:
                     fail(ctx, command, err)
                 finally:
@@ -179,7 +189,9 @@ def _run_session(
         session.pending_attachments.extend(attachments)
         if prompt is not None and not _interactive():
             try:
-                result = agent_runtime.run_turn(session, agent_runtime.prepare_attachment_message(session, prompt))
+                result = agent_runtime.run_turn(
+                    session, agent_runtime.prepare_attachment_message(session, prompt)
+                )
             finally:
                 session.end()
             typer.echo()

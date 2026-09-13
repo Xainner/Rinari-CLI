@@ -168,6 +168,7 @@ class AgentOrchestrator:
         self._lock = threading.Lock()
         self._session_id = ""
         self._project_root_value: Path | None = None
+        self._collected_results: set[str] = set()
 
     def bind_session(self, session_id: str) -> None:
         self._session_id = session_id
@@ -256,6 +257,38 @@ class AgentOrchestrator:
     def list(self) -> list[dict]:
         with self._lock:
             return [self._status_dict(s) for s in self._agents.values()]
+
+    def collect_for_final(self, cancel: CancellationToken) -> str | None:
+        """Join delegated work before finalizing; keep user cancellation responsive."""
+        import json
+        from dataclasses import asdict
+
+        collected = []
+        for item in self.list():
+            agent_id = item["id"]
+            if agent_id in self._collected_results:
+                continue
+            while True:
+                cancel.throw_if_cancelled()
+                try:
+                    result = self.wait(agent_id, timeout_s=0.1)
+                    break
+                except OrchestratorError as exc:
+                    if exc.code != "AGENT_NOT_TERMINAL":
+                        raise
+                    state = self._state(agent_id)
+                    if time.monotonic() - state["started_at"] > state["timeout_s"]:
+                        self.cancel(agent_id, reason="timeout")
+                        raise TimeoutError(
+                            "Subagent did not finish within its execution deadline"
+                        ) from exc
+            self._collected_results.add(agent_id)
+            collected.append({"agent_id": agent_id, **asdict(result)})
+        return json.dumps(collected, ensure_ascii=True) if collected else None
+
+    def note_result_delivered(self, agent_id: str) -> None:
+        if self.result(agent_id) is not None:
+            self._collected_results.add(agent_id)
 
     def wait(self, agent_id: str, timeout_s: float | None = None) -> AgentResult:
         state = self._state(agent_id)
@@ -366,7 +399,7 @@ class AgentOrchestrator:
         return state
 
     def _prepare_worktree(self, definition: AgentDefinition, agent_id: str, requested: bool):
-        writer = definition.profile == "workspace"
+        writer = definition.profile in {"workspace", "inherit"}
         if not (writer and requested and self._worktrees is not None and self._project_root()):
             return None
         try:
@@ -471,6 +504,8 @@ class AgentOrchestrator:
             "session_id": self._session_id,
             "state": state["state"],
             "status": result.status if result else None,
+            "summary": result.summary if result else None,
+            "error": result.error if result else None,
         }
 
     def _emit_hook(self, event: str, payload: dict) -> None:

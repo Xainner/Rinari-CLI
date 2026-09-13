@@ -67,11 +67,17 @@ def render_tool_event(
         active = render.symbol(render.SYMBOL_ACTIVE, ascii_=ascii_)
         console.print(Text(f"{active} {label}", style=render.tool_style(name)), highlight=False)
     else:
-        from rinari.tools.definition import ToolResult
         from rinari.runtime.agent import _tool_activity_presentation
+        from rinari.tools.definition import ToolResult
 
         label = state.pop("label", name)
         arguments = state.pop("arguments", {})
+        if isinstance(detail, ToolResult) and detail.ok and name == "fs.read_image":
+            data = detail.data or {}
+            console.print(Text(f"Viewed image: {data.get('path', '')} "
+                               f"({data.get('width', 0)} × {data.get('height', 0)})", style="cyan"))
+            console.print(Text(str(data.get("uri", "")), style="dim"))
+            return
         if isinstance(detail, ToolResult) and name in {
             "shell.exec",
             "process.output",
@@ -147,7 +153,8 @@ def _render_command_result(console: Console, data: dict, *, ascii_: bool) -> Non
         if exit_code == 0:
             body.append(
                 Text(
-                    "Process exited successfully but wrote to stderr; task outcome is not verified.",
+                    "Process exited successfully but wrote to stderr; task outcome is not "
+                    "verified.",
                     style="yellow",
                 )
             )

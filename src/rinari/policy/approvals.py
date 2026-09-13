@@ -14,7 +14,7 @@ Project grants never leak into global chat or another project
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 
@@ -36,6 +36,7 @@ class ApprovalRequest:
     rule_id: str = "default"
     reusable: bool = True
     choices: tuple[str, ...] = ("deny", "allow_once", "allow_session")
+    cancellation: object | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True, slots=True)

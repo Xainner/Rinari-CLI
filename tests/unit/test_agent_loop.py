@@ -153,6 +153,232 @@ def test_direct_answer(env) -> None:
     assert "AgentTurnCompleted" in types
 
 
+def test_final_answer_waits_for_delegated_results(env):
+    from rinari.agents.orchestrator import AgentOrchestrator, AgentResult
+
+    class Runner:
+        def run(self, spec):
+            return AgentResult(agent="explore", objective=spec.objective,
+                               status="completed", summary="Repository has src and tests")
+
+    orch = AgentOrchestrator(Runner())
+    orch.spawn("explore", "Map the repository")
+    env["ctx"].collect_subagent_results = orch.collect_for_final
+    model = FakeModel(scripted=[ModelResponse(content="The explorer is working."),
+                                ModelResponse(content="The repository has src and tests.")])
+    activity = []
+    loop = AgentLoop(model, env["runtime"], env["assembler"],
+                     activity_sink=lambda name, payload: activity.append((name, payload)))
+    result = loop.turn(env["ctx"], "Explore this repo")
+    assert result.content == "The repository has src and tests."
+    assert any("Repository has src and tests" in (m.content or "")
+               for m in model.requests[-1].messages)
+    assert [p["output_kind"] for name, p in activity
+            if name == "model.content.completed"] == ["progress", "final"]
+
+
+def test_automatic_subagent_join_is_cancellable():
+    from rinari.agents.orchestrator import AgentOrchestrator, AgentResult
+
+    release = threading.Event()
+    entered = threading.Event()
+
+    class Runner:
+        def run(self, spec):
+            entered.set()
+            release.wait(timeout=3)
+            return AgentResult(agent="explore", objective="test", status="completed", summary="ok")
+
+    orch = AgentOrchestrator(Runner())
+    agent_id = orch.spawn("explore", "test")
+    assert entered.wait(timeout=1)
+    cancel = CancellationToken()
+    timer = threading.Timer(0.05, cancel.cancel)
+    timer.start()
+    try:
+        with pytest.raises(CancelledError):
+            orch.collect_for_final(cancel)
+    finally:
+        timer.cancel()
+        release.set()
+        orch.wait(agent_id, timeout_s=2)
+
+
+@pytest.mark.parametrize(
+    "vision,confirmed,success",
+    [(True, False, True), (False, False, False), (None, False, False), (None, True, False)],
+)
+@pytest.mark.parametrize("artifact_source", [False, True])
+def test_local_image_visual_delivery(env, app_ctx, vision, confirmed, success, artifact_source):
+    from PIL import Image
+
+    from rinari.artifacts.store import ArtifactStore
+    from rinari.models.images import expand_tool_images
+    from rinari.providers.adapters.anthropic import _convert_to_anthropic
+    from rinari.providers.adapters.openai_compatible import _message_to_openai
+    from rinari.providers.adapters.responses import _message_to_responses
+
+    path = env["root"] / "imagen con ñ.png"
+    Image.new("RGB", (120, 80), "purple").save(path)
+    store = ArtifactStore(app_ctx)
+    source = str(path)
+    if artifact_source:
+        from rinari.artifacts.transfer import import_file
+        source = import_file(store, env["ctx"].session_id, path).uri()
+        path.unlink()
+    env["ctx"].tool_ctx = replace(env["ctx"].tool_ctx, artifact_store=store)
+    env["ctx"].allow_unconfirmed_vision = confirmed
+
+    class VisionModel(FakeModel):
+        def capabilities(self):
+            return ProviderCapabilities(tool_calls=True, vision=vision)
+
+    model = VisionModel(
+        [
+            ModelResponse(
+                content="",
+                tool_calls=(
+                    ToolCall("image", "fs.read_image", {"path": source}),
+                    ToolCall("list", "fs.list", {"path": str(env["root"])}),
+                ),
+            ),
+            ModelResponse(content="Done"),
+        ]
+    )
+    activity = []
+    loop = AgentLoop(
+        model,
+        env["runtime"],
+        env["assembler"],
+        activity_sink=lambda event, payload: activity.append((event, payload)),
+    )
+    if not success:
+        from rinari.shared.errors import InvalidUsageError
+        with pytest.raises(InvalidUsageError, match="Vision settings"):
+            loop.turn(env["ctx"], "Mira la imagen")
+        assert len(model.requests) == 1  # No repeated discovery after a deterministic block.
+        return
+    assert loop.turn(env["ctx"], "Mira la imagen").kind == "answer"
+    message = next(m for m in model.requests[-1].messages if m.tool_call_id == "image")
+    assert bool(message.images) == success
+    assert len([m for m in env["ctx"].history if m.role == "user"]) == 1
+    if not success:
+        assert '"ok": false' in message.content
+        return
+    # The model receives real pixel content, after every pending tool result.
+    wire = expand_tool_images(model.requests[-1].messages)
+    visual = next(m for m in wire if m.images)
+    assert wire.index(visual) > next(i for i, m in enumerate(wire) if m.tool_call_id == "list")
+    assert _message_to_openai(visual)["content"][1]["image_url"]["url"].startswith(
+        "data:image/jpeg;base64,"
+    )
+    assert _message_to_responses(visual, {})[0]["content"][1]["type"] == "input_image"
+    anthropic = _convert_to_anthropic(model.requests[-1].messages)[1]
+    results = [b for m in anthropic if isinstance(m["content"], list)
+               for b in m["content"] if b.get("type") == "tool_result"]
+    assert any(isinstance(b["content"], list) and
+               any(part.get("type") == "image" for part in b["content"]) for b in results)
+
+
+
+def test_image_artifact_scope_integrity_and_no_reimport(env, app_ctx):
+    from PIL import Image
+    from rinari.artifacts.store import ArtifactStore
+    from rinari.artifacts.transfer import import_file
+
+    store = ArtifactStore(app_ctx)
+    path = env["root"] / "rinari.png"
+    Image.new("RGB", (16, 16), "purple").save(path)
+    record = import_file(store, env["ctx"].session_id, path)
+    ctx = replace(env["ctx"].tool_ctx, artifact_store=store, vision_allowed=True,
+                  profile=PermissionProfile.READ_ONLY)
+    def read(uri):
+        return env["runtime"].execute("fs.read_image", {"path": uri}, ctx)
+    before = len(store.list(session_id=ctx.session_id))
+    result = read(record.uri())
+    assert result.ok and result.images[0].uri == record.uri()
+    assert len(store.list(session_id=ctx.session_id)) == before
+    artifact_ctx = replace(ctx, artifact_root=store._root())
+    metadata = env["runtime"].execute("artifact.metadata", {"uri": record.uri()}, artifact_ctx)
+    assert metadata.ok  # The test approval callback denies all prompts; none is needed.
+    text_read = env["runtime"].execute("artifact.read", {"uri": record.uri()}, artifact_ctx)
+    assert text_read.error.code.value == "INVALID_ARGUMENT"
+    assert "fs.read_image" in text_read.error.message
+    other = import_file(store, "another-session", path)
+    assert read(other.uri()).error.code.value == "PERMISSION_DENIED"
+    assert not read(f"artifact://{ctx.session_id}/media/../rinari.png").ok
+    assert read(f"artifact://{ctx.session_id}/media/missing.png").error.code.value == "NOT_FOUND"
+    text_record = store.create(ctx.session_id, "derived", "note.txt", b"not an image")
+    assert not read(text_record.uri()).ok
+    stored = store._storage_path(record.storage_path)
+    stored.write_bytes(b"changed")
+    assert not read(record.uri()).ok
+
+
+def test_image_read_policy_formats_and_limits(env, app_ctx):
+    from PIL import Image
+
+    from rinari.artifacts.store import ArtifactStore
+
+    ctx = replace(env["ctx"].tool_ctx, artifact_store=ArtifactStore(app_ctx), vision_allowed=True)
+    runtime = env["runtime"]
+
+    def read(path, **kwargs):
+        return runtime.execute("fs.read_image", {"path": str(path)}, replace(ctx, **kwargs))
+
+    outside = env["tmp"] / "outside.png"
+    Image.new("RGB", (2, 2)).save(outside)
+    assert not read(outside).ok
+    assert not read(env["root"] / "missing.png").ok
+    assert not read(env["root"]).ok
+    corrupt = env["root"] / "corrupt.png"
+    corrupt.write_bytes(b"not an image")
+    assert not read(corrupt).ok
+    for suffix in ("png", "jpg", "webp"):
+        path = env["root"] / ("imagen." + suffix)
+        Image.new("RGB", (20, 10)).save(path)
+        assert read(path).ok
+        assert read(path, image_slots=0).ok
+    huge = env["root"] / "huge.png"
+    with huge.open("wb") as stream:
+        stream.truncate(10 * 1024**2 + 1)
+    assert not read(huge).ok
+
+
+def test_image_batches_bound_visual_context_without_losing_history(env, app_ctx):
+    from PIL import Image
+    from rinari.artifacts.store import ArtifactStore
+
+    paths = []
+    for index in range(5):
+        path = env["root"] / f"image-{index}.png"
+        Image.new("RGB", (8, 8), (index, 0, 0)).save(path)
+        paths.append(path)
+    env["ctx"].tool_ctx = replace(env["ctx"].tool_ctx, artifact_store=ArtifactStore(app_ctx))
+
+    class VisionModel(FakeModel):
+        def capabilities(self):
+            return ProviderCapabilities(vision=True, tool_calls=True)
+
+    model = VisionModel([
+        ModelResponse(content="", tool_calls=tuple(
+            ToolCall(f"image-{i}", "fs.read_image", {"path": str(path)})
+            for i, path in enumerate(paths))),
+        ModelResponse(content="", tool_calls=(
+            ToolCall("retry-fifth", "fs.read_image", {"path": str(paths[-1])}),)),
+        ModelResponse(content="Done"),
+    ])
+    AgentLoop(model, env["runtime"], env["assembler"]).turn(env["ctx"], "Mira las imágenes")
+    assert sum(len(m.images) for m in model.requests[1].messages) == 5
+    assert sum(len(m.images) for m in model.requests[2].messages) == 1
+    fifth = next(m for m in model.requests[1].messages if m.tool_call_id == "image-4")
+    assert fifth.images
+    oldest = next(m for m in model.requests[2].messages if m.tool_call_id == "image-0")
+    assert not oldest.images and 'artifact://' in oldest.content
+    latest = next(m for m in model.requests[2].messages if m.tool_call_id == "retry-fifth")
+    assert latest.images and latest.images[0].encoded()
+
+
 def test_tool_call_roundtrip(env) -> None:
     write_call = ToolCall(
         id="tc1", name="fs.write", arguments={"path": "out.txt", "content": "hi\n"}

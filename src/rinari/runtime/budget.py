@@ -22,12 +22,26 @@ reason instead of a generic failure.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import wraps
 from typing import Any
 
 from rinari.models.types import Usage
 from rinari.shared.clock import Clock
+
+_ledger_lock = threading.RLock()
+
+
+def ledger_locked(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        with _ledger_lock:
+            return fn(*args, **kwargs)
+
+    return wrapped
+
 
 MODEL_CALLS = "model-calls"
 TOOL_CALLS = "tool-calls"
@@ -83,6 +97,7 @@ class BudgetMeter:
     max_recursion_depth: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    unpriced_model_usage: bool = False
     started_at: float = field(init=False)
 
     def __post_init__(self) -> None:
@@ -109,11 +124,29 @@ class BudgetMeter:
 
     # -- recording -----------------------------------------------------------
 
+    @ledger_locked
+    def reserve_model_call(self, *, model_only=False):
+        meter = self
+        while meter is not None:
+            if (
+                (
+                    meter.limits.max_model_calls is not None
+                    and meter.model_calls >= meter.limits.max_model_calls
+                )
+                if model_only
+                else meter.first_exhausted()
+            ):
+                raise ValueError("Model call stopped: turn budget exhausted")
+            meter = meter.parent
+        self.note_model_call()
+
+    @ledger_locked
     def note_model_call(self) -> None:
         self.model_calls += 1
         if self.parent is not None:
             self.parent.note_model_call()
 
+    @ledger_locked
     def note_tool_call(self, name: str, *, is_network: bool | None = None) -> None:
         self.tool_calls += 1
         network = is_network if is_network is not None else self._net(name)
@@ -122,6 +155,7 @@ class BudgetMeter:
         if self.parent is not None:
             self.parent.note_tool_call(name, is_network=network)
 
+    @ledger_locked
     def note_usage(self, usage: Usage | None) -> None:
         if usage is None:
             return
@@ -132,6 +166,7 @@ class BudgetMeter:
         if self.parent is not None:
             self.parent.note_usage(usage)
 
+    @ledger_locked
     def note_subagent(self, depth: int = 1) -> None:
         self.subagent_calls += 1
         self.max_recursion_depth = max(self.max_recursion_depth, depth)
@@ -161,6 +196,8 @@ class BudgetMeter:
         return max(0.0, self.clock.now() - self.started_at)
 
     def estimated_cost(self) -> float | None:
+        if self.unpriced_model_usage:
+            return None
         # None = pricing unknown: never invent a number.
         if self.limits.input_price_per_mtok is None and self.limits.output_price_per_mtok is None:
             return None
@@ -209,6 +246,7 @@ class BudgetMeter:
         ordered = [name for name in PRIORITY if name in hits]
         return tuple(ordered)
 
+    @ledger_locked
     def first_exhausted(self, *, ignore: tuple[str, ...] = ()) -> str | None:
         """First exhausted dimension, optionally skipping some.
 

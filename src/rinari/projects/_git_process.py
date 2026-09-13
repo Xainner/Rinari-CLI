@@ -11,6 +11,8 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
+from rinari.runtime.cancellation import CancellationToken
+
 
 @dataclass(frozen=True, slots=True)
 class GitCommandResult:
@@ -18,6 +20,7 @@ class GitCommandResult:
     returncode: int | None
     timed_out: bool = False
     error: str | None = None
+    stderr: str = ""
 
 
 def _terminate_tree(proc: subprocess.Popen[bytes]) -> None:
@@ -47,20 +50,35 @@ def _terminate_tree(proc: subprocess.Popen[bytes]) -> None:
         proc.wait(timeout=0.5)
 
 
-def run_git(cwd: Path, args: list[str], *, timeout_s: float) -> GitCommandResult:
+def run_git(
+    cwd: Path,
+    args: list[str],
+    *,
+    timeout_s: float,
+    cancellation: CancellationToken | None = None,
+) -> GitCommandResult:
     """Run one bounded Git probe and preserve a structured failure reason."""
     started = time.monotonic()
     try:
-        with tempfile.TemporaryFile(mode="w+b") as output:
+        if cancellation is not None:
+            cancellation.throw_if_cancelled()
+        with (
+            tempfile.TemporaryFile(mode="w+b") as output,
+            tempfile.TemporaryFile(mode="w+b") as diagnostics,
+        ):
             creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
             proc = subprocess.Popen(
-                ["git", *args],
+                ["git", "--no-pager", "-c", "core.fsmonitor=false", *args],
                 cwd=cwd,
                 stdout=output,
-                stderr=subprocess.DEVNULL,
+                stderr=diagnostics,
                 stdin=subprocess.DEVNULL,
                 creationflags=creationflags,
                 start_new_session=os.name != "nt",
+                env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"},
+            )
+            unsubscribe = (
+                cancellation.on_cancel(lambda: _terminate_tree(proc)) if cancellation else None
             )
             try:
                 return_code = proc.wait(timeout=max(0.01, timeout_s))
@@ -72,13 +90,21 @@ def run_git(cwd: Path, args: list[str], *, timeout_s: float) -> GitCommandResult
                     timed_out=True,
                     error=f"git {' '.join(args)} exceeded {timeout_s:.2f}s",
                 )
+            finally:
+                if unsubscribe is not None:
+                    unsubscribe()
+            if cancellation is not None:
+                cancellation.throw_if_cancelled()
             output.seek(0)
             stdout = output.read().decode("utf-8", errors="replace")
+            diagnostics.seek(0)
+            stderr = diagnostics.read(8192).decode("utf-8", errors="replace")
             if return_code != 0:
                 return GitCommandResult(
                     stdout=stdout,
                     returncode=return_code,
                     error=f"git {' '.join(args)} exited with {return_code}",
+                    stderr=stderr,
                 )
             return GitCommandResult(stdout=stdout, returncode=return_code)
     except (OSError, subprocess.SubprocessError) as exc:

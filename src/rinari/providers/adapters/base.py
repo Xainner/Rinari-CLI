@@ -44,6 +44,9 @@ class ProviderAdapter:
     """One adapter per provider family. Subclasses override capabilities."""
 
     type: str = "abstract"
+    tool_image_transport: str = "user-observation"  # Wire capability, separate from model vision.
+
+    default_max_tokens = None
 
     def __init__(self, client: httpx.Client | None = None) -> None:
         self._client = client

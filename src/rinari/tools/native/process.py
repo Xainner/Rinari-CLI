@@ -53,6 +53,33 @@ POSIX_SIGNALS = {
 }
 
 
+class _ProcessBuffer(_BoundedBuffer):
+    """Keep model cursors stable while the desktop observes recent output."""
+
+    def __init__(self, max_bytes: int) -> None:
+        super().__init__(max_bytes)
+        self._tail = bytearray()
+        self._lock = threading.RLock()
+        self.tail_truncated = False
+
+    def write(self, data: bytes) -> int:
+        with self._lock:
+            count = super().write(data)
+            self._tail.extend(data)
+            if len(self._tail) > 64000:
+                del self._tail[:-64000]
+                self.tail_truncated = True
+            return count
+
+    def text(self) -> str:
+        with self._lock:
+            return super().text()
+
+    def tail_text(self) -> str:
+        with self._lock:
+            return self._tail.decode("utf-8", errors="replace")
+
+
 def _ok(data) -> ToolResult:
     return ToolResult(ok=True, data=data)
 
@@ -81,8 +108,8 @@ class _Handle:
         self.command = command
         self.cwd = cwd
         self.process = process
-        self.stdout = _BoundedBuffer(MAX_PROCESS_OUTPUT_BYTES)
-        self.stderr = _BoundedBuffer(MAX_PROCESS_OUTPUT_BYTES)
+        self.stdout = _ProcessBuffer(MAX_PROCESS_OUTPUT_BYTES)
+        self.stderr = _ProcessBuffer(MAX_PROCESS_OUTPUT_BYTES)
         self.exit_code: int | None = None
         self.started_at = time.time()
         self.readers: list[threading.Thread] = []
@@ -135,11 +162,17 @@ class ProcessRegistry:
 
     def get(self, handle_id: str) -> _Handle | None:
         with self._lock:
-            return self._handles.get(handle_id)
+            handle = self._handles.get(handle_id)
+            if handle is not None:
+                handle.exit_code = handle.process.poll()
+            return handle
 
     def list(self) -> list[_Handle]:
         with self._lock:
-            return list(self._handles.values())
+            handles = list(self._handles.values())
+            for handle in handles:
+                handle.exit_code = handle.process.poll()
+            return handles
 
     def wait(self, handle: _Handle, timeout: float | None) -> bool:
         """Wait for exit; returns True if it exited, False on timeout."""
@@ -188,7 +221,7 @@ class ProcessRegistry:
 def _pump(stream, buffer, handle: _Handle, registry: ProcessRegistry) -> None:
     try:
         while True:
-            chunk = stream.read(65536)
+            chunk = stream.read1(65536) if hasattr(stream, "read1") else stream.read(65536)
             if not chunk:
                 break
             buffer.write(chunk)
