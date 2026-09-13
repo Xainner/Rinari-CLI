@@ -28,7 +28,7 @@ from rinari.runtime.agent import AgentContext, AgentLoop
 from rinari.runtime.budget import BudgetMeter, TurnBudgetLimits
 from rinari.runtime.cancellation import CancellationToken
 from rinari.shared.clock import FakeClock
-from rinari.shared.errors import CancelledError
+from rinari.shared.errors import CancelledError, NetworkError
 from rinari.shared.redaction import Redactor
 from rinari.tools.definition import ToolContext
 from rinari.tools.exposure import ToolExposure
@@ -507,6 +507,37 @@ def test_cancelled_before_model(env) -> None:
     with pytest.raises(CancelledError):
         loop.turn(env["ctx"], "too late", cancel=token)
     assert model.requests == []
+
+
+def test_model_timeout_activity_preserves_structured_network_details(env) -> None:
+    class TimeoutModel(FakeModel):
+        def invoke(self, request: ModelRequest) -> ModelResponse:
+            self.requests.append(request)
+            raise NetworkError(
+                "Timed out streaming from provider",
+                details={
+                    "kind": "TIMEOUT",
+                    "phase": "first_byte",
+                    "timeout_s": 30.0,
+                    "last_payload_at_s": None,
+                },
+            )
+
+    activity: list[tuple[str, dict]] = []
+    model = TimeoutModel(scripted=[])
+    loop = AgentLoop(
+        model,
+        env["runtime"],
+        env["assembler"],
+        activity_sink=lambda event, payload: activity.append((event, payload)),
+    )
+    with pytest.raises(NetworkError):
+        loop.turn(env["ctx"], "hello")
+
+    failed = next(payload for event, payload in activity if event == "model.failed")
+    assert failed["error"]["code"] == "NETWORK_FAILURE"
+    assert failed["error"]["retryable"] is True
+    assert failed["error"]["details"]["phase"] == "first_byte"
 
 
 def test_cancel_interrupts_a_blocked_stream_without_waiting_for_provider(env) -> None:

@@ -274,12 +274,21 @@ class AgentLoop:
                     cancel,
                 )
             except BaseException as exc:
+                error = {
+                    "message": str(exc),
+                    "type": type(exc).__name__,
+                    "code": getattr(exc, "machine_code", "UNKNOWN"),
+                    "retryable": bool(getattr(exc, "retryable", False)),
+                }
+                details = getattr(exc, "details", None)
+                if isinstance(details, dict):
+                    error["details"] = dict(details)
                 self._emit_activity(
                     "model.failed",
                     {
                         "model_call_id": model_call_id,
                         "duration_ms": round((time.monotonic() - model_started) * 1000, 1),
-                        "error": {"message": str(exc), "type": type(exc).__name__},
+                        "error": error,
                     },
                 )
                 raise

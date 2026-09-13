@@ -4,7 +4,7 @@ import httpx
 import pytest
 
 from rinari.application.context import build_app_context
-from rinari.models.router import ModelRouter
+from rinari.models.router import ModelRouter, _stream_read_timeout_s
 from rinari.models.types import (
     ChatMessage,
     ModelRequest,
@@ -184,6 +184,20 @@ def test_openai_invoke_malformed_payload() -> None:
     adapter = OpenAICompatibleAdapter("https://api.test/v1", client=_client(handler))
     with pytest.raises(ProviderModelError):
         adapter.invoke(_request(), "sk-x", None)
+
+
+def test_stream_read_timeout_resolution_is_bounded_and_model_specific(monkeypatch) -> None:
+    assert _stream_read_timeout_s({}, {}) == 30.0
+    assert _stream_read_timeout_s({"stream_read_timeout_s": 90}, {}) == 90.0
+    assert _stream_read_timeout_s(
+        {"stream_read_timeout_s": 90}, {"stream_read_timeout_s": 120}
+    ) == 120.0
+
+    monkeypatch.setenv("RINARI_MODEL_STREAM_READ_TIMEOUT_SECONDS", "45")
+    assert _stream_read_timeout_s({}, {}) == 45.0
+    for value in (0, 601, "bad", True):
+        with pytest.raises(InvalidUsageError):
+            _stream_read_timeout_s({"stream_read_timeout_s": value}, {})
 
 
 # -- OpenAI-compatible: streaming --------------------------------------------

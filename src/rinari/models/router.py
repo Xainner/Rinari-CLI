@@ -8,6 +8,8 @@ references, resolves the credential, and dispatches the normalized
 
 from __future__ import annotations
 
+import math
+import os
 from collections.abc import Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
@@ -15,6 +17,9 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from rinari.providers.adapters.http import (
+    DEFAULT_MODEL_STREAM_READ_TIMEOUT_S,
+    MAX_MODEL_STREAM_READ_TIMEOUT_S,
+    MIN_MODEL_STREAM_READ_TIMEOUT_S,
     is_opencode_endpoint,
     needs_tool_aliasing,
     sanitize_tool_name,
@@ -98,6 +103,51 @@ def _merge_capabilities(
         if value is None or isinstance(value, kind):
             changes[key] = value
     return replace(base, **changes) if changes else base
+
+
+def _stream_read_timeout_s(
+    provider_settings: dict[str, Any], model_settings: dict[str, Any]
+) -> float:
+    """Resolve a bounded per-provider/model stream inactivity timeout.
+
+    Model settings override provider settings. An installation environment
+    fallback is available for deployments that cannot edit persisted records;
+    the ordinary default remains 30 seconds.
+    """
+    raw: Any = None
+    source = "default"
+    for label, settings in (("provider", provider_settings), ("model", model_settings)):
+        if isinstance(settings, dict) and "stream_read_timeout_s" in settings:
+            raw = settings.get("stream_read_timeout_s")
+            source = f"{label}.stream_read_timeout_s"
+    if raw is None:
+        raw = os.environ.get("RINARI_MODEL_STREAM_READ_TIMEOUT_SECONDS")
+        if raw is not None:
+            source = "RINARI_MODEL_STREAM_READ_TIMEOUT_SECONDS"
+    if raw is None:
+        return DEFAULT_MODEL_STREAM_READ_TIMEOUT_S
+    if isinstance(raw, bool):
+        raise InvalidUsageError(
+            f"{source} must be a number between "
+            f"{MIN_MODEL_STREAM_READ_TIMEOUT_S:g} and "
+            f"{MAX_MODEL_STREAM_READ_TIMEOUT_S:g} seconds"
+        )
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise InvalidUsageError(
+            f"{source} must be a number between "
+            f"{MIN_MODEL_STREAM_READ_TIMEOUT_S:g} and "
+            f"{MAX_MODEL_STREAM_READ_TIMEOUT_S:g} seconds"
+        ) from exc
+    in_bounds = MIN_MODEL_STREAM_READ_TIMEOUT_S <= value <= MAX_MODEL_STREAM_READ_TIMEOUT_S
+    if not math.isfinite(value) or not in_bounds:
+        raise InvalidUsageError(
+            f"{source} must be a number between "
+            f"{MIN_MODEL_STREAM_READ_TIMEOUT_S:g} and "
+            f"{MAX_MODEL_STREAM_READ_TIMEOUT_S:g} seconds"
+        )
+    return value
 
 
 def _unalias_response(
@@ -290,6 +340,10 @@ class ModelRouter:
     ) -> ModelResponse:
         model = self._resolve_model(provider, model_id)
         request = self.generation_request(provider, model, request)
+        request = replace(
+            request,
+            stream_read_timeout_s=_stream_read_timeout_s(provider.settings, model.settings),
+        )
         self._validate_reasoning(provider, model, request)
         from rinari.models.visual_context import prepare_visual_payload
 

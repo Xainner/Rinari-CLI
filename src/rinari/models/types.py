@@ -153,3 +153,7 @@ class ModelRequest:
     session_id: str | None = None
     """Opaque conversation id, forwarded only to vendors that require
     session affinity (e.g. OpenCode's x-opencode-session header)."""
+    # Runtime-only provider tuning. The router resolves this from provider /
+    # model settings and adapters use it only for the streaming read deadline;
+    # it is never serialized into a provider payload.
+    stream_read_timeout_s: float | None = None

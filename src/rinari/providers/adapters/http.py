@@ -7,6 +7,7 @@ interpretation (auth vs. provider errors) belongs to each adapter.
 from __future__ import annotations
 
 import re
+import time
 
 import httpx
 
@@ -19,6 +20,9 @@ MODEL_CALL_TIMEOUT = 600.0
 # response may keep streaming for minutes, but waiting ten minutes for the first
 # byte makes a dead provider look like a permanently thinking model.
 MODEL_STREAM_TIMEOUT = httpx.Timeout(connect=15.0, read=30.0, write=30.0, pool=10.0)
+DEFAULT_MODEL_STREAM_READ_TIMEOUT_S = 30.0
+MIN_MODEL_STREAM_READ_TIMEOUT_S = 1.0
+MAX_MODEL_STREAM_READ_TIMEOUT_S = 600.0
 
 OPENCODE_SESSION_HEADER = "x-opencode-session"
 
@@ -78,9 +82,78 @@ def send_request(
     try:
         return client.request(method, url, headers=headers, json=json_body, timeout=timeout)
     except httpx.TimeoutException as exc:
-        raise NetworkError(f"Timed out contacting {url}") from exc
+        timeout_s = timeout if isinstance(timeout, (int, float)) else None
+        raise NetworkError(
+            f"Timed out contacting {url}",
+            details={
+                "kind": "TIMEOUT",
+                "phase": "request",
+                "timeout_s": timeout_s,
+            },
+        ) from exc
     except httpx.TransportError as exc:
         raise NetworkError(f"Cannot reach {url}: {exc.__class__.__name__}") from exc
+
+
+def model_stream_timeout(read_timeout_s: float | None = None) -> httpx.Timeout:
+    """Build the bounded streaming timeout used by model adapters."""
+    read = DEFAULT_MODEL_STREAM_READ_TIMEOUT_S if read_timeout_s is None else read_timeout_s
+    return httpx.Timeout(connect=15.0, read=read, write=30.0, pool=10.0)
+
+
+def stream_timeout_error(
+    url: str,
+    model: str,
+    exc: httpx.TimeoutException,
+    *,
+    timeout_s: float,
+    headers_received: bool,
+    saw_payload: bool,
+    stream_started_at: float,
+    last_activity_at: float,
+) -> NetworkError:
+    """Normalize a stream timeout without losing where the wait occurred."""
+    if isinstance(exc, httpx.ConnectTimeout):
+        phase = "connect"
+        effective_timeout_s = 15.0
+    elif isinstance(exc, httpx.PoolTimeout):
+        phase = "pool"
+        effective_timeout_s = 10.0
+    elif isinstance(exc, httpx.WriteTimeout):
+        phase = "write"
+        effective_timeout_s = 30.0
+    elif isinstance(exc, httpx.ReadTimeout) and not headers_received:
+        phase = "response_headers"
+        effective_timeout_s = timeout_s
+    elif isinstance(exc, httpx.ReadTimeout) and not saw_payload:
+        phase = "first_byte"
+        effective_timeout_s = timeout_s
+    elif isinstance(exc, httpx.ReadTimeout):
+        phase = "between_chunks"
+        effective_timeout_s = timeout_s
+    else:
+        phase = "read"
+        effective_timeout_s = timeout_s
+    now = time.monotonic()
+    last_payload_at_s = (
+        round(last_activity_at - stream_started_at, 3) if saw_payload else None
+    )
+    return NetworkError(
+        f"Timed out streaming from {url}",
+        details={
+            "kind": "TIMEOUT",
+            "phase": phase,
+            "timeout_s": effective_timeout_s,
+            # These measure complete provider payload lines, not raw socket
+            # bytes, because httpx exposes the stream to us at line boundaries.
+            "last_payload_at_s": last_payload_at_s,
+            "payload_idle_s": round(now - last_activity_at, 3),
+            "headers_received": headers_received,
+            "saw_payload": saw_payload,
+            "partial": saw_payload,
+            "model": model,
+        },
+    )
 
 
 def provider_error_detail(response: httpx.Response, url: str) -> str:

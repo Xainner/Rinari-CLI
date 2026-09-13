@@ -1,6 +1,7 @@
 import httpx
 import pytest
 
+from rinari.models.types import ModelRequest
 from rinari.providers.adapters.anthropic import AnthropicAdapter
 from rinari.providers.adapters.base import AuthStatus, DiscoveredModel, ProviderHealth
 from rinari.providers.adapters.openai_compatible import OpenAICompatibleAdapter
@@ -102,6 +103,14 @@ class _BytesStream(httpx.SyncByteStream):
         return None
 
 
+class _TimeoutStream(httpx.SyncByteStream):
+    def __iter__(self):
+        raise httpx.ReadTimeout("read timeout")
+
+    def close(self) -> None:
+        return None
+
+
 def test_provider_error_detail_reads_stream_body() -> None:
     # Regression: a streaming error response is unread when passed to
     # provider_error_detail; it must read the body instead of crashing with
@@ -127,6 +136,28 @@ def test_openai_timeout_maps_to_network_error() -> None:
     adapter = OpenAICompatibleAdapter("http://127.0.0.1:9/v1", client=_client(handler))
     with pytest.raises(NetworkError):
         adapter.validate_credential(None, None)
+
+
+def test_openai_stream_timeout_reports_phase_and_configured_idle_bound() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, request=request, stream=_TimeoutStream())
+
+    adapter = OpenAICompatibleAdapter("https://api.test/v1", client=_client(handler))
+    request = ModelRequest(model="qwen", messages=(), stream_read_timeout_s=120.0)
+    with pytest.raises(NetworkError) as excinfo:
+        adapter.invoke_stream(request, "sk-test", None, lambda _delta: None)
+
+    assert seen[0].extensions["timeout"]["read"] == 120.0
+    details = excinfo.value.details
+    assert details["kind"] == "TIMEOUT"
+    assert details["phase"] == "first_byte"
+    assert details["timeout_s"] == 120.0
+    assert details["last_payload_at_s"] is None
+    assert details["partial"] is False
+    assert details["model"] == "qwen"
 
 
 def test_anthropic_validate_and_models() -> None:

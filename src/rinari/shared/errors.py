@@ -96,6 +96,19 @@ class NetworkError(RinariError):
     exit_code = ExitCode.NETWORK_FAILURE
     machine_code = "NETWORK_FAILURE"
 
+    def __init__(
+        self,
+        message: str,
+        hint: str | None = None,
+        *,
+        details: dict | None = None,
+    ) -> None:
+        super().__init__(message, hint=hint)
+        # Transport failures can still carry safe, machine-readable context
+        # (for example stream phase and the configured idle timeout). Keep it
+        # separate from the user-facing message so clients do not parse prose.
+        self.details = dict(details or {})
+
     @property
     def retryable(self) -> bool:
         return True

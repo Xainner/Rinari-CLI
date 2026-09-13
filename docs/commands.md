@@ -1508,6 +1508,14 @@ models that live on `/responses` (Muse Spark contributors, Grok 4.5,
 GPT 5.6 Luna); everywhere else the default is `chat`. An explicit
 per-model setting always wins.
 
+Streaming model calls use a 30-second inactivity timeout by default. A slow
+provider may set `stream_read_timeout_s` in provider settings, or override it
+for one saved model with the same key in model settings. Values must be between
+1 and 600 seconds; model settings take precedence. Installations that cannot
+edit saved records may use `RINARI_MODEL_STREAM_READ_TIMEOUT_SECONDS` as the
+fallback. A stream timeout remains terminal (there is no automatic replay) and
+the model/turn failure telemetry includes its phase and timeout details.
+
 ---
 
 ## `models alias`

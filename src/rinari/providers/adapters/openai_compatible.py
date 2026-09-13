@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -22,14 +23,16 @@ from rinari.models.types import (
 )
 from rinari.providers.adapters.base import AuthStatus, DiscoveredModel, ProviderAdapter
 from rinari.providers.adapters.http import (
+    DEFAULT_MODEL_STREAM_READ_TIMEOUT_S,
     MODEL_CALL_TIMEOUT,
-    MODEL_STREAM_TIMEOUT,
     auth_failure,
     decode_json,
+    model_stream_timeout,
     provider_error,
     sanitize_tool_name,
     send_request,
     session_affinity_headers,
+    stream_timeout_error,
 )
 from rinari.shared.errors import InvalidUsageError, NetworkError, ProviderModelError
 
@@ -211,6 +214,15 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         calls = _ToolCallAccumulator()
         stop_reason = StopReason.END_TURN
         stream_usage: dict[str, Any] | None = None
+        headers_received = False
+        saw_payload = False
+        stream_started_at = time.monotonic()
+        last_activity_at = stream_started_at
+        stream_timeout_s = (
+            request.stream_read_timeout_s
+            if request.stream_read_timeout_s is not None
+            else DEFAULT_MODEL_STREAM_READ_TIMEOUT_S
+        )
         headers = {**self._headers(secret), **session_affinity_headers(url, request.session_id)}
         try:
             with self.client().stream(
@@ -218,8 +230,9 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                 url,
                 json=self._payload(request, stream=True, tool_aliases=tool_aliases),
                 headers=headers,
-                timeout=MODEL_STREAM_TIMEOUT,
+                timeout=model_stream_timeout(request.stream_read_timeout_s),
             ) as response:
+                headers_received = True
                 if response.status_code in (401, 403):
                     raise auth_failure(response, url, model=request.model)
                 if response.status_code >= 400:
@@ -227,6 +240,8 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                 for line in response.iter_lines():
                     if not line or not line.startswith("data:"):
                         continue
+                    saw_payload = True
+                    last_activity_at = time.monotonic()
                     data = line[5:].strip()
                     if data == "[DONE]":
                         break
@@ -243,7 +258,16 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                     if reason:
                         stop_reason = _stop_reason_from_openai(reason)
         except httpx.TimeoutException as exc:
-            raise NetworkError(f"Timed out streaming from {url}") from exc
+            raise stream_timeout_error(
+                url,
+                request.model,
+                exc,
+                timeout_s=stream_timeout_s,
+                headers_received=headers_received,
+                saw_payload=saw_payload,
+                stream_started_at=stream_started_at,
+                last_activity_at=last_activity_at,
+            ) from exc
         except httpx.TransportError as exc:
             raise NetworkError(f"Stream interrupted: {exc.__class__.__name__}") from exc
         tool_calls = calls.finalize()

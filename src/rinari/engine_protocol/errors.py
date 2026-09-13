@@ -42,6 +42,9 @@ def from_rinari_error(err: RinariError) -> EngineProtocolError:
     details: dict[str, Any] = {}
     if getattr(err, "hint", None):
         details["hint"] = err.hint
+    error_details = getattr(err, "details", None)
+    if isinstance(error_details, dict):
+        details.update(error_details)
     return EngineProtocolError(
         code=err.machine_code,
         message=err.message,
