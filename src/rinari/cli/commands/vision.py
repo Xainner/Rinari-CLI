@@ -76,6 +76,13 @@ def execution(
     model: str | None = typer.Option(None),
     output_tokens: int | None = typer.Option(None),
     inherit: bool = typer.Option(False),
+    connect: float | None = typer.Option(None, help="Connection timeout in seconds."),
+    first_byte: float | None = typer.Option(None, help="First response byte timeout in seconds."),
+    idle: float | None = typer.Option(None, help="Stream inactivity timeout in seconds."),
+    total: float | None = typer.Option(None, help="Total streaming request timeout in seconds."),
+    inherit_timeouts: bool = typer.Option(
+        False, help="Clear global or selected provider timeout overrides."
+    ),
 ):
     """Configure shared model execution; not a vision-only limit."""
     with services(ctx) as service:
@@ -97,6 +104,31 @@ def execution(
                 value["models"][ref] = output_tokens
         elif output_tokens is not None:
             raise InvalidUsageError("--output-tokens requires --model")
+        overrides = {
+            k: v
+            for k, v in {
+                "connect": connect,
+                "first_byte": first_byte,
+                "idle": idle,
+                "total": total,
+            }.items()
+            if v is not None
+        }
+        if overrides or inherit_timeouts:
+            if model:
+                raise InvalidUsageError(
+                    "Timeout flags accept --provider or global scope, not --model"
+                )
+            target = (
+                value.setdefault("provider_timeouts", {}).setdefault(
+                    service.providers.get(provider).id, {}
+                )
+                if provider
+                else value.setdefault("timeouts", {})
+            )
+            if inherit_timeouts:
+                target.clear()
+            target.update(overrides)
         try:
             result = configure(service, {**config, "execution": value})
         except ValueError as exc:

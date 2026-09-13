@@ -16,11 +16,13 @@ def engine_version() -> str:
 
 
 CAPABILITIES: dict[str, bool] = {
+    "persistent_context_compaction_v1": True,
     "local_image_view_v1": True,
     "vision_routing_v1": True,
     "vision_routing_v2": True,
             "vision_message_routing_v3": True,
     "model_execution_policy_v1": True,
+    "durable_turn_recovery_v1": True,
     "desktop_processes_v1": True,
     "agent_inheritance_v1": True,
     "agent_activity_v1": True,

@@ -340,10 +340,25 @@ class ModelRouter:
     ) -> ModelResponse:
         model = self._resolve_model(provider, model_id)
         request = self.generation_request(provider, model, request)
-        request = replace(
-            request,
-            stream_read_timeout_s=_stream_read_timeout_s(provider.settings, model.settings),
-        )
+        from rinari.models.execution import policy
+        from rinari.providers.adapters.http import validate_stream_timeouts
+
+        config = policy(getattr(getattr(self._providers, "_ctx", None), "home", None))
+        limits = {
+            **config.get("timeouts", {}),
+            **config.get("provider_timeouts", {}).get(provider.id, {}),
+            **(provider.settings or {}).get("stream_timeouts", {}),
+            **(model.settings or {}).get("stream_timeouts", {}),
+        }
+        legacy = any(
+            "stream_read_timeout_s" in (s or {}) for s in (provider.settings, model.settings)
+        ) or os.environ.get("RINARI_MODEL_STREAM_READ_TIMEOUT_SECONDS")
+        if legacy:
+            read = _stream_read_timeout_s(provider.settings, model.settings)
+            limits.setdefault("first_byte", read)
+            limits.setdefault("idle", read)
+        limits = validate_stream_timeouts({**limits, **(request.stream_timeouts or {})})
+        request = replace(request, stream_timeouts=limits, stream_read_timeout_s=limits["idle"])
         self._validate_reasoning(provider, model, request)
         from rinari.models.visual_context import prepare_visual_payload
 

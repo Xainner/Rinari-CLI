@@ -1508,13 +1508,34 @@ models that live on `/responses` (Muse Spark contributors, Grok 4.5,
 GPT 5.6 Luna); everywhere else the default is `chat`. An explicit
 per-model setting always wins.
 
-Streaming model calls use a 30-second inactivity timeout by default. A slow
-provider may set `stream_read_timeout_s` in provider settings, or override it
-for one saved model with the same key in model settings. Values must be between
-1 and 600 seconds; model settings take precedence. Installations that cannot
-edit saved records may use `RINARI_MODEL_STREAM_READ_TIMEOUT_SECONDS` as the
-fallback. A stream timeout remains terminal (there is no automatic replay) and
-the model/turn failure telemetry includes its phase and timeout details.
+Streaming model calls have separate connection (15 s), first-byte (120 s),
+inactivity (120 s) and total (900 s) defaults. Configure installation-wide
+or provider-specific overrides in `model-execution.json` through:
+
+```bash
+rinari vision execution --first-byte 240 --idle 120 --total 1200
+rinari vision execution --provider opencode-go --first-byte 300
+rinari vision execution --provider opencode-go --inherit-timeouts
+```
+
+These are shared streaming settings despite the historical `vision execution`
+command name. Agent exposes them under Settings → Vision and images → Model
+execution. Empty UI fields inherit. `--inherit-timeouts` clears the selected
+provider's overrides, or the global overrides without `--provider`.
+
+Precedence: installation → provider execution overrides → saved provider
+`stream_timeouts` → saved model `stream_timeouts` → explicit request. Supported
+keys are `connect`, `first_byte`, `idle`, `total`, in finite positive seconds.
+The existing provider/model `stream_read_timeout_s` (1–600 s), and environment
+fallback `RINARI_MODEL_STREAM_READ_TIMEOUT_SECONDS`, remain compatible and fill
+first-byte/inactivity values not specified by the new policy. Direct adapter
+callers without a policy retain the legacy 30-second read default.
+
+First-byte includes waiting for response headers; inactivity measures raw bytes,
+including heartbeat traffic. The total bound also limits streams that send only
+heartbeats. A timeout is terminal with phase diagnostics; streaming requests and
+tools are never replayed automatically. Explicit continuation restores durable
+context. These settings do not change non-streaming call deadlines.
 
 ---
 
@@ -4159,3 +4180,8 @@ se ignora. Se mantienen las aprobaciones de acceso a archivos.
 
 La política común de generación y concurrencia, incluida visión auxiliar, se
 documenta en [Ejecución de visión](vision-execution.md).
+
+
+## Context compaction controls
+
+`rinari context settings` configures the shared threshold, optional summarizer and per-model window. `rinari context compact --session <id>` performs compaction without resuming the task. See [context-compaction.md](context-compaction.md) for the protocol, defaults and examples.

@@ -56,6 +56,19 @@ def test_hello_shape() -> None:
     assert payload["protocol_version"] == protocol.PROTOCOL_VERSION
     assert payload["engine_version"]
     assert payload["capabilities"]["chat"] is True
+    assert payload["capabilities"]["persistent_context_compaction_v1"] is True
+
+
+def test_context_settings_protocol_round_trip(server):
+    initial = server.handle_line(_req("ctx-get", "context.settings.get"))
+    assert initial["ok"] is True
+    settings = initial["result"]
+    settings["compact_at_percent"] = 77
+    saved = server.handle_line(_req("ctx-set", "context.settings.set", settings))
+    assert saved["ok"] is True
+    assert saved["result"]["compact_at_percent"] == 77
+    bad = server.handle_line(_req("ctx-bad", "context.settings.set", {**settings, "compact_at_percent": 0}))
+    assert bad["ok"] is False
 
 
 def test_success_and_failure_envelopes() -> None:

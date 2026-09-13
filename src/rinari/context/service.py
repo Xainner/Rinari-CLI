@@ -1,18 +1,9 @@
-"""Storage-aware compaction service (phase 4).
+"""Storage-aware context services.
 
-`maybe_compact` is invoked by the agent loop (through an injected hook)
-before model calls. When context pressure crosses the compact threshold it:
-
-1. rebuilds a provider-independent `CompactState` from the conversation
-   (rule-based extraction) plus persisted evidence (tasks, validation
-   records, approvals from PolicyDecision events, artifacts);
-2. trims the in-memory history tail in place (safe cut) so the next request
-   fits the post-compact budget;
-3. persists the state into `sessions.compact_state_json` (survives resume)
-   and records a `ContextCompacted` event.
-
-The persisted conversation (`session_messages`) is never truncated: resume
-restores full history and re-applies the same tail selection deterministically.
+Production session hosts call ``prepare`` before model dispatch. It generates a
+cumulative summary and persists exact covered message IDs before replacing the
+active projection. Original messages remain intact. ``maybe_compact`` retains
+the legacy deterministic hook for compatibility; production uses ``prepare``.
 """
 
 from __future__ import annotations
@@ -36,6 +27,10 @@ class ContextService:
     def __init__(self, ctx, artifacts: ArtifactStore) -> None:
         self._ctx = ctx
         self._artifacts = artifacts
+
+    def prepare(self, *args):
+        from rinari.context.preparation import prepare
+        return prepare(self, *args)
 
     # -- evidence -----------------------------------------------------------
 
@@ -72,11 +67,9 @@ class ContextService:
 
         approvals: list[str] = []
         for event in self._ctx.event_repo.list(session_id, limit=500):
-            if event.type != "PolicyDecision":
+            if event.type != "ToolApproved":
                 continue
             payload = event.payload or {}
-            if payload.get("action") != "ask":
-                continue
             target = payload.get("target")
             line = f"{payload.get('capability')}"
             if target:
@@ -166,9 +159,8 @@ class ContextService:
         record = self._ctx.session_repo.get(agent_ctx.session_id)
         if record is None or not record.compact_state:
             return
-        state = compact_state.CompactState.from_dict(record.compact_state)
-        if not state.is_empty():
-            agent_ctx.compact_state_text = state.render_prompt()
+        from rinari.context.projection import render
+        agent_ctx.compact_state_text = render(record.compact_state)
 
     # -- internals -----------------------------------------------------------
 

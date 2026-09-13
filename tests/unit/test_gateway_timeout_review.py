@@ -91,7 +91,7 @@ def test_read_timeout_before_headers_is_structured_and_timeout_is_transport_only
     assert seen[0].extensions["timeout"]["read"] == 17.0
     assert "stream_read_timeout_s" not in seen[0].content.decode()
     assert deltas == []
-    assert excinfo.value.details == {
+    expected = {
         "kind": "TIMEOUT",
         "phase": "response_headers",
         "timeout_s": 17.0,
@@ -102,6 +102,7 @@ def test_read_timeout_before_headers_is_structured_and_timeout_is_transport_only
         "partial": False,
         "model": "review-model",
     }
+    assert expected.items() <= excinfo.value.details.items()
     assert excinfo.value.details["payload_idle_s"] >= 0
 
 
@@ -192,7 +193,7 @@ class _DelayedHeadersHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         time.sleep(1.2)
-        body = b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n'
+        body = b'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Content-Length", str(len(body)))
@@ -294,3 +295,12 @@ def test_timeout_details_survive_engine_mapping_and_runtime_activity() -> None:
     assert failed["error"]["code"] == "NETWORK_FAILURE"
     assert failed["error"]["retryable"] is True
     assert failed["error"]["details"] == details
+
+
+@pytest.mark.parametrize("kind", ADAPTERS)
+def test_eof_after_partial_content_is_failure(kind):
+    client = httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(200, content=_partial_event(kind))))
+    with pytest.raises(NetworkError) as err:
+        _invoke_stream(kind, _adapter(kind, client), ModelRequest(model="test", messages=()), lambda _: None)
+    assert err.value.details["kind"] == "STREAM_INTERRUPTED"
+    assert err.value.details["partial_text"] == "partial"

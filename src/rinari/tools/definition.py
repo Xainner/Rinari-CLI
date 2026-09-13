@@ -109,6 +109,13 @@ class ToolResult:
         envelope: dict[str, Any] = {"ok": self.ok}
         if tool is not None:
             envelope["tool"] = tool
+        process = self.data if isinstance(self.data, dict) else {}
+        if "exit_code" in process:
+            code = process["exit_code"]
+            envelope["process_status"] = (
+                "running" if code is None else "failed" if code != 0 else "exited_zero"
+            )
+            envelope["task_verified"] = False
         if self.ok:
             envelope["data"] = self.data
         else:
@@ -138,6 +145,11 @@ class ToolResult:
         if len(text) <= len(self.truncation_mark()) + self.OBSERVATION_INLINE_BUDGET:
             return text
         compact: dict[str, Any] = {"ok": self.ok, "truncated": True}
+        for key in ("process_status", "task_verified"):
+            if key in envelope:
+                compact[key] = envelope[key]
+        if "exit_code" in process:
+            compact["exit_code"] = process["exit_code"]
         if tool:
             compact["tool"] = tool
         if self.error:

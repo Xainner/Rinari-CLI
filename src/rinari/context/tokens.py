@@ -17,7 +17,7 @@ CHARS_PER_TOKEN = 4
 # Harness trigger points (harness.md section 67).
 PRESSURE_WARNING = 0.70
 PRESSURE_PREPARE = 0.80
-PRESSURE_COMPACT = 0.85
+PRESSURE_COMPACT = 0.80
 
 # Budget fallback when neither the provider capabilities nor a session-level
 # override reports a context window. Deliberately conservative: compaction
@@ -54,10 +54,8 @@ def estimate_tokens(
     for message in history:
         total += estimate_message_tokens(message)
     if tools:
-        total += len(json.dumps([t.name for t in tools])) // CHARS_PER_TOKEN
-        total += sum(len(json.dumps(t.parameters, default=str)) for t in tools) // (
-            CHARS_PER_TOKEN * 2
-        )
+        total += sum(len(json.dumps({"name": t.name, "description": t.description,
+            "parameters": t.parameters}, default=str)) for t in tools) // CHARS_PER_TOKEN
     return total
 
 

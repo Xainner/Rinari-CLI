@@ -222,6 +222,8 @@ class EngineServer:
         self._dispatcher.register("agent.config.get", self._agent_config_get)
         self._dispatcher.register("agent.config.set", self._agent_config_set)
         self._dispatcher.register("model.capabilities", self._model_capabilities)
+        self._dispatcher.register("context.compact", lambda params: self._turns.start_turn(
+            params.get("session_id"), "", compaction_only=True))
         self._dispatcher.register("session.events", self._session_events)
         self._dispatcher.register("soul.list", self._soul_list)
         self._dispatcher.register("soul.get", self._soul_get)

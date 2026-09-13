@@ -118,6 +118,12 @@ class ProviderModelError(RinariError):
     exit_code = ExitCode.PROVIDER_MODEL_FAILURE
     machine_code = "PROVIDER_MODEL_FAILURE"
 
+    def __init__(
+        self, message: str, hint: str | None = None, *, details: dict | None = None
+    ) -> None:
+        super().__init__(message, hint=hint)
+        self.details = dict(details or {})
+
 
 class ToolError(RinariError):
     exit_code = ExitCode.TOOL_FAILURE

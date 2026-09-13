@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
+from uuid import uuid4
 
 ROLE_SYSTEM = "system"
 ROLE_USER = "user"
@@ -43,6 +44,9 @@ class ToolCall:
 
 @dataclass(frozen=True, slots=True)
 class ChatMessage:
+    message_id: str = field(
+        default_factory=lambda: uuid4().hex, compare=False, repr=False, kw_only=True
+    )
     role: str
     content: str | None = None
     tool_calls: tuple[ToolCall, ...] = ()
@@ -156,4 +160,5 @@ class ModelRequest:
     # Runtime-only provider tuning. The router resolves this from provider /
     # model settings and adapters use it only for the streaming read deadline;
     # it is never serialized into a provider payload.
+    stream_timeouts: dict[str, float] | None = None
     stream_read_timeout_s: float | None = None

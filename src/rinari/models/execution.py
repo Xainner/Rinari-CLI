@@ -22,7 +22,7 @@ def policy(home):
 
 def validate(value):
     if not isinstance(value, dict) or any(
-        not isinstance(value.get(k, {}), dict) for k in ("providers", "models")
+        not isinstance(value.get(k, {}), dict) for k in ("providers", "models", "provider_timeouts")
     ):
         raise ValueError("Model execution settings must contain provider/model maps")
     result = {
@@ -35,6 +35,14 @@ def validate(value):
         raise ValueError(
             "Execution concurrency and configured output tokens must be positive integers"
         )
+    for key in ("timeouts", "provider_timeouts"):
+        if key in value:
+            result[key] = value[key]
+    from rinari.providers.adapters.http import validate_stream_timeouts
+
+    validate_stream_timeouts(result.get("timeouts", {}))
+    for entry in result.get("provider_timeouts", {}).values():
+        validate_stream_timeouts(entry)
     return result
 
 

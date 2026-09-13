@@ -225,6 +225,18 @@ def register_media(dispatcher, services):
             raise EngineProtocolError(INVALID_PARAMS, str(exc)) from exc
 
     dispatcher.register("vision.settings.get", lambda params: settings(services))
+    from rinari.context.settings import load as context_settings, save as save_context_settings
+    dispatcher.register("context.settings.get", lambda params: context_settings(services.ctx))
+    dispatcher.register("context.settings.set", lambda params: save_context_settings(services, params))
+    def context_status(params):
+        from rinari.context.settings import window
+        from rinari.models.router import ModelRouter
+        from rinari.runtime.model_caller import ModelCaller
+        model = services.models.resolve(params.get("model_id"))
+        caller = ModelCaller(ModelRouter(services.providers, services.models),
+            services.providers.get(model.provider_id), model.id)
+        return window(services.ctx, caller)
+    dispatcher.register("context.status", context_status)
     dispatcher.register("vision.settings.set", save_vision)
     dispatcher.register("session.image_support", support)
     dispatcher.register("artifact.receive_image", receive)

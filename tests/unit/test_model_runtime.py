@@ -282,7 +282,7 @@ def test_openai_invoke_sends_opencode_session_header() -> None:
 
 def test_openai_stream_sends_opencode_session_header() -> None:
     seen: list[httpx.Request] = []
-    body = 'data: {"choices":[{"delta":{"content":"hola"}}]}\ndata: [DONE]\n'
+    body = 'data: {"choices":[{"delta":{"content":"hola"},"finish_reason":"stop"}]}\ndata: [DONE]\n'
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
@@ -1031,5 +1031,30 @@ def test_router_without_model(monkeypatch, tmp_path) -> None:
         router = ModelRouter(services.providers, services.models, http_client=_client(handler))
         with pytest.raises(InvalidUsageError):
             router.invoke(a, None, _request())
+    finally:
+        ctx.close()
+
+
+def test_stream_timeout_policy_precedence_is_transport_only(monkeypatch, tmp_path):
+    from dataclasses import replace
+    seen = []
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, content=b'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n')
+    ctx, services = _app_and_services(handler, monkeypatch, tmp_path)
+    try:
+        provider = services.providers.add(_add_input(services, "openai", "https://api.test/v1"))
+        model = services.models.add(provider.alias, "gpt-real", "principal", settings={"stream_timeouts": {"idle": 77}})
+        (ctx.home / "model-execution.json").write_text(json.dumps({
+            "timeouts": {"connect": 19, "first_byte": 42, "idle": 50},
+            "provider_timeouts": {provider.id: {"idle": 65}},
+        }), encoding="utf-8")
+        router = ModelRouter(services.providers, services.models, http_client=_client(handler))
+        router.invoke_stream(provider, model.id, _request(), lambda _: None)
+        assert seen[-1].extensions["timeout"]["connect"] == 19
+        assert seen[-1].extensions["timeout"]["read"] == 77
+        router.invoke_stream(provider, model.id, replace(_request(), stream_timeouts={"idle": 99}), lambda _: None)
+        assert seen[-1].extensions["timeout"]["read"] == 99
+        assert b'stream_timeouts' not in seen[-1].content
     finally:
         ctx.close()

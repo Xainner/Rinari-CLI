@@ -146,10 +146,10 @@ def test_session_interruption_state() -> None:
     services = SimpleNamespace(
         ctx=SimpleNamespace(
             clock=FakeClock(start=1_700_000_000.0, step=0.01),
-            session_repo=SimpleNamespace(update=lambda r: calls.append(r.state)),
+            session_repo=SimpleNamespace(update=lambda r: calls.append(r.state), get=lambda _: None),
         )
     )
-    record = SimpleNamespace(state="active", last_active_at="", updated_at="")
+    record = SimpleNamespace(id="session", state="active", last_active_at="", updated_at="")
     agent_runtime._set_session_state(services, record, "interrupted")
     assert record.state == "interrupted"
     assert calls == ["interrupted"]

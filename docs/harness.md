@@ -9225,3 +9225,32 @@ sin eliminar texto. Los originales persistidos no se modifican.
 
 La política común de generación y concurrencia, incluida visión auxiliar, se
 documenta en [Ejecución de visión](vision-execution.md).
+
+### Persistencia y recuperación de turnos interrumpidos
+
+El host común de CLI/Agent conserva cada mensaje del modelo antes de ejecutar
+sus herramientas y cada resultado antes de solicitar el siguiente paso. Los IDs
+estables hacen idempotente el guardado durante el turno y al finalizar. Un fallo
+del proveedor conserva el intercambio anterior y etiqueta su texto parcial.
+
+La proyección de reanudación completa pares de herramientas sin resultado con
+una observación explícita de desenlace desconocido; no ejecuta la llamada.
+Los turnos históricos fallidos que carecen de mensajes del asistente pueden
+recuperar evidencia acotada de sus eventos persistidos. Esa evidencia se marca
+como histórica y no modifica los registros originales. Las herramientas usadas
+recientemente vuelven al catálogo de contexto; permisos y políticas siguen
+evaluándose normalmente.
+
+Responses exige un evento terminal; Chat exige finish_reason y Anthropic
+message_stop. EOF prematuro, error, fallo o cancelación del proveedor no equivalen
+a finalización. El límite de salida produce respuesta truncada sin llamadas
+ejecutables. El consumidor controla cancelación y espera total; los trabajadores
+HTTP solo transportan datos y cierran respuestas tardías abandonadas.
+
+Contrato anunciado: `durable_turn_recovery_v1`. Diseño, límites y comprobaciones:
+[Recuperación de streams](stream-recovery.md).
+
+
+## Persistent pre-dispatch context projection
+
+Session hosts prepare context before provider dispatch. The versioned compact state identifies the exact covered message IDs and a cumulative model-generated summary; reopening reconstructs that projection rather than the full prefix. Original messages remain durable. The shared `context.compact_at_percent` controls the threshold. See [context-compaction.md](context-compaction.md) for migration, failure behavior and validation.

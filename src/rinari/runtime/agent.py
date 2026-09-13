@@ -106,6 +106,9 @@ class AgentContext:
     compact_state_text: str | None = None
     dropped_total: int = 0
     compacted: bool = False
+    force_compaction: bool = False
+    compaction_reason: str = "automatic"
+    context_usage: dict = field(default_factory=dict)
     pending_images: tuple[Any, ...] = ()
     pending_attachments: tuple[dict[str, Any], ...] = ()
     pending_display_content: str | None = None
@@ -127,6 +130,7 @@ class AgentLoop:
         hook_sink: HookSink | None = None,
         activity_sink: ActivityHook | None = None,
         reasoning_effort: str | None = None,
+        prepare_context: Callable | None = None,
     ) -> None:
         self._provider = model_provider
         self._tools = tool_runtime
@@ -138,6 +142,7 @@ class AgentLoop:
         self._hook_sink = hook_sink
         self._activity_sink = activity_sink
         self._reasoning_effort = reasoning_effort
+        self._prepare_context = prepare_context
 
     @property
     def tool_registry(self):
@@ -242,6 +247,11 @@ class AgentLoop:
                     )
                 budget.reserve_model_call(model_only=True)
             request = self._build_request(ctx)
+            if self._prepare_context is not None:
+                request = self._prepare_context(
+                    ctx, request, self._provider, lambda state: self._build_request(state, request.tools),
+                    self._emit_activity, cancel,
+                )
             before_model_payload: dict = {
                 "model": ctx.model_ref,
                 "messages": len(request.messages),
@@ -258,7 +268,10 @@ class AgentLoop:
                 {"model_call_id": model_call_id, "model": ctx.model_ref},
             )
 
+            accepted_output = False
             def visible_delta(text: str, call_id: str = model_call_id) -> None:
+                nonlocal accepted_output
+                accepted_output = accepted_output or bool(text)
                 if on_delta is not None:
                     on_delta(text)
                 self._emit_activity(
@@ -267,12 +280,22 @@ class AgentLoop:
                 )
 
             try:
-                response = self._invoke(
-                    ctx,
-                    request,
-                    self._guarded_delta(ctx, visible_delta),
-                    cancel,
-                )
+                try:
+                    response = self._invoke(ctx, request, self._guarded_delta(ctx, visible_delta), cancel)
+                except Exception as rejected:
+                    from rinari.providers.errors import ProviderErrorCode
+                    if (self._prepare_context is None or accepted_output
+                        or getattr(rejected, "error_code", None) != ProviderErrorCode.CONTEXT_OVERFLOW):
+                        raise
+                    ctx.force_compaction = True
+                    try:
+                        request = self._prepare_context(ctx, request, self._provider,
+                            lambda state: self._build_request(state, request.tools), self._emit_activity, cancel)
+                    finally:
+                        ctx.force_compaction = False
+                    if budget is not None:
+                        budget.reserve_model_call(model_only=True)
+                    response = self._invoke(ctx, request, self._guarded_delta(ctx, visible_delta), cancel)
             except BaseException as exc:
                 error = {
                     "message": str(exc),
@@ -343,7 +366,11 @@ class AgentLoop:
                     ),
                 },
             )
-            self._check_pressure(ctx, response, governor)
+            from rinari.context.preparation import request_size
+            ctx.context_usage = {"model": ctx.model_ref, "estimated": request_size(request),
+                                 "actual": getattr(response.usage, "input_tokens", None)}
+            if self._prepare_context is None:
+                self._check_pressure(ctx, response, governor)
 
             if not response.has_tool_calls:
                 ctx.history.append(ChatMessage.assistant(response.content or ""))
@@ -494,7 +521,11 @@ class AgentLoop:
                         )
                     _hook(on_tool, "end", call.name, result)
                     terminal_event = "tool.completed"
-                    if not result.ok:
+                    command_failed = (
+                        _tool_activity_presentation(call.name, call.arguments, result).get("status")
+                        == "failed"
+                    )
+                    if not result.ok or command_failed:
                         terminal_event = (
                             "tool.cancelled"
                             if result.error is not None
@@ -676,7 +707,7 @@ class AgentLoop:
 
     # -- internals ------------------------------------------------------------
 
-    def _build_request(self, ctx: AgentContext) -> ModelRequest:
+    def _build_request(self, ctx: AgentContext, wire_tools=None) -> ModelRequest:
         context = replace(
             ctx.assembler_base,
             history=tuple(ctx.history),
@@ -688,7 +719,9 @@ class AgentLoop:
             messages.append(ChatMessage.system(bundle.system_prompt))
         messages.extend(ctx.history)
         exposure = getattr(ctx.tool_ctx, "exposure", None)
-        if exposure is not None:
+        if wire_tools is not None:
+            pass
+        elif exposure is not None:
             # Dynamic exposure (Etapa B): core + activated + recent, pruned
             # once per model request so turn-scoped activations decay.
             exposure.prune()
@@ -758,10 +791,10 @@ class AgentLoop:
         on_delta: DeltaFn | None,
         cancellation: CancellationToken,
     ) -> Any:
-        from rinari.runtime.vision import visual_status
         from rinari.models.visual_context import last_owner_message, select_visual_context
+        from rinari.runtime.vision import visual_status
 
-        request = select_visual_context(request)
+        request = replace(select_visual_context(request), cancellation=cancellation)
         last_user = last_owner_message(request.messages)
         if any(message.images for message in request.messages[last_user:]):
             decision = visual_status(self._provider)
@@ -774,11 +807,18 @@ class AgentLoop:
         # read. Keep every provider invocation outside the logical turn worker
         # so cancellation is bounded by this 50 ms polling interval.
         completed: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
+        partial_text: list[str] = []
+
+        def deliver_delta(text: str) -> None:
+            cancellation.throw_if_cancelled()
+            partial_text.append(text)
+            if on_delta is not None:
+                on_delta(text)
 
         def invoke_provider() -> None:
             try:
                 value = (
-                    self._provider.invoke_stream(request, on_delta)
+                    self._provider.invoke_stream(request, deliver_delta)
                     if streaming
                     else self._provider.invoke(request)
                 )
@@ -792,13 +832,19 @@ class AgentLoop:
             daemon=True,
         ).start()
         while True:
-            cancellation.throw_if_cancelled("Model call cancelled")
+            try:
+                cancellation.throw_if_cancelled("Model call cancelled")
+            except CancelledError as exc:
+                exc.details = {"partial_text": "".join(partial_text)}
+                raise
             try:
                 ok, value = completed.get(timeout=0.05)
             except queue.Empty:
                 continue
             if ok:
                 return value
+            if isinstance(value, CancelledError):
+                value.details = {"partial_text": "".join(partial_text)}
             raise value
 
     def _guarded_delta(self, ctx: AgentContext, on_delta: DeltaFn | None) -> DeltaFn | None:

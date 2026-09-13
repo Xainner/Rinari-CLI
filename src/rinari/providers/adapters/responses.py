@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any
 
 import httpx
@@ -39,7 +40,8 @@ from rinari.providers.adapters.http import (
     MODEL_CALL_TIMEOUT,
     auth_failure,
     decode_json,
-    model_stream_timeout,
+    iter_model_lines,
+    open_model_stream,
     provider_error,
     sanitize_tool_name,
     send_request,
@@ -172,19 +174,21 @@ class OpenAIResponsesAdapter(ProviderAdapter):
             else DEFAULT_MODEL_STREAM_READ_TIMEOUT_S
         )
         try:
-            with self.client().stream(
+            with open_model_stream(
+                self.client(),
+                request,
+                stream_started_at,
                 "POST",
                 url,
                 json=self._responses_payload(request, stream=True, tool_aliases=tool_aliases),
                 headers=headers,
-                timeout=model_stream_timeout(request.stream_read_timeout_s),
             ) as response:
                 headers_received = True
                 if response.status_code in (401, 403):
                     raise auth_failure(response, url, model=request.model)
                 if response.status_code >= 400:
                     raise provider_error(response, url, model=request.model)
-                for line in response.iter_lines():
+                for line in iter_model_lines(response, request, stream_started_at):
                     if not line or not line.startswith("data:"):
                         continue
                     saw_payload = True
@@ -193,8 +197,20 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                     if data == "[DONE]":
                         break
                     acc.update(_parse_sse_payload(data, url), on_delta)
+                    if acc._completed is not None:
+                        break
+        except (NetworkError, ProviderModelError) as exc:
+            exc.details.update(
+                {
+                    "partial_text": "".join(acc._text_parts),
+                    "partial": bool(acc._text_parts),
+                    "last_event": acc.last_event,
+                    "response_id": acc.response_id,
+                }
+            )
+            raise
         except httpx.TimeoutException as exc:
-            raise stream_timeout_error(
+            error = stream_timeout_error(
                 url,
                 request.model,
                 exc,
@@ -203,9 +219,27 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                 saw_payload=saw_payload,
                 stream_started_at=stream_started_at,
                 last_activity_at=last_activity_at,
-            ) from exc
+                effective_timeouts=request.stream_timeouts,
+                response=response if headers_received else None,
+            )
+            error.details.update(
+                {
+                    "partial_text": "".join(acc._text_parts),
+                    "last_event": acc.last_event,
+                    "response_id": acc.response_id,
+                }
+            )
+            raise error from exc
         except httpx.TransportError as exc:
-            raise NetworkError(f"Stream interrupted: {exc.__class__.__name__}") from exc
+            raise NetworkError(
+                f"Stream interrupted: {exc.__class__.__name__}",
+                details={
+                    "kind": "STREAM_INTERRUPTED",
+                    "partial_text": "".join(acc._text_parts),
+                    "last_event": acc.last_event,
+                    "response_id": acc.response_id,
+                },
+            ) from exc
         return acc.finalize(url)
 
     def _responses_payload(
@@ -349,14 +383,9 @@ def _optional_int(value: Any) -> int | None:
 def _response_from_responses(data: Any, url: str) -> ModelResponse:
     if not isinstance(data, dict):
         raise ProviderModelError(f"Unexpected responses payload from {url}")
-    if data.get("status") == "failed":
-        err = data.get("error") or {}
-        detail = err.get("message") if isinstance(err, dict) else None
-        raise ProviderModelError(
-            f"Provider returned an errored response for {url}"
-            + (f": {str(detail)[:300]}" if detail else "")
-        )
-    output = data.get("output")
+    output = data.get(
+        "output", [] if data.get("status") in {"failed", "cancelled", "incomplete"} else None
+    )
     if not isinstance(output, list):
         raise ProviderModelError(f"Unexpected responses payload from {url}")
     content_parts: list[str] = []
@@ -382,7 +411,30 @@ def _response_from_responses(data: Any, url: str) -> ModelResponse:
                 tool_calls.append(call)
     status = data.get("status")
     incomplete = data.get("incomplete_details") or {}
-    if status == "incomplete" and incomplete.get("reason") == "max_output_tokens":
+    if status in {"failed", "cancelled"}:
+        raise ProviderModelError(
+            "Provider response " + status,
+            details={
+                "kind": "RESPONSE_" + status.upper(),
+                "response_id": data.get("id"),
+                "partial_text": "".join(content_parts),
+                "provider_error": data.get("error"),
+                "partial": bool(content_parts),
+            },
+        )
+    if status == "incomplete":
+        # Never execute tools from an incomplete response, even syntactically valid ones.
+        if incomplete.get("reason") != "max_output_tokens":
+            raise ProviderModelError(
+                "Provider response incomplete",
+                details={
+                    "kind": "RESPONSE_INCOMPLETE",
+                    "reason": incomplete.get("reason"),
+                    "partial_text": "".join(content_parts),
+                    "partial": bool(content_parts),
+                },
+            )
+        tool_calls = []
         stop_reason = StopReason.MAX_TOKENS
     elif tool_calls:
         stop_reason = StopReason.TOOL_CALLS
@@ -412,20 +464,68 @@ class _ResponsesStreamAccumulator:
     def __init__(self) -> None:
         self._text_parts: list[str] = []
         self._completed: dict[str, Any] | None = None
+        self.last_event: str | None = None
+        self.response_id: str | None = None
+        self._sequences: set[int] = set()
 
     def update(self, event: dict[str, Any], on_delta: Callable[[str], None]) -> None:
+        sequence = event.get("sequence_number")
+        if isinstance(sequence, int):
+            if sequence in self._sequences:
+                return
+            self._sequences.add(sequence)
         event_type = event.get("type")
+        self.last_event = event_type
+        if isinstance(event.get("response"), dict):
+            self.response_id = event["response"].get("id", self.response_id)
+        if self._completed is not None:
+            return
+        if event_type == "error":
+            raise ProviderModelError(
+                "Provider stream error",
+                details={
+                    "kind": "RESPONSE_FAILED",
+                    "provider_error": event.get("message"),
+                    "partial_text": "".join(self._text_parts),
+                    "response_id": self.response_id,
+                    "partial": bool(self._text_parts),
+                },
+            )
         if event_type == "response.output_text.delta":
             delta = event.get("delta")
             if isinstance(delta, str) and delta:
                 self._text_parts.append(delta)
                 on_delta(delta)
-        elif event_type == "response.completed":
+        elif event_type in {
+            "response.completed",
+            "response.incomplete",
+            "response.failed",
+            "response.cancelled",
+        }:
             response = event.get("response")
             if isinstance(response, dict):
-                self._completed = response
+                self._completed = {**response, "status": event_type.split(".")[-1]}
 
     def finalize(self, url: str) -> ModelResponse:
         if self._completed is None:
-            return ModelResponse(content="".join(self._text_parts), tool_calls=())
-        return _response_from_responses(self._completed, url)
+            raise NetworkError(
+                "Response stream closed without a terminal event",
+                details={
+                    "kind": "STREAM_INTERRUPTED",
+                    "partial": bool(self._text_parts),
+                    "partial_text": "".join(self._text_parts),
+                    "last_event": self.last_event,
+                    "response_id": self.response_id,
+                },
+            )
+        try:
+            result = _response_from_responses(self._completed, url)
+            if result.stop_reason == StopReason.MAX_TOKENS and not result.content:
+                result = replace(result, content="".join(self._text_parts))
+            return result
+        except ProviderModelError as exc:
+            if not exc.details.get("partial_text"):
+                exc.details["partial_text"] = "".join(self._text_parts)
+                exc.details["partial"] = bool(self._text_parts)
+            exc.details.update(last_event=self.last_event, response_id=self.response_id)
+            raise

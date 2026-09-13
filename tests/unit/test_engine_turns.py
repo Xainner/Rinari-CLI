@@ -1350,3 +1350,61 @@ def test_desktop_observes_real_browser_and_retains_it_across_turns(server, tmp_p
     finally:
         server.turns.close_browser(session_id)
     assert not browser.connected
+
+
+def test_failed_turn_preserves_tool_exchange_and_restores_without_replay(server, services, tmp_path, monkeypatch):
+    from rinari.models.types import ToolCall
+    from rinari.shared.errors import NetworkError
+
+    sid = _create_chat(server, tmp_path, "durable")
+    services.sessions.set_permission(sid, "full-access")
+    class FailAfterTool(FakeModel):
+        def invoke(self, request):
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                return ModelResponse(content="Consulto", tool_calls=(ToolCall("durable-list", "fs.list", {"path": str(tmp_path)}),))
+            # The tool exchange must already be durable BEFORE the failing request.
+            rows = services.ctx.message_repo.list(sid)
+            assert any(r.role == "tool" and r.tool_call_id == "durable-list" for r in rows)
+            raise NetworkError("synthetic disconnect", details={"partial_text": "avance parcial", "phase": "between_chunks"})
+    model = FailAfterTool([])
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda *args: model)
+    assert server.handle_line(_req("durable-start", "session.turn.start", {"session_id": sid, "message": "lista"}))["ok"]
+    events = _collect_until(server, sid)
+    failure = next(e for e in events if e["event"] == "turn.failed")
+    assert failure["payload"]["error"]["details"]["history_preserved"] is True
+    rows = services.ctx.message_repo.list(sid)
+    assert sum(r.role == "tool" for r in rows) == 1
+    assert any("avance parcial" in (r.content or "") for r in rows)
+    before = [r.id for r in rows]
+    restored = agent_runtime._restore_history(services, services.sessions.show(sid))
+    assert sum(m.tool_call_id == "durable-list" for m in restored) == 1
+    assert [r.id for r in services.ctx.message_repo.list(sid)] == before
+    continuation = FakeModel([_answer()])
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda *args: continuation)
+    assert server.handle_line(_req("durable-continue", "session.turn.start", {"session_id": sid, "message": "continua"}))["ok"]
+    next_events = _collect_until(server, sid)
+    assert any(e["event"] == "turn.completed" for e in next_events)
+    assert not any(e["event"] == "tool.requested" for e in next_events)
+    assert any(m.tool_call_id == "durable-list" for m in continuation.requests[0].messages)
+    assert sum(r.role == "tool" for r in services.ctx.message_repo.list(sid)) == 1
+
+
+def test_cancelled_stream_keeps_partial_text_durable(server, services, tmp_path, monkeypatch):
+    ready = threading.Event()
+    class PartialStream(FakeStreamModel):
+        def invoke_stream(self, request, on_delta):
+            on_delta("retained partial")
+            ready.set()
+            time.sleep(0.2)
+            request.cancellation.throw_if_cancelled()
+            return _answer()
+    model = PartialStream([])
+    sid = _create_chat(server, tmp_path, "partial-cancel")
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda *args: model)
+    assert server.handle_line(_req("pc-start", "session.turn.start", {"session_id": sid, "message": "test"}))["ok"]
+    assert ready.wait(5)
+    assert server.handle_line(_req("pc-cancel", "session.turn.cancel", {"session_id": sid}))["ok"]
+    assert any(e["event"] == "turn.cancelled" for e in _collect_until(server, sid))
+    rows = services.ctx.message_repo.list(sid)
+    assert sum("retained partial" in (r.content or "") for r in rows) == 1

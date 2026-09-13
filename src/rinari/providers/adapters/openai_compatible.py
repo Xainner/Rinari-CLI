@@ -27,7 +27,8 @@ from rinari.providers.adapters.http import (
     MODEL_CALL_TIMEOUT,
     auth_failure,
     decode_json,
-    model_stream_timeout,
+    iter_model_lines,
+    open_model_stream,
     provider_error,
     sanitize_tool_name,
     send_request,
@@ -95,9 +96,9 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             model_id = entry.get("id") if isinstance(entry, dict) else str(entry)
             if not model_id:
                 continue
-            models.append(
-                DiscoveredModel(provider_model_id=str(model_id), availability="available")
-            )
+            from rinari.context.windows import normalize
+            models.append(DiscoveredModel(provider_model_id=str(model_id), availability="available",
+                capabilities=normalize(entry) or None))
         return models
 
     # -- model invocation ---------------------------------------------------
@@ -213,6 +214,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         content_parts: list[str] = []
         calls = _ToolCallAccumulator()
         stop_reason = StopReason.END_TURN
+        terminal_seen = False
         stream_usage: dict[str, Any] | None = None
         headers_received = False
         saw_payload = False
@@ -225,19 +227,21 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         )
         headers = {**self._headers(secret), **session_affinity_headers(url, request.session_id)}
         try:
-            with self.client().stream(
+            with open_model_stream(
+                self.client(),
+                request,
+                stream_started_at,
                 "POST",
                 url,
                 json=self._payload(request, stream=True, tool_aliases=tool_aliases),
                 headers=headers,
-                timeout=model_stream_timeout(request.stream_read_timeout_s),
             ) as response:
                 headers_received = True
                 if response.status_code in (401, 403):
                     raise auth_failure(response, url, model=request.model)
                 if response.status_code >= 400:
                     raise provider_error(response, url, model=request.model)
-                for line in response.iter_lines():
+                for line in iter_model_lines(response, request, stream_started_at):
                     if not line or not line.startswith("data:"):
                         continue
                     saw_payload = True
@@ -246,6 +250,11 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                     if data == "[DONE]":
                         break
                     chunk = _parse_sse_payload(data, url)
+                    if chunk.get("error"):
+                        raise NetworkError(
+                            "Provider reported stream failure",
+                            details={"provider_error": chunk["error"]},
+                        )
                     if isinstance(chunk.get("usage"), dict):
                         stream_usage = chunk["usage"]
                     choice = (chunk.get("choices") or [{}])[0]
@@ -256,9 +265,15 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                     calls.update(delta.get("tool_calls"))
                     reason = choice.get("finish_reason")
                     if reason:
+                        terminal_seen = True
                         stop_reason = _stop_reason_from_openai(reason)
+        except (NetworkError, ProviderModelError) as exc:
+            exc.details.update(
+                {"partial_text": "".join(content_parts), "partial": bool(content_parts)}
+            )
+            raise
         except httpx.TimeoutException as exc:
-            raise stream_timeout_error(
+            error = stream_timeout_error(
                 url,
                 request.model,
                 exc,
@@ -267,10 +282,32 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                 saw_payload=saw_payload,
                 stream_started_at=stream_started_at,
                 last_activity_at=last_activity_at,
-            ) from exc
+                effective_timeouts=request.stream_timeouts,
+                response=response if headers_received else None,
+            )
+            error.details.update(
+                {"partial_text": "".join(content_parts), "partial": bool(content_parts)}
+            )
+            raise error from exc
         except httpx.TransportError as exc:
-            raise NetworkError(f"Stream interrupted: {exc.__class__.__name__}") from exc
-        tool_calls = calls.finalize()
+            raise NetworkError(
+                f"Stream interrupted: {exc.__class__.__name__}",
+                details={
+                    "kind": "STREAM_INTERRUPTED",
+                    "partial_text": "".join(content_parts),
+                    "partial": bool(content_parts),
+                },
+            ) from exc
+        if not terminal_seen:
+            raise NetworkError(
+                "Response stream closed without a terminal event",
+                details={
+                    "kind": "STREAM_INTERRUPTED",
+                    "partial_text": "".join(content_parts),
+                    "partial": bool(content_parts),
+                },
+            )
+        tool_calls = () if stop_reason is StopReason.MAX_TOKENS else calls.finalize()
         if tool_calls and stop_reason is not StopReason.MAX_TOKENS:
             stop_reason = StopReason.TOOL_CALLS
         # §6.2: captured chunk usage is authoritative; silence is marked,
@@ -380,7 +417,7 @@ def _response_from_openai(data: Any, url: str) -> ModelResponse:
         )
     return ModelResponse(
         content=content,
-        tool_calls=tool_calls,
+        tool_calls=() if choice.get("finish_reason") == "length" else tool_calls,
         usage=_usage_from_openai(data.get("usage")),
         stop_reason=_stop_reason_from_openai(
             choice.get("finish_reason"), has_tool_calls=bool(tool_calls)

@@ -27,7 +27,8 @@ from rinari.providers.adapters.http import (
     MODEL_CALL_TIMEOUT,
     auth_failure,
     decode_json,
-    model_stream_timeout,
+    iter_model_lines,
+    open_model_stream,
     provider_error,
     send_request,
     session_affinity_headers,
@@ -83,8 +84,9 @@ class AnthropicAdapter(ProviderAdapter):
         data = decode_json(response, url)
         if not isinstance(data, dict):
             raise ProviderModelError(f"Unexpected model list payload for {url}")
+        from rinari.context.windows import normalize
         return [
-            DiscoveredModel(provider_model_id=str(item["id"]), availability="available")
+            DiscoveredModel(provider_model_id=str(item["id"]), availability="available", capabilities=normalize(item) or None)
             for item in data.get("data", [])
             if isinstance(item, dict) and item.get("id")
         ]
@@ -152,6 +154,7 @@ class AnthropicAdapter(ProviderAdapter):
         calls = _ToolCallBlockAccumulator()
         usage = Usage()
         stop_reason = StopReason.END_TURN
+        terminal_seen = False
         headers_received = False
         saw_payload = False
         stream_started_at = time.monotonic()
@@ -163,26 +166,36 @@ class AnthropicAdapter(ProviderAdapter):
         )
         headers = {**self._headers(secret), **session_affinity_headers(url, request.session_id)}
         try:
-            with self.client().stream(
+            with open_model_stream(
+                self.client(),
+                request,
+                stream_started_at,
                 "POST",
                 url,
                 json=self._payload(request, stream=True),
                 headers=headers,
-                timeout=model_stream_timeout(request.stream_read_timeout_s),
             ) as response:
                 headers_received = True
                 if response.status_code in (401, 403):
                     raise auth_failure(response, url, model=request.model)
                 if response.status_code >= 400:
                     raise provider_error(response, url, model=request.model)
-                for line in response.iter_lines():
+                for line in iter_model_lines(response, request, stream_started_at):
                     if not line:
                         continue
                     saw_payload = True
                     last_activity_at = time.monotonic()
                     event = _parse_sse_line(line, url)
                     event_type = event.get("type")
-                    if event_type == "message_start":
+                    if event_type == "message_stop":
+                        terminal_seen = True
+                        break
+                    elif event_type == "error":
+                        raise NetworkError(
+                            "Provider reported stream failure",
+                            details={"provider_error": event.get("error")},
+                        )
+                    elif event_type == "message_start":
                         usage = _usage_from_anthropic(_event_message(event).get("usage"))
                     elif event_type == "content_block_start":
                         calls.begin(_optional_int(event.get("index")), event.get("content_block"))
@@ -207,8 +220,13 @@ class AnthropicAdapter(ProviderAdapter):
                             output_tokens=output_tokens,
                             cached_input_tokens=usage.cached_input_tokens,
                         )
+        except (NetworkError, ProviderModelError) as exc:
+            exc.details.update(
+                {"partial_text": "".join(content_parts), "partial": bool(content_parts)}
+            )
+            raise
         except httpx.TimeoutException as exc:
-            raise stream_timeout_error(
+            error = stream_timeout_error(
                 url,
                 request.model,
                 exc,
@@ -217,10 +235,32 @@ class AnthropicAdapter(ProviderAdapter):
                 saw_payload=saw_payload,
                 stream_started_at=stream_started_at,
                 last_activity_at=last_activity_at,
-            ) from exc
+                effective_timeouts=request.stream_timeouts,
+                response=response if headers_received else None,
+            )
+            error.details.update(
+                {"partial_text": "".join(content_parts), "partial": bool(content_parts)}
+            )
+            raise error from exc
         except httpx.TransportError as exc:
-            raise NetworkError(f"Stream interrupted: {exc.__class__.__name__}") from exc
-        tool_calls = calls.finalize()
+            raise NetworkError(
+                f"Stream interrupted: {exc.__class__.__name__}",
+                details={
+                    "kind": "STREAM_INTERRUPTED",
+                    "partial_text": "".join(content_parts),
+                    "partial": bool(content_parts),
+                },
+            ) from exc
+        if not terminal_seen:
+            raise NetworkError(
+                "Response stream closed without a terminal event",
+                details={
+                    "kind": "STREAM_INTERRUPTED",
+                    "partial_text": "".join(content_parts),
+                    "partial": bool(content_parts),
+                },
+            )
+        tool_calls = () if stop_reason is StopReason.MAX_TOKENS else calls.finalize()
         if tool_calls and stop_reason is not StopReason.MAX_TOKENS:
             stop_reason = StopReason.TOOL_CALLS
         return ModelResponse(
@@ -277,10 +317,22 @@ def _convert_to_anthropic(
                         {
                             "type": "tool_result",
                             "tool_use_id": message.tool_call_id,
-                            "content": ([{"type": "text", "text": message.content or "Image loaded"}] + [
-                                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image.encoded()}}
-                                for image in message.images
-                            ]) if message.images else message.content or "",
+                            "content": (
+                                [{"type": "text", "text": message.content or "Image loaded"}]
+                                + [
+                                    {
+                                        "type": "image",
+                                        "source": {
+                                            "type": "base64",
+                                            "media_type": "image/jpeg",
+                                            "data": image.encoded(),
+                                        },
+                                    }
+                                    for image in message.images
+                                ]
+                            )
+                            if message.images
+                            else message.content or "",
                         }
                     ],
                 }
@@ -391,7 +443,7 @@ def _response_from_anthropic(data: Any, url: str) -> ModelResponse:
     )
     return ModelResponse(
         content="".join(text_parts),
-        tool_calls=tool_calls,
+        tool_calls=() if data.get("stop_reason") == "max_tokens" else tool_calls,
         usage=_usage_from_anthropic(data.get("usage")),
         stop_reason=_stop_reason_from_anthropic(data.get("stop_reason")),
         raw=data,

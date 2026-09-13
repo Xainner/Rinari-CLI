@@ -26,7 +26,10 @@
     "visionSettings",
     "visionActivity",
     "visualRouteStatus",
-    "modelExecutionSettings"
+    "modelExecutionSettings",
+    "contextSettings",
+    "contextStatus",
+    "contextActivity"
   ],
   "$defs": {
     "webPreview": {
@@ -358,7 +361,11 @@
         "workspace.process.read",
         "workspace.process.stop",
         "vision.settings.get",
-        "vision.settings.set"
+        "vision.settings.set",
+        "context.settings.get",
+        "context.settings.set",
+        "context.compact",
+        "context.status"
       ]
     },
     "event": {
@@ -1354,6 +1361,21 @@
             "type": "integer",
             "minimum": 1
           }
+        },
+        "timeouts": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "number"
+          }
+        },
+        "provider_timeouts": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number"
+            }
+          }
         }
       },
       "required": [
@@ -1361,6 +1383,112 @@
         "providers",
         "models"
       ]
+    },
+    "contextSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "compact_at_percent",
+        "model_id",
+        "model_windows"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "compact_at_percent": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "model_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model_windows": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    },
+    "contextStatus": {
+      "type": "object",
+      "required": [
+        "window_tokens",
+        "window_source",
+        "window_estimated"
+      ],
+      "properties": {
+        "window_tokens": {
+          "type": "integer"
+        },
+        "window_source": {
+          "type": "string"
+        },
+        "window_estimated": {
+          "type": "boolean"
+        }
+      }
+    },
+    "contextActivity": {
+      "type": "object",
+      "required": [
+        "compaction_id",
+        "reason",
+        "status"
+      ],
+      "properties": {
+        "compaction_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "turn_id": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "automatic",
+            "manual"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "started",
+            "completed",
+            "skipped",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "window_tokens": {
+          "type": "integer"
+        },
+        "window_source": {
+          "type": "string"
+        },
+        "used_tokens": {
+          "type": "integer"
+        },
+        "after_tokens": {
+          "type": "integer"
+        },
+        "usage_source": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        }
+      }
     }
   }
 }

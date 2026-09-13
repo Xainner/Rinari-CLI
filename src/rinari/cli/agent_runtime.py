@@ -549,6 +549,16 @@ def build_agent_session(
     )
     parent_runtime.append(tools)
     preparing("tools")
+    def context_activity(event, payload):
+        if activity_sink is not None:
+            activity_sink(event, payload)
+        elif interactive and event == "governor.compact":
+            from rinari.cli.repl_output import emit
+            labels = {"started": "Compactando contexto automáticamente…", "completed": "Contexto compactado",
+                      "failed": "No se pudo compactar el contexto", "cancelled": "Compactación cancelada"}
+            if payload.get("reason") == "manual":
+                labels["started"] = "Compactando contexto…"
+            emit("stdout", labels.get(payload.get("status"), "") + "\n")
     loop = AgentLoop(
         gateway,
         tools,
@@ -560,8 +570,9 @@ def build_agent_session(
         hook_sink=lambda event, payload: (
             hook_engine.emit(event, payload, project=root) if hook_engine is not None else None
         ),
-        activity_sink=activity_sink,
+        activity_sink=context_activity,
         reasoning_effort=reasoning_effort,
+        prepare_context=lambda *args: services.context.prepare(*args),
     )
     if hook_engine is not None:
         hook_engine.emit(
@@ -1048,6 +1059,7 @@ def _record_to_message(rec: SessionMessageRecord) -> ChatMessage:
         for tc in (rec.tool_calls or ())
     )
     return ChatMessage(
+        message_id=rec.id,
         role=rec.role,
         content=rec.content,
         tool_calls=tool_calls,
@@ -1069,7 +1081,7 @@ def _message_to_record(
         {"id": tc.id, "name": tc.name, "arguments": tc.arguments} for tc in msg.tool_calls
     ]
     return SessionMessageRecord(
-        id=services.ctx.ids.new("msg"),
+        id=msg.message_id,
         session_id=session_id,
         seq=0,
         role=msg.role,
@@ -1095,19 +1107,53 @@ def _restore_history(services: ServiceContainer, record: SessionRecord) -> list[
         message = _record_to_message(rec)
         if rec.images:
             try:
-                message = replace(message, images=references(services.artifacts, record.id, rec.images, validate=False))
+                message = replace(
+                    message,
+                    images=references(services.artifacts, record.id, rec.images, validate=False),
+                )
                 if any(not image.path.is_file() for image in message.images):
                     from rinari.models.visual_context import retire_images
+
                     message = retire_images(message)
             except Exception:
-                message = replace(message, content=(message.content or "") + "\n[Image unavailable: " + ", ".join(i["uri"] for i in rec.images) + "]")
+                message = replace(
+                    message,
+                    content=(message.content or "")
+                    + "\n[Image unavailable: "
+                    + ", ".join(i["uri"] for i in rec.images)
+                    + "]",
+                )
         result.append(message)
     restored = list(reversed(result))
+    from rinari.runtime.durable_history import recover_legacy_turns
+
+    legacy = recover_legacy_turns(
+        records,
+        services.ctx.db.query(
+            "SELECT type,payload_json FROM session_events WHERE session_id=? ORDER BY seq",
+            (record.id,),
+        ),
+    )
+    if legacy:
+        expanded = []
+        for index, (rec, msg) in enumerate(zip(records, restored, strict=True)):
+            expanded.append(msg)
+            if index + 1 == len(records) or records[index + 1].turn_id != rec.turn_id:
+                expanded.extend(legacy.get(rec.turn_id, ()))
+        restored = expanded
     if record.compact_state:
         from rinari.models.types import ModelRequest
         from rinari.models.visual_context import select_visual_context
-        restored = list(select_visual_context(ModelRequest(model="", messages=tuple(restored)), compact=True).messages)
-    return restored
+
+        restored = list(
+            select_visual_context(
+                ModelRequest(model="", messages=tuple(restored)), compact=True
+            ).messages
+        )
+    from rinari.runtime.durable_history import complete_tool_pairs
+
+    from rinari.context.projection import project
+    return complete_tool_pairs(project(restored, record.compact_state))
 
 
 def _persist_new_messages(
@@ -1121,6 +1167,13 @@ def _persist_new_messages(
     ts = now_iso(services.ctx.clock)
     recs = [_message_to_record(services, record.id, m, ts, turn_id) for m in messages]
     with services.ctx.db.transaction():
+        recs = [
+            rec
+            for rec in recs
+            if not services.ctx.db.query_one(
+                "SELECT id FROM session_messages WHERE id=?", (rec.id,)
+            )
+        ]
         services.ctx.message_repo.append_many(record.id, recs)
     return recs
 
@@ -1361,6 +1414,9 @@ def _set_session_state(services: ServiceContainer, record: SessionRecord, state:
     if record.state == state:
         return
     record.state = state
+    latest = services.ctx.session_repo.get(record.id)
+    if latest is not None:
+        record.compact_state = latest.compact_state
     ts = now_iso(services.ctx.clock)
     record.last_active_at = ts
     record.updated_at = ts
@@ -1384,8 +1440,8 @@ def _sync_live_compact_state(
     if current == previous_compact_state and current is not None:
         return
     if current:
-        state = CompactState.from_dict(current)
-        context.compact_state_text = None if state.is_empty() else state.render_prompt()
+        from rinari.context.projection import render
+        context.compact_state_text = render(current)
     else:
         context.compact_state_text = None
     context.dropped_total = 0
@@ -1476,6 +1532,28 @@ def prepare_attachment_message(session: AgentSession, message: str) -> str:
         raise InvalidUsageError(f"Could not prepare attachments: {exc}") from exc
 
 
+def compact_session(session: AgentSession, activity_sink=None):
+    """Explicit context-only operation; never invoke the conversation or tools."""
+    from rinari.sessions.turn_lock import SessionTurnLock
+    path = session.services.ctx.layout.dir("sessions") / f"{session.record.id}.turn.lock"
+    with SessionTurnLock(path, session.record.id):
+        record = records_get(session.services, session.record.id)
+        context = session.context
+        context.history = _restore_history(session.services, record)
+        session.services.context.restore_compact_state(context)
+        context.force_compaction = True
+        context.compaction_reason = "manual"
+        try:
+            request = session.loop._build_request(context)
+            session.services.context.prepare(context, request, session.gateway,
+                lambda state: session.loop._build_request(state, request.tools),
+                activity_sink or session.loop._emit_activity, session.token)
+            return {"compacted": context.compacted}
+        finally:
+            context.force_compaction = False
+            context.compaction_reason = "automatic"
+
+
 def run_turn(
     session: AgentSession,
     message: str,
@@ -1533,13 +1611,14 @@ def _run_turn_unlocked(
     previous_compact_state = session.record.compact_state
     session.record = latest_record
     _sync_live_compact_state(session, previous_compact_state)
-    previous_dropped = session.context.dropped_total
     refreshed_history = _restore_history(services, session.record)
-    if previous_dropped:
-        keep_count = max(0, len(refreshed_history) - previous_dropped)
-        refreshed_history = refreshed_history[-keep_count:] if keep_count else []
     session.context.history.clear()
     session.context.history.extend(refreshed_history)
+    exposure = getattr(session.context.tool_ctx, "exposure", None)
+    if exposure is not None:
+        for past in refreshed_history:
+            if past.role == "tool" and past.name:
+                exposure.note_used(past.name)
     _set_session_state(services, session.record, STATE_ACTIVE)
     base = session.context.assembler_base
     include_identity = _needs_identity(message)
@@ -1617,6 +1696,22 @@ def _run_turn_unlocked(
     owner_source_record, owner_memory_source = _prepare_owner_memory_source(
         services, session.record, session, message, memory_origin, turn_id
     )
+    from rinari.runtime.durable_history import DurableHistory
+
+    def save_message(item):
+        # The owner is already durable before invoking the model.
+        if (
+            owner_source_record is not None
+            and item.role == "user"
+            and not durable_history.owner_seen
+        ):
+            durable_history.owner_seen = True
+            item = replace(item, message_id=owner_source_record.id)
+        _persist_new_messages(services, session.record, [item], turn_id)
+        return item
+
+    durable_history = DurableHistory(session.context.history, save_message)
+    session.context.history = durable_history
     # A session context can survive several turns; never carry a previous
     # owner's source into an automation turn or a later message.
     session.context.tool_ctx = replace(session.context.tool_ctx, memory_source=None)
@@ -1637,7 +1732,12 @@ def _run_turn_unlocked(
                 governor=governor,
                 turn_index=turn_index,
             )
-        except CancelledError:
+        except CancelledError as exc:
+            partial = getattr(exc, "details", {}).get("partial_text")
+            if partial:
+                session.context.history.append(
+                    ChatMessage.assistant("[Cancelled model response; incomplete]\n" + str(partial))
+                )
             session.context.tool_ctx = replace(session.context.tool_ctx, memory_source=None)
             _set_session_state(services, session.record, STATE_INTERRUPTED)
             new_msgs = _without_pre_persisted_owner_message(
@@ -1656,8 +1756,41 @@ def _run_turn_unlocked(
                 budget=budget,
             )
             return TurnResult(kind="cancelled", content="Turn cancelled.", tool_calls=0, usage=None)
+    except Exception as exc:
+        _set_session_state(services, session.record, STATE_INTERRUPTED)
+        details = getattr(exc, "details", {}) or {}
+        details["history_preserved"] = True
+        if hasattr(exc, "details"):
+            exc.details = details
+        partial = details.get("partial_text")
+        if partial:
+            session.context.history.append(
+                ChatMessage.assistant(
+                    "[Interrupted model response; incomplete, no tool calls executed]\n"
+                    + str(partial)
+                )
+            )
+        _persist_event(
+            services,
+            session.record.id,
+            "TurnInterrupted",
+            {
+                "turn_id": turn_id,
+                "reason": type(exc).__name__,
+                "history_preserved": True,
+                "resume_requires_request": True,
+            },
+        )
+        _account_turn(
+            session,
+            result=TurnResult(kind="error", content=str(exc), tool_calls=0, usage=None),
+            budget=budget,
+        )
+        raise
     finally:
         session.context.tool_ctx = replace(session.context.tool_ctx, memory_source=None)
+        # Never retain a callback bound to this turn across reloads/continuations.
+        session.context.history = list(session.context.history)
     new_msgs = _without_pre_persisted_owner_message(
         _new_history(session.context, before, dropped_before), owner_source_record
     )

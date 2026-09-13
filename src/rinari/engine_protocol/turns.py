@@ -69,6 +69,9 @@ class _ActiveTurn:
     display_message: str | None = None
     attachment_metadata: list | None = None
     allow_unconfirmed_vision: bool = False
+    compaction_only: bool = False
+    activity_lock: Any = field(default_factory=threading.RLock)
+    terminal_emitted: bool = False
     preparation_stage: str | None = None
     activities: dict[str, dict[str, Any]] = field(default_factory=dict)
     activity_keys: dict[str, int] = field(default_factory=dict)
@@ -320,6 +323,7 @@ class TurnManager:
         attachment_metadata: list | None = None,
         allow_unconfirmed_vision: bool = False,
         memory_origin: str = "interactive",
+        compaction_only: bool = False,
     ) -> dict[str, Any]:
         record = self._services.sessions.show(session_id)
         if record.state in {SESSION_STATE_CLOSED, SESSION_STATE_ARCHIVED}:
@@ -342,6 +346,7 @@ class TurnManager:
             display_message=display_message,
             attachment_metadata=attachment_metadata,
             allow_unconfirmed_vision=allow_unconfirmed_vision,
+            compaction_only=compaction_only,
         )
         with self._lock:
             record = self._services.sessions.show(session_id)
@@ -620,12 +625,18 @@ class TurnManager:
                 )
             turn.session.context.pending_attachments = tuple(turn.attachment_metadata or ())
             turn.session.context.pending_display_content = turn.display_message
-            result = run_turn(
-                agent_session,
-                message,
-                turn_id=turn_id,
-                memory_origin=turn.memory_origin,
-            )
+            if turn.compaction_only:
+                from rinari.runtime.agent import TurnResult
+                from rinari.cli.agent_runtime import compact_session
+                compact_session(agent_session, self._activity_cb(turn))
+                result = TurnResult(kind="compaction", content="", tool_calls=0, usage=None)
+            else:
+                result = run_turn(
+                    agent_session,
+                    message,
+                    turn_id=turn_id,
+                    memory_origin=turn.memory_origin,
+                )
             if result.kind == "cancelled":
                 self._cancel_running_activities(turn)
                 finalize_changes()
@@ -988,7 +999,16 @@ class TurnManager:
                 self._persist_activity(event_name, safe)
             self._emit(event(event_name, safe))
 
-        return _on_activity
+        def _serialized(event_name: str, payload: dict[str, Any]) -> None:
+            # Preparation and cancellation can race on separate workers. Keep
+            # the persisted/emitted terminal boundary atomic with other activity.
+            with turn.activity_lock:
+                if turn.terminal_emitted:
+                    return
+                _on_activity(event_name, payload)
+                if event_name in {"turn.completed", "turn.failed", "turn.cancelled", "turn.stopped"}:
+                    turn.terminal_emitted = True
+        return _serialized
 
     def _activity_key(self, turn: _ActiveTurn, event_name: str, payload: dict[str, Any]) -> str:
         if event_name == "agent.activity":
@@ -1011,7 +1031,7 @@ class TurnManager:
             change_id = payload.get("id") or payload.get("changeset_id") or turn.turn_id
             return f"changeset:{change_id}"
         if event_name == "governor.compact":
-            return f"context:compact:{payload.get('history_size', 0)}"
+            return f"context:compact:{payload.get('compaction_id') or payload.get('history_size', 0)}"
         if event_name.startswith("verification."):
             return "verification:completion-gate"
         if event_name.startswith("agent.") and payload.get("agent_id"):
