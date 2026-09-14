@@ -61,9 +61,7 @@ def owned_provider_id(entry: VaultCredential) -> str | None:
     return provider_id or None
 
 
-def plan_cleanup(
-    entries: Iterable[VaultCredential], live_provider_ids: set[str]
-) -> CleanupPlan:
+def plan_cleanup(entries: Iterable[VaultCredential], live_provider_ids: set[str]) -> CleanupPlan:
     live: list[VaultCredential] = []
     orphans: list[VaultCredential] = []
     foreign: list[VaultCredential] = []
