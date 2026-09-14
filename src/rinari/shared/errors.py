@@ -152,6 +152,22 @@ class CredentialStoreUnavailableError(RinariError):
     machine_code = "CREDENTIAL_STORE_UNAVAILABLE"
 
 
+class HomeIdUnavailableError(RinariError):
+    """Another process is publishing this home's identifier and the wait ended.
+
+    Nunca se devuelve un identificador alternativo para el mismo home: dos
+    procesos con ids distintos escribirían credenciales en namespaces que el
+    otro no puede leer.
+    """
+
+    exit_code = ExitCode.CONFLICT
+    machine_code = "HOME_ID_UNAVAILABLE"
+
+    @property
+    def retryable(self) -> bool:
+        return True
+
+
 class LockTimeoutError(RinariError):
     """Another process is mutating the same shared resource (for example the
     OS credential vault) and the lock could not be taken in time."""

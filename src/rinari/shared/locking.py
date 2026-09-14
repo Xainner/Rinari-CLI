@@ -63,9 +63,7 @@ def file_lock(path: Path, *, timeout: float = 5.0, poll: float = 0.05) -> Iterat
                 if time.monotonic() >= deadline:
                     raise LockTimeoutError(
                         f"Could not acquire {path.name} within {timeout:g}s",
-                        hint=(
-                            "Another Rinari process is writing credentials; retry once it finishes."
-                        ),
+                        hint="Another Rinari process holds it; retry once it finishes.",
                     ) from None
                 time.sleep(poll)
         held[key] = 1
