@@ -152,6 +152,18 @@ class CredentialStoreUnavailableError(RinariError):
     machine_code = "CREDENTIAL_STORE_UNAVAILABLE"
 
 
+class LockTimeoutError(RinariError):
+    """Another process is mutating the same shared resource (for example the
+    OS credential vault) and the lock could not be taken in time."""
+
+    exit_code = ExitCode.CONFLICT
+    machine_code = "CREDENTIAL_STORE_BUSY"
+
+    @property
+    def retryable(self) -> bool:
+        return True
+
+
 class CredentialWriteError(RinariError):
     """The OS credential store refused a write (for example a full vault).
 

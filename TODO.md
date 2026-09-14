@@ -742,6 +742,9 @@ Todo con tests deterministas.
 - [x] Rotación segura: la clave anterior sobrevive a una escritura fallida.
 - [x] Una entrada por secreto (sin huérfanas por reescritura del backend).
 - [x] Saneamiento del vault (`secrets cleanup`, solo huérfanas).
+- [x] Retención explícita (`remove --keep-credentials`) registrada en su propia tabla.
+- [x] Exclusión entre procesos para mutaciones del vault (lock compartido con la limpieza).
+- [ ] Migrar copias legacy sin scope demostrable (la copia anterior a una rotación queda en el vault).
 
 ## Provider Registry
 

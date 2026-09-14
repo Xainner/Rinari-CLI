@@ -2307,12 +2307,12 @@ Do not expose a plaintext-oriented `secrets show` command.
 
 `secrets cleanup` reads the OS vault and classifies each entry as live (bound
 to a provider that still exists), retained (kept on purpose through
-`providers remove --keep-credentials`), orphaned (this home's namespace without
+`providers remove --keep-credentials`, recorded in its own retained_credentials table so it survives the provider row), orphaned (this home's namespace without
 a live or retained provider), unknown (rinari-shaped but with no provable home
 scope, such as the legacy shared service) or foreign (other applications). The
 default is a dry run; `--apply` deletes only the orphaned entries and
 revalidates each id against the database immediately before deleting it, so a
-concurrent provider addition always wins. Entries without a provable scope are
+concurrent provider addition always wins. Additions, rotations and this cleanup share an exclusive per-home lock (credentials.lock), so a deletion phase cannot interleave with an addition whose secret is already written but whose row is not yet committed; --lock-timeout SECONDS (default 5) bounds the wait and a busy lock fails with CREDENTIAL_STORE_BUSY instead of touching the vault. Entries without a provable scope are
 reported and never deleted. On systems without a native vault inventory the
 command reports `unsupported` instead of failing.
 

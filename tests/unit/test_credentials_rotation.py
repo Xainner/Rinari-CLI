@@ -39,10 +39,13 @@ class PhaseBackend(SlotBackend):
         super().__init__()
         self.fail_on: set[str] = set()
         self.corrupt_on: set[str] = set()
+        self.persistent: set[str] = set()
 
     def set_password(self, service: str, username: str, password: str) -> None:
-        # Fallos de una sola vez: modelan un vault que se llena o una escritura
-        # que no queda verificable, no un backend roto para siempre.
+        # `persistent` modela un destino que sigue fallando en los reintentos;
+        # `fail_on`/`corrupt_on` son fallos de una sola vez.
+        if service in self.persistent:
+            raise RuntimeError("(8, 'CredWrite', 'persistente')")
         if service in self.fail_on:
             self.fail_on.discard(service)
             raise RuntimeError("(8, 'CredWrite', 'sin recursos')")
@@ -190,3 +193,64 @@ def test_two_homes_do_not_collide_in_the_same_backend() -> None:
         "rinari/home-a/providers/prov_1",
         "rinari/home-b/providers/prov_1",
     ]
+
+
+def test_persistent_definitive_failure_keeps_the_previous_value_every_time() -> None:
+    """Repro de la segunda revisión: el destino sigue fallando en varios intentos."""
+    backend = PhaseBackend()
+    store = _store(backend)
+    store.store(KEY, "old")
+    backend.persistent = {"rinari/home-a/providers/prov_1"}
+
+    for attempt in range(3):
+        with pytest.raises(CredentialWriteError):
+            store.store(KEY, f"attempt-{attempt}")
+        assert store.resolve(KEY) == "old"
+
+
+def test_retry_does_not_rewrite_the_backup_holding_the_last_copy() -> None:
+    """Con el backup intacto, el reintento no lo reescribe: un fallo del backup
+    ya no puede llevarse la última copia válida (repro de la revisión)."""
+    backend = PhaseBackend()
+    store = _store(backend)
+    store.store(KEY, "old")
+    backend.persistent = {"rinari/home-a/providers/prov_1"}
+    with pytest.raises(CredentialWriteError):
+        store.store(KEY, "new")
+    assert store.resolve(KEY) == "old"
+
+    # El destino ya responde; el backup falla, pero no hace falta reescribirlo.
+    backend.persistent = {"rinari/home-a/previous/providers/prov_1"}
+    store.store(KEY, "new2")
+
+    assert store.resolve(KEY) == "new2"
+    assert _targets(backend) == ["rinari/home-a/providers/prov_1"]
+
+
+def test_backup_write_failure_keeps_the_current_value() -> None:
+    backend = PhaseBackend()
+    store = _store(backend)
+    store.store(KEY, "old")
+    backend.persistent = {"rinari/home-a/previous/providers/prov_1"}
+    with pytest.raises(CredentialWriteError):
+        store.store(KEY, "new")
+
+    assert store.resolve(KEY) == "old"
+    assert "rinari/home-a/providers/prov_1" in backend.entries
+
+
+def test_recovery_after_consecutive_failures_ends_with_one_entry() -> None:
+    backend = PhaseBackend()
+    store = _store(backend)
+    store.store(KEY, "old")
+    backend.persistent = {"rinari/home-a/providers/prov_1"}
+    with pytest.raises(CredentialWriteError):
+        store.store(KEY, "new")
+    backend.persistent = {"rinari/home-a/previous/providers/prov_1"}
+    store.store(KEY, "new2")
+    backend.persistent = set()
+    store.store(KEY, "new3")
+
+    assert _targets(backend) == ["rinari/home-a/providers/prov_1"]
+    assert store.resolve(KEY) == "new3"
+    assert store.staged(KEY) is None

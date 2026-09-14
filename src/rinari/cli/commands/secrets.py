@@ -11,7 +11,7 @@ import os
 import typer
 
 from rinari.application.credentials import SecretRef
-from rinari.application.credentials_gc import apply_cleanup, plan_cleanup
+from rinari.application.credentials_gc import apply_cleanup_locked, plan_cleanup
 from rinari.application.credentials_vault import delete_credential, enumerate_credentials
 from rinari.cli.deps import is_json, services, with_error_handling
 from rinari.shared.errors import (
@@ -174,6 +174,11 @@ def cleanup(
     apply: bool = typer.Option(
         False, "--apply", help="Delete the orphaned entries (default: dry run)."
     ),
+    lock_timeout: float = typer.Option(
+        5.0,
+        "--lock-timeout",
+        help="Seconds to wait for other processes writing credentials.",
+    ),
 ) -> None:
     """Inspect (and optionally retire) orphaned entries in the OS vault.
 
@@ -220,11 +225,13 @@ def cleanup(
                 typer.echo(f"  orphan  {entry.target}")
             typer.echo("dry run: pass --apply to delete the orphaned entries")
             return
-        report = apply_cleanup(
+        report = apply_cleanup_locked(
             plan,
             delete=delete_credential,
             # Revalidación: un alta reciente gana aunque el plan la marcara.
             still_orphan=lambda provider_id: not s.ctx.provider_repo.credential_exists(provider_id),
+            lock_path=s.ctx.layout.credentials_lock,
+            timeout=lock_timeout,
         )
         data = {
             "supported": True,

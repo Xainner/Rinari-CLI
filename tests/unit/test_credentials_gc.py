@@ -15,6 +15,7 @@ Solo `orphans` se borra. `unknown` y `foreign` nunca.
 from __future__ import annotations
 
 import json
+import threading
 
 from typer.testing import CliRunner
 
@@ -240,3 +241,61 @@ def test_cleanup_command_reports_unsupported_when_the_vault_is_unavailable(
     payload = json.loads(result.stdout)
     assert payload["data"]["status"] == "unsupported"
     assert payload["data"]["supported"] is False
+
+
+def test_cleanup_apply_respects_the_shared_credential_lock(tmp_path, monkeypatch) -> None:
+    """Revisión (P1): la limpieza no puede correr mientras hay un alta en curso."""
+    from rinari.cli.main import app
+    from rinari.shared.locking import file_lock
+    from rinari.shared.paths import ENV_HOME, home_identifier
+
+    home = tmp_path / "rinari-home"
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.setenv(ENV_HOME, str(home))
+    monkeypatch.chdir(work)
+
+    scope = home_identifier(home)
+    target = f"rinari/{scope}/providers/prov_dead"
+    inventory = [_cred(target, "providers/prov_dead")]
+    monkeypatch.setattr("rinari.cli.commands.secrets.enumerate_credentials", lambda: inventory)
+    deleted: list[str] = []
+    monkeypatch.setattr(
+        "rinari.cli.commands.secrets.delete_credential",
+        lambda entry_target, cred_type: deleted.append(entry_target),
+    )
+
+    # `main()` activa el modo JSON global al ver --json antes del subcomando;
+    # el CliRunner no pasa por esa ruta, así que se replica aquí.
+    monkeypatch.setattr("rinari.cli.deps._global_json", True)
+
+    # El lock se mantiene desde otro hilo: en el mismo hilo es reentrante.
+    ready = threading.Event()
+    release = threading.Event()
+
+    def holder() -> None:
+        with file_lock(home / "credentials.lock"):
+            ready.set()
+            release.wait(5)
+
+    keeper = threading.Thread(target=holder)
+    keeper.start()
+    assert ready.wait(5)
+    try:
+        blocked = CliRunner().invoke(
+            app, ["--json", "secrets", "cleanup", "--apply", "--lock-timeout", "0.3"]
+        )
+    finally:
+        release.set()
+        keeper.join(5)
+    assert blocked.exit_code == 8, blocked.output
+    envelope = json.loads(blocked.stdout)
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == "CREDENTIAL_STORE_BUSY"
+    assert envelope["error"]["retryable"] is True
+    assert deleted == []
+
+    free = CliRunner().invoke(app, ["--json", "secrets", "cleanup", "--apply"])
+    assert free.exit_code == 0, free.output
+    assert json.loads(free.stdout)["data"]["deleted"] == 1
+    assert deleted == [target]

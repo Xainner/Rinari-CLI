@@ -21,6 +21,7 @@ from rinari.shared.errors import (
     CredentialWriteError,
     InvalidUsageError,
 )
+from rinari.shared.locking import file_lock
 from rinari.shared.paths import HomeLayout, home_identifier
 
 ENV_SCHEME = "env://"
@@ -142,9 +143,22 @@ class KeyringCredentialStore:
 
     SERVICE = "rinari"
 
-    def __init__(self, backend: Any, *, scope: str | None = None) -> None:
+    def __init__(
+        self,
+        backend: Any,
+        *,
+        scope: str | None = None,
+        lock_path: Path | None = None,
+    ) -> None:
         self._backend = backend
         self._scope = scope
+        self._lock_path = Path(lock_path) if lock_path is not None else None
+
+    def _locked(self) -> Any:
+        """Serializa mutaciones del vault entre procesos, si hay lock configurado."""
+        if self._lock_path is None:
+            return contextlib.nullcontext()
+        return file_lock(self._lock_path)
 
     # -- naming ----------------------------------------------------------
     def _prefix(self) -> str:
@@ -230,35 +244,42 @@ class KeyringCredentialStore:
             self._drop(self._service(key), key)
             self._backend.set_password(self._service(key), key, secret)
 
+    def _effective_value(self, key: str) -> str | None:
+        """Valor en vigor, con el mismo orden que `resolve`."""
+        for service in self._readable_services(key):
+            value = self._read(service, key)
+            if value is not None:
+                return value
+        return None
+
     # -- protocol --------------------------------------------------------
     def store(self, key: str, secret: str) -> str:
-        last_known = self._read(self._previous_service(key), key)
-        if last_known is None:
-            for service in self._readable_services(key):
-                if service == self._previous_service(key):
-                    continue
-                current = self._read(service, key)
-                if current is not None:
-                    last_known = current
-                    break
+        with self._locked():
+            return self._rotate(key, secret)
+
+    def _rotate(self, key: str, secret: str) -> str:
+        last_known = self._effective_value(key)
 
         # 1) La copia nueva, verificada, en staging: no toca el valor vigente.
         self._write_verified(self._staging_service(key), key, secret, action="stage the new secret")
-        # 2) Copia del valor anterior: garantiza poder volver atrás en cualquier
-        #    fase posterior (también en backends donde escribir reemplaza).
-        if last_known is not None:
+        # 2) Copia del valor anterior, solo si el backup no la tiene ya: si el
+        #    backup ES la última copia válida, reescribirlo la retiraría un
+        #    instante y un fallo ahí la perdería.
+        if last_known is not None and self._read(self._previous_service(key), key) != last_known:
             self._write_verified(
                 self._previous_service(key), key, last_known, action="back up the current secret"
             )
-        # 3) Reemplazo definitivo: borrar y escribir están juntos y la copia
-        #    anterior ya está a salvo. Si no queda verificable, se devuelve el
+        # 3) Reemplazo definitivo. El valor vigente ya está a salvo en `previous`
+        #    (o no existía), así que borrar el destino antes de escribir no
+        #    elimina la última copia. Si no queda verificable, se devuelve el
         #    valor anterior al destino antes de propagar el error.
         try:
             self._write_verified(self._service(key), key, secret, action="store the secret")
         except CredentialWriteError:
             self._restore(key, last_known)
             raise
-        # 4) Confirmado: recién ahora se retiran los transitorios.
+        # 4) Confirmado: recién ahora se retiran los transitorios (el valor nuevo
+        #    ya quedó verificado en el destino definitivo).
         self._drop(self._staging_service(key), key)
         self._drop(self._previous_service(key), key)
         return f"{KEYRING_SCHEME}{key}"
@@ -279,10 +300,11 @@ class KeyringCredentialStore:
 
     def delete(self, key: str) -> bool:
         # Sin cortocircuito: hay que visitar todos los nombres gestionados.
-        removed = False
-        for service in self._readable_services(key):
-            removed = self._drop(service, key) or removed
-        return removed
+        with self._locked():
+            removed = False
+            for service in self._readable_services(key):
+                removed = self._drop(service, key) or removed
+            return removed
 
     def exists(self, key: str) -> bool:
         return any(self._read(service, key) is not None for service in self._readable_services(key))
@@ -315,15 +337,20 @@ class CredentialStore:
         self.files = FileCredentialStore(layout.credentials_dir)
         self._env: Mapping[str, str] = env if env is not None else os.environ
         self.scope = home_identifier(layout.root) if scope is None else scope
+        self.lock_path = layout.credentials_lock
         if keyring_backend is None:
             self.keyring: KeyringCredentialStore | None = None
         elif isinstance(keyring_backend, str) and keyring_backend == "auto":
             detected = _keyring_backend()
             self.keyring = (
-                KeyringCredentialStore(detected, scope=self.scope) if detected is not None else None
+                KeyringCredentialStore(detected, scope=self.scope, lock_path=self.lock_path)
+                if detected is not None
+                else None
             )
         else:
-            self.keyring = KeyringCredentialStore(keyring_backend, scope=self.scope)
+            self.keyring = KeyringCredentialStore(
+                keyring_backend, scope=self.scope, lock_path=self.lock_path
+            )
 
     def provider_secret_ref(self, provider_id: str) -> str:
         return f"{FILE_SCHEME}providers/{provider_id}"

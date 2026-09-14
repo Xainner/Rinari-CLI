@@ -21,8 +21,10 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from rinari.application.credentials_vault import VaultCredential
+from rinari.shared.locking import file_lock
 
 #: Marca del servicio del harness. Solo se acepta en formas exactas.
 SERVICE = "rinari"
@@ -174,6 +176,24 @@ def plan_cleanup(
         foreign=foreign,
         orphan_owners=orphan_owners,
     )
+
+
+def apply_cleanup_locked(
+    plan: CleanupPlan,
+    *,
+    delete: Deleter,
+    lock_path: Path,
+    still_orphan: OwnershipCheck | None = None,
+    timeout: float = 5.0,
+) -> CleanupReport:
+    """Aplica el saneamiento tomando el lock compartido de credenciales.
+
+    Los escritores del vault (altas y rotaciones) toman el mismo lock: sin él,
+    la limpieza puede borrar el target de un alta que aún no confirmó su fila
+    en la base, y la revalidación no alcanza porque la fila todavía no existe.
+    """
+    with file_lock(lock_path, timeout=timeout):
+        return apply_cleanup(plan, delete=delete, still_orphan=still_orphan)
 
 
 def apply_cleanup(
