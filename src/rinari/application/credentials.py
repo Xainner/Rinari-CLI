@@ -16,7 +16,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from rinari.shared.errors import AuthenticationRequiredError, InvalidUsageError
+from rinari.shared.errors import (
+    AuthenticationRequiredError,
+    CredentialWriteError,
+    InvalidUsageError,
+)
 from rinari.shared.paths import HomeLayout
 
 ENV_SCHEME = "env://"
@@ -116,42 +120,104 @@ def _keyring_backend() -> Any | None:
 
 class KeyringCredentialStore:
     """OS-native backend: Windows Credential Manager, macOS Keychain, or
-    Secret Service via the `keyring` package. Secrets are namespaced under
-    the ``rinari`` service name; the backend object is duck-typed
-    (set_password/get_password/delete_password) so tests inject fakes."""
+    Secret Service via the `keyring` package; the backend object is
+    duck-typed (set_password/get_password/delete_password) so tests inject
+    fakes.
+
+    Write pattern: the Windows backend of `keyring` keeps a *single*
+    credential per service and displaces the previous one to
+    ``<username>@<service>`` on every write. Sharing one service name for
+    every provider therefore orphaned one vault entry per write until the
+    credential manager filled up and `CredWrite` failed with error 8 (see the
+    CredWrite report). Each key now uses its own service name, the new value
+    is written and read back through a staging entry first, and the
+    definitive entry is only replaced once the new secret is durable.
+    """
 
     SERVICE = "rinari"
 
     def __init__(self, backend: Any) -> None:
         self._backend = backend
 
-    def store(self, key: str, secret: str) -> str:
-        self._backend.set_password(self.SERVICE, key, secret)
-        return f"{KEYRING_SCHEME}{key}"
+    # -- naming ----------------------------------------------------------
+    def _service(self, key: str) -> str:
+        return f"{self.SERVICE}/{key}"
 
-    def resolve(self, key: str) -> str:
-        try:
-            value = self._backend.get_password(self.SERVICE, key)
-        except Exception as exc:
-            raise AuthenticationRequiredError(
-                f"OS credential store unavailable for: {key}"
-            ) from exc
-        if not value:
-            raise AuthenticationRequiredError(f"Stored credential not found: {key}")
-        return value
+    def _staging_service(self, key: str) -> str:
+        return f"{self.SERVICE}/staging/{key}"
 
-    def delete(self, key: str) -> bool:
+    def _services(self, key: str) -> tuple[str, ...]:
+        # Orden de resolución: entrada actual, recuperación (staging, por si
+        # una rotación no llegó a completarse) y formato legado compartido.
+        return (self._service(key), self._staging_service(key), self.SERVICE)
+
+    # -- backend helpers -------------------------------------------------
+    def _read(self, service: str, key: str) -> str | None:
         try:
-            self._backend.delete_password(self.SERVICE, key)
+            value = self._backend.get_password(service, key)
+        except Exception:
+            return None
+        return value or None
+
+    def _drop(self, service: str, key: str) -> bool:
+        try:
+            self._backend.delete_password(service, key)
         except Exception:
             return False
         return True
 
-    def exists(self, key: str) -> bool:
+    def _write_verified(self, service: str, key: str, secret: str) -> None:
+        # Retirar primero deja el slot vacío: sin desplazamiento
+        # (`<usuario>@<servicio>`) no quedan huérfanas.
+        self._drop(service, key)
         try:
-            return self._backend.get_password(self.SERVICE, key) is not None
-        except Exception:
-            return False
+            self._backend.set_password(service, key, secret)
+        except Exception as exc:
+            raise CredentialWriteError(
+                f"Could not write the credential to the OS store: {exc}",
+                hint=(
+                    "The OS credential store may be full or locked. Run "
+                    "`rinari secrets cleanup --apply` to retire orphaned entries."
+                ),
+                details={"service": service},
+            ) from exc
+        if self._read(service, key) != secret:
+            raise CredentialWriteError(
+                "The OS credential store did not return the value it just stored",
+                hint="Run `rinari secrets cleanup --apply` to check a full vault.",
+                details={"service": service},
+            )
+
+    # -- protocol --------------------------------------------------------
+    def store(self, key: str, secret: str) -> str:
+        staging = self._staging_service(key)
+        self._write_verified(staging, key, secret)
+        try:
+            self._write_verified(self._service(key), key, secret)
+        finally:
+            self._drop(staging, key)
+        return f"{KEYRING_SCHEME}{key}"
+
+    def resolve(self, key: str) -> str:
+        for service in self._services(key):
+            value = self._read(service, key)
+            if value is not None:
+                return value
+        raise AuthenticationRequiredError(
+            f"Stored credential not found: {key}",
+            hint="Store it again with `rinari secrets add <provider>`.",
+        )
+
+    def delete(self, key: str) -> bool:
+        # Sin cortocircuito: hay que visitar los tres servicios (el legado
+        # también), aunque el primero ya haya borrado algo.
+        removed = False
+        for service in self._services(key):
+            removed = self._drop(service, key) or removed
+        return removed
+
+    def exists(self, key: str) -> bool:
+        return any(self._read(service, key) is not None for service in self._services(key))
 
 
 class CredentialStore:

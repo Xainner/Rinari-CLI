@@ -11,8 +11,14 @@ import os
 import typer
 
 from rinari.application.credentials import SecretRef
+from rinari.application.credentials_gc import apply_cleanup, plan_cleanup
+from rinari.application.credentials_vault import delete_credential, enumerate_credentials
 from rinari.cli.deps import is_json, services, with_error_handling
-from rinari.shared.errors import InvalidUsageError, NotFoundError
+from rinari.shared.errors import (
+    CredentialStoreUnavailableError,
+    InvalidUsageError,
+    NotFoundError,
+)
 
 from ..output import emit_json, success_envelope
 
@@ -26,7 +32,7 @@ def list_cmd(ctx: typer.Context) -> None:
     with services(ctx) as s:
         rows = []
         for record in s.providers.list():
-            ref = s.credentials.provider_secret_ref(record.id)
+            ref = _secret_ref(s, record)
             exists = s.credentials.exists(ref)
             rows.append(
                 {
@@ -128,7 +134,7 @@ def scopes(ctx: typer.Context) -> None:
     with services(ctx) as s:
         rows = []
         for record in s.providers.list():
-            ref = s.credentials.provider_secret_ref(record.id)
+            ref = _secret_ref(s, record)
             rows.append(
                 {"provider": record.alias, "ref": ref, "present": s.credentials.exists(ref)}
             )
@@ -148,7 +154,7 @@ def test(
     """Check that a provider's secret resolves (value is never printed)."""
     with services(ctx) as s:
         record = _find_provider(s, provider)
-        ref = s.credentials.provider_secret_ref(record.id)
+        ref = _secret_ref(s, record)
         try:
             value = s.credentials.resolve(ref)
             ok = bool(value)
@@ -159,6 +165,70 @@ def test(
             emit_json(success_envelope("secrets.test", data))
             return
         typer.echo(f"secret for {record.alias}: {'resolvable' if ok else 'NOT resolvable'}")
+
+
+@app.command("cleanup")
+@with_error_handling("secrets.cleanup")
+def cleanup(
+    ctx: typer.Context,
+    apply: bool = typer.Option(
+        False, "--apply", help="Delete the orphaned entries (default: dry run)."
+    ),
+) -> None:
+    """Inspect (and optionally retire) orphaned entries in the OS vault."""
+    with services(ctx) as s:
+        try:
+            entries = enumerate_credentials()
+        except CredentialStoreUnavailableError as error:
+            data = {"supported": False, "status": "unsupported", "detail": error.message}
+            if is_json(ctx):
+                emit_json(success_envelope("secrets.cleanup", data))
+            else:
+                typer.echo(f"credential vault cleanup: {error.message}")
+            return
+        live_ids = {record.id for record in s.providers.list()}
+        plan = plan_cleanup(entries, live_provider_ids=live_ids)
+        counts = plan.summary()
+        if not apply:
+            data = {
+                "supported": True,
+                "status": "plan",
+                "summary": counts,
+                "orphans": [entry.target for entry in plan.orphans],
+            }
+            if is_json(ctx):
+                emit_json(success_envelope("secrets.cleanup", data))
+                return
+            typer.echo(
+                f"vault: {counts['live']} live · {counts['orphans']} orphaned · "
+                f"{counts['foreign']} foreign"
+            )
+            for entry in plan.orphans:
+                typer.echo(f"  orphan  {entry.target}")
+            typer.echo("dry run: pass --apply to delete the orphaned entries")
+            return
+        report = apply_cleanup(plan, delete=delete_credential)
+        data = {
+            "supported": True,
+            "status": "applied",
+            "summary": counts,
+            "deleted": report.deleted,
+            "failed": report.failed,
+            "failures": [
+                {"target": target, "detail": detail} for target, detail in report.failures
+            ],
+        }
+        if is_json(ctx):
+            emit_json(success_envelope("secrets.cleanup", data))
+            return
+        typer.echo(f"deleted {report.deleted} orphaned entries, {report.failed} failures")
+        for target, detail in report.failures:
+            typer.echo(f"  failed {target}: {detail}")
+
+
+def _secret_ref(s, record) -> str:
+    """Registered reference for the provider (keyring, file or environment)."""
+    return s.providers.credential_ref(record) or s.credentials.provider_secret_ref(record.id)
 
 
 def _find_provider(s, alias: str):

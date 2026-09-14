@@ -235,10 +235,13 @@ class ProviderService:
         if (secret is None) == (secret_env is None):
             raise InvalidUsageError("Pass exactly one of --api-key or --api-key-env")
         now = self._now()
+        previous_ref: str | None = None
         with self._ctx.db.transaction():
             existing = self._ctx.provider_repo.get_credential(record.id)
-            if existing is not None:
-                self._credentials.delete(existing.secret_ref)
+            previous_ref = existing.secret_ref if existing is not None else None
+            # Store the new secret *before* retiring the old one: a failed
+            # rotation (full vault, locked store) must not lose the previous
+            # key, and a transaction rollback cannot restore a deleted secret.
             if secret is not None:
                 secret_ref = self._credentials.store_provider_secret(record.id, secret)
             else:
@@ -256,6 +259,9 @@ class ProviderService:
             record.status_checked_at = None
             record.updated_at = now
             self._ctx.provider_repo.update(record)
+        # Only now is the previous reference retired, and only if it changed.
+        if previous_ref is not None and previous_ref != secret_ref:
+            self._credentials.delete(previous_ref)
         return record
 
     def logout(self, ref: str) -> ProviderRecord:

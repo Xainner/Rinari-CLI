@@ -143,3 +143,27 @@ class PartialCompletionError(RinariError):
 class BlockedError(RinariError):
     exit_code = ExitCode.BLOCKED
     machine_code = "BLOCKED"
+
+
+class CredentialStoreUnavailableError(RinariError):
+    """The requested credential backend cannot operate on this system."""
+
+    exit_code = ExitCode.CONFIGURATION_ERROR
+    machine_code = "CREDENTIAL_STORE_UNAVAILABLE"
+
+
+class CredentialWriteError(RinariError):
+    """The OS credential store refused a write (for example a full vault).
+
+    Raised before any previous value is removed, so a failed rotation keeps
+    the stored secret usable (see the CredWrite error 8 report).
+    """
+
+    exit_code = ExitCode.GENERIC_FAILURE
+    machine_code = "CREDENTIAL_STORE_WRITE_FAILED"
+
+    def __init__(
+        self, message: str, hint: str | None = None, *, details: dict | None = None
+    ) -> None:
+        super().__init__(message, hint=hint)
+        self.details = dict(details or {})

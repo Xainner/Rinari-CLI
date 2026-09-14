@@ -1790,6 +1790,13 @@ rinari providers auth anthropic-work \
 
 Do not export plaintext secrets in normal config export.
 
+OS keychain writes keep one service name per secret: the new value is written
+to a staging entry, read back, and only then does it replace the previous one.
+A failed rotation therefore never loses the stored secret, and repeated writes
+do not leave orphaned vault entries behind. `rinari secrets cleanup --apply`
+retires leftovers written by older layouts (and also reports whether the vault
+is close to full).
+
 ---
 
 # 25. `config`
@@ -2290,9 +2297,16 @@ secrets remove
 secrets rotate
 secrets test
 secrets scopes
+secrets cleanup
 ```
 
 Do not expose a plaintext-oriented `secrets show` command.
+
+`secrets cleanup` reads the OS vault and classifies each entry: live (bound to
+a provider that still exists), orphaned (its provider was removed) and foreign
+(other applications). The default is a dry run; `--apply` deletes only the
+orphaned entries. On systems without a native vault inventory the command
+reports `unsupported` instead of failing.
 
 Metadata is enough:
 
