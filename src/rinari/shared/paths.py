@@ -6,11 +6,37 @@ config dir under it is Rinari state.
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
 ENV_HOME = "RINARI_HOME"
+
+#: Archivo con el identificador estable del home (namespacea las credenciales
+#: del sistema para que un home no pueda tocar las de otro).
+HOME_ID_FILE = "home-id"
+
+
+def home_identifier(root: Path) -> str:
+    """Identificador estable del home; se persiste en el primer uso.
+
+    Si el home es de solo lectura, se usa un hash determinista de la ruta (el
+    scope sigue siendo estable aunque no se pueda escribir el archivo).
+    """
+    path = Path(root) / HOME_ID_FILE
+    with contextlib.suppress(OSError):
+        value = path.read_text(encoding="utf-8").strip()
+        if value:
+            return value
+    value = uuid4().hex[:16]
+    with contextlib.suppress(OSError):
+        path.write_text(value + "\n", encoding="utf-8")
+        return value
+    return hashlib.sha256(str(Path(root).resolve()).encode("utf-8")).hexdigest()[:16]
+
 
 _STANDARD_DIRS = (
     "profiles",

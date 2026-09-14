@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 
 from rinari.storage.db import Database
@@ -101,6 +103,25 @@ class ProviderRepository:
             method=row["method"],
             updated_at=row["updated_at"],
         )
+
+    def list_retained_credential_ids(self) -> list[str]:
+        """Credential ids kept on purpose after the provider was removed.
+
+        `providers remove --keep-credentials` deletes the provider row but not
+        its credential metadata; those ids belong to this home and must never
+        be treated as orphaned vault entries.
+        """
+        rows = self._db.query(
+            """
+            SELECT provider_id FROM provider_credentials_metadata
+            WHERE provider_id NOT IN (SELECT id FROM providers)
+            """
+        )
+        return [row["provider_id"] for row in rows]
+
+    def credential_exists(self, provider_id: str) -> bool:
+        row = self._db.query_one("SELECT 1 FROM providers WHERE id = ?", (provider_id,))
+        return row is not None
 
     def delete_credential(self, provider_id: str) -> bool:
         cursor = self._db.execute(

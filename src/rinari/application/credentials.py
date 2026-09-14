@@ -21,7 +21,7 @@ from rinari.shared.errors import (
     CredentialWriteError,
     InvalidUsageError,
 )
-from rinari.shared.paths import HomeLayout
+from rinari.shared.paths import HomeLayout, home_identifier
 
 ENV_SCHEME = "env://"
 FILE_SCHEME = "file://"
@@ -124,32 +124,56 @@ class KeyringCredentialStore:
     duck-typed (set_password/get_password/delete_password) so tests inject
     fakes.
 
-    Write pattern: the Windows backend of `keyring` keeps a *single*
-    credential per service and displaces the previous one to
-    ``<username>@<service>`` on every write. Sharing one service name for
-    every provider therefore orphaned one vault entry per write until the
-    credential manager filled up and `CredWrite` failed with error 8 (see the
-    CredWrite report). Each key now uses its own service name, the new value
-    is written and read back through a staging entry first, and the
-    definitive entry is only replaced once the new secret is durable.
+    Two ordering constraints shape this class (see the CredWrite error 8
+    report and the PR review):
+
+    * The Windows backend of `keyring` keeps one credential per service and
+      displaces the previous one to ``<username>@<service>`` on every write,
+      so sharing a service name orphaned one vault entry per write until the
+      vault filled up. Every key therefore gets its own service name, scoped
+      by home (``rinari/<home>/providers/<id>``) so a cleanup run from another
+      home cannot touch these credentials.
+    * No phase may destroy the last copy of a secret. A rotation writes the
+      new value to a staging entry, copies the current value to a previous
+      entry, and only then replaces the definitive target, which is deleted
+      immediately before the write to avoid a displaced leftover. A failure
+      anywhere leaves the previous value resolvable and the new one staged.
     """
 
     SERVICE = "rinari"
 
-    def __init__(self, backend: Any) -> None:
+    def __init__(self, backend: Any, *, scope: str | None = None) -> None:
         self._backend = backend
+        self._scope = scope
 
     # -- naming ----------------------------------------------------------
+    def _prefix(self) -> str:
+        return f"{self.SERVICE}/{self._scope}" if self._scope else self.SERVICE
+
     def _service(self, key: str) -> str:
-        return f"{self.SERVICE}/{key}"
+        return f"{self._prefix()}/{key}"
 
     def _staging_service(self, key: str) -> str:
-        return f"{self.SERVICE}/staging/{key}"
+        return f"{self._prefix()}/staging/{key}"
 
-    def _services(self, key: str) -> tuple[str, ...]:
-        # Orden de resolución: entrada actual, recuperación (staging, por si
-        # una rotación no llegó a completarse) y formato legado compartido.
-        return (self._service(key), self._staging_service(key), self.SERVICE)
+    def _previous_service(self, key: str) -> str:
+        return f"{self._prefix()}/previous/{key}"
+
+    def _unscoped_service(self, key: str) -> str:
+        return f"{self.SERVICE}/{key}"
+
+    def _readable_services(self, key: str) -> tuple[str, ...]:
+        """Orden de resolución: vigente, anterior, sin scope, legado, staging.
+
+        El staging va al final a propósito: es una copia en vuelo, no un valor
+        en vigor; solo resuelve si no queda ninguna otra copia (por ejemplo si
+        se interrumpió una rotación antes del reemplazo definitivo).
+        """
+        services = [self._service(key), self._previous_service(key)]
+        if self._scope:
+            services.append(self._unscoped_service(key))
+        services.extend([self.SERVICE, self._staging_service(key)])
+        return tuple(services)
 
     # -- backend helpers -------------------------------------------------
     def _read(self, service: str, key: str) -> str | None:
@@ -166,40 +190,85 @@ class KeyringCredentialStore:
             return False
         return True
 
-    def _write_verified(self, service: str, key: str, secret: str) -> None:
-        # Retirar primero deja el slot vacío: sin desplazamiento
-        # (`<usuario>@<servicio>`) no quedan huérfanas.
+    def _write_verified(self, service: str, key: str, secret: str, *, action: str) -> None:
+        # Borrar primero deja el slot limpio: sin desplazamiento
+        # (`<usuario>@<servicio>`) no quedan huérfanas. Solo se usa con copias
+        # transitorias o justo antes del reemplazo definitivo.
         self._drop(service, key)
         try:
             self._backend.set_password(service, key, secret)
         except Exception as exc:
             raise CredentialWriteError(
-                f"Could not write the credential to the OS store: {exc}",
+                f"Could not {action} in the OS credential store: {exc}",
                 hint=(
                     "The OS credential store may be full or locked. Run "
-                    "`rinari secrets cleanup --apply` to retire orphaned entries."
+                    "`rinari secrets cleanup --apply` and retry "
+                    "`rinari providers auth <alias>`; the previous value is kept."
                 ),
-                details={"service": service},
+                details={"service": service, "phase": action},
             ) from exc
         if self._read(service, key) != secret:
             raise CredentialWriteError(
-                "The OS credential store did not return the value it just stored",
-                hint="Run `rinari secrets cleanup --apply` to check a full vault.",
-                details={"service": service},
+                f"The OS credential store did not return the value it just tried to {action}",
+                hint=(
+                    "Run `rinari secrets cleanup --apply` to check a full vault; "
+                    "the previous value is kept."
+                ),
+                details={"service": service, "phase": f"{action}:verification"},
             )
+
+    def _restore(self, key: str, secret: str | None) -> None:
+        """Devuelve el valor anterior al destino definitivo, si se puede.
+
+        Se usa cuando la escritura definitiva no quedó verificable: el valor
+        vigente sigue siendo el anterior (la rotación no se confirmó) y no debe
+        quedar un valor corrupto ocupando el destino.
+        """
+        if secret is None:
+            return
+        with contextlib.suppress(Exception):
+            self._drop(self._service(key), key)
+            self._backend.set_password(self._service(key), key, secret)
 
     # -- protocol --------------------------------------------------------
     def store(self, key: str, secret: str) -> str:
-        staging = self._staging_service(key)
-        self._write_verified(staging, key, secret)
+        last_known = self._read(self._previous_service(key), key)
+        if last_known is None:
+            for service in self._readable_services(key):
+                if service == self._previous_service(key):
+                    continue
+                current = self._read(service, key)
+                if current is not None:
+                    last_known = current
+                    break
+
+        # 1) La copia nueva, verificada, en staging: no toca el valor vigente.
+        self._write_verified(self._staging_service(key), key, secret, action="stage the new secret")
+        # 2) Copia del valor anterior: garantiza poder volver atrás en cualquier
+        #    fase posterior (también en backends donde escribir reemplaza).
+        if last_known is not None:
+            self._write_verified(
+                self._previous_service(key), key, last_known, action="back up the current secret"
+            )
+        # 3) Reemplazo definitivo: borrar y escribir están juntos y la copia
+        #    anterior ya está a salvo. Si no queda verificable, se devuelve el
+        #    valor anterior al destino antes de propagar el error.
         try:
-            self._write_verified(self._service(key), key, secret)
-        finally:
-            self._drop(staging, key)
+            self._write_verified(self._service(key), key, secret, action="store the secret")
+        except CredentialWriteError:
+            self._restore(key, last_known)
+            raise
+        # 4) Confirmado: recién ahora se retiran los transitorios.
+        self._drop(self._staging_service(key), key)
+        self._drop(self._previous_service(key), key)
         return f"{KEYRING_SCHEME}{key}"
 
+    def staged(self, key: str) -> str | None:
+        """Valor nuevo en vuelo, recuperable tras una rotación fallida."""
+        return self._read(self._staging_service(key), key)
+
     def resolve(self, key: str) -> str:
-        for service in self._services(key):
+        for service in self._readable_services(key):
             value = self._read(service, key)
             if value is not None:
                 return value
@@ -209,15 +278,14 @@ class KeyringCredentialStore:
         )
 
     def delete(self, key: str) -> bool:
-        # Sin cortocircuito: hay que visitar los tres servicios (el legado
-        # también), aunque el primero ya haya borrado algo.
+        # Sin cortocircuito: hay que visitar todos los nombres gestionados.
         removed = False
-        for service in self._services(key):
+        for service in self._readable_services(key):
             removed = self._drop(service, key) or removed
         return removed
 
     def exists(self, key: str) -> bool:
-        return any(self._read(service, key) is not None for service in self._services(key))
+        return any(self._read(service, key) is not None for service in self._readable_services(key))
 
 
 class CredentialStore:
@@ -232,22 +300,30 @@ class CredentialStore:
         layout: HomeLayout,
         env: Mapping[str, str] | None = None,
         keyring_backend: Any | None = "auto",
+        scope: str | None = None,
     ) -> None:
         """Select the preferred secret backend for new writes.
 
         ``"auto"`` uses the OS store when functional (file fallback);
         ``None`` disables it (file only — hermetic tests); any other object
         is used as the keyring backend directly (injected fakes in tests).
+
+        ``scope`` is the stable home identifier used to namespace OS-store
+        entries; it defaults to the home's own identifier so two homes sharing
+        an OS account never collide (or clean up each other's secrets).
         """
         self.files = FileCredentialStore(layout.credentials_dir)
         self._env: Mapping[str, str] = env if env is not None else os.environ
+        self.scope = home_identifier(layout.root) if scope is None else scope
         if keyring_backend is None:
             self.keyring: KeyringCredentialStore | None = None
         elif isinstance(keyring_backend, str) and keyring_backend == "auto":
             detected = _keyring_backend()
-            self.keyring = KeyringCredentialStore(detected) if detected is not None else None
+            self.keyring = (
+                KeyringCredentialStore(detected, scope=self.scope) if detected is not None else None
+            )
         else:
-            self.keyring = KeyringCredentialStore(keyring_backend)
+            self.keyring = KeyringCredentialStore(keyring_backend, scope=self.scope)
 
     def provider_secret_ref(self, provider_id: str) -> str:
         return f"{FILE_SCHEME}providers/{provider_id}"

@@ -175,8 +175,14 @@ def cleanup(
         False, "--apply", help="Delete the orphaned entries (default: dry run)."
     ),
 ) -> None:
-    """Inspect (and optionally retire) orphaned entries in the OS vault."""
+    """Inspect (and optionally retire) orphaned entries in the OS vault.
+
+    Only entries this home can prove it owns are candidates: entries without a
+    home scope, from another home, or from another application are reported
+    and never deleted.
+    """
     with services(ctx) as s:
+        scope = s.credentials.scope
         try:
             entries = enumerate_credentials()
         except CredentialStoreUnavailableError as error:
@@ -186,33 +192,47 @@ def cleanup(
             else:
                 typer.echo(f"credential vault cleanup: {error.message}")
             return
-        live_ids = {record.id for record in s.providers.list()}
-        plan = plan_cleanup(entries, live_provider_ids=live_ids)
+        plan = plan_cleanup(
+            entries,
+            live_provider_ids={record.id for record in s.providers.list()},
+            retained_provider_ids=set(s.ctx.provider_repo.list_retained_credential_ids()),
+            scope=scope,
+        )
         counts = plan.summary()
         if not apply:
             data = {
                 "supported": True,
                 "status": "plan",
+                "scope": scope,
                 "summary": counts,
                 "orphans": [entry.target for entry in plan.orphans],
+                "unknown": [entry.target for entry in plan.unknown],
             }
             if is_json(ctx):
                 emit_json(success_envelope("secrets.cleanup", data))
                 return
             typer.echo(
-                f"vault: {counts['live']} live · {counts['orphans']} orphaned · "
+                f"vault: {counts['live']} live, {counts['retained']} retained, "
+                f"{counts['orphans']} orphaned, {counts['unknown']} unknown, "
                 f"{counts['foreign']} foreign"
             )
             for entry in plan.orphans:
                 typer.echo(f"  orphan  {entry.target}")
             typer.echo("dry run: pass --apply to delete the orphaned entries")
             return
-        report = apply_cleanup(plan, delete=delete_credential)
+        report = apply_cleanup(
+            plan,
+            delete=delete_credential,
+            # Revalidación: un alta reciente gana aunque el plan la marcara.
+            still_orphan=lambda provider_id: not s.ctx.provider_repo.credential_exists(provider_id),
+        )
         data = {
             "supported": True,
             "status": "applied",
+            "scope": scope,
             "summary": counts,
             "deleted": report.deleted,
+            "skipped": report.skipped,
             "failed": report.failed,
             "failures": [
                 {"target": target, "detail": detail} for target, detail in report.failures
@@ -221,7 +241,10 @@ def cleanup(
         if is_json(ctx):
             emit_json(success_envelope("secrets.cleanup", data))
             return
-        typer.echo(f"deleted {report.deleted} orphaned entries, {report.failed} failures")
+        typer.echo(
+            f"deleted {report.deleted} orphaned entries "
+            f"({report.skipped} kept after revalidation, {report.failed} failures)"
+        )
         for target, detail in report.failures:
             typer.echo(f"  failed {target}: {detail}")
 

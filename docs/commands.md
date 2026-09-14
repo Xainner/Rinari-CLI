@@ -1790,12 +1790,15 @@ rinari providers auth anthropic-work \
 
 Do not export plaintext secrets in normal config export.
 
-OS keychain writes keep one service name per secret: the new value is written
-to a staging entry, read back, and only then does it replace the previous one.
-A failed rotation therefore never loses the stored secret, and repeated writes
-do not leave orphaned vault entries behind. `rinari secrets cleanup --apply`
-retires leftovers written by older layouts (and also reports whether the vault
-is close to full).
+OS keychain writes keep one service name per secret, scoped by home
+(`rinari/<home-id>/providers/<id>`): two homes sharing an OS account never
+collide, and a cleanup run from one home cannot touch another home's secrets.
+A rotation writes the new value to a staging entry, copies the current value to
+a previous entry, and only then replaces the definitive target, which is
+deleted immediately before the write so no displaced copy is left behind. A
+failure in any phase therefore leaves the previous value resolvable and the new
+one staged for recovery; repeated writes do not accumulate orphaned entries.
+`rinari secrets cleanup --apply` retires leftovers written by this home.
 
 ---
 
@@ -2302,11 +2305,16 @@ secrets cleanup
 
 Do not expose a plaintext-oriented `secrets show` command.
 
-`secrets cleanup` reads the OS vault and classifies each entry: live (bound to
-a provider that still exists), orphaned (its provider was removed) and foreign
-(other applications). The default is a dry run; `--apply` deletes only the
-orphaned entries. On systems without a native vault inventory the command
-reports `unsupported` instead of failing.
+`secrets cleanup` reads the OS vault and classifies each entry as live (bound
+to a provider that still exists), retained (kept on purpose through
+`providers remove --keep-credentials`), orphaned (this home's namespace without
+a live or retained provider), unknown (rinari-shaped but with no provable home
+scope, such as the legacy shared service) or foreign (other applications). The
+default is a dry run; `--apply` deletes only the orphaned entries and
+revalidates each id against the database immediately before deleting it, so a
+concurrent provider addition always wins. Entries without a provable scope are
+reported and never deleted. On systems without a native vault inventory the
+command reports `unsupported` instead of failing.
 
 Metadata is enough:
 
