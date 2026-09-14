@@ -102,8 +102,13 @@ def test_preview_stop_is_routed_to_its_owning_preview_service():
     previews = api.server._previews
     calls = []
     previews._items["p1"] = SimpleNamespace(
-        id="p1", session_id="owner", process_id=None, server=object(),
-        command=None, root="C:/Site", url="http://127.0.0.1:8123/",
+        id="p1",
+        session_id="owner",
+        process_id=None,
+        server=object(),
+        command=None,
+        root="C:/Site",
+        url="http://127.0.0.1:8123/",
     )
     previews.stop = lambda params: calls.append(params)
     row = api.list({"session_id": "owner"})["processes"][0]

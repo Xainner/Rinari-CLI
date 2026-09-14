@@ -474,9 +474,11 @@ def test_web_operations_share_snapshot_and_can_refresh(tmp_path):
 
 def test_source_id_keeps_exact_snapshot_and_unknown_id_does_not_fetch(tmp_path):
     calls = []
+
     def handle(request):
         calls.append(str(request.url))
         return httpx.Response(200, text=PAGE_HTML, headers={"content-type": "text/html"})
+
     ctx = _ctx(tmp_path, web=_factory(handle))
     registry = ToolRegistry()
     registry.register_all(web_tools())

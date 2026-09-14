@@ -194,11 +194,15 @@ class BrowserManager:
     def diagnostics(self) -> dict[str, Any]:
         with self._stderr_lock:
             stderr = self._stderr.decode("utf-8", "replace")
-        return {"executable": self._executable, "last_error": self._last_error,
-                "profile_dir": str(self.profile_dir), "headless": self._headless,
-                "stderr": stderr, "stderr_limit_bytes": 16384,
-                "process_exit_code": self._process.poll() if self._process
-                else self._last_exit_code}
+        return {
+            "executable": self._executable,
+            "last_error": self._last_error,
+            "profile_dir": str(self.profile_dir),
+            "headless": self._headless,
+            "stderr": stderr,
+            "stderr_limit_bytes": 16384,
+            "process_exit_code": self._process.poll() if self._process else self._last_exit_code,
+        }
 
     def _drain_stderr(self, process: subprocess.Popen) -> None:
         assert process.stderr is not None
@@ -284,11 +288,15 @@ class BrowserManager:
             with self._stderr_lock:
                 self._stderr.clear()
             self._process = subprocess.Popen(
-                argv, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                argv,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             )
             self._stderr_reader = threading.Thread(
-                target=self._drain_stderr, args=(self._process,), daemon=True,
+                target=self._drain_stderr,
+                args=(self._process,),
+                daemon=True,
                 name="rinari-browser-stderr",
             )
             self._stderr_reader.start()
@@ -356,8 +364,10 @@ class BrowserManager:
             with contextlib.suppress(OSError, subprocess.TimeoutExpired):
                 subprocess.run(
                     ["taskkill.exe", "/PID", str(process.pid), "/T", "/F"],
-                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL, timeout=10,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=10,
                     creationflags=subprocess.CREATE_NO_WINDOW,
                 )
         if process.poll() is None:
@@ -582,8 +592,9 @@ class BrowserManager:
         )
         nodes = result.get("nodes", [])
         kept: list[dict[str, Any]] = []
-        self._elements = {key: value for key, value in self._elements.items()
-                          if value[0] != target_id}
+        self._elements = {
+            key: value for key, value in self._elements.items() if value[0] != target_id
+        }
         for node in nodes[:max_nodes]:
             backend_id = node.get("backendDOMNodeId")
             element_id = f"node:{self._generation}:{backend_id}" if backend_id else None
@@ -930,9 +941,14 @@ class BrowserManager:
         for event in events:
             params = event.get("params", {})
             if event.get("method") == "Runtime.exceptionThrown":
-                out.append({"type": "error", "text": _exception_text(
-                    params.get("exceptionDetails", {}),
-                )})
+                out.append(
+                    {
+                        "type": "error",
+                        "text": _exception_text(
+                            params.get("exceptionDetails", {}),
+                        ),
+                    }
+                )
                 continue
             text = " ".join(_arg_text(arg) for arg in params.get("args", []))
             out.append({"type": params.get("type", "log"), "text": text[:500]})

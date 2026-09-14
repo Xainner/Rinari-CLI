@@ -25,7 +25,9 @@ def test_edge_outside_path_with_spaces(monkeypatch, tmp_path):
     edge.write_bytes(b"fixture")
     monkeypatch.setenv("PROGRAMFILES", str(tmp_path / "Program Files"))
     monkeypatch.setattr(
-        discovery.shutil, "which", lambda name: str(edge) if name == str(edge) else None,
+        discovery.shutil,
+        "which",
+        lambda name: str(edge) if name == str(edge) else None,
     )
     assert discovery.find_browser() == str(edge)
 
@@ -89,8 +91,12 @@ def test_agent_session_end_always_closes_browser(broken_hook):
     browser = Mock()
     hook = Mock(side_effect=RuntimeError("hook failed") if broken_hook else None)
     session = AgentSession(
-        services=None, record=None, caller=None, loop=None,
-        context=SimpleNamespace(tool_ctx=SimpleNamespace(browser=browser)), close=hook,
+        services=None,
+        record=None,
+        caller=None,
+        loop=None,
+        context=SimpleNamespace(tool_ctx=SimpleNamespace(browser=browser)),
+        close=hook,
     )
     session.end()
     browser.close.assert_called_once()

@@ -533,7 +533,9 @@ def test_complete_subagent_report_reaches_coordinator(monkeypatch, git_repo):
 
     report = ("Repository findings: 日本語 and evidence.\n" * 600) + "FINAL FINDING"
     result = _run_subagent(
-        monkeypatch, git_repo, AgentDefinition("explore", "", ""),
+        monkeypatch,
+        git_repo,
+        AgentDefinition("explore", "", ""),
         _AnswerModel(None, {}, report),
     )
     assert result.summary == report

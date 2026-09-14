@@ -60,8 +60,11 @@ def test_cancelled_waiter_never_dispatches_or_blocks_next(tmp_path):
 
 def test_destination_and_installations_are_independent(tmp_path):
     (tmp_path / "model-execution.json").write_text(json.dumps({"max_concurrency": 1}))
-    with (destination_slot(tmp_path, "p"), destination_slot(tmp_path, "other"),
-          destination_slot(tmp_path / "another-install", "p")):
+    with (
+        destination_slot(tmp_path, "p"),
+        destination_slot(tmp_path, "other"),
+        destination_slot(tmp_path / "another-install", "p"),
+    ):
         pass
 
 

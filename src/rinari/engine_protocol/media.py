@@ -54,21 +54,31 @@ def register_media(dispatcher, services):
             record = services.sessions.show(params["session_id"])
         else:
             from types import SimpleNamespace
+
             model = services.models.resolve(params["model_id"])
             record = SimpleNamespace(id="", model_id=model.id, provider_id=model.provider_id)
         caller = _caller_for(services, record)
         from rinari.runtime.vision import visual_status
+
         decision = visual_status(caller)
         vision = caller.capabilities().vision
-        destination = caller.destination() if decision.available and hasattr(caller, "destination") else None
-        return {"vision": vision, "known": vision is not None,
-                "confirmed_for_session": False,  # Deprecated, never authorizes routing.
-                "available": decision.available, "reason": decision.reason,
-                "model_id": record.model_id,
-                "destination_model_id": destination.model_id if destination else None,
-                "destination_model": services.models.resolve(destination.model_id).alias if destination else None,
-                "destination_provider": destination.provider.alias if destination else None,
-                "route": decision.route}
+        destination = (
+            caller.destination() if decision.available and hasattr(caller, "destination") else None
+        )
+        return {
+            "vision": vision,
+            "known": vision is not None,
+            "confirmed_for_session": False,  # Deprecated, never authorizes routing.
+            "available": decision.available,
+            "reason": decision.reason,
+            "model_id": record.model_id,
+            "destination_model_id": destination.model_id if destination else None,
+            "destination_model": services.models.resolve(destination.model_id).alias
+            if destination
+            else None,
+            "destination_provider": destination.provider.alias if destination else None,
+            "route": decision.route,
+        }
 
     def receive(params):
         session = services.sessions.show(params["session_id"])
@@ -216,7 +226,7 @@ def register_media(dispatcher, services):
         except ValueError as exc:
             raise EngineProtocolError(INVALID_PARAMS, str(exc)) from exc
 
-    from rinari.application.vision import settings, configure
+    from rinari.application.vision import configure, settings
 
     def save_vision(params):
         try:
@@ -225,17 +235,27 @@ def register_media(dispatcher, services):
             raise EngineProtocolError(INVALID_PARAMS, str(exc)) from exc
 
     dispatcher.register("vision.settings.get", lambda params: settings(services))
-    from rinari.context.settings import load as context_settings, save as save_context_settings
+    from rinari.context.settings import load as context_settings
+    from rinari.context.settings import save as save_context_settings
+
     dispatcher.register("context.settings.get", lambda params: context_settings(services.ctx))
-    dispatcher.register("context.settings.set", lambda params: save_context_settings(services, params))
+    dispatcher.register(
+        "context.settings.set", lambda params: save_context_settings(services, params)
+    )
+
     def context_status(params):
         from rinari.context.settings import window
         from rinari.models.router import ModelRouter
         from rinari.runtime.model_caller import ModelCaller
+
         model = services.models.resolve(params.get("model_id"))
-        caller = ModelCaller(ModelRouter(services.providers, services.models),
-            services.providers.get(model.provider_id), model.id)
+        caller = ModelCaller(
+            ModelRouter(services.providers, services.models),
+            services.providers.get(model.provider_id),
+            model.id,
+        )
         return window(services.ctx, caller)
+
     dispatcher.register("context.status", context_status)
     dispatcher.register("vision.settings.set", save_vision)
     dispatcher.register("session.image_support", support)

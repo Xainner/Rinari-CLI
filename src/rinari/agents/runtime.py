@@ -125,6 +125,7 @@ class _SubagentRunner:
             except Exception:
                 effort = None
         from copy import copy
+
         from rinari.application.vision import VisionCaller
         from rinari.runtime.model_caller import SessionModelGateway
 

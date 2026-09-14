@@ -56,8 +56,7 @@ def test_capture_requires_exact_owner_source_and_closed_benign_grammar(app_ctx) 
 
     _append(app_ctx, "owner", "assistant", "Prefiero respuestas detalladas", role="assistant")
     assert (
-        memory.capture_owner_message("owner", "assistant", "Prefiero respuestas detalladas")
-        is None
+        memory.capture_owner_message("owner", "assistant", "Prefiero respuestas detalladas") is None
     )
     _append(app_ctx, "owner", "mismatch", "Prefiero tono formal")
     assert memory.capture_owner_message("owner", "mismatch", "Prefiero tono casual") is None
@@ -94,9 +93,7 @@ def test_safe_preferences_keep_independent_dimensions_and_supersede_only_conflic
         None if item is None else (item["status"], item["classification"], item["topic"])
         for item in captured
     ]
-    assert all(
-        item is not None and item["status"] == "accepted" for item in captured
-    ), observed
+    assert all(item is not None and item["status"] == "accepted" for item in captured), observed
     short, language, long = captured
     assert short["memory_id"] != language["memory_id"]
     assert long["memory_id"] != language["memory_id"]
@@ -160,10 +157,7 @@ def test_exclusion_closes_automatic_deferred_and_tool_write_paths(app_ctx, tmp_p
     assert redacted == 0
 
     _append(app_ctx, "excluded", "later", "Prefiero respuestas cortas")
-    assert (
-        memory.capture_owner_message("excluded", "later", "Prefiero respuestas cortas")
-        is None
-    )
+    assert memory.capture_owner_message("excluded", "later", "Prefiero respuestas cortas") is None
     # A model tool call in that same session cannot bypass the durable control.
     project = tmp_path / "project"
     project.mkdir()
@@ -176,9 +170,7 @@ def test_exclusion_closes_automatic_deferred_and_tool_write_paths(app_ctx, tmp_p
     assert memory.list_user() == []
 
 
-def test_user_memory_tools_cannot_create_untracked_or_sensitive_records(
-    app_ctx, tmp_path
-) -> None:
+def test_user_memory_tools_cannot_create_untracked_or_sensitive_records(app_ctx, tmp_path) -> None:
     memory = MemoryService(app_ctx)
     project = tmp_path / "tool-project"
     project.mkdir()
@@ -189,15 +181,11 @@ def test_user_memory_tools_cannot_create_untracked_or_sensitive_records(
         "Tomo loratadina diariamente",
         "Prefiero respuestas breves",
     ):
-        result = memory_remember(
-            {"scope": "user", "topic": "preferencia", "text": text}, tool_ctx
-        )
+        result = memory_remember({"scope": "user", "topic": "preferencia", "text": text}, tool_ctx)
         assert not result.ok, text
     assert memory.list_user() == []
 
-    panel = memory.remember_user(
-        "Texto aprobado por panel", topic="panel", provenance="panel"
-    )
+    panel = memory.remember_user("Texto aprobado por panel", topic="panel", provenance="panel")
     row = memory.get_user(panel["id"])
     update = memory_update(
         {
@@ -224,9 +212,10 @@ def test_source_revocation_preserves_independent_source_until_all_are_excluded(a
 
     memory.exclude_conversation("one")
     assert memory.get_user(first["memory_id"]) is not None
-    assert [row["session_id"] for row in memory.repo.sources_for_memory(
-        first["memory_id"], live_only=True
-    )] == ["two"]
+    assert [
+        row["session_id"]
+        for row in memory.repo.sources_for_memory(first["memory_id"], live_only=True)
+    ] == ["two"]
 
     memory.exclude_conversation("two")
     assert memory.get_user(first["memory_id"]) is None
@@ -281,9 +270,7 @@ def test_forget_and_delete_redact_source_turn_and_survive_restart(tmp_path, monk
         reopened.close()
 
 
-def test_ledger_import_purges_live_rows_covered_by_new_suppressions(
-    tmp_path, monkeypatch
-) -> None:
+def test_ledger_import_purges_live_rows_covered_by_new_suppressions(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("RINARI_KEYRING", "0")
     authority_ctx = build_app_context(
         home=tmp_path / "authority",

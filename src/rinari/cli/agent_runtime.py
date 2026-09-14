@@ -22,7 +22,6 @@ import typer
 
 from rinari import __version__
 from rinari.application.services import ServiceContainer
-from rinari.context.compact_state import CompactState
 from rinari.instructions.resolver import provenance_for, resolve_project_instructions
 from rinari.models.router import ModelRouter
 from rinari.models.types import ChatMessage, ToolCall
@@ -182,12 +181,14 @@ def build_assembler_context(
     )
     task_state = _task_state_text(services, root) if record.kind == "PROJECT" else None
     from rinari.prompts.modes import mode_instructions
+
     skills_tuple, catalog = _skill_prompt_parts(services, root, record)
     return AssemblerContext(
         session_kind=record.kind,
         constitution=constitution,
         runtime_policy=_policy_summary(record.kind, profile, _read_profile(record, profile))
-        + "\n" + mode_instructions(record.mode)
+        + "\n"
+        + mode_instructions(record.mode)
         + (
             "\nImages attached to a user message already arrive as visual content when enabled; "
             "you may describe them directly without a tool. This is real visual input, not a "
@@ -549,16 +550,23 @@ def build_agent_session(
     )
     parent_runtime.append(tools)
     preparing("tools")
+
     def context_activity(event, payload):
         if activity_sink is not None:
             activity_sink(event, payload)
         elif interactive and event == "governor.compact":
             from rinari.cli.repl_output import emit
-            labels = {"started": "Compactando contexto automáticamente…", "completed": "Contexto compactado",
-                      "failed": "No se pudo compactar el contexto", "cancelled": "Compactación cancelada"}
+
+            labels = {
+                "started": "Compactando contexto automáticamente…",
+                "completed": "Contexto compactado",
+                "failed": "No se pudo compactar el contexto",
+                "cancelled": "Compactación cancelada",
+            }
             if payload.get("reason") == "manual":
                 labels["started"] = "Compactando contexto…"
             emit("stdout", labels.get(payload.get("status"), "") + "\n")
+
     loop = AgentLoop(
         gateway,
         tools,
@@ -594,6 +602,7 @@ def build_agent_session(
         collect_subagent_results=orchestrator.collect_for_final,
     )
     if hasattr(gateway.current, "budget_getter"):
+
         def visual_activity(event, payload):
             if activity_sink is not None:
                 activity_sink(event, payload)
@@ -601,10 +610,22 @@ def build_agent_session(
                 _persist_event(services, record.id, event, payload)
                 if interactive:
                     from rinari.cli.repl_output import emit
-                    emit("stdout", f"Visión {event.removeprefix('vision.')}: {', '.join(i.get('name', 'imagen') for i in payload.get('images', []))}{' — salida parcial por límite del proveedor' if payload.get('partial') else ''}\n")
+
+                    names = ", ".join(i.get("name", "imagen") for i in payload.get("images", []))
+                    note = (
+                        " — salida parcial por límite del proveedor"
+                        if payload.get("partial")
+                        else ""
+                    )
+                    emit(
+                        "stdout",
+                        f"Visión {event.removeprefix('vision.')}: {names}{note}\n",
+                    )
 
         gateway.current.activity_sink = visual_activity
-        gateway.current.event_sink = lambda event, payload: _persist_event(services, record.id, event, payload)
+        gateway.current.event_sink = lambda event, payload: _persist_event(
+            services, record.id, event, payload
+        )
         gateway.current.token = token
         gateway.current.budget_getter = lambda: context.tool_ctx.parent_budget
     if channel_host is not None:
@@ -935,11 +956,15 @@ def _caller_for(services: ServiceContainer, record: SessionRecord) -> ModelCalle
     router = ModelRouter(services.providers, services.models)
     from rinari.application.vision import VisionCaller
 
-    return VisionCaller(services, record, ModelCaller(
-        router=router,
-        provider=services.providers.get(record.provider_id),
-        model_id=record.model_id,
-    ))
+    return VisionCaller(
+        services,
+        record,
+        ModelCaller(
+            router=router,
+            provider=services.providers.get(record.provider_id),
+            model_id=record.model_id,
+        ),
+    )
 
 
 def caller_for_agent(
@@ -1091,7 +1116,8 @@ def _message_to_record(
         name=msg.name,
         created_at=ts,
         turn_id=turn_id,
-        images=[{"uri": i.uri, "sha256": i.sha256} for i in (msg.images or msg.retired_images)] or None,
+        images=[{"uri": i.uri, "sha256": i.sha256} for i in (msg.images or msg.retired_images)]
+        or None,
         attachments=list(msg.attachments) or None,
         display_content=msg.display_content,
     )
@@ -1150,9 +1176,9 @@ def _restore_history(services: ServiceContainer, record: SessionRecord) -> list[
                 ModelRequest(model="", messages=tuple(restored)), compact=True
             ).messages
         )
+    from rinari.context.projection import project
     from rinari.runtime.durable_history import complete_tool_pairs
 
-    from rinari.context.projection import project
     return complete_tool_pairs(project(restored, record.compact_state))
 
 
@@ -1423,9 +1449,7 @@ def _set_session_state(services: ServiceContainer, record: SessionRecord, state:
     services.ctx.session_repo.update(record)
 
 
-def _sync_live_compact_state(
-    session: AgentSession, previous_compact_state: dict | None
-) -> None:
+def _sync_live_compact_state(session: AgentSession, previous_compact_state: dict | None) -> None:
     """Reconcile a live context with the durable compact-state projection.
 
     Memory privacy operations invalidate ``sessions.compact_state_json``
@@ -1441,6 +1465,7 @@ def _sync_live_compact_state(
         return
     if current:
         from rinari.context.projection import render
+
         context.compact_state_text = render(current)
     else:
         context.compact_state_text = None
@@ -1514,6 +1539,7 @@ def prepare_attachment_message(session: AgentSession, message: str) -> str:
         )
         image_refs = [image for item in prepared for image in item.images]
         from rinari.runtime.vision import visual_status
+
         if image_refs:
             decision = visual_status(session.gateway)
             if not decision.available:
@@ -1535,6 +1561,7 @@ def prepare_attachment_message(session: AgentSession, message: str) -> str:
 def compact_session(session: AgentSession, activity_sink=None):
     """Explicit context-only operation; never invoke the conversation or tools."""
     from rinari.sessions.turn_lock import SessionTurnLock
+
     path = session.services.ctx.layout.dir("sessions") / f"{session.record.id}.turn.lock"
     with SessionTurnLock(path, session.record.id):
         record = records_get(session.services, session.record.id)
@@ -1545,9 +1572,14 @@ def compact_session(session: AgentSession, activity_sink=None):
         context.compaction_reason = "manual"
         try:
             request = session.loop._build_request(context)
-            session.services.context.prepare(context, request, session.gateway,
+            session.services.context.prepare(
+                context,
+                request,
+                session.gateway,
                 lambda state: session.loop._build_request(state, request.tools),
-                activity_sink or session.loop._emit_activity, session.token)
+                activity_sink or session.loop._emit_activity,
+                session.token,
+            )
             return {"compacted": context.compacted}
         finally:
             context.force_compaction = False

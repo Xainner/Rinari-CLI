@@ -157,46 +157,78 @@ def _answer() -> ModelResponse:
     return ModelResponse(content="hola", stop_reason=StopReason.END_TURN)
 
 
-def test_declared_visual_attachments_and_tool_need_no_consent(server, services, tmp_path, monkeypatch):
+def test_declared_visual_attachments_and_tool_need_no_consent(
+    server, services, tmp_path, monkeypatch
+):
     from PIL import Image
+
     from rinari.application.vision_consent import confirmed
     from rinari.models.types import ToolCall
 
     sid = _create_chat(server, tmp_path, "consent")
     path = tmp_path / "rinari.png"
     Image.new("RGB", (40, 30), "purple").save(path)
+
     class VisualModel(FakeModel):
         def capabilities(self):
             return ProviderCapabilities(vision=True, tool_calls=True)
+
     fake = VisualModel([_answer()])
     monkeypatch.setattr(agent_runtime, "_caller_for", lambda services, rec: fake)
-    started = server.handle_line(_req("consent-first", "session.turn.start", {
-        "session_id": sid, "message": "Que ves?",
-        "attachments": [{"path": str(path)}],
-    }))
+    started = server.handle_line(
+        _req(
+            "consent-first",
+            "session.turn.start",
+            {
+                "session_id": sid,
+                "message": "Que ves?",
+                "attachments": [{"path": str(path)}],
+            },
+        )
+    )
     assert started["ok"], started
     assert any(e["event"] == "turn.completed" for e in _collect_until(server, sid))
     original = next(m.images[0] for m in fake.requests[0].messages if m.images)
     path.unlink()
-    fake.scripted.extend([ModelResponse(content="", tool_calls=(
-        ToolCall("view-again", "fs.read_image", {"path": original.uri}),)), _answer()])
-    assert server.handle_line(_req("consent-second", "session.turn.start", {
-        "session_id": sid, "message": "Usa la herramienta",
-    }))["ok"]
+    fake.scripted.extend(
+        [
+            ModelResponse(
+                content="",
+                tool_calls=(ToolCall("view-again", "fs.read_image", {"path": original.uri}),),
+            ),
+            _answer(),
+        ]
+    )
+    assert server.handle_line(
+        _req(
+            "consent-second",
+            "session.turn.start",
+            {
+                "session_id": sid,
+                "message": "Usa la herramienta",
+            },
+        )
+    )["ok"]
     events = _collect_until(server, sid)
-    assert any(e["event"] == "tool.completed" and e["payload"].get("tool") == "fs.read_image"
-               for e in events), events
+    assert any(
+        e["event"] == "tool.completed" and e["payload"].get("tool") == "fs.read_image"
+        for e in events
+    ), events
     assert any(m.tool_call_id == "view-again" and m.images for m in fake.requests[-1].messages)
     record = services.sessions.show(sid)
     assert not confirmed(services, record)
     services.models.set_vision(record.model_id, True)
-    support = server.handle_line(_req("consent-support", "session.image_support", {"session_id": sid}))
+    support = server.handle_line(
+        _req("consent-support", "session.image_support", {"session_id": sid})
+    )
     assert support["result"]["vision"] is True
     assert support["result"]["confirmed_for_session"] is False
     assert support["result"]["available"] is True
 
 
-def test_local_image_turn_persists_pixels_and_large_preview(server, services, tmp_path, monkeypatch):
+def test_local_image_turn_persists_pixels_and_large_preview(
+    server, services, tmp_path, monkeypatch
+):
     from PIL import Image
 
     from rinari.models.images import expand_tool_images
@@ -211,18 +243,36 @@ def test_local_image_turn_persists_pixels_and_large_preview(server, services, tm
         def capabilities(self):
             return ProviderCapabilities(vision=True, tool_calls=True)
 
-    fake = VisionModel([ModelResponse(content="", tool_calls=(
-        ToolCall("view", "fs.read_image", {"path": str(path)}),)), _answer()])
+    fake = VisionModel(
+        [
+            ModelResponse(
+                content="", tool_calls=(ToolCall("view", "fs.read_image", {"path": str(path)}),)
+            ),
+            _answer(),
+        ]
+    )
     monkeypatch.setattr(agent_runtime, "_caller_for", lambda services, rec: fake)
-    response = server.handle_line(_req("visual-turn", "session.turn.start", {
-        "session_id": session_id, "message": "Mira la imagen de esta carpeta",
-    }))
+    response = server.handle_line(
+        _req(
+            "visual-turn",
+            "session.turn.start",
+            {
+                "session_id": session_id,
+                "message": "Mira la imagen de esta carpeta",
+            },
+        )
+    )
     assert response["ok"], response
     events = _collect_until(server, session_id)
     assert any(e["event"] == "turn.completed" for e in events), events
-    assert any(e["event"] == "tool.completed" for e in events), [e["payload"].get("error") for e in events if e["event"] == "tool.failed"]
-    viewed = next(e["payload"]["presentation"]["image"] for e in events
-                  if e["event"] == "tool.completed" and e["payload"]["tool"] == "fs.read_image")
+    assert any(e["event"] == "tool.completed" for e in events), [
+        e["payload"].get("error") for e in events if e["event"] == "tool.failed"
+    ]
+    viewed = next(
+        e["payload"]["presentation"]["image"]
+        for e in events
+        if e["event"] == "tool.completed" and e["payload"]["tool"] == "fs.read_image"
+    )
     path.unlink()
     moved = services.sessions.move(session_id, None)
     assert moved.current_cwd != str(tmp_path)
@@ -231,19 +281,36 @@ def test_local_image_turn_persists_pixels_and_large_preview(server, services, tm
     assert image_message.role == "tool" and image_message.images[0].encoded()
     assert any(m.images for m in expand_tool_images(restored))
     for dimension in (512, 2048):
-        preview = server.handle_line(_req(f"preview-{dimension}", "attachment.preview", {
-            "uri": viewed["uri"], "max_dimension": dimension,
-        }))
+        preview = server.handle_line(
+            _req(
+                f"preview-{dimension}",
+                "attachment.preview",
+                {
+                    "uri": viewed["uri"],
+                    "max_dimension": dimension,
+                },
+            )
+        )
         assert preview["ok"], preview
         assert preview["result"]["width"] == min(dimension, 1800)
-    invalid = server.handle_line(_req("bad-preview", "attachment.preview", {
-        "uri": viewed["uri"], "max_dimension": 100000,
-    }))
+    invalid = server.handle_line(
+        _req(
+            "bad-preview",
+            "attachment.preview",
+            {
+                "uri": viewed["uri"],
+                "max_dimension": 100000,
+            },
+        )
+    )
     assert not invalid["ok"]
     snapshot = server.handle_line(_req("timeline", "session.timeline", {"ref": session_id}))
     assert snapshot["ok"], snapshot
-    assert any(item.get("presentation", {}).get("image", {}).get("uri") == viewed["uri"]
-               for turn in snapshot["result"]["turns"] for item in turn["items"])
+    assert any(
+        item.get("presentation", {}).get("image", {}).get("uri") == viewed["uri"]
+        for turn in snapshot["result"]["turns"]
+        for item in turn["items"]
+    )
 
 
 # -- live turns -------------------------------------------------------------
@@ -1352,24 +1419,36 @@ def test_desktop_observes_real_browser_and_retains_it_across_turns(server, tmp_p
     assert not browser.connected
 
 
-def test_failed_turn_preserves_tool_exchange_and_restores_without_replay(server, services, tmp_path, monkeypatch):
+def test_failed_turn_preserves_tool_exchange_and_restores_without_replay(
+    server, services, tmp_path, monkeypatch
+):
     from rinari.models.types import ToolCall
     from rinari.shared.errors import NetworkError
 
     sid = _create_chat(server, tmp_path, "durable")
     services.sessions.set_permission(sid, "full-access")
+
     class FailAfterTool(FakeModel):
         def invoke(self, request):
             self.requests.append(request)
             if len(self.requests) == 1:
-                return ModelResponse(content="Consulto", tool_calls=(ToolCall("durable-list", "fs.list", {"path": str(tmp_path)}),))
+                return ModelResponse(
+                    content="Consulto",
+                    tool_calls=(ToolCall("durable-list", "fs.list", {"path": str(tmp_path)}),),
+                )
             # The tool exchange must already be durable BEFORE the failing request.
             rows = services.ctx.message_repo.list(sid)
             assert any(r.role == "tool" and r.tool_call_id == "durable-list" for r in rows)
-            raise NetworkError("synthetic disconnect", details={"partial_text": "avance parcial", "phase": "between_chunks"})
+            raise NetworkError(
+                "synthetic disconnect",
+                details={"partial_text": "avance parcial", "phase": "between_chunks"},
+            )
+
     model = FailAfterTool([])
     monkeypatch.setattr(agent_runtime, "_caller_for", lambda *args: model)
-    assert server.handle_line(_req("durable-start", "session.turn.start", {"session_id": sid, "message": "lista"}))["ok"]
+    assert server.handle_line(
+        _req("durable-start", "session.turn.start", {"session_id": sid, "message": "lista"})
+    )["ok"]
     events = _collect_until(server, sid)
     failure = next(e for e in events if e["event"] == "turn.failed")
     assert failure["payload"]["error"]["details"]["history_preserved"] is True
@@ -1382,7 +1461,9 @@ def test_failed_turn_preserves_tool_exchange_and_restores_without_replay(server,
     assert [r.id for r in services.ctx.message_repo.list(sid)] == before
     continuation = FakeModel([_answer()])
     monkeypatch.setattr(agent_runtime, "_caller_for", lambda *args: continuation)
-    assert server.handle_line(_req("durable-continue", "session.turn.start", {"session_id": sid, "message": "continua"}))["ok"]
+    assert server.handle_line(
+        _req("durable-continue", "session.turn.start", {"session_id": sid, "message": "continua"})
+    )["ok"]
     next_events = _collect_until(server, sid)
     assert any(e["event"] == "turn.completed" for e in next_events)
     assert not any(e["event"] == "tool.requested" for e in next_events)
@@ -1392,6 +1473,7 @@ def test_failed_turn_preserves_tool_exchange_and_restores_without_replay(server,
 
 def test_cancelled_stream_keeps_partial_text_durable(server, services, tmp_path, monkeypatch):
     ready = threading.Event()
+
     class PartialStream(FakeStreamModel):
         def invoke_stream(self, request, on_delta):
             on_delta("retained partial")
@@ -1399,10 +1481,13 @@ def test_cancelled_stream_keeps_partial_text_durable(server, services, tmp_path,
             time.sleep(0.2)
             request.cancellation.throw_if_cancelled()
             return _answer()
+
     model = PartialStream([])
     sid = _create_chat(server, tmp_path, "partial-cancel")
     monkeypatch.setattr(agent_runtime, "_caller_for", lambda *args: model)
-    assert server.handle_line(_req("pc-start", "session.turn.start", {"session_id": sid, "message": "test"}))["ok"]
+    assert server.handle_line(
+        _req("pc-start", "session.turn.start", {"session_id": sid, "message": "test"})
+    )["ok"]
     assert ready.wait(5)
     assert server.handle_line(_req("pc-cancel", "session.turn.cancel", {"session_id": sid}))["ok"]
     assert any(e["event"] == "turn.cancelled" for e in _collect_until(server, sid))

@@ -7,8 +7,13 @@ import shutil
 from pathlib import Path
 
 CANDIDATES = (
-    "chromium", "chromium-browser", "google-chrome", "google-chrome-stable",
-    "chrome", "headless_shell", "msedge",
+    "chromium",
+    "chromium-browser",
+    "google-chrome",
+    "google-chrome-stable",
+    "chrome",
+    "headless_shell",
+    "msedge",
 )
 
 
@@ -17,8 +22,10 @@ def windows_candidates() -> list[str]:
     for variable in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
         root = os.environ.get(variable)
         if root:
-            for relative in ("Microsoft/Edge/Application/msedge.exe",
-                             "Google/Chrome/Application/chrome.exe"):
+            for relative in (
+                "Microsoft/Edge/Application/msedge.exe",
+                "Google/Chrome/Application/chrome.exe",
+            ):
                 paths.append(str(Path(root) / relative))
     try:
         import winreg

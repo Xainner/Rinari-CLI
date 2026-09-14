@@ -229,8 +229,8 @@ class WebSocketClient:
         if length > self._max_message_bytes:
             raise WsError("WS_PROTOCOL", f"Frame too large: {length} bytes")
         self._fill(sock, offset + length)
-        payload = bytes(self._incoming[offset:offset + length])
-        del self._incoming[:offset + length]
+        payload = bytes(self._incoming[offset : offset + length])
+        del self._incoming[: offset + length]
         return opcode, fin, payload
 
     def _fill(self, sock: socket.socket, n: int) -> None:

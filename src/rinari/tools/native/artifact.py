@@ -55,8 +55,10 @@ def artifact_read(input: dict, ctx: ToolContext) -> ToolResult:
     if error is not None:
         return error
     if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}:
-        return _error(ToolErrorCode.INVALID_ARGUMENT,
-                      "This artifact is an image. Use fs.read_image with this artifact URI in path.")
+        return _error(
+            ToolErrorCode.INVALID_ARGUMENT,
+            "This artifact is an image. Use fs.read_image with this artifact URI in path.",
+        )
     try:
         start = max(0, int(input.get("start_byte", 0)))
         maximum = min(MAX_ARTIFACT_SLICE, max(1, int(input.get("max_bytes", 8192))))

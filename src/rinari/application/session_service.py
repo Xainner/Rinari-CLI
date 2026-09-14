@@ -554,7 +554,7 @@ class SessionService:
                 generated = title_factory(message)
                 if isinstance(generated, str):
                     generated = generated.strip().strip('"').strip()
-                    if generated and len(generated) <= 160 and '\n' not in generated:
+                    if generated and len(generated) <= 160 and "\n" not in generated:
                         clean = generated
             except Exception:
                 # Naming is optional metadata; provider failure must not lose the turn.

@@ -79,9 +79,7 @@ def test_suppression_is_durable_and_topic_change_is_not_a_bypass(tmp_path, monke
         reopened.close()
 
 
-def test_existing_tools_cannot_recreate_or_update_into_suppressed_pair(
-    app_ctx, tmp_path
-) -> None:
+def test_existing_tools_cannot_recreate_or_update_into_suppressed_pair(app_ctx, tmp_path) -> None:
     memory = MemoryService(app_ctx)
     forgotten = memory.remember_user("Usa español", topic="idioma")
     forgotten_row = memory.get_user(forgotten["id"])
@@ -189,9 +187,7 @@ def test_relevant_project_memory_is_not_starved_by_unrelated_user_rows(app_ctx) 
         topic="hardware saturno",
     )
     for index in range(15):
-        memory.remember_user(
-            f"nota sin relación {index} " + ("x" * 760), topic=f"nota-{index}"
-        )
+        memory.remember_user(f"nota sin relación {index} " + ("x" * 760), topic=f"nota-{index}")
 
     rendered = memory.prompt_segment(project_root, query="hardware de saturno") or ""
     assert "Saturno usa una GPU NVIDIA" in rendered

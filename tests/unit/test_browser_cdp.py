@@ -673,10 +673,15 @@ def test_console_includes_uncaught_javascript_errors(tmp_path, fake_cdp) -> None
     try:
         manager.connect(fake_cdp.base_url)
         session, target_session = manager._session_for("t1", "Runtime")
-        session._events.put({
-            "method": "Runtime.exceptionThrown", "sessionId": target_session,
-            "params": {"exceptionDetails": {"exception": {"description": "Error: broken game"}}},
-        })
+        session._events.put(
+            {
+                "method": "Runtime.exceptionThrown",
+                "sessionId": target_session,
+                "params": {
+                    "exceptionDetails": {"exception": {"description": "Error: broken game"}}
+                },
+            }
+        )
         assert {"type": "error", "text": "Error: broken game"} in manager.console_events("t1")
     finally:
         manager.close()

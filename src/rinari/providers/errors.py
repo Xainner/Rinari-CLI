@@ -125,7 +125,11 @@ def classify_http_error(
     if status in (400, 422):
         error = payload.get("error", {}) if isinstance(payload, dict) else {}
         code = str(error.get("code", "")) if isinstance(error, dict) else ""
-        if code in {"context_length_exceeded", "context_window_exceeded", "max_context_length_exceeded"}:
+        if code in {
+            "context_length_exceeded",
+            "context_window_exceeded",
+            "max_context_length_exceeded",
+        }:
             return ProviderError(message, code=ProviderErrorCode.CONTEXT_OVERFLOW, **common)
         text = detail.lower()
         explicit = code in {

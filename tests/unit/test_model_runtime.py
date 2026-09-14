@@ -189,9 +189,10 @@ def test_openai_invoke_malformed_payload() -> None:
 def test_stream_read_timeout_resolution_is_bounded_and_model_specific(monkeypatch) -> None:
     assert _stream_read_timeout_s({}, {}) == 30.0
     assert _stream_read_timeout_s({"stream_read_timeout_s": 90}, {}) == 90.0
-    assert _stream_read_timeout_s(
-        {"stream_read_timeout_s": 90}, {"stream_read_timeout_s": 120}
-    ) == 120.0
+    assert (
+        _stream_read_timeout_s({"stream_read_timeout_s": 90}, {"stream_read_timeout_s": 120})
+        == 120.0
+    )
 
     monkeypatch.setenv("RINARI_MODEL_STREAM_READ_TIMEOUT_SECONDS", "45")
     assert _stream_read_timeout_s({}, {}) == 45.0
@@ -1037,24 +1038,42 @@ def test_router_without_model(monkeypatch, tmp_path) -> None:
 
 def test_stream_timeout_policy_precedence_is_transport_only(monkeypatch, tmp_path):
     from dataclasses import replace
+
     seen = []
+
     def handler(request):
         seen.append(request)
-        return httpx.Response(200, content=b'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n')
+        return httpx.Response(
+            200,
+            content=(
+                b'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\n'
+                b"data: [DONE]\n"
+            ),
+        )
+
     ctx, services = _app_and_services(handler, monkeypatch, tmp_path)
     try:
         provider = services.providers.add(_add_input(services, "openai", "https://api.test/v1"))
-        model = services.models.add(provider.alias, "gpt-real", "principal", settings={"stream_timeouts": {"idle": 77}})
-        (ctx.home / "model-execution.json").write_text(json.dumps({
-            "timeouts": {"connect": 19, "first_byte": 42, "idle": 50},
-            "provider_timeouts": {provider.id: {"idle": 65}},
-        }), encoding="utf-8")
+        model = services.models.add(
+            provider.alias, "gpt-real", "principal", settings={"stream_timeouts": {"idle": 77}}
+        )
+        (ctx.home / "model-execution.json").write_text(
+            json.dumps(
+                {
+                    "timeouts": {"connect": 19, "first_byte": 42, "idle": 50},
+                    "provider_timeouts": {provider.id: {"idle": 65}},
+                }
+            ),
+            encoding="utf-8",
+        )
         router = ModelRouter(services.providers, services.models, http_client=_client(handler))
         router.invoke_stream(provider, model.id, _request(), lambda _: None)
         assert seen[-1].extensions["timeout"]["connect"] == 19
         assert seen[-1].extensions["timeout"]["read"] == 77
-        router.invoke_stream(provider, model.id, replace(_request(), stream_timeouts={"idle": 99}), lambda _: None)
+        router.invoke_stream(
+            provider, model.id, replace(_request(), stream_timeouts={"idle": 99}), lambda _: None
+        )
         assert seen[-1].extensions["timeout"]["read"] == 99
-        assert b'stream_timeouts' not in seen[-1].content
+        assert b"stream_timeouts" not in seen[-1].content
     finally:
         ctx.close()

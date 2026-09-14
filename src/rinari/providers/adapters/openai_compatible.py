@@ -97,8 +97,14 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             if not model_id:
                 continue
             from rinari.context.windows import normalize
-            models.append(DiscoveredModel(provider_model_id=str(model_id), availability="available",
-                capabilities=normalize(entry) or None))
+
+            models.append(
+                DiscoveredModel(
+                    provider_model_id=str(model_id),
+                    availability="available",
+                    capabilities=normalize(entry) or None,
+                )
+            )
         return models
 
     # -- model invocation ---------------------------------------------------

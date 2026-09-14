@@ -74,8 +74,13 @@ def render_tool_event(
         arguments = state.pop("arguments", {})
         if isinstance(detail, ToolResult) and detail.ok and name == "fs.read_image":
             data = detail.data or {}
-            console.print(Text(f"Viewed image: {data.get('path', '')} "
-                               f"({data.get('width', 0)} × {data.get('height', 0)})", style="cyan"))
+            console.print(
+                Text(
+                    f"Viewed image: {data.get('path', '')} "
+                    f"({data.get('width', 0)} × {data.get('height', 0)})",  # noqa: RUF001
+                    style="cyan",
+                )
+            )
             console.print(Text(str(data.get("uri", "")), style="dim"))
             return
         if isinstance(detail, ToolResult) and name in {

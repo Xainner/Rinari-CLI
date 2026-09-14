@@ -119,10 +119,14 @@ def _prepare_turn_attachments(
 
         references(services.artifacts, session_id, image_refs)
         from rinari.runtime.vision import visual_status
+
         decision = visual_status(_caller_for(services, services.sessions.show(session_id)))
         if not decision.available:
-            raise EngineProtocolError(INVALID_PARAMS, decision.reason,
-                details={"visual_route": decision.route, "retryable": False})
+            raise EngineProtocolError(
+                INVALID_PARAMS,
+                decision.reason,
+                details={"visual_route": decision.route, "retryable": False},
+            )
     return attachment_prompt(prepared), image_refs, [item.reference() for item in prepared]
 
 
@@ -222,8 +226,12 @@ class EngineServer:
         self._dispatcher.register("agent.config.get", self._agent_config_get)
         self._dispatcher.register("agent.config.set", self._agent_config_set)
         self._dispatcher.register("model.capabilities", self._model_capabilities)
-        self._dispatcher.register("context.compact", lambda params: self._turns.start_turn(
-            params.get("session_id"), "", compaction_only=True))
+        self._dispatcher.register(
+            "context.compact",
+            lambda params: self._turns.start_turn(
+                params.get("session_id"), "", compaction_only=True
+            ),
+        )
         self._dispatcher.register("session.events", self._session_events)
         self._dispatcher.register("soul.list", self._soul_list)
         self._dispatcher.register("soul.get", self._soul_get)
