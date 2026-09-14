@@ -144,6 +144,38 @@ class ProviderRepository:
         row = self._db.query_one("SELECT 1 FROM providers WHERE id = ?", (provider_id,))
         return row is not None
 
+    # -- pending credential cleanup (rotation leftovers, per reference) ----
+
+    def add_pending_credential_cleanup(self, provider_id: str, secret_ref: str, at: str) -> None:
+        """Track a replaced credential reference that still needs a store delete."""
+        self._db.execute(
+            """
+            INSERT INTO pending_credential_cleanup (provider_id, secret_ref, requested_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(secret_ref) DO NOTHING
+            """,
+            (provider_id, secret_ref, at),
+        )
+
+    def list_pending_credential_cleanup(self) -> list[dict[str, str]]:
+        rows = self._db.query(
+            "SELECT provider_id, secret_ref, requested_at FROM pending_credential_cleanup"
+        )
+        return [
+            {
+                "provider_id": row["provider_id"],
+                "secret_ref": row["secret_ref"],
+                "requested_at": row["requested_at"],
+            }
+            for row in rows
+        ]
+
+    def remove_pending_credential_cleanup(self, secret_ref: str) -> bool:
+        cursor = self._db.execute(
+            "DELETE FROM pending_credential_cleanup WHERE secret_ref = ?", (secret_ref,)
+        )
+        return cursor.rowcount > 0
+
     def delete_credential(self, provider_id: str) -> bool:
         cursor = self._db.execute(
             "DELETE FROM provider_credentials_metadata WHERE provider_id = ?",

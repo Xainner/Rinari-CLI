@@ -89,16 +89,13 @@ class ToolResult:
     presentation: Any = None
     # Internal capture only; runtime redacts and spills it before publication.
     captured_output: Any = None
+    # Ephemeral sanitized source for fair allocation before persisting tool messages.
+    full_observation: Any = field(default=None, repr=False, compare=False)
     # Validated, immutable image references; never serialized as model text.
     images: tuple[Any, ...] = ()
 
-    # Inline budget for the serialized observation envelope. Large outputs
-    # should already have spilled to artifacts upstream; this is the last
-    # bound before text reaches the model.
-    OBSERVATION_INLINE_BUDGET = 2048
-
     def to_model_text(self, tool: str | None = None) -> str:
-        """Bounded, model-visible structured observation.
+        """Serialize the model observation without dropping evidence.
 
         Always serializes the envelope (ok/error code/retryability/
         artifacts/truncation) so the model can retry, fall back, and
@@ -142,34 +139,7 @@ class ToolResult:
                 '{"ok": false, "error": {"code": "UNKNOWN", '
                 '"message": "unserializable result", "retryable": false}}'
             )
-        if len(text) <= len(self.truncation_mark()) + self.OBSERVATION_INLINE_BUDGET:
-            return text
-        compact: dict[str, Any] = {"ok": self.ok, "truncated": True}
-        for key in ("process_status", "task_verified"):
-            if key in envelope:
-                compact[key] = envelope[key]
-        if "exit_code" in process:
-            compact["exit_code"] = process["exit_code"]
-        if tool:
-            compact["tool"] = tool
-        if self.error:
-            compact["error"] = {
-                "code": self.error.code.value,
-                "message": self.error.message[:300],
-                "retryable": self.error.retryable,
-            }
-        if self.artifacts:
-            compact["artifacts"] = [a.uri for a in self.artifacts[:4]]
-        compact["notice"] = "[output truncated]"
-        preview = text
-        while True:
-            compact["preview"] = preview
-            encoded = json.dumps(compact, ensure_ascii=False, default=str)
-            if len(encoded) <= self.OBSERVATION_INLINE_BUDGET or not preview:
-                return encoded
-            preview = preview[
-                : max(0, len(preview) - (len(encoded) - self.OBSERVATION_INLINE_BUDGET))
-            ]
+        return text
 
     @staticmethod
     def truncation_mark() -> str:
@@ -210,6 +180,9 @@ class ToolContext:
     artifact_root: Path
     clock: Clock
     cancellation: Any = None
+    observation_budget_bytes: int = 64 * 1024
+    round_observation_bytes: int = 256 * 1024
+    max_concurrency: int = 4
     environment: dict[str, str] | None = None
     output_sink: OutputSink | None = None
     # Mutable session-scoped process registry for process.* tools (None = disabled).
@@ -310,6 +283,7 @@ class ToolDefinition:
     handler: Callable[[dict, ToolContext], ToolResult] | None = None
     classify: Callable[[dict], ClassifiedAction] | None = None
     always_loaded: bool = True
+    concurrency: str = "serial"
     namespace: str = "core"
     manifest: dict[str, Any] = field(default_factory=dict, compare=False)
 

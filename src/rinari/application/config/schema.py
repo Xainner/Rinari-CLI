@@ -45,7 +45,15 @@ class RuntimeCostSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeToolsSettings:
+    max_concurrency: int = 4
+    observation_bytes: int = 65536
+    round_observation_bytes: int = 262144
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeSettings:
+    tools: RuntimeToolsSettings = field(default_factory=RuntimeToolsSettings)
     execution: str = "automatic"
     safeguards: RuntimeSafeguardsSettings = field(default_factory=RuntimeSafeguardsSettings)
     emergency: RuntimeEmergencySettings = field(default_factory=RuntimeEmergencySettings)
@@ -122,6 +130,10 @@ class Config:
         safeguards = _nested_table(runtime, "safeguards", "runtime.safeguards")
         emergency = _nested_table(runtime, "emergency", "runtime.emergency")
         cost = _nested_table(runtime, "cost", "runtime.cost")
+        tools = {
+            **Config().to_dict()["runtime"]["tools"],
+            **(_nested_table(runtime, "tools", "runtime.tools") if "tools" in runtime else {}),
+        }
         return cls(
             user_name=_str(data, "user_name", "str"),
             language=_str(data, "language", "str"),
@@ -136,6 +148,25 @@ class Config:
                 max_runtime_minutes=_int(data, "agent", "max_runtime_minutes", 1, 1440),
             ),
             runtime=RuntimeSettings(
+                tools=RuntimeToolsSettings(
+                    max_concurrency=_plain_int(
+                        tools, "max_concurrency", "runtime.tools.max_concurrency", 1, 32
+                    ),
+                    observation_bytes=_plain_int(
+                        tools,
+                        "observation_bytes",
+                        "runtime.tools.observation_bytes",
+                        4096,
+                        16777216,
+                    ),
+                    round_observation_bytes=_plain_int(
+                        tools,
+                        "round_observation_bytes",
+                        "runtime.tools.round_observation_bytes",
+                        4096,
+                        67108864,
+                    ),
+                ),
                 execution=_plain_enum(runtime, "execution", "runtime.execution", ("automatic",)),
                 safeguards=RuntimeSafeguardsSettings(
                     loop_detection=_plain_bool(
@@ -230,6 +261,11 @@ class Config:
                 "max_runtime_minutes": self.agent.max_runtime_minutes,
             },
             "runtime": {
+                "tools": {
+                    "max_concurrency": self.runtime.tools.max_concurrency,
+                    "observation_bytes": self.runtime.tools.observation_bytes,
+                    "round_observation_bytes": self.runtime.tools.round_observation_bytes,
+                },
                 "execution": self.runtime.execution,
                 "safeguards": {
                     "loop_detection": self.runtime.safeguards.loop_detection,
@@ -290,7 +326,7 @@ class Config:
 def _section_keys(section: str) -> list[str]:
     return {
         "agent": ["max_turns", "max_tool_calls", "max_runtime_minutes"],
-        "runtime": ["execution", "safeguards", "emergency", "cost"],
+        "runtime": ["execution", "safeguards", "emergency", "cost", "tools"],
         "context": ["compact_at_percent", "artifact_output_threshold_kb"],
         "agents": ["enabled", "max_concurrent", "max_depth", "max_total"],
         "permissions": ["profile", "approval_policy"],
@@ -307,6 +343,9 @@ def leaf_keys() -> list[str]:
         if section == "runtime":
             keys.extend(
                 [
+                    "runtime.tools.max_concurrency",
+                    "runtime.tools.observation_bytes",
+                    "runtime.tools.round_observation_bytes",
                     "runtime.execution",
                     "runtime.safeguards.loop_detection",
                     "runtime.safeguards.progress_detection",
@@ -338,6 +377,9 @@ def key_type(dotted: str) -> str:
         raise ConfigurationError(f"Unknown config key: {dotted}")
     if len(parts) == 3 and parts[0] == "runtime":
         nested_types = {
+            "runtime.tools.max_concurrency": "int",
+            "runtime.tools.observation_bytes": "int",
+            "runtime.tools.round_observation_bytes": "int",
             "runtime.safeguards.loop_detection": "bool",
             "runtime.safeguards.progress_detection": "bool",
             "runtime.safeguards.context_compaction": "bool",
@@ -512,6 +554,7 @@ def _validate(data: dict[str, Any]) -> None:
     runtime = data.get("runtime")
     if isinstance(runtime, dict):
         nested_allowed = {
+            "tools": {"max_concurrency", "observation_bytes", "round_observation_bytes"},
             "safeguards": {"loop_detection", "progress_detection", "context_compaction"},
             "emergency": {
                 "max_runtime_minutes",

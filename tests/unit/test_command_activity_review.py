@@ -150,11 +150,12 @@ def test_capture_artifact_retains_output_beyond_visible_limit(tmp_path):
     result = runtime_with_secrets().execute(
         "shell.exec", arguments, context(tmp_path), tool_call_id="capture"
     )
-    capture = tmp_path / "artifacts" / "ses_review" / "runtime" / "capture-stdout.txt"
+    reference = next(ref for ref in result.artifacts if ref.name.startswith("capture-stdout-"))
+    capture = tmp_path / "artifacts" / "ses_review" / "runtime" / reference.name
     assert capture.exists()
     assert capture.read_text(encoding="utf-8").endswith("END_OF_CAPTURE\n")
     assert result.captured_output is None
-    assert any(ref.uri.endswith("capture-stdout.txt") for ref in result.artifacts)
+    assert reference.uri.endswith(reference.name)
 
 
 def test_execution_capture_shares_limit_between_streams(monkeypatch):

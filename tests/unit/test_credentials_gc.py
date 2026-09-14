@@ -74,6 +74,59 @@ def test_plan_classifies_scoped_entries_of_this_home() -> None:
     assert plan.foreign == []
 
 
+def test_plan_classifies_rotation_slots_as_managed() -> None:
+    """`gen/providers/<id>/gen-<n>` (stage_unique): propio del home y huérfana
+    cuando el proveedor ya no vive; conservada mientras el id esté vivo (un
+    candidato staged más reciente puede ser la única copia de una clave)."""
+    entries = [
+        _cred("rinari/home-a/gen/providers/prov_live/gen-1", "providers/prov_live"),
+        _cred("rinari/home-a/gen/providers/prov_dead/gen-2", "providers/prov_dead"),
+        _cred("rinari/home-a/gen/providers/other/gen-3", "providers/prov_dead"),
+        _cred("rinari/home-b/gen/providers/prov_dead/gen-4", "providers/prov_dead"),
+    ]
+    plan = _plan(entries, live={"prov_live"})
+    assert [entry.target for entry in plan.live] == [
+        "rinari/home-a/gen/providers/prov_live/gen-1",
+    ]
+    assert [entry.target for entry in plan.orphans] == [
+        "rinari/home-a/gen/providers/prov_dead/gen-2",
+    ]
+    # id no coincidente y scope ajeno quedan sin tocar (foreign/unknown):
+    # nunca entran al borrado.
+    non_deletable = [e.target for e in plan.foreign] + [e.target for e in plan.unknown]
+    assert "rinari/home-a/gen/providers/other/gen-3" in non_deletable
+    assert "rinari/home-b/gen/providers/prov_dead/gen-4" in non_deletable
+
+
+def test_plan_recognizes_real_keyring_rotation_slot_username() -> None:
+    """Formato real del backend keyring (review P1): el username lleva el slot
+    completo `gen/providers/<id>/gen-<n>`, no solo `providers/<id>`."""
+    entries = [
+        _cred("rinari/home-a/gen/providers/prov_live/gen-1", "gen/providers/prov_live/gen-1"),
+        _cred("rinari/home-a/gen/providers/prov_dead/gen-2", "gen/providers/prov_dead/gen-2"),
+    ]
+    plan = _plan(entries, live={"prov_live"})
+    assert [entry.target for entry in plan.live] == [
+        "rinari/home-a/gen/providers/prov_live/gen-1",
+    ]
+    assert [entry.target for entry in plan.orphans] == [
+        "rinari/home-a/gen/providers/prov_dead/gen-2",
+    ]
+    assert plan.orphan_owners == {"rinari/home-a/gen/providers/prov_dead/gen-2": "prov_dead"}
+
+
+def test_plan_rejects_malformed_rotation_slot_usernames() -> None:
+    """Formas casi idénticas que no son slots administrados no se tocan."""
+    entries = [
+        _cred("rinari/home-a/gen/providers/../../etc/gen-1", "gen/providers/../../etc/gen-1"),
+        _cred("rinari/home-a/gen/providers/prov_dead", "gen/providers/prov_dead"),
+        _cred("rinari/home-a/gen/providers/prov_dead/genX", "gen/providers/prov_dead/genX"),
+    ]
+    plan = _plan(entries, live=set())
+    deletable = plan.live + plan.retained + plan.orphans
+    assert deletable == []
+
+
 def test_plan_ignores_targets_that_merely_contain_the_service_name() -> None:
     entries = [
         _cred("unrelated-rinari-backup", "providers/prov_dead"),

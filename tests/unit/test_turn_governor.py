@@ -50,3 +50,13 @@ def test_context_pressure_is_an_explicit_deduplicated_compaction_decision() -> N
     grown = governor.context_pressure(0.86, history_size=22)
     assert grown.action is GovernorAction.COMPACT
     assert governor.snapshot()["compactions"] == 1
+
+
+def test_real_progress_resets_recovery_budget():
+    governor = TurnGovernor()
+    governor.after_cycle()
+    governor.after_cycle()
+    assert governor.recovery_attempts > 0
+    governor.after_tool("fs.read", {"path": "new"}, {"text": "new evidence"}, ok=True)
+    assert governor.after_cycle().action is GovernorAction.CONTINUE
+    assert governor.recovery_attempts == 0

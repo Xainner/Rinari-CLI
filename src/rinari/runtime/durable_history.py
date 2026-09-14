@@ -25,13 +25,17 @@ class DurableHistory(list[ChatMessage]):
             self.append(message)
 
 
-def complete_tool_pairs(messages: Iterable[ChatMessage]) -> list[ChatMessage]:
+def complete_tool_pairs(messages: Iterable[ChatMessage], observations=None) -> list[ChatMessage]:
     """Do not replay unresolved calls. Supply explicit unknown-outcome observations."""
     result = []
     pending = {}
 
     def finish():
-        for call in pending.values():
+        for call, owner in pending.values():
+            observed = (observations or {}).get((owner, call.id))
+            if observed is not None:
+                result.append(ChatMessage.tool_result(call.id, call.name, observed))
+                continue
             result.append(
                 ChatMessage.tool_result(
                     call.id,
@@ -51,7 +55,7 @@ def complete_tool_pairs(messages: Iterable[ChatMessage]) -> list[ChatMessage]:
             pending.pop(message.tool_call_id, None)
         result.append(message)
         for call in message.tool_calls:
-            pending[call.id] = call
+            pending[call.id] = (call, message.message_id)
     finish()
     return result
 
@@ -65,7 +69,6 @@ def recover_legacy_turns(records, events):
     import uuid
 
     from rinari.models.types import ToolCall
-    from rinari.tools.definition import ToolResult
 
     turns_with_assistant = {r.turn_id for r in records if r.role == "assistant"}
     grouped = {}
@@ -117,14 +120,18 @@ def recover_legacy_turns(records, events):
                     "outcome": "unknown",
                     "message": "No recoverable result. Verify state before repeating this action.",
                 }
-            encoded = json.dumps(evidence, ensure_ascii=False)
-            if len(encoded) > ToolResult.OBSERVATION_INLINE_BUDGET:
-                evidence = {
-                    "preview": encoded[: ToolResult.OBSERVATION_INLINE_BUDGET],
-                    "truncated": True,
-                    "exit_code": evidence.get("exit_code") if isinstance(evidence, dict) else None,
-                    "notice": "Full recorded presentation remains in the session timeline.",
-                }
+            if isinstance(outcome.get("observation"), str):
+                messages.append(
+                    ChatMessage(
+                        role="tool",
+                        name=name,
+                        tool_call_id=call,
+                        message_id=mid("result"),
+                        content=outcome["observation"],
+                    )
+                )
+                continue
+            evidence = {"legacy_presentation": evidence, "historical_evidence_incomplete": True}
             messages.append(
                 ChatMessage(
                     role="tool",
@@ -147,3 +154,42 @@ def recover_legacy_turns(records, events):
         if messages:
             recovered[turn] = messages
     return recovered
+
+
+def completed_observations(records, events):
+    """Recover a finished call after a crash before the tool-message transaction.
+
+    Scope by turn and reject ambiguous repeated call IDs instead of attaching
+    another invocation's evidence. No handler or presentation reconstruction.
+    """
+    import json
+
+    found = {}
+    current = None
+    for row in events:
+        try:
+            data = json.loads(row["payload_json"])
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        if row["type"] == "turn.started":
+            current = data.get("turn_id")
+        turn = data.get("turn_id") or current
+        if row["type"] not in {"tool.completed", "tool.failed", "tool.cancelled"}:
+            continue
+        if not turn or not isinstance(data.get("observation"), str):
+            continue
+        key = (turn, data.get("tool_call_id"))
+        observation = data["observation"]
+        if (data.get("presentation") or {}).get("kind") == "image":
+            parsed = json.loads(observation)
+            parsed["visual_pixels_restored"] = False
+            observation = json.dumps(parsed, ensure_ascii=False)
+        found[key] = None if key in found else observation
+    output = {}
+    for record in records:
+        for (turn, call), observation in found.items():
+            if turn == record.turn_id and observation is not None:
+                output[(record.id, call)] = observation
+    return output

@@ -34,6 +34,7 @@ CAPABILITIES: dict[str, bool] = {
     "document_attachments_v1": True,
     "ocr_attachments_v1": True,
     "structured_tool_activity_v1": True,
+    "recoverable_tool_results_v1": True,
     "ssh_targets_v1": True,
     "plan_read_scope_v1": True,
     "web_preview_v1": True,

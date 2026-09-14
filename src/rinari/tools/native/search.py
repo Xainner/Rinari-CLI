@@ -132,6 +132,7 @@ def search_tools() -> list[ToolDefinition]:
     return [
         ToolDefinition(
             name="search.files",
+            concurrency="local-read",
             description="Exact file search by glob pattern (e.g. **/*.py, tests/test_*.py).",
             input_schema={
                 "type": "object",

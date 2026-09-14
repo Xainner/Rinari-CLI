@@ -1,10 +1,10 @@
 """Parallel pure filesystem reads, after ToolRuntime authorizes every path."""
 
 import time
-from concurrent.futures import ThreadPoolExecutor
 
 from rinari.shared.errors import CancelledError
 from rinari.tools.definition import ToolErrorCode, ToolErrorInfo, ToolResult
+from rinari.tools.executor import map_reads
 
 PATHS_SCHEMA = {
     "type": "array",
@@ -45,8 +45,7 @@ def read_batch(paths, ctx, handler):
             ),
         }
 
-    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="rinari-read") as pool:
-        rows = list(pool.map(read, paths))
+    rows = map_reads(read, paths, limit=ctx.max_concurrency)
     success = all(row["ok"] for row in rows)
     return ToolResult(
         ok=success,

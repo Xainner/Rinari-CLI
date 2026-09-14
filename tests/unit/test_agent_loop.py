@@ -710,3 +710,56 @@ def test_untrusted_tool_output_does_not_leak_into_system(env) -> None:
     assert payload in injected[0].content
     system_messages = [m for m in messages if m.role == "system"]
     assert all(payload not in (m.content or "") for m in system_messages)
+
+
+def test_provider_request_preserves_six_real_files_and_recovery_history(env):
+    import json
+
+    paths = []
+    for i in range(6):
+        path = env["root"] / f"document-{i}.md"
+        path.write_text("Documentation line.\n" * 450 + f"PROOF_{i}", encoding="utf-8")
+        paths.append(str(path))
+    model = FakeModel(
+        scripted=[
+            ModelResponse(
+                content="",
+                tool_calls=(ToolCall(id="six", name="fs.read", arguments={"paths": paths}),),
+            ),
+            ModelResponse(content="Done"),
+            ModelResponse(content="Follow-up"),
+        ]
+    )
+    loop = AgentLoop(model, env["runtime"], env["assembler"])
+    assert loop.turn(env["ctx"], "Inspect these files").kind == "answer"
+    observation = next(m.content for m in model.requests[1].messages if m.role == "tool")
+    assert len(json.loads(observation)["data"]["files"]) == 6
+    assert all(f"PROOF_{i}" in observation for i in range(6))
+    for path in paths:
+        Path(path).unlink()
+    assert loop.turn(env["ctx"], "Use the previous evidence").kind == "answer"
+    restored = next(m.content for m in model.requests[2].messages if m.role == "tool")
+    assert restored == observation
+
+
+def test_final_projection_failure_keeps_completed_observation(env, monkeypatch):
+    model = FakeModel(
+        scripted=[
+            ModelResponse(
+                content="",
+                tool_calls=(ToolCall(id="read", name="fs.read", arguments={"path": "file.txt"}),),
+            )
+        ]
+    )
+    (env["root"] / "file.txt").write_text("Verified original", encoding="utf-8")
+
+    def fail(*args):
+        raise OSError("storage unavailable")
+
+    monkeypatch.setattr(env["runtime"], "project_round", fail)
+    loop = AgentLoop(model, env["runtime"], env["assembler"])
+    with pytest.raises(OSError):
+        loop.turn(env["ctx"], "Inspect the file")
+    tools = [message for message in env["ctx"].history if message.role == "tool"]
+    assert len(tools) == 1 and "Verified original" in tools[0].content
+    assert len(model.requests) == 1

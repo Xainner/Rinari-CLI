@@ -5,9 +5,8 @@ group are safe to run together (read-only + idempotent + independent);
 groups themselves always run in order, and observations are reported back
 in the original call order (§5.2 determinism).
 
-Execution today is still serial within the loop (baseline correctness for
-policy/approval/event ordering); the plan is computed, traced, and ready
-for a concurrent executor once the runtime's shared state is hardened.
+Authorization stays on the coordinator. Only explicitly reviewed local
+readers can enter the shared executor; all other calls are barriers.
 """
 
 from __future__ import annotations
@@ -19,7 +18,7 @@ from rinari.tools.definition import SIDE_EFFECT_NONE
 
 def is_parallelizable(tool: Any, arguments: dict | None = None) -> bool:
     """READ_ONLY + idempotent + independent resources → may share a group."""
-    if tool is None:
+    if tool is None or getattr(tool, "concurrency", "serial") != "local-read":
         return False
     if getattr(tool, "side_effects", None) != SIDE_EFFECT_NONE:
         return False

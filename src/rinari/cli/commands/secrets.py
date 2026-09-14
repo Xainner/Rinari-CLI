@@ -192,6 +192,10 @@ def cleanup(
             entries = enumerate_credentials()
         except CredentialStoreUnavailableError as error:
             data = {"supported": False, "status": "unsupported", "detail": error.message}
+            if apply:
+                data["pending_cleanup_completed"] = s.providers.run_pending_credential_cleanup(
+                    lock_timeout=lock_timeout
+                )
             if is_json(ctx):
                 emit_json(success_envelope("secrets.cleanup", data))
             else:
@@ -225,6 +229,11 @@ def cleanup(
                 typer.echo(f"  orphan  {entry.target}")
             typer.echo("dry run: pass --apply to delete the orphaned entries")
             return
+        # 1) El barrido de pendientes de rotación: intenta completar los
+        #    deletes fallidos registrados en pending_credential_cleanup
+        #    (bajo el mismo lock de credenciales que las rotaciones).
+        completed = s.providers.run_pending_credential_cleanup(lock_timeout=lock_timeout)
+        # 2) GC vault clásico de huérfanos no administrados.
         report = apply_cleanup_locked(
             plan,
             delete=delete_credential,
@@ -238,6 +247,7 @@ def cleanup(
             "status": "applied",
             "scope": scope,
             "summary": counts,
+            "pending_cleanup_completed": completed,
             "deleted": report.deleted,
             "skipped": report.skipped,
             "failed": report.failed,
@@ -249,6 +259,7 @@ def cleanup(
             emit_json(success_envelope("secrets.cleanup", data))
             return
         typer.echo(
+            f"completed {completed} pending rotation cleanups; "
             f"deleted {report.deleted} orphaned entries "
             f"({report.skipped} kept after revalidation, {report.failed} failures)"
         )

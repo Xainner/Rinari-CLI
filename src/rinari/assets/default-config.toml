@@ -55,3 +55,8 @@ project_names = ["RINARI.override.md", "RINARI.md"]
 [telemetry]
 local_traces = true
 redact_secrets = true
+
+[runtime.tools]
+max_concurrency = 4
+observation_bytes = 65536
+round_observation_bytes = 262144
