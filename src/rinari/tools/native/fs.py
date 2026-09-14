@@ -98,6 +98,8 @@ def fs_read(input: dict, ctx: ToolContext) -> ToolResult:
             "This is an image. Use fs.read_image to view its pixels, not fs.read.",
         )
     raw = read_text_bounded(resolved)
+    if raw.error:
+        return _fail(ToolErrorCode.INVALID_ARGUMENT, raw.error)
     return _ok(
         {
             "path": str(resolved),
@@ -114,13 +116,17 @@ def read_text_bounded(path: Path, max_bytes: int = MAX_READ_BYTES) -> _Bounded:
         with path.open("rb") as stream:
             raw = stream.read(max_bytes + 1)
     except OSError as exc:
-        return _Bounded(text=f"[unreadable: {exc.__class__.__name__}]", truncated=False)
+        return _Bounded(
+            text="", truncated=False, error=f"File unreadable: {exc.__class__.__name__}"
+        )
     truncated = len(raw) > max_bytes
     data = raw[:max_bytes]
+    if b"\0" in data:
+        return _Bounded(text="", truncated=truncated, error="File is binary or not UTF-8 text")
     try:
         text = codecs.getincrementaldecoder("utf-8")().decode(data, final=not truncated)
     except UnicodeDecodeError:
-        return _Bounded(text="[binary file - content not shown]", truncated=truncated)
+        return _Bounded(text="", truncated=truncated, error="File is binary or not UTF-8 text")
     return _Bounded(
         text=text,
         truncated=truncated,
@@ -129,7 +135,10 @@ def read_text_bounded(path: Path, max_bytes: int = MAX_READ_BYTES) -> _Bounded:
 
 
 class _Bounded:
-    def __init__(self, text: str, truncated: bool, sha256: str | None = None) -> None:
+    def __init__(
+        self, text: str, truncated: bool, sha256: str | None = None, error: str | None = None
+    ) -> None:
+        self.error = error
         self.text = text
         self.truncated = truncated
         self.sha256 = sha256
@@ -313,6 +322,10 @@ def fs_list(input: dict, ctx: ToolContext) -> ToolResult:
             resolved.iterdir(), key=lambda p: (p.is_file(), p.name.lower(), p.name)
         )
         for entry in all_entries[offset : offset + limit]:
+            if ctx.cancellation:
+                ctx.cancellation.throw_if_cancelled()
+            if ctx.deadline_at is not None and time.time() >= ctx.deadline_at:
+                return _fail(ToolErrorCode.TIMEOUT, "Directory scan deadline exhausted")
             try:
                 size = entry.stat().st_size if entry.is_file() else None
             except OSError:
@@ -469,6 +482,8 @@ def fs_diff(input: dict, ctx: ToolContext) -> ToolResult:
         return error
     source_a = read_text_bounded(path_a, max_bytes=1_000_000)
     source_b = read_text_bounded(path_b, max_bytes=1_000_000)
+    if source_a.error or source_b.error:
+        return _fail(ToolErrorCode.INVALID_ARGUMENT, source_a.error or source_b.error)
     if source_a.truncated or source_b.truncated:
         return _fail(
             ToolErrorCode.RESOURCE_EXHAUSTED,
@@ -506,6 +521,7 @@ def filesystem_tools() -> list[ToolDefinition]:
     return [
         ToolDefinition(
             name="fs.read",
+            concurrency="local-read",
             description=(
                 "Read a text file; use paths for up to 16 independent files in one "
                 "parallel batch. Every path is permission checked."
@@ -525,6 +541,7 @@ def filesystem_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="fs.read_lines",
+            concurrency="local-read",
             description="Read a 1-indexed inclusive line range from a text file.",
             input_schema={
                 "type": "object",
@@ -594,6 +611,7 @@ def filesystem_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="fs.list",
+            concurrency="local-read",
             description="List a directory page. Continue with next_offset and revision.",
             input_schema={
                 "type": "object",
@@ -611,6 +629,7 @@ def filesystem_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="fs.glob",
+            concurrency="local-read",
             description="Find files matching a glob pattern under a root.",
             input_schema={
                 "type": "object",
@@ -627,6 +646,7 @@ def filesystem_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="fs.search_text",
+            concurrency="local-read",
             description="Case-insensitive literal text search across text files.",
             input_schema={
                 "type": "object",
@@ -644,6 +664,7 @@ def filesystem_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="fs.stat",
+            concurrency="local-read",
             description="Filesystem metadata for a path.",
             input_schema={
                 "type": "object",

@@ -72,6 +72,8 @@ class TurnGovernor:
     def after_cycle(self, *, looping: bool = False) -> GovernorDecision:
         observation = self.progress.finish_cycle(looping=looping)
         self.last = observation
+        if observation.kind is ProgressKind.HEALTHY:
+            self.recovery_attempts = 0
         if observation.kind in (ProgressKind.HEALTHY, ProgressKind.SLOW):
             return self._decision(GovernorAction.CONTINUE, observation)
         self.recovery_attempts += 1

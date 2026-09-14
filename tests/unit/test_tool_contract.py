@@ -135,7 +135,7 @@ def test_per_tool_output_cap_below_global(project) -> None:
         spill=64 * 1024,
     )
     result = rt.execute("small.tool", _args(root), _ctx(tmp_path, root), tool_call_id="t1")
-    assert result.truncated
+    assert result.data["delivery_partial"]
     assert any(a.kind == "tool-output" for a in result.artifacts)
 
 
@@ -205,8 +205,8 @@ def test_reads_share_a_group_writes_are_alone() -> None:
     reg = ToolRegistry()
     reg.register_all(
         [
-            _sched_tool("fs.read"),
-            _sched_tool("fs.list"),
+            _sched_tool("fs.read", concurrency="local-read"),
+            _sched_tool("fs.list", concurrency="local-read"),
             _sched_tool("fs.write", side_effects=SIDE_EFFECT_LOCAL_REVERSIBLE, idempotent=False),
         ]
     )
@@ -269,8 +269,7 @@ def test_long_observation_remains_valid_json():
     result = ToolResult(ok=True, data={"text": 'ñ"\\n' * 5000})
     encoded = result.to_model_text("fs.read")
     decoded = json.loads(encoded)
-    assert decoded["truncated"] is True
-    assert len(encoded) <= result.OBSERVATION_INLINE_BUDGET
+    assert decoded["data"] == result.data
 
 
 def test_builtin_catalog_covers_session_tools_without_executing_them():

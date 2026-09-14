@@ -263,7 +263,7 @@ def test_legacy_recovery_uses_evidence_only_and_stable_ids():
     ]
     events = [{"type": kind, "payload_json": json.dumps(data)} for kind, data in pairs]
     recovered = recover_legacy_turns(records, events)["t"]
-    assert json.loads(recovered[1].content)["evidence"]["exit_code"] == 127
+    assert json.loads(recovered[1].content)["evidence"]["legacy_presentation"]["exit_code"] == 127
     assert recovered[0].message_id == recover_legacy_turns(records, events)["t"][0].message_id
     assert len(records) == 1 and len(events) == 4
 
@@ -274,7 +274,7 @@ def test_large_process_observation_preserves_exit_status(code, status):
         "shell.exec"
     )
     data = json.loads(text)
-    assert data["process_status"] == status and data["exit_code"] == code
+    assert data["process_status"] == status and data["data"]["exit_code"] == code
     assert data["task_verified"] is False
 
 
@@ -307,3 +307,32 @@ def test_timeout_settings_reject_invalid_values(value):
 
     with pytest.raises(ValueError):
         validate(value)
+
+
+def test_crash_after_completion_uses_durable_observation_scoped_to_turn():
+    from types import SimpleNamespace
+
+    from rinari.runtime.durable_history import complete_tool_pairs, completed_observations
+
+    first = ChatMessage.assistant("", (ToolCall(id="same", name="fs.read", arguments={}),))
+    second = ChatMessage.assistant("", (ToolCall(id="same", name="fs.read", arguments={}),))
+    records = [
+        SimpleNamespace(id=first.message_id, turn_id="t1"),
+        SimpleNamespace(id=second.message_id, turn_id="t2"),
+    ]
+    events = [
+        {
+            "type": "tool.completed",
+            "payload_json": json.dumps(
+                {
+                    "turn_id": turn,
+                    "tool_call_id": "same",
+                    "observation": json.dumps({"data": value}),
+                }
+            ),
+        }
+        for turn, value in [("t1", "FIRST"), ("t2", "SECOND")]
+    ]
+    restored = complete_tool_pairs([first, second], completed_observations(records, events))
+    assert json.loads(restored[1].content)["data"] == "FIRST"
+    assert json.loads(restored[3].content)["data"] == "SECOND"

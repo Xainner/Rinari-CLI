@@ -30,6 +30,7 @@ from rinari.providers.adapters.http import (
     iter_model_lines,
     open_model_stream,
     provider_error,
+    sanitize_tool_name,
     send_request,
     session_affinity_headers,
     stream_timeout_error,
@@ -130,7 +131,7 @@ class AnthropicAdapter(ProviderAdapter):
             "POST",
             url,
             headers=headers,
-            json_body=self._payload(request, stream=False),
+            json_body=self._payload(request, stream=False, tool_aliases=tool_aliases),
             timeout=MODEL_CALL_TIMEOUT,
         )
         if response.status_code in (401, 403):
@@ -177,7 +178,7 @@ class AnthropicAdapter(ProviderAdapter):
                 stream_started_at,
                 "POST",
                 url,
-                json=self._payload(request, stream=True),
+                json=self._payload(request, stream=True, tool_aliases=tool_aliases),
                 headers=headers,
             ) as response:
                 headers_received = True
@@ -275,8 +276,14 @@ class AnthropicAdapter(ProviderAdapter):
             stop_reason=stop_reason,
         )
 
-    def _payload(self, request: ModelRequest, *, stream: bool) -> dict[str, Any]:
-        system, messages = _convert_to_anthropic(request.messages)
+    def _payload(
+        self,
+        request: ModelRequest,
+        *,
+        stream: bool,
+        tool_aliases: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        system, messages = _convert_to_anthropic(request.messages, tool_aliases)
         payload: dict[str, Any] = {
             "model": request.model,
             "max_tokens": request.max_tokens or DEFAULT_MAX_TOKENS,
@@ -288,7 +295,7 @@ class AnthropicAdapter(ProviderAdapter):
         if request.tools:
             payload["tools"] = [
                 {
-                    "name": tool.name,
+                    "name": _wire_tool_name(tool.name, tool_aliases),
                     "description": tool.description,
                     "input_schema": tool.parameters,
                 }
@@ -304,8 +311,22 @@ class AnthropicAdapter(ProviderAdapter):
 # -- helpers -----------------------------------------------------------------
 
 
+def _wire_tool_name(name: str, tool_aliases: dict[str, str] | None) -> str:
+    """Registry name -> wire name (F3).
+
+    With an alias map, conforming names pass through and non-conforming
+    ones use their collision-safe alias; without a map names are
+    sanitized in place (unaliasing happens in the router).
+    """
+    if tool_aliases is None:
+        return sanitize_tool_name(name)
+    alias_of = {real: alias for alias, real in tool_aliases.items()}
+    return alias_of.get(name, sanitize_tool_name(name))
+
+
 def _convert_to_anthropic(
     messages: tuple[ChatMessage, ...],
+    tool_aliases: dict[str, str] | None = None,
 ) -> tuple[list[str], list[dict[str, Any]]]:
     system: list[str] = []
     converted: list[dict[str, Any]] = []
@@ -350,7 +371,12 @@ def _convert_to_anthropic(
                     blocks.append({"type": "text", "text": message.content})
                 for tc in message.tool_calls:
                     blocks.append(
-                        {"type": "tool_use", "id": tc.id, "name": tc.name, "input": tc.arguments}
+                        {
+                            "type": "tool_use",
+                            "id": tc.id,
+                            "name": _wire_tool_name(tc.name, tool_aliases),
+                            "input": tc.arguments,
+                        }
                     )
                 converted.append({"role": "assistant", "content": blocks})
             else:

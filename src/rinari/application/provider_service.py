@@ -15,7 +15,10 @@ from typing import Any
 import httpx
 
 from rinari.application.context import AppContext
-from rinari.application.credentials import CredentialStore
+from rinari.application.credentials import (
+    CredentialStore,
+    validate_env_name,
+)
 from rinari.providers.adapters.base import ProviderHealth
 from rinari.providers.registry import adapter_for, validate_provider_type
 from rinari.shared.clock import now_iso
@@ -119,6 +122,17 @@ class ProviderService:
             )
         if input.secret is not None and input.secret_env is not None:
             raise InvalidUsageError("Use either --api-key or --api-key-env, not both")
+        # F1: validate the env NAME before any write. A rejected reference is
+        # never persisted and never echoed back (it may hold a pasted key).
+        if input.secret_env is not None:
+            validate_env_name(input.secret_env)
+        # F5: a provider without any usable base URL would persist fine and
+        # then fail on every call; reject it up front.
+        if input.provider_type == "custom" and not (input.endpoint or "").strip():
+            raise InvalidUsageError(
+                "A custom provider requires an endpoint",
+                hint="Pass --endpoint https://host/v1 (or a base_url setting).",
+            )
 
         now = self._now()
         record = ProviderRecord(
@@ -194,6 +208,13 @@ class ProviderService:
         if settings is not None:
             if not isinstance(settings, dict):
                 raise InvalidUsageError("Settings must be an object")
+            # F5: the same registry rules as creation apply on edit; an
+            # unknown adapter protocol must not be persisted via update.
+            validate_provider_type(
+                record.type,
+                record.auth_method,
+                settings.get("protocol", record.settings.get("protocol")),
+            )
             record.settings = dict(settings)
             changed = True
         if account_hint is not None:
@@ -204,6 +225,141 @@ class ProviderService:
         if changed:
             record.updated_at = self._now()
             self._ctx.provider_repo.update(record)
+        return record
+
+    def apply_update(
+        self,
+        ref: str,
+        *,
+        new_alias: str | None = None,
+        endpoint: str | None = None,
+        settings: dict[str, Any] | None = None,
+        account_hint: str | None = None,
+        secret: str | None = None,
+        secret_env: str | None = None,
+    ) -> ProviderRecord:
+        """Atomic combined edit (F4/F5): validate everything, then apply.
+
+        Absent fields mean "leave unchanged"; a rename, a credential source
+        change and connection fields are validated as one operation so a
+        rejected update leaves no partial changes (alias, credential or
+        settings already mutated) behind. Credential storage lives outside
+        SQL, so the credential path reuses the rotation-safe `set_auth`
+        ordering: write the new value first, retire the old one only after
+        the record update commits.
+        """
+        record = self.get(ref)
+        if new_alias is not None:
+            new_alias = new_alias.strip()
+            if not new_alias:
+                raise InvalidUsageError("Alias must be a non-empty string")
+        if secret is not None and secret_env is not None:
+            raise InvalidUsageError("Use either --api-key or --api-key-env, not both")
+        if secret_env is not None:
+            # F1/F2: a malformed env reference must be rejected before any
+            # state (or secret) changes, keeping the previous credential.
+            validate_env_name(secret_env)
+        if (
+            secret is None
+            and secret_env is None
+            and new_alias is None
+            and endpoint is None
+            and settings is None
+            and account_hint is None
+        ):
+            raise InvalidUsageError(
+                "Nothing to update: pass alias, endpoint, settings, account_hint, "
+                "secret or secret_env."
+            )
+
+        # -- validation phase (no writes) --------------------------------
+        if settings is not None:
+            if not isinstance(settings, dict):
+                raise InvalidUsageError("Settings must be an object")
+            validate_provider_type(
+                record.type,
+                record.auth_method,
+                settings.get("protocol", record.settings.get("protocol")),
+            )
+        if (
+            new_alias is not None
+            and new_alias != record.alias
+            and self._ctx.provider_repo.get_by_alias(new_alias) is not None
+        ):
+            raise ConflictError(f"Provider alias already exists: {new_alias}")
+        if endpoint is not None and not endpoint.strip():
+            raise InvalidUsageError("Endpoint must be a non-empty string")
+
+        # -- apply phase --------------------------------------------------
+        now = self._now()
+        previous_ref: str | None = None
+        staged_ref: str | None = None
+        with self._credential_lock():
+            existing = self._ctx.provider_repo.get_credential(record.id)
+            previous_ref = existing.secret_ref if existing is not None else None
+            try:
+                # Rotation protocol (review P1): stage the new value under a
+                # FRESH reference *before* any destructive step. The previous
+                # resolvable value is never overwritten, so neither an SQL
+                # failure, a failed cleanup nor a process kill can lose the
+                # currently confirmed credential.
+                if secret is not None:
+                    staged_ref = self._stage_candidate(record.id, secret)
+                with self._ctx.db.transaction():
+                    if staged_ref is not None or secret_env is not None:
+                        secret_ref = staged_ref if staged_ref is not None else f"env://{secret_env}"
+                        self._ctx.provider_repo.set_credential(
+                            ProviderCredentialRef(
+                                provider_id=record.id,
+                                secret_ref=secret_ref,
+                                method="api-key",
+                                updated_at=now,
+                            )
+                        )
+                        record.auth_method = "api-key"
+                        record.status_connected = None
+                        record.status_checked_at = None
+                    if new_alias is not None:
+                        record.alias = new_alias
+                    if endpoint is not None:
+                        record.endpoint = endpoint.strip()
+                        record.status_connected = None
+                        record.status_checked_at = None
+                    if settings is not None:
+                        record.settings = dict(settings)
+                    if account_hint is not None:
+                        record.account_hint = account_hint
+                    record.updated_at = now
+                    if staged_ref is not None:
+                        self._ctx.provider_repo.remove_pending_credential_cleanup(staged_ref)
+                    self._ctx.provider_repo.update(record)
+                    # Pending row inside the same transaction: a crash before
+                    # or after the commit leaves the old reference tracked.
+                    if previous_ref is not None and previous_ref != (
+                        staged_ref or f"env://{secret_env}"
+                    ):
+                        self._ctx.provider_repo.add_pending_credential_cleanup(
+                            record.id, previous_ref, now
+                        )
+            except Exception:
+                # SQL rolled back (or staging failed): the confirmed record
+                # still points at the previous reference, which was never
+                # modified. Only the fresh candidate needs cleanup, and its
+                # failure is recorded, never fatal.
+                if staged_ref is not None:
+                    with contextlib.suppress(Exception):
+                        self._retire_previous_reference(record.id, staged_ref, "", now)
+                raise
+        # Retire the previous secret only after the new state committed and
+        # only if the reference actually changed (rotation-safe ordering). A
+        # crash from here on leaves the previous copy as a resolvable orphan
+        # until `rinari secrets cleanup` removes it — never a lost key. A
+        # FAILED delete never propagates: the update is already confirmed;
+        # the old reference is recorded as pending cleanup instead.
+        if secret is not None or secret_env is not None:
+            current = self._ctx.provider_repo.get_credential(record.id)
+            if previous_ref is not None and current is not None:
+                self._retire_previous_reference(record.id, previous_ref, current.secret_ref, now)
         return record
 
     def remove(
@@ -253,46 +409,144 @@ class ProviderService:
             self._credentials.delete(credential.secret_ref)
         return record
 
-    def set_auth(
-        self, ref: str, secret: str | None = None, secret_env: str | None = None
-    ) -> ProviderRecord:
-        with self._credential_lock():
-            return self._set_auth(ref, secret=secret, secret_env=secret_env)
+    def _stage_candidate(self, provider_id: str, secret: str) -> str:
+        def record_candidate(ref):
+            with self._ctx.db.transaction():
+                self._ctx.provider_repo.add_pending_credential_cleanup(
+                    provider_id, ref, self._now()
+                )
 
-    def _set_auth(
+        return self._credentials.stage_unique_provider_secret(
+            provider_id, secret, before_write=record_candidate
+        )
+
+    def _retire_previous_reference(
+        self,
+        provider_id: str,
+        previous_ref: str,
+        current_ref: str,
+        now: str,
+    ) -> bool:
+        """Post-commit attempt to delete the replaced credential reference.
+
+        Review rework: the pending row is registered INSIDE the rotation
+        transaction (see _set_auth_locked/apply_update), so a crash between
+        commit and this call still leaves the old reference tracked. This
+        method only tries to complete the work: when the store delete
+        succeeds — or the value is already gone — the pending row is
+        removed. Any other failure keeps the row for a later attempt and
+        never raises: the update is confirmed, cleanup failure must not
+        report the whole operation as failed.
+        """
+        if previous_ref == current_ref:
+            return True
+        try:
+            self._credentials.delete(previous_ref)
+            if self._credentials.exists(previous_ref):
+                return False
+            with self._ctx.db.transaction():
+                self._ctx.provider_repo.remove_pending_credential_cleanup(previous_ref)
+        except Exception:
+            return False  # pending row stays; a later run retries it
+        return True
+
+    def run_pending_credential_cleanup(self, *, lock_timeout: float = 5.0) -> int:
+        """Sweep pending rows: delete the store value, retire the row.
+
+        Idempotent: a missing store value completes the cleanup (the delete
+        already happened); a store ACCESS error keeps the row for retry.
+        Runs best-effort after rotations and is exposed via
+        `rinari secrets cleanup`; never raises for individual entries.
+        """
+        completed = 0
+        with file_lock(self._ctx.layout.credentials_lock, timeout=lock_timeout):
+            protected = {
+                row["secret_ref"]
+                for row in self._ctx.db.query(
+                    "SELECT secret_ref FROM provider_credentials_metadata "
+                    "UNION SELECT secret_ref FROM retained_credentials"
+                )
+            }
+            for entry in self._ctx.provider_repo.list_pending_credential_cleanup():
+                secret_ref = entry["secret_ref"]
+                if secret_ref in protected:
+                    continue
+                if self._retire_previous_reference(
+                    entry["provider_id"], secret_ref, "", self._now()
+                ):
+                    completed += 1
+        return completed
+
+    def set_auth(
         self, ref: str, secret: str | None = None, secret_env: str | None = None
     ) -> ProviderRecord:
         record = self.get(ref)
         if (secret is None) == (secret_env is None):
             raise InvalidUsageError("Pass exactly one of --api-key or --api-key-env")
-        now = self._now()
-        previous_ref: str | None = None
-        with self._ctx.db.transaction():
-            existing = self._ctx.provider_repo.get_credential(record.id)
-            previous_ref = existing.secret_ref if existing is not None else None
-            # Store the new secret *before* retiring the old one: a failed
-            # rotation (full vault, locked store) must not lose the previous
-            # key, and a transaction rollback cannot restore a deleted secret.
+        # F2: validate the new source structurally *before* touching state.
+        # A malformed env reference must not retire the previous credential.
+        if secret_env is not None:
+            validate_env_name(secret_env)
+        with self._credential_lock():
+            return self._set_auth_locked(record, secret, secret_env, self._now())
+
+    def _set_auth_locked(
+        self,
+        record: ProviderRecord,
+        secret: str | None,
+        secret_env: str | None,
+        now: str,
+    ) -> ProviderRecord:
+        existing = self._ctx.provider_repo.get_credential(record.id)
+        previous_ref = existing.secret_ref if existing is not None else None
+        staged_ref: str | None = None
+        try:
+            # Rotation protocol (review P1): stage the new value under a
+            # FRESH reference *before* any destructive step; see apply_update.
             if secret is not None:
-                secret_ref = self._credentials.store_provider_secret(record.id, secret)
-            else:
-                secret_ref = f"env://{secret_env}"
-            self._ctx.provider_repo.set_credential(
-                ProviderCredentialRef(
-                    provider_id=record.id,
-                    secret_ref=secret_ref,
-                    method="api-key",
-                    updated_at=now,
-                )
-            )
-            record.auth_method = "api-key"
-            record.status_connected = None
-            record.status_checked_at = None
-            record.updated_at = now
-            self._ctx.provider_repo.update(record)
-        # Only now is the previous reference retired, and only if it changed.
-        if previous_ref is not None and previous_ref != secret_ref:
-            self._credentials.delete(previous_ref)
+                staged_ref = self._stage_candidate(record.id, secret)
+            with self._ctx.db.transaction():
+                if staged_ref is not None or secret_env is not None:
+                    secret_ref = staged_ref if staged_ref is not None else f"env://{secret_env}"
+                    self._ctx.provider_repo.set_credential(
+                        ProviderCredentialRef(
+                            provider_id=record.id,
+                            secret_ref=secret_ref,
+                            method="api-key",
+                            updated_at=now,
+                        )
+                    )
+                    record.auth_method = "api-key"
+                    record.status_connected = None
+                    record.status_checked_at = None
+                    record.updated_at = now
+                    if staged_ref is not None:
+                        self._ctx.provider_repo.remove_pending_credential_cleanup(staged_ref)
+                    self._ctx.provider_repo.update(record)
+                # The pending row is part of the same transaction: a crash
+                # before or after the commit leaves the old reference tracked
+                # exactly once (review: coordination, not suppression).
+                if previous_ref is not None and previous_ref != (
+                    staged_ref or f"env://{secret_env}"
+                ):
+                    self._ctx.provider_repo.add_pending_credential_cleanup(
+                        record.id, previous_ref, now
+                    )
+        except Exception:
+            # SQL rolled back (or staging failed): the confirmed record still
+            # points at the untouched previous reference. Only the candidate
+            # needs cleanup; its failure is never fatal.
+            if staged_ref is not None:
+                with contextlib.suppress(Exception):
+                    self._retire_previous_reference(record.id, staged_ref, "", now)
+            raise
+        # Retire the previous reference only after the new state committed.
+        # Never raises (review P1): a failed delete records the old reference
+        # as pending cleanup instead of failing a confirmed rotation.
+        if previous_ref is not None:
+            current = self._ctx.provider_repo.get_credential(record.id)
+            if current is not None:
+                self._retire_previous_reference(record.id, previous_ref, current.secret_ref, now)
         return record
 
     def logout(self, ref: str) -> ProviderRecord:

@@ -29,6 +29,12 @@ OPENCODE_SESSION_HEADER = "x-opencode-session"
 
 _TOOL_NAME_UNSAFE = re.compile(r"[^a-zA-Z0-9_-]")
 
+#: Official wire contract for function tool names, shared by OpenAI
+#: (max 64) and Anthropic (max 128): letters, digits, underscore, hyphen.
+#: The 64 bound is the stricter of the two and what the router uses to
+#: decide when the reversible alias map is needed (providers/PLAN F3).
+WIRE_TOOL_NAME_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
 
 def _is_opencode_host(url: str | None) -> bool:
     if not url:
@@ -67,7 +73,11 @@ def is_opencode_endpoint(url: str | None) -> bool:
 
 
 def needs_tool_aliasing(endpoint: str | None) -> bool:
-    """Whether tool names must be sanitized for this endpoint."""
+    """Deprecated host check; the router now aliases per tool-name pattern.
+
+    Kept for the OpenCode session-affinity code path only; tool-name
+    aliasing is decided by WIRE_TOOL_NAME_RE in the router (F3).
+    """
     return _is_opencode_host(endpoint)
 
 

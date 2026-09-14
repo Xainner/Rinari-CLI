@@ -47,6 +47,7 @@ def tool_row_view(tool: Any) -> dict[str, Any]:
         "permissions": list(tool.permissions) or None,
         "risk": tool.risk,
         "side_effects": tool.side_effects,
+        "concurrency": tool.concurrency,
         "namespace": tool.namespace,
         "always_loaded": tool.always_loaded,
         "availability": availability(tool.name),

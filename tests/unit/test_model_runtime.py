@@ -438,8 +438,10 @@ def test_anthropic_tools_in_payload() -> None:
     adapter = AnthropicAdapter(client=_client(handler))
     adapter.invoke(request, "key", None)
     body = json.loads(seen[0].content)
+    # F3: the adapter alone sanitize-falls-back (invoked without the router's
+    # alias map); dotted names must never reach the official wire.
     assert body["tools"] == [
-        {"name": "fs.read", "description": "lee", "input_schema": {"type": "object"}}
+        {"name": "fs_read", "description": "lee", "input_schema": {"type": "object"}}
     ]
 
 
@@ -608,7 +610,7 @@ def test_router_keeps_tool_names_off_vendor(monkeypatch, tmp_path) -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
-        return httpx.Response(200, json=_tool_call_response("fs.read"))
+        return httpx.Response(200, json=_tool_call_response("fs_read"))
 
     ctx, services = _app_and_services(handler, monkeypatch, tmp_path)
     try:
@@ -618,7 +620,10 @@ def test_router_keeps_tool_names_off_vendor(monkeypatch, tmp_path) -> None:
         req = _request(tools=(ToolSchema(name="fs.read", description="read", parameters={}),))
         response = router.invoke(provider, model.id, req)
         body = json.loads(seen[-1].content)
-        assert body["tools"][0]["function"]["name"] == "fs.read"
+        # F3: dotted names violate the official OpenAI/Anthropic wire
+        # contract everywhere, not only on OpenCode hosts; the reversible
+        # alias rewrites them and the response restores the registry name.
+        assert body["tools"][0]["function"]["name"] == "fs_read"
         assert response.tool_calls[0].name == "fs.read"
     finally:
         ctx.close()
@@ -957,7 +962,63 @@ def test_pick_saves_responses_transport_for_catalog_id(monkeypatch, tmp_path) ->
         ctx.close()
 
 
-# -- router ---------------------------------------------------------------------
+def test_long_nonconforming_name_is_truncated_into_the_wire_pattern(monkeypatch, tmp_path) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        # Model calls back with the exact name it was offered: the aliases
+        # are reversible, so the unaliased ToolCall restores the registry name.
+        offered = payload["tools"][0]["function"]["name"]
+        seen.append(request)
+        return httpx.Response(200, json=_tool_call_response(offered))
+
+    ctx, services = _app_and_services(handler, monkeypatch, tmp_path)
+    try:
+        provider = services.providers.add(_add_custom_input("other", "https://api.test/v1"))
+        model = services.models.add(provider.alias, "m-x", "mx")
+        router = ModelRouter(services.providers, services.models, http_client=_client(handler))
+        long_name = "x" * 65  # 65 chars: one over the official bound
+        req = _request(tools=(ToolSchema(name=long_name, description="long", parameters={}),))
+        response = router.invoke(provider, model.id, req)
+        wire_name = json.loads(seen[-1].content)["tools"][0]["function"]["name"]
+        # The sanitized alias must fit the 64-char pattern...
+        assert len(wire_name) <= 64
+        # ...and the returned call restores the original registry name.
+        assert response.tool_calls[0].name == long_name
+    finally:
+        ctx.close()
+
+
+def test_collision_suffix_stays_within_the_wire_pattern(monkeypatch, tmp_path) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=_tool_call_response("ok"))
+
+    ctx, services = _app_and_services(handler, monkeypatch, tmp_path)
+    try:
+        provider = services.providers.add(_add_custom_input("other", "https://api.test/v1"))
+        model = services.models.add(provider.alias, "m-x", "mx")
+        router = ModelRouter(services.providers, services.models, http_client=_client(handler))
+        base = "y" * 65
+        req = _request(
+            tools=(
+                ToolSchema(name=base, description="a", parameters={}),
+                ToolSchema(name=base + "_dup", description="b", parameters={}),
+            )
+        )
+        router.invoke(provider, model.id, req)
+        body = json.loads(seen[-1].content)
+        names = [t["function"]["name"] for t in body["tools"]]
+        assert len({names[0], names[1]}) == 2, "aliases must remain distinct"
+        assert all(len(n) <= 64 for n in names), names
+    finally:
+        ctx.close()
+
+
+# -- router (original section) ---------------------------------------------------
 
 
 def _app_and_services(handler, monkeypatch, tmp_path):
@@ -1075,5 +1136,133 @@ def test_stream_timeout_policy_precedence_is_transport_only(monkeypatch, tmp_pat
         )
         assert seen[-1].extensions["timeout"]["read"] == 99
         assert b"stream_timeouts" not in seen[-1].content
+    finally:
+        ctx.close()
+
+
+# -- F3: wire tool names conform to the official contracts everywhere ----------
+
+
+def test_anthropic_tools_use_official_wire_names(monkeypatch, tmp_path) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "tu_1",
+                        "name": "fs_read",
+                        "input": {"path": "b.txt"},
+                    }
+                ],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 3, "output_tokens": 4},
+            },
+        )
+
+    ctx, services = _app_and_services(handler, monkeypatch, tmp_path)
+    try:
+        from rinari.application.provider_service import AddProviderInput
+
+        provider = services.providers.add(
+            AddProviderInput(
+                alias="anthropic-test",
+                provider_type="anthropic",
+                auth_method="api-key",
+                secret="sk-test-key",
+            )
+        )
+        model = services.models.add(provider.alias, "claude-x", "cx")
+        router = ModelRouter(services.providers, services.models, http_client=_client(handler))
+        req = _request(tools=(ToolSchema(name="fs.read", description="read", parameters={}),))
+        response = router.invoke(provider, model.id, req)
+        body = json.loads(seen[-1].content)
+        # Declaration uses the sanitized alias...
+        assert body["tools"][0]["name"] == "fs_read"
+        # ...and the model-requested call restores the registry name.
+        assert response.tool_calls[0].name == "fs.read"
+    finally:
+        ctx.close()
+
+
+def test_anthropic_history_uses_wire_names(monkeypatch, tmp_path) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(
+            200,
+            json={"content": [], "stop_reason": "end_turn", "usage": {}},
+        )
+
+    ctx, services = _app_and_services(handler, monkeypatch, tmp_path)
+    try:
+        from rinari.application.provider_service import AddProviderInput
+
+        provider = services.providers.add(
+            AddProviderInput(
+                alias="anthropic-test",
+                provider_type="anthropic",
+                auth_method="api-key",
+                secret="sk-test-key",
+            )
+        )
+        model = services.models.add(provider.alias, "claude-x", "cx")
+        router = ModelRouter(services.providers, services.models, http_client=_client(handler))
+        req = _request(
+            tools=(ToolSchema(name="fs.read", description="read", parameters={}),),
+            messages=(
+                ChatMessage.system("sys"),
+                ChatMessage.user("hola"),
+                ChatMessage.assistant(
+                    "",
+                    tool_calls=(ToolCall(id="tu_1", name="fs.read", arguments={"p": 1}),),
+                ),
+                ChatMessage.tool_result("tu_1", "fs.read", "ok"),
+            ),
+        )
+        router.invoke(provider, model.id, req)
+        body = json.loads(seen[-1].content)
+        tool_use_blocks = [
+            block
+            for message in body["messages"]
+            for block in (message["content"] if isinstance(message["content"], list) else [])
+            if isinstance(block, dict) and block.get("type") == "tool_use"
+        ]
+        assert tool_use_blocks[0]["name"] == "fs_read"
+    finally:
+        ctx.close()
+
+
+def test_conforming_tool_names_pass_through_untouched(monkeypatch, tmp_path) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=_tool_call_response("fs_read"))
+
+    ctx, services = _app_and_services(handler, monkeypatch, tmp_path)
+    try:
+        provider = services.providers.add(_add_custom_input("other", "https://api.test/v1"))
+        model = services.models.add(provider.alias, "m-x", "mx")
+        router = ModelRouter(services.providers, services.models, http_client=_client(handler))
+        req = _request(
+            tools=(
+                ToolSchema(name="fs_read", description="conforming", parameters={}),
+                ToolSchema(name="web.search", description="needs alias", parameters={}),
+            )
+        )
+        response = router.invoke(provider, model.id, req)
+        body = json.loads(seen[-1].content)
+        names = [t["function"]["name"] for t in body["tools"]]
+        # Conforming names keep their exact spelling; only non-conforming
+        # ones get the collision-safe sanitized alias (web.search -> web_search).
+        assert names == ["fs_read", "web_search"]
+        unaliased = {tc.name for tc in response.tool_calls}
+        assert unaliased <= {"fs_read", "web.search"}
     finally:
         ctx.close()

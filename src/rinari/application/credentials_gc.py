@@ -33,13 +33,18 @@ PROVIDER_PREFIX = "providers/"
 CRED_TYPE_GENERIC = 1
 
 #: Tipos de entrada gestionados por el store con scope de home.
-SCOPED_KINDS = ("current", "staging", "previous")
+SCOPED_KINDS = ("current", "staging", "previous", "gen")
 #: Infijos de cada forma con scope, en el orden en que se prueban.
 _SCOPED_INFIXES = (
     ("current", "providers"),
     ("staging", "staging/providers"),
     ("previous", "previous/providers"),
+    ("gen", "gen/providers"),
 )
+
+#: Infijo de las referencias frescas de rotación (`gen/providers/<id>/gen-<n>`,
+#: generadas por `stage_unique`); deben coincidir con el prefijo del slot.
+_GEN_PREFIX = "gen/providers/"
 
 Deleter = Callable[[str, int], None]
 OwnershipCheck = Callable[[str], bool]
@@ -85,14 +90,44 @@ class CleanupReport:
 
 
 def parse_managed_target(target: str, username: str, scope: str) -> ManagedTarget | None:
-    """Reconoce solo las formas administradas, y dice de qué scope son.
+    r"""Reconoce solo las formas administradas, y dice de qué scope son.
 
     Acepta ``rinari/<scope>/providers/<id>`` (y sus variantes staging/anterior)
     más el compuesto ``<username>@<service>`` que deja el backend de Windows,
     exigiendo que el id del username coincida con el del target. El formato
     legado ``rinari`` y el intermedio ``rinari/providers/<id>`` se reconocen
     como *sin scope*: son de rinari, pero su pertenencia no puede probarse.
+    Los slots de rotación de keyring llevan el slot completo en el username:
+    ``gen/providers/<id>/gen-<n>`` (review P1: el prefijo ``providers/`` puro
+    no los reconoce y quedaban fuera del saneo administrado).
     """
+    service = target
+    if "@" in target:
+        head, _, tail = target.partition("@")
+        if head != username.partition("@")[0]:
+            return None
+        service = tail
+
+    # Slots de rotación (keyring real): username == "gen/providers/<id>/gen-<n>".
+    gen_marker_user = f"gen/{PROVIDER_PREFIX}"
+    if username.startswith(gen_marker_user):
+        parts = username.split("/")
+        # gen / providers / <id> / gen-<n>
+        if len(parts) == 4 and parts[1] == "providers":
+            provider_id, slot_suffix = parts[2], parts[3]
+            if (
+                provider_id
+                and slot_suffix.startswith("gen-")
+                and not any(p in (".", "..") for p in parts)
+                and provider_id not in (".", "..")
+            ):
+                # La pertenencia al home se prueba por el SERVICE NAME del
+                # target: `rinari/<scope>/gen/providers/<id>/gen-<n>`.
+                expected_service = f"{SERVICE}/{scope}/{_GEN_PREFIX}{provider_id}/{slot_suffix}"
+                if service == expected_service:
+                    return ManagedTarget(kind="gen", provider_id=provider_id, scope=scope)
+        return None
+
     if not username.startswith(PROVIDER_PREFIX):
         return None
     provider_id = username[len(PROVIDER_PREFIX) :]
@@ -100,13 +135,6 @@ def parse_managed_target(target: str, username: str, scope: str) -> ManagedTarge
         return None
     if any(part in (".", "..") for part in provider_id.split("/")):
         return None
-
-    service = target
-    if "@" in target:
-        head, _, tail = target.partition("@")
-        if head != username:
-            return None
-        service = tail
 
     if service == SERVICE:
         return ManagedTarget(kind="legacy", provider_id=provider_id, scope=None)
@@ -117,12 +145,23 @@ def parse_managed_target(target: str, username: str, scope: str) -> ManagedTarge
     if not service.startswith(prefix):
         return None
     for kind, infix in _SCOPED_INFIXES:
+        if kind == "gen":
+            # Slots de rotación: manejo aparte más abajo (el servicio lleva
+            # el sufijo `gen-<n>` que el bucle de sufijos exactos no cubre).
+            continue
         suffix = f"/{infix}/{provider_id}"
         if not service.endswith(suffix):
             continue
         owner = service[len(prefix) : -len(suffix)]
         if owner and "/" not in owner:
             return ManagedTarget(kind=kind, provider_id=provider_id, scope=owner)
+    # Rotación (`stage_unique`, keyring con scope): `rinari/<scope>/gen/providers/<id>/gen-<n>`.
+    gen_marker = f"{prefix}{scope}/{_GEN_PREFIX}"
+    if service.startswith(gen_marker):
+        rest = service[len(gen_marker) :]
+        parts = rest.split("/")
+        if len(parts) == 2 and parts[0] == provider_id and parts[1].startswith("gen-"):
+            return ManagedTarget(kind="gen", provider_id=provider_id, scope=scope)
     return None
 
 

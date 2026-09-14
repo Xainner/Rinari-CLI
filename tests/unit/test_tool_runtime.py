@@ -312,10 +312,10 @@ def test_redaction_and_events(project) -> None:
 
     spilled = runtime.execute("fs.read", {"path": "big.py"}, ctx)
     assert spilled.ok is True
-    assert spilled.truncated is True
-    assert spilled.data["artifact"].startswith("artifact://s1/runtime/")
-    assert "spill_guidance" in spilled.data
-    assert "text" not in spilled.data
+    assert spilled.data["delivery_partial"] is True
+    assert spilled.data["result_ref"].startswith("artifact://s1/runtime/")
+    assert spilled.data["recovery"]["tool"] == "artifact.read"
+    assert len(spilled.to_model_text().encode("utf-8")) < 64 * 1024
     spill_files = list((tmp_path / "artifacts" / "s1" / "runtime").glob("*.txt"))
     assert len(spill_files) == 1
     assert spill_files[0].stat().st_size > 64 * 1024
@@ -334,7 +334,7 @@ def test_cancelled_before_execution(project) -> None:
 def test_to_model_text_truncation() -> None:
     result = ToolResult(ok=True, data={"x": "y" * 5000}, tool_call_id="t1")
     text = result.to_model_text()
-    assert "[output truncated]" in text
+    assert __import__("json").loads(text)["data"] == result.data
 
 
 def test_to_model_text_error_envelope() -> None:

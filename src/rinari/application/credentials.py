@@ -34,6 +34,32 @@ KEYRING_ENV_DISABLE = "RINARI_KEYRING"
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
+def validate_env_name(name: str) -> str:
+    """Validate an environment-variable name, raising a redacted error.
+
+    The rejected text is never interpolated into the message: an env-ref
+    field commonly receives a pasted API key by mistake, and echoing it
+    would leak the secret into errors, logs and protocol events
+    (providers/PLAN_DE_TRABAJO.md F1).
+    """
+    if not name:
+        raise InvalidUsageError(
+            "Invalid environment secret reference: the variable name is empty",
+            hint="Pass a variable name such as OPENAI_API_KEY, not the key value.",
+        )
+    if not _ENV_NAME_RE.match(name):
+        raise InvalidUsageError(
+            "Invalid environment secret reference: the variable name may only "
+            "contain letters, digits and underscores, and must not start with "
+            "a digit",
+            hint=(
+                "Pass a variable NAME such as OPENAI_API_KEY. If you pasted an "
+                "API key, put it in the API key field instead."
+            ),
+        )
+    return name
+
+
 @dataclass(frozen=True, slots=True)
 class SecretRef:
     scheme: str
@@ -44,9 +70,19 @@ def parse_secret_ref(ref: str) -> SecretRef:
     if not ref:
         raise InvalidUsageError("Secret reference is empty")
     if ref.startswith(ENV_SCHEME):
-        key = ref[len(ENV_SCHEME) :]
-        if not _ENV_NAME_RE.match(key):
-            raise InvalidUsageError(f"Invalid environment secret reference: {ref}")
+        try:
+            key = validate_env_name(ref[len(ENV_SCHEME) :])
+        except InvalidUsageError:
+            # Re-raise without the reference: `ref` may be a pasted key.
+            raise InvalidUsageError(
+                "Invalid environment secret reference: the variable name may "
+                "only contain letters, digits and underscores, and must not "
+                "start with a digit",
+                hint=(
+                    "Pass a variable NAME such as OPENAI_API_KEY. If you pasted "
+                    "an API key, put it in the API key field instead."
+                ),
+            ) from None
         return SecretRef(scheme="env", key=key)
     if ref.startswith(FILE_SCHEME):
         key = ref[len(FILE_SCHEME) :]
@@ -97,6 +133,20 @@ class FileCredentialStore:
 
     def exists(self, key: str) -> bool:
         return self.path_for(key).is_file()
+
+    def stage_unique(self, key: str, secret: str) -> str:
+        """Write `secret` under a fresh sub-key without touching `key` itself.
+
+        Used by the rotation protocol: the previous file is never rewritten,
+        so no failure/interruption can destroy the resolvable value. The new
+        copy lives in a parallel namespace (`gen/<key>/gen-<n>`) to keep
+        files and directories disjoint from the base path.
+        """
+        n = 1
+        while self.exists(f"gen/{key}/gen-{n}"):
+            n += 1
+        self.store(f"gen/{key}/gen-{n}", secret)
+        return f"{FILE_SCHEME}gen/{key}/gen-{n}"
 
 
 def _keyring_backend() -> Any | None:
@@ -288,6 +338,23 @@ class KeyringCredentialStore:
         """Valor nuevo en vuelo, recuperable tras una rotación fallida."""
         return self._read(self._staging_service(key), key)
 
+    def stage_unique(self, key: str, secret: str) -> str:
+        """Write `secret` under a fresh service-name slot, non-destructively.
+
+        The current entry (`rinari/<home>/providers/<id>`) is never touched,
+        so an interruption can never destroy the resolvable value; the new
+        one lands under `rinari/<home>/gen/<id>/gen-<n>`. Resolution is not
+        affected: the record only points to `keyring://providers/<id>/gen-N`
+        after the SQL commit.
+        """
+        with self._locked():
+            n = 1
+            while self._read(self._service(f"gen/{key}/gen-{n}"), f"gen/{key}/gen-{n}") is not None:
+                n += 1
+            slot = f"gen/{key}/gen-{n}"
+            self._write_verified(self._service(slot), slot, secret, action="stage the new secret")
+            return f"{KEYRING_SCHEME}{slot}"
+
     def resolve(self, key: str) -> str:
         for service in self._readable_services(key):
             value = self._read(service, key)
@@ -307,7 +374,11 @@ class KeyringCredentialStore:
             return removed
 
     def exists(self, key: str) -> bool:
-        return any(self._read(service, key) is not None for service in self._readable_services(key))
+        # Cleanup must distinguish an inaccessible vault from an absent entry.
+        return any(
+            self._backend.get_password(service, key) is not None
+            for service in self._readable_services(key)
+        )
 
 
 class CredentialStore:
@@ -355,6 +426,39 @@ class CredentialStore:
     def provider_secret_ref(self, provider_id: str) -> str:
         return f"{FILE_SCHEME}providers/{provider_id}"
 
+    def stage_unique_provider_secret(
+        self, provider_id: str, secret: str, *, before_write=None
+    ) -> str:
+        """Write `secret` under a FRESH per-provider reference, non-destructively.
+
+        Rotation protocol (review P1: interrupt-safe credential rotation):
+        the previous value is never overwritten — the new one lands under an
+        independent reference (`providers/<id>/gen-<n>`), the confirmed record
+        points at it after the SQL commit, and only then is the previous
+        reference retired. Any failure/interruption before the commit leaves
+        the previous reference intact (candidate cleaned by `rinari secrets
+        cleanup`); a commit followed by a crash before the retire leaves the
+        previous copy as one orphan, resolvable via the old reference until
+        cleanup removes it — never a lost credential.
+        """
+        if before_write is not None:
+            import uuid
+
+            key = f"gen/providers/{provider_id}/gen-{uuid.uuid4().int}"
+            ref = f"{KEYRING_SCHEME if self.keyring is not None else FILE_SCHEME}{key}"
+            before_write(ref)
+            if self.keyring is not None:
+                with self.keyring._locked():
+                    self.keyring._write_verified(
+                        self.keyring._service(key), key, secret, action="stage secret"
+                    )
+            else:
+                self.files.store(key, secret)
+            return ref
+        if self.keyring is not None:
+            return self.keyring.stage_unique(f"providers/{provider_id}", secret)
+        return self.files.stage_unique(f"providers/{provider_id}", secret)
+
     def store_provider_secret(self, provider_id: str, secret: str) -> str:
         if self.keyring is not None:
             return self.keyring.store(f"providers/{provider_id}", secret)
@@ -394,5 +498,7 @@ class CredentialStore:
         if parsed.scheme == "env":
             return bool(self._env.get(parsed.key))
         if parsed.scheme == "keyring":
-            return self.keyring.exists(parsed.key) if self.keyring is not None else False
+            if self.keyring is None:
+                raise AuthenticationRequiredError("OS credential store unavailable")
+            return self.keyring.exists(parsed.key)
         return self.files.exists(parsed.key)

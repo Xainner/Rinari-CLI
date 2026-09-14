@@ -200,11 +200,11 @@ def test_nested_outputs_spill_and_redact_before_artifact(tmp_path):
         )
     )
     result = runtime.execute("fs.stat", {"path": "."}, ctx, tool_call_id="nested")
-    assert result.ok and result.truncated and result.artifacts
-    path = ctx.artifact_root / ctx.session_id / "runtime" / "nested.txt"
+    assert result.ok and result.data["delivery_partial"] and result.artifacts
+    path = ctx.artifact_root / ctx.session_id / "runtime" / result.artifacts[0].name
     text = path.read_text(encoding="utf-8")
     assert "private-token" not in text
-    assert len(json.loads(text)) == 100
+    assert len(json.loads(text)["data"]) == 100
 
 
 def test_lsp_unicode_column_is_translated_to_utf16(tmp_path):

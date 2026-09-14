@@ -132,6 +132,7 @@ def artifact_tools() -> list[ToolDefinition]:
     return [
         ToolDefinition(
             name="artifact.read",
+            concurrency="local-read",
             description=(
                 "Read a bounded byte slice from an artifact:// URI produced by a prior tool. "
                 "Use next_start_byte to continue. UTF-8 only; a slice can extend up to "
@@ -158,6 +159,7 @@ def artifact_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="artifact.metadata",
+            concurrency="local-read",
             description="Return metadata for an artifact:// URI from the current session.",
             input_schema={
                 "type": "object",

@@ -489,6 +489,9 @@ def build_agent_session(
     gateway = caller if isinstance(caller, SessionModelGateway) else SessionModelGateway(caller)
     policy = PolicyEngine(network=network_policy)
     tool_ctx = ToolContext(
+        observation_budget_bytes=services.ctx.config.config.runtime.tools.observation_bytes,
+        round_observation_bytes=services.ctx.config.config.runtime.tools.round_observation_bytes,
+        max_concurrency=services.ctx.config.config.runtime.tools.max_concurrency,
         session_id=record.id,
         kind=record.kind,
         cwd=root if root is not None else cwd,
@@ -1153,13 +1156,11 @@ def _restore_history(services: ServiceContainer, record: SessionRecord) -> list[
     restored = list(reversed(result))
     from rinari.runtime.durable_history import recover_legacy_turns
 
-    legacy = recover_legacy_turns(
-        records,
-        services.ctx.db.query(
-            "SELECT type,payload_json FROM session_events WHERE session_id=? ORDER BY seq",
-            (record.id,),
-        ),
+    activity_events = services.ctx.db.query(
+        "SELECT type,payload_json FROM session_events WHERE session_id=? ORDER BY seq",
+        (record.id,),
     )
+    legacy = recover_legacy_turns(records, activity_events)
     if legacy:
         expanded = []
         for index, (rec, msg) in enumerate(zip(records, restored, strict=True)):
@@ -1177,9 +1178,11 @@ def _restore_history(services: ServiceContainer, record: SessionRecord) -> list[
             ).messages
         )
     from rinari.context.projection import project
-    from rinari.runtime.durable_history import complete_tool_pairs
+    from rinari.runtime.durable_history import complete_tool_pairs, completed_observations
 
-    return complete_tool_pairs(project(restored, record.compact_state))
+    return complete_tool_pairs(
+        project(restored, record.compact_state), completed_observations(records, activity_events)
+    )
 
 
 def _persist_new_messages(

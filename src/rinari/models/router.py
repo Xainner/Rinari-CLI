@@ -20,8 +20,8 @@ from rinari.providers.adapters.http import (
     DEFAULT_MODEL_STREAM_READ_TIMEOUT_S,
     MAX_MODEL_STREAM_READ_TIMEOUT_S,
     MIN_MODEL_STREAM_READ_TIMEOUT_S,
+    WIRE_TOOL_NAME_RE,
     is_opencode_endpoint,
-    needs_tool_aliasing,
     sanitize_tool_name,
 )
 from rinari.providers.catalog import OPENCODE_RESPONSES_MODELS
@@ -61,20 +61,37 @@ def _resolve_transport(provider, model) -> str:
 def _alias_map_for_request(endpoint: str | None, request: ModelRequest) -> dict[str, str] | None:
     """Alias->real tool-name map for vendors with strict name patterns.
 
-    None off-vendor (or tool-less): adapters then pass names through
-    untouched. The router applies the same map back on the way in.
+    Activated whenever any requested tool name violates the official
+    function-name contract (letters, digits, underscore, hyphen only —
+    both OpenAI and Anthropic reject dotted names, F3), regardless of the
+    endpoint host. Conforming names keep their exact spelling; the map is
+    reversible and collision-safe. The router applies the same map back on
+    the way in.
     """
-    if not request.tools or not needs_tool_aliasing(endpoint):
+    if not request.tools or all(WIRE_TOOL_NAME_RE.fullmatch(t.name) for t in request.tools):
         return None
     real_by_alias: dict[str, str] = {}
     for tool in sorted(request.tools, key=lambda t: t.name):
-        base = sanitize_tool_name(tool.name)
-        alias, n = base, 2
+        alias = tool.name if WIRE_TOOL_NAME_RE.fullmatch(tool.name) else _wire_alias(tool.name)
+        suffix = 2
         while alias in real_by_alias and real_by_alias[alias] != tool.name:
-            alias = f"{base}__{n}"
-            n += 1
+            # Deterministic collision suffix; the budgeted alias keeps the
+            # suffixed name inside the wire pattern even at the 64-char bound
+            # (review P1: long names were aliased but never shortened).
+            alias = f"{_wire_alias(tool.name, reserve=suffix + 2)}__{suffix}"
+            suffix += 1
         real_by_alias[alias] = tool.name
     return real_by_alias
+
+
+def _wire_alias(name: str, *, reserve: int = 0) -> str:
+    """Sanitized alias within the official 64-character contract.
+
+    Collision suffixes like ``__12`` can exceed the pattern on their own,
+    so `reserve` withholds that many characters from the sanitized base
+    before appending them.
+    """
+    return sanitize_tool_name(name)[: max(0, 64 - reserve)]
 
 
 def _merge_capabilities(

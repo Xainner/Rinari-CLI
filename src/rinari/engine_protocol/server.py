@@ -2407,18 +2407,7 @@ class EngineServer:
         provider = params.get("provider")
         if provider is not None and not isinstance(provider, str):
             raise EngineProtocolError(INVALID_PARAMS, "Param 'provider' must be a string.")
-        current = self._services.providers.current()
-        active_model_id = (
-            current.model.id if current is not None and current.model is not None else None
-        )
-        items = [
-            model_dict(
-                model,
-                provider_alias=self._provider_alias(model.provider_id),
-                active=(model.id == active_model_id),
-            )
-            for model in self._services.models.list(provider)
-        ]
+        items = [self._model_view(model) for model in self._services.models.list(provider)]
         return {"models": items}
 
     def _provider_alias(self, provider_id: str) -> str | None:
@@ -2465,11 +2454,19 @@ class EngineServer:
     def _model_view(self, model: Any) -> dict[str, Any]:
         current = self._services.providers.current()
         active_id = current.model.id if current is not None and current.model is not None else None
-        return model_dict(
+        view = model_dict(
             model,
             provider_alias=self._provider_alias(model.provider_id),
             active=(model.id == active_id),
         )
+        router = ModelRouter(self._services.providers, self._services.models)
+        provider = self._services.providers.get(model.provider_id)
+        effective = router.capabilities(provider, model.id)
+        view["capabilities"] = {
+            **(view.get("capabilities") or {}),
+            "reasoning_effort": effective.reasoning_effort,
+        }
+        return view
 
     def _provider_create(self, params: dict[str, Any]) -> dict[str, Any]:
         alias = self._need_str(params, "alias")
@@ -2505,41 +2502,38 @@ class EngineServer:
 
     def _provider_update(self, params: dict[str, Any]) -> dict[str, Any]:
         providers = self._services.providers
-        record = providers.get(self._need_str(params, "ref"))
-        changed = False
-        if "alias" in params:
-            record = providers.rename(record.id, self._need_str(params, "alias"))
-            changed = True
-        if "secret" in params or "secret_env" in params:
-            secret = params.get("secret")
-            secret_env = params.get("secret_env")
-            if secret is not None and not isinstance(secret, str):
-                raise EngineProtocolError(INVALID_PARAMS, "Param 'secret' must be a string.")
-            if secret_env is not None and not isinstance(secret_env, str):
-                raise EngineProtocolError(INVALID_PARAMS, "Param 'secret_env' must be a string.")
-            record = providers.set_auth(
-                record.id, secret=secret or None, secret_env=secret_env or None
-            )
-            changed = True
-        patch = {
-            key: params[key] for key in ("endpoint", "settings", "account_hint") if key in params
-        }
-        if patch:
-            if "settings" in patch and not isinstance(patch["settings"], dict):
-                raise EngineProtocolError(INVALID_PARAMS, "Param 'settings' must be an object.")
-            record = providers.update(
-                record.id,
-                endpoint=patch.get("endpoint"),
-                settings=dict(patch["settings"]) if patch.get("settings") is not None else None,
-                account_hint=patch.get("account_hint"),
-            )
-            changed = True
-        if not changed:
+        # F4: validate the whole operation before applying any part of it.
+        # Absent keys mean "leave unchanged"; the service rejects partial
+        # mutations up front instead of renaming/rotating and failing later.
+        # F1 contract: an empty string for a secret field means "absent" and
+        # never deletes or replaces the stored credential.
+        secret = params.get("secret")
+        secret_env = params.get("secret_env")
+        if secret is not None and not isinstance(secret, str):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'secret' must be a string.")
+        if secret_env is not None and not isinstance(secret_env, str):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'secret_env' must be a string.")
+        settings = params.get("settings")
+        if settings is not None and not isinstance(settings, dict):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'settings' must be an object.")
+        if not any(
+            key in params
+            for key in ("alias", "endpoint", "settings", "account_hint", "secret", "secret_env")
+        ):
             raise EngineProtocolError(
                 INVALID_PARAMS,
                 "Nothing to update: pass alias, endpoint, settings, account_hint, "
                 "secret or secret_env.",
             )
+        record = providers.apply_update(
+            self._need_str(params, "ref"),
+            new_alias=self._opt_str(params, "alias"),
+            endpoint=self._opt_str(params, "endpoint"),
+            settings=dict(settings) if settings is not None else None,
+            account_hint=self._opt_str(params, "account_hint"),
+            secret=secret or None,
+            secret_env=secret_env or None,
+        )
         return {"provider": self._provider_view(providers.get(record.id))}
 
     def _provider_remove(self, params: dict[str, Any]) -> dict[str, Any]:

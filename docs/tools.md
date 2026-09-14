@@ -2011,3 +2011,8 @@ Real local-browser regression (temporary profile, loopback page, 31-second idle,
 keyboard, capture, console, reconnect and relaunch): set
 `RINARI_TEST_REAL_BROWSER=1` and run
 `uv run pytest tests/e2e/test_browser_windows.py -q -s`.
+
+
+## Resultados recuperables y concurrencia del Engine
+
+El contrato de entrega, configuración y catálogo con elegibilidad explícita está en [tool-results.md](tool-results.md). La serialización de resultados no recorta evidencia; el Engine proyecta resultados recuperables dentro del presupuesto de la ronda.

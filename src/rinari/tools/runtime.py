@@ -97,6 +97,7 @@ class ToolRuntime:
         *,
         tool_call_id: str = "",
         trace: dict[str, Any] | None = None,
+        prepared=None,
     ) -> ToolResult:
         started = time.monotonic()
         if not isinstance(arguments, dict):
@@ -111,7 +112,9 @@ class ToolRuntime:
         self._event("ToolRequested", requested)
         request_id = arguments.get("request_id")
         tool = self.registry.get(tool_name)
-        if request_id and (not isinstance(request_id, str) or len(request_id) > 128):
+        if prepared is not None:
+            result = prepared() if callable(prepared) else prepared
+        elif request_id and (not isinstance(request_id, str) or len(request_id) > 128):
             result = self._error(ctx, ToolErrorCode.INVALID_ARGUMENT, "request_id must be a string")
         elif request_id and tool and tool.manifest.get("supports_request_id"):
             clean = {k: v for k, v in arguments.items() if k != "request_id"}
@@ -136,13 +139,15 @@ class ToolRuntime:
                         self._receipts.popitem(last=False)
         else:
             result = self._execute_inner(tool_name, arguments, ctx, tool_call_id)
+        if result.full_observation is None:
+            result = self._postprocess(result, ctx, tool_call_id, tool)
         duration_ms = (time.monotonic() - started) * 1000.0
         completed = {
             "tool": tool_name,
             "name": tool_name,
             "ok": result.ok,
             "duration_ms": round(duration_ms, 1),
-            # §5.2 determinism metadata: stable ordering anchors per call.
+            # Â§5.2 determinism metadata: stable ordering anchors per call.
             "started_at": started_at,
             "completed_at": now_iso(self._ctx_clock()),
             "error_code": result.error.code.value if result.error else None,
@@ -169,6 +174,11 @@ class ToolRuntime:
         ctx: ToolContext,
         tool_call_id: str,
     ) -> ToolResult:
+        prepared = self.prepare(tool_name, arguments, ctx, tool_call_id)
+        return prepared() if callable(prepared) else prepared
+
+    def prepare(self, tool_name: str, arguments: dict, ctx: ToolContext, tool_call_id: str):
+        """Validate and authorize on the coordinator; return a bounded execution closure."""
         tool = self.registry.get(tool_name)
         if tool is None:
             return self._error(
@@ -241,6 +251,10 @@ class ToolRuntime:
                 if not granted:
                     return self._error(ctx, ToolErrorCode.APPROVAL_DENIED, decision.reason)
 
+        return lambda: self._execute_authorized(tool, arguments, ctx, tool_call_id)
+
+    def _execute_authorized(self, tool, arguments, ctx, tool_call_id):
+        tool_name = tool.name
         cancellation = ctx.cancellation
         if cancellation is not None:
             cancellation.throw_if_cancelled()
@@ -265,7 +279,7 @@ class ToolRuntime:
                         result, data={**result.data, "source_id": snapshot_id(snapshot)}
                     )
             if result.ok and tool.output_schema:
-                # P0.5: the contract is enforced, not decorative — dynamic
+                # P0.5: the contract is enforced, not decorative â€” dynamic
                 # sources (plugins/MCP/OpenAPI) must honor their schema.
                 output_errors = validate_against(tool.output_schema, result.data)
                 if output_errors:
@@ -501,65 +515,23 @@ class ToolRuntime:
         tool_call_id: str,
         tool: ToolDefinition | None = None,
     ) -> ToolResult:
-        truncated = False
-        data = result.data
-        presentation = result.presentation
-        spill_ref = None
-        # P0.5: per-tool cap wins over the global spill threshold.
-        cap = self.spill_threshold_bytes
-        if tool is not None and tool.max_output_bytes:
-            cap = min(cap, tool.max_output_bytes)
-        if isinstance(data, (str, bytes)):
-            payload = self._redactor.redact(data) if isinstance(data, str) else data
-            size = len(payload if isinstance(payload, bytes) else payload.encode("utf-8"))
-            if size > cap:
-                spill_ref = self._spill(tool_call_id or "tool", payload, ctx)
-                truncated = True
-            data = payload
-        elif isinstance(data, dict):
-            data = self._redact_payload(data)
-            if {"command", "argv", "stdout", "stderr", "exit_code"} & data.keys():
-                presentation = {
-                    "kind": "command",
-                    "command": data.get("command") or data.get("argv"),
-                    "cwd": data.get("cwd"),
-                    "exit_code": data.get("exit_code"),
-                    "stdout": str(data.get("stdout") or "")[:64_000],
-                    "stderr": str(data.get("stderr") or "")[:64_000],
-                    "running": bool(data.get("running", False)),
-                    "truncated": bool(data.get("truncated", False)),
-                }
-            text = data.get("text") if isinstance(data, dict) else None
-            if isinstance(text, str) and len(text.encode("utf-8")) > cap:
-                spill_ref = self._spill(tool_call_id or "tool", text, ctx)
-                truncated = True
-                # Keep metadata out of the literal preview. Otherwise a model
-                # can feed the spill marker back into an exact-text edit.
-                data.pop("text", None)
-                data["artifact"] = spill_ref.uri
-                data["spill_guidance"] = (
-                    "Use artifact.read with start_byte/max_bytes, or use "
-                    "fs.read_lines on the source file, before editing."
-                )
-                data["text_preview"] = text[:1536]
-        elif isinstance(data, (list, tuple)):
-            data = self._redact_payload(list(data))
-        if spill_ref is None and isinstance(data, (dict, list)):
-            serialized = json.dumps(data, ensure_ascii=False, default=str)
-            if len(serialized.encode("utf-8")) > cap:
-                spill_ref = self._spill(tool_call_id or "tool", serialized, ctx)
-                truncated = True
-                data = {
-                    "summary": "Large structured result; read the full JSON artifact",
-                    "artifact": spill_ref.uri,
-                    "preview": serialized[: min(1536, cap)],
-                }
-        if spill_ref is not None and not isinstance(data, dict):
-            data = {
-                "summary": (f"output exceeded {cap} bytes; spilled to artifact"),
-                "artifact": spill_ref.uri,
+        data = self._redact_payload(result.data)
+        presentation = self._redact_payload(result.presentation)
+        artifacts = result.artifacts
+        if (
+            isinstance(data, dict)
+            and {"command", "argv", "stdout", "stderr", "exit_code"} & data.keys()
+        ):
+            presentation = {
+                "kind": "command",
+                "command": data.get("command") or data.get("argv"),
+                "cwd": data.get("cwd"),
+                "exit_code": data.get("exit_code"),
+                "stdout": str(data.get("stdout") or "")[:64_000],
+                "stderr": str(data.get("stderr") or "")[:64_000],
+                "running": bool(data.get("running", False)),
+                "truncated": bool(data.get("truncated", False)),
             }
-        artifacts = (*result.artifacts, spill_ref) if spill_ref else result.artifacts
         if isinstance(result.captured_output, dict):
             captured = self._redact_payload(result.captured_output)
             for stream in ("stdout", "stderr"):
@@ -570,7 +542,7 @@ class ToolRuntime:
                     artifacts = (*artifacts, reference)
             if isinstance(presentation, dict):
                 presentation["capture_truncated"] = bool(captured.get("truncated"))
-        return dataclasses.replace(
+        sanitized = dataclasses.replace(
             result,
             data=data,
             presentation=presentation,
@@ -585,22 +557,104 @@ class ToolRuntime:
                 else None
             ),
             artifacts=tuple(artifacts),
-            truncated=result.truncated or truncated,
+            truncated=result.truncated,
         )
+
+        from rinari.tools.observations import project_result
+
+        budget = ctx.observation_budget_bytes
+        threshold = (
+            min(self.spill_threshold_bytes, tool.max_output_bytes or self.spill_threshold_bytes)
+            if tool
+            else self.spill_threshold_bytes
+        )
+        try:
+            projected = project_result(
+                sanitized,
+                tool=tool.name if tool else "",
+                budget=budget - 128,
+                force=len(json.dumps(data, ensure_ascii=False, default=str).encode("utf-8"))
+                > threshold,
+                spill=lambda suffix, content: self._spill(f"{tool_call_id}-{suffix}", content, ctx),
+            )
+            return dataclasses.replace(projected, full_observation=sanitized)
+        except OSError as exc:
+            return dataclasses.replace(
+                sanitized,
+                ok=False,
+                data=None,
+                error=ToolErrorInfo(
+                    ToolErrorCode.RESOURCE_EXHAUSTED,
+                    f"Could not persist tool evidence ({type(exc).__name__}); "
+                    "execution may have occurred, do not repeat it automatically",
+                ),
+            )
+
+    def project_round(self, entries, ctx):
+        from rinari.tools.observations import allocate_budgets, project_result
+
+        sources = [result.full_observation or result for call, result in entries]
+        sizes = [
+            len(source.to_model_text(call.name).encode("utf-8")) + 128
+            for (call, _), source in zip(entries, sources, strict=True)
+        ]
+        budgets = allocate_budgets(sizes, ctx.observation_budget_bytes, ctx.round_observation_bytes)
+        projected = []
+        for (call, result), source, budget in zip(entries, sources, budgets, strict=True):
+            output = project_result(
+                source,
+                tool=call.name,
+                budget=max(0, budget - 128),
+                spill=lambda suffix, content, call=call: self._spill(
+                    f"{call.id}-{suffix}", content, ctx
+                ),
+            )
+            projected.append(
+                dataclasses.replace(
+                    output,
+                    duration_ms=result.duration_ms,
+                    tool_call_id=call.id,
+                    full_observation=None,
+                )
+            )
+        if (
+            sum(
+                len(result.to_model_text(call.name).encode("utf-8"))
+                for (call, _), result in zip(entries, projected, strict=True)
+            )
+            > ctx.round_observation_bytes
+        ):
+            raise ToolError(
+                "Round observation budget cannot hold mandatory result metadata; "
+                "increase runtime.tools.round_observation_bytes. "
+                "Executed actions must not be repeated."
+            )
+        return projected
 
     def _spill(self, tool_call_id: str, payload: str | bytes, ctx: ToolContext) -> ArtifactRef:
         directory = ctx.artifact_root / ctx.session_id / "runtime"
         directory.mkdir(parents=True, exist_ok=True)
         safe_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in tool_call_id) or "result"
+        safe_id = safe_id[:64]
         suffix = ".bin" if isinstance(payload, bytes) else ".txt"
-        path = directory / f"{safe_id}{suffix}"
-        if isinstance(payload, bytes):
-            path.write_bytes(payload)
-        else:
-            # Preserve captured process output exactly.  Path.write_text uses
-            # platform newline translation on Windows, which turns an
-            # existing CRLF into CRCRLF and changes the artifact contents.
-            path.write_text(payload, encoding="utf-8", newline="")
+        digest = hashlib.sha256(
+            payload if isinstance(payload, bytes) else payload.encode("utf-8")
+        ).hexdigest()
+        path = directory / f"{safe_id}-{digest}{suffix}"
+        import os
+        import tempfile
+
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=directory, delete=False) as handle:
+                temporary = Path(handle.name)
+                handle.write(payload if isinstance(payload, bytes) else payload.encode("utf-8"))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
         return ArtifactRef(
             uri=f"artifact://{ctx.session_id}/runtime/{path.name}",
             name=path.name,
@@ -632,7 +686,7 @@ class ToolRuntime:
             return self._redactor.redact(payload)
         if isinstance(payload, dict):
             return {k: self._redact_payload(v) for k, v in payload.items()}
-        if isinstance(payload, list):
+        if isinstance(payload, (list, tuple)):
             return [self._redact_payload(v) for v in payload]
         return payload
 

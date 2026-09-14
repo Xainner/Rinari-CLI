@@ -439,7 +439,12 @@ class AgentLoop:
             # EXECUTE: run every requested tool, feed results back as tool msgs.
             ctx.history.append(ChatMessage.assistant(response.content or "", response.tool_calls))
             looping_detected = False
-            for call in response.tool_calls:
+            round_tool_seq = tool_seq
+
+            def prepare_call(
+                call, model_call_id=model_call_id, round_tool_seq=round_tool_seq, response=response
+            ):
+                nonlocal tool_calls_requested, tool_calls_executed, tool_calls_rejected
                 cancel.throw_if_cancelled()
                 self._emit_activity(
                     "tool.requested",
@@ -517,157 +522,224 @@ class AgentLoop:
                             "model_call_id": model_call_id,
                         },
                     )
-                    trace = {"tool_seq": tool_seq + 1}
+                    trace = {
+                        "tool_seq": round_tool_seq
+                        + 1
+                        + next(
+                            i for i, item in enumerate(response.tool_calls) if item.id == call.id
+                        )
+                    }
                     if turn_index is not None:
                         trace["turn_index"] = turn_index
-                    call_context = ctx.tool_ctx
-                    result = self._tools.execute(
+                    call_context = replace(
+                        ctx.tool_ctx,
+                        observation_budget_bytes=min(
+                            ctx.tool_ctx.observation_budget_bytes,
+                            ctx.tool_ctx.round_observation_bytes
+                            // max(1, len(response.tool_calls)),
+                        ),
+                    )
+                    from rinari.tools.scheduler import is_parallelizable
+
+                    prepared = (
+                        self._tools.prepare(call.name, call.arguments, call_context, call.id)
+                        if is_parallelizable(self._tools.registry.get(call.name), call.arguments)
+                        else None
+                    )
+                    return executed, lambda: self._tools.execute(
                         call.name,
                         call.arguments,
                         call_context,
                         tool_call_id=call.id,
                         trace=trace,
+                        prepared=prepared,
                     )
-                    self._emit_hook(
-                        "PostToolUse",
-                        {
-                            "tool": call.name,
-                            "tool_call_id": call.id,
-                            "ok": result.ok,
-                            "duration_ms": round(result.duration_ms, 1),
-                            "truncated": result.truncated,
-                        },
-                    )
-                    if result.error is not None:
-                        self._emit_hook(
-                            "ToolError",
-                            {
-                                "tool": call.name,
-                                "tool_call_id": call.id,
-                                "code": result.error.code.value,
-                                "message": result.error.message,
-                            },
-                        )
-                    _hook(on_tool, "end", call.name, result)
-                    terminal_event = "tool.completed"
-                    command_failed = (
-                        _tool_activity_presentation(call.name, call.arguments, result).get("status")
-                        == "failed"
-                    )
-                    if not result.ok or command_failed:
-                        terminal_event = (
-                            "tool.cancelled"
-                            if result.error is not None
-                            and result.error.code is ToolErrorCode.CANCELLED
-                            else "tool.failed"
-                        )
-                    self._emit_activity(
-                        terminal_event,
-                        {
-                            "tool_call_id": call.id,
-                            "tool": call.name,
-                            "model_call_id": model_call_id,
-                            "ok": result.ok,
-                            "duration_ms": round(result.duration_ms, 1),
-                            "error": (
-                                {
-                                    "code": result.error.code.value,
-                                    "message": result.error.message,
-                                    "retryable": result.error.retryable,
-                                }
-                                if result.error is not None
-                                else None
-                            ),
-                            # The model observation is intentionally private to
-                            # AgentLoop.  Desktop/CLI activity receives the
-                            # original structured result so it can render a
-                            # command card without showing escaped JSON.
-                            "presentation": _tool_activity_presentation(
-                                call.name, call.arguments, result
-                            ),
-                        },
-                    )
-                tool_seq += 1
-                ctx.history.append(
-                    replace(
-                        ChatMessage.tool_result(
-                            call.id, call.name, result.to_model_text(call.name)
-                        ),
-                        images=result.images if result.ok else (),
-                    )
-                )
-                governor.after_tool(
-                    call.name,
-                    call.arguments,
-                    result.to_model_text(call.name),
-                    ok=result.ok,
-                )
-                if not executed:
-                    self._emit_activity(
-                        "tool.failed",
-                        {
-                            "tool_call_id": call.id,
-                            "tool": call.name,
-                            "ok": False,
-                            "duration_ms": round(result.duration_ms, 1),
-                            "error": (
-                                {
-                                    "code": result.error.code.value,
-                                    "message": result.error.message,
-                                    "retryable": result.error.retryable,
-                                }
-                                if result.error is not None
-                                else None
-                            ),
-                        },
-                    )
-                    tool_completed_payload: dict = {
+                return executed, result
+
+            def complete_call(call, result, model_call_id=model_call_id):
+                self._emit_hook(
+                    "PostToolUse",
+                    {
+                        "tool": call.name,
                         "tool_call_id": call.id,
-                        "name": call.name,
                         "ok": result.ok,
-                        "error_code": result.error.code.value if result.error else None,
                         "duration_ms": round(result.duration_ms, 1),
                         "truncated": result.truncated,
-                        "artifacts": [a.uri for a in result.artifacts],
-                        "tool_seq": tool_seq,
-                    }
-                    if turn_index is not None:
-                        tool_completed_payload["turn_index"] = turn_index
-                    self._emit(ctx.session_id, EVENT_TOOL_COMPLETED, tool_completed_payload)
-                loop.record_tool(call.name, call.arguments)
+                    },
+                )
                 if result.error is not None:
-                    loop.record_error(call.name, result.error.code.value, result.error.message)
-                signal = loop.check()
-                if signal is not None:
-                    self._emit(
-                        ctx.session_id,
-                        EVENT_LOOP_DETECTED,
-                        {"kind": signal.kind, "detail": signal.detail, "action": signal.action},
+                    self._emit_hook(
+                        "ToolError",
+                        {
+                            "tool": call.name,
+                            "tool_call_id": call.id,
+                            "code": result.error.code.value,
+                            "message": result.error.message,
+                        },
                     )
-                    if signal.action == "stop":
-                        looping_detected = True
+                _hook(on_tool, "end", call.name, result)
+                terminal_event = "tool.completed"
+                command_failed = (
+                    _tool_activity_presentation(call.name, call.arguments, result).get("status")
+                    == "failed"
+                )
+                if not result.ok or command_failed:
+                    terminal_event = (
+                        "tool.cancelled"
+                        if result.error is not None and result.error.code is ToolErrorCode.CANCELLED
+                        else "tool.failed"
+                    )
+                self._emit_activity(
+                    terminal_event,
+                    {
+                        "tool_call_id": call.id,
+                        "tool": call.name,
+                        "model_call_id": model_call_id,
+                        "ok": result.ok,
+                        "duration_ms": round(result.duration_ms, 1),
+                        "error": (
+                            {
+                                "code": result.error.code.value,
+                                "message": result.error.message,
+                                "retryable": result.error.retryable,
+                            }
+                            if result.error is not None
+                            else None
+                        ),
+                        # The model observation is intentionally private to
+                        # AgentLoop.  Desktop/CLI activity receives the
+                        # original structured result so it can render a
+                        # command card without showing escaped JSON.
+                        "observation": result.to_model_text(call.name),
+                        "result_id": (f"{ctx.session_id}/{turn_index}/{model_call_id}/{call.id}"),
+                        "presentation": _tool_activity_presentation(
+                            call.name, call.arguments, result
+                        ),
+                    },
+                )
+
+            from rinari.runtime.tool_coordinator import execute_round
+
+            round_results = []
+            round_nudges = []
+            try:
+                for call, executed, result, group_end in execute_round(
+                    response.tool_calls,
+                    self._tools.registry,
+                    prepare_call,
+                    cancellation=cancel,
+                    max_concurrency=ctx.tool_ctx.max_concurrency,
+                    on_completed=complete_call,
+                ):
+                    tool_seq += 1
+                    round_results.append((call, result))
+                    governor.after_tool(
+                        call.name,
+                        call.arguments,
+                        result.to_model_text(call.name),
+                        ok=result.ok,
+                    )
+                    if not executed:
                         self._emit_activity(
-                            "governor.stop",
-                            {"reason": "loop", "recoverable": True, "detail": signal.detail},
+                            "tool.cancelled"
+                            if result.error and result.error.code is ToolErrorCode.CANCELLED
+                            else "tool.failed",
+                            {
+                                "tool_call_id": call.id,
+                                "tool": call.name,
+                                "ok": False,
+                                "observation": result.to_model_text(call.name),
+                                "result_id": (
+                                    f"{ctx.session_id}/{turn_index}/{model_call_id}/{call.id}"
+                                ),
+                                "duration_ms": round(result.duration_ms, 1),
+                                "error": (
+                                    {
+                                        "code": result.error.code.value,
+                                        "message": result.error.message,
+                                        "retryable": result.error.retryable,
+                                    }
+                                    if result.error is not None
+                                    else None
+                                ),
+                            },
                         )
-                        return self._stop(
+                        tool_completed_payload: dict = {
+                            "tool_call_id": call.id,
+                            "name": call.name,
+                            "ok": result.ok,
+                            "error_code": result.error.code.value if result.error else None,
+                            "duration_ms": round(result.duration_ms, 1),
+                            "truncated": result.truncated,
+                            "artifacts": [a.uri for a in result.artifacts],
+                            "tool_seq": tool_seq,
+                        }
+                        if turn_index is not None:
+                            tool_completed_payload["turn_index"] = turn_index
+                        self._emit(ctx.session_id, EVENT_TOOL_COMPLETED, tool_completed_payload)
+                    loop.record_tool(call.name, call.arguments)
+                    if result.error is not None:
+                        loop.record_error(call.name, result.error.code.value, result.error.message)
+                    signal = loop.check() if group_end else None
+                    if signal is not None:
+                        self._emit(
                             ctx.session_id,
-                            "loop",
-                            f"Stopped: persistent loop detected ({signal.kind} — {signal.detail}).",
-                            tool_calls_executed,
-                            total_usage,
-                            budget,
-                            turn_index,
-                            requested=tool_calls_requested,
-                            rejected=tool_calls_rejected,
-                            governor=governor,
+                            EVENT_LOOP_DETECTED,
+                            {"kind": signal.kind, "detail": signal.detail, "action": signal.action},
                         )
-                    else:
-                        self._emit_activity(
-                            "governor.nudge",
-                            {"reason": signal.kind, "detail": signal.detail},
+                        if signal.action == "stop":
+                            looping_detected = True
+                            self._emit_activity(
+                                "governor.stop",
+                                {"reason": "loop", "recoverable": True, "detail": signal.detail},
+                            )
+                            return self._stop(
+                                ctx.session_id,
+                                "loop",
+                                f"Stopped: persistent loop detected ({signal.kind}: "
+                                f"{signal.detail}).",
+                                tool_calls_executed,
+                                total_usage,
+                                budget,
+                                turn_index,
+                                requested=tool_calls_requested,
+                                rejected=tool_calls_rejected,
+                                governor=governor,
+                            )
+                        else:
+                            self._emit_activity(
+                                "governor.nudge",
+                                {"reason": signal.kind, "detail": signal.detail},
+                            )
+                            round_nudges.append(ChatMessage.user(loop.nudge_text(signal)))
+            finally:
+                # Preserve complete call/result blocks even on cancellation or stop.
+                try:
+                    outputs = self._tools.project_round(round_results, ctx.tool_ctx)
+                except Exception:
+                    # Earlier bounded observations already have durable backing.
+                    # Keep them when final allocation/storage fails, then surface
+                    # the failure without sending an oversized provider request.
+                    for call, result in round_results:
+                        ctx.history.append(
+                            replace(
+                                ChatMessage.tool_result(
+                                    call.id, call.name, result.to_model_text(call.name)
+                                ),
+                                images=result.images if result.ok else (),
+                            )
                         )
-                        ctx.history.append(ChatMessage.user(loop.nudge_text(signal)))
+                    raise
+                for (call, _), result in zip(round_results, outputs, strict=True):
+                    ctx.history.append(
+                        replace(
+                            ChatMessage.tool_result(
+                                call.id, call.name, result.to_model_text(call.name)
+                            ),
+                            images=result.images if result.ok else (),
+                        )
+                    )
+                ctx.history.extend(round_nudges)
 
             decision = governor.after_cycle(looping=looping_detected)
             self._emit_activity(
@@ -880,7 +952,7 @@ class AgentLoop:
             raise value
 
     def _guarded_delta(self, ctx: AgentContext, on_delta: DeltaFn | None) -> DeltaFn | None:
-        """Abort a live stream promptly on cancel (§8/Etapa D).
+        """Abort a live stream promptly on cancel (Â§8/Etapa D).
 
         The guard raises inside the adapter's stream loop, which unwinds
         through the httpx stream context (closed on exception) instead of
@@ -1009,6 +1081,16 @@ def _tool_activity_presentation(tool: str, arguments: dict, result: ToolResult) 
         "stderr_warning": False,
         "artifacts": [artifact.uri for artifact in result.artifacts],
     }
+    source = (result.full_observation or result).data
+    if tool in {"fs.read", "fs.read_lines"} and isinstance(source, dict):
+        if isinstance(source.get("files"), list):
+            presentation["file_paths"] = [
+                str((row.get("data") or {}).get("path") or row.get("path"))
+                for row in source["files"]
+                if row.get("ok")
+            ]
+        elif result.ok and source.get("path"):
+            presentation["file_paths"] = [source["path"]]
     presentation.update(preserved)
     presentation["tool"] = tool
     presentation["artifacts"] = [artifact.uri for artifact in result.artifacts]
@@ -1021,8 +1103,8 @@ def _tool_activity_presentation(tool: str, arguments: dict, result: ToolResult) 
                 or arguments.get("argv"),
                 "cwd": data.get("cwd") or preserved.get("cwd") or arguments.get("cwd"),
                 "exit_code": data.get("exit_code", preserved.get("exit_code")),
-                "stdout": data.get("stdout", preserved.get("stdout", "")) or "",
-                "stderr": data.get("stderr", preserved.get("stderr", "")) or "",
+                "stdout": preserved.get("stdout", data.get("stdout", "")) or "",
+                "stderr": preserved.get("stderr", data.get("stderr", "")) or "",
                 "running": data.get("running", preserved.get("running", False)),
             }
         )

@@ -29,7 +29,8 @@
     "modelExecutionSettings",
     "contextSettings",
     "contextStatus",
-    "contextActivity"
+    "contextActivity",
+    "toolResultDelivery"
   ],
   "$defs": {
     "webPreview": {
@@ -943,6 +944,13 @@
             "object",
             "null"
           ]
+        },
+        "concurrency": {
+          "type": "string",
+          "enum": [
+            "serial",
+            "local-read"
+          ]
         }
       }
     },
@@ -1487,6 +1495,33 @@
         },
         "error": {
           "type": "string"
+        }
+      }
+    },
+    "toolResultDelivery": {
+      "type": "object",
+      "required": [
+        "result_id",
+        "observation"
+      ],
+      "properties": {
+        "result_id": {
+          "type": "string"
+        },
+        "observation": {
+          "type": "string"
+        },
+        "source_partial": {
+          "type": "boolean"
+        },
+        "delivery_partial": {
+          "type": "boolean"
+        },
+        "result_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     }

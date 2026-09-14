@@ -60,9 +60,9 @@ def test_child_spills_large_output_to_portable_isolated_path(tmp_path: Path):
             assert child.session_id == f"ses_parent-{agent_id}"
             assert not any(char in child.session_id for char in '<>:"/\\|?*')
             ref = runtime._spill("read-docs", payload, child)
-            target = parent.artifact_root / child.session_id / "runtime" / "read-docs.txt"
+            target = parent.artifact_root / child.session_id / "runtime" / ref.name
             assert target.read_text(encoding="utf-8") == payload
-            assert ref.uri == f"artifact://{child.session_id}/runtime/read-docs.txt"
+            assert ref.uri == f"artifact://{child.session_id}/runtime/{ref.name}"
             refs.append(ref.uri)
         finally:
             child.browser.close()
