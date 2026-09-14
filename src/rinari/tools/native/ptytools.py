@@ -58,6 +58,7 @@ class PtyHandle:
         "buffer",
         "command",
         "cwd",
+        "ended_at",
         "exit_code",
         "id",
         "lock",
@@ -66,6 +67,7 @@ class PtyHandle:
         "read_cursor",
         "reaper",
         "size",
+        "stop_requested",
     )
 
     def __init__(self, handle_id: str, command: str, cwd: str, master: int, process) -> None:
@@ -76,10 +78,12 @@ class PtyHandle:
         self.process = process
         self.buffer = _BoundedBuffer(MAX_PTY_OUTPUT_BYTES)
         self.exit_code: int | None = None
+        self.ended_at: float | None = None
         self.lock = threading.Lock()
         self.reaper: threading.Thread | None = None
         self.read_cursor = 0
         self.size = None
+        self.stop_requested = False
 
     def pump(self) -> None:
         import select
@@ -173,6 +177,8 @@ class PtyRegistry:
     def _wait(self, handle_id: str, handle: PtyHandle) -> None:
         code = handle.process.wait()
         handle.exit_code = code
+        if handle.ended_at is None:
+            handle.ended_at = time.time()
         if handle.reaper is not None:
             handle.reaper.join(timeout=1)
         with contextlib.suppress(OSError):

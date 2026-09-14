@@ -19,6 +19,7 @@ frozen ghost).
 from __future__ import annotations
 
 import contextlib
+import itertools
 import os
 import threading
 import time
@@ -55,6 +56,11 @@ class EnginePtyService:
         self._lock = threading.Lock()
         self._forwarders: set[str] = set()
         self._session_of: dict[str, str | None] = {}
+        # Per-handle creation generation for process_identity_v1: pty ids
+        # are sequential per boot, so the generation disambiguates them
+        # together with the engine instance id.
+        self._generation_counter = itertools.count(1)
+        self._handle_generation: dict[str, int] = {}
 
     # -- lifecycle ------------------------------------------------------
 
@@ -84,6 +90,7 @@ class EnginePtyService:
         pty_id = self._registry.start(command, str(directory), clean_env, columns, rows)
         with self._lock:
             self._session_of[pty_id] = session_id
+            self._handle_generation.setdefault(pty_id, next(self._generation_counter))
             first = pty_id not in self._forwarders
             if first:
                 self._forwarders.add(pty_id)
@@ -149,16 +156,24 @@ class EnginePtyService:
                 "cwd": handle.cwd,
                 "alive": not handle.exited,
                 "exit_code": handle.exit_code,
+                "ended_at": handle.ended_at,
+                "stop_requested": handle.stop_requested,
                 "session_id": session_of.get(handle.id),
             }
             for handle in self._registry.list()
         ]
+
+    def handle_generation(self, pty_id: str) -> int:
+        """Creation generation of a pty handle (1 when unknown)."""
+        with self._lock:
+            return self._handle_generation.get(pty_id, 1)
 
     def terminate(self, pty_id: str) -> dict[str, Any]:
         handle = self._need(pty_id)
         if handle.exited:
             # No-op success on a dead handle (desktop needs no tombstones).
             return {"pty_id": pty_id, "alive": False, "exit_code": handle.exit_code}
+        handle.stop_requested = True
         try:
             os.killpg(os.getpgid(handle.process.pid), 15)
         except OSError:

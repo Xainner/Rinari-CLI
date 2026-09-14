@@ -24,6 +24,9 @@ CAPABILITIES: dict[str, bool] = {
     "model_execution_policy_v1": True,
     "durable_turn_recovery_v1": True,
     "desktop_processes_v1": True,
+    # Strong process identity: engine_instance_id per boot plus a
+    # per-resource generation token validated by workspace.process.stop.
+    "process_identity_v1": True,
     "agent_inheritance_v1": True,
     "agent_activity_v1": True,
     "browser_view_v1": True,

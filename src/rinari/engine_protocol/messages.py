@@ -7,14 +7,17 @@ from typing import Any
 from rinari.engine_protocol import protocol
 
 
-def hello() -> dict[str, Any]:
-    return {
+def hello(engine_instance_id: str | None = None) -> dict[str, Any]:
+    payload = {
         "type": "hello",
         "protocol": protocol.PROTOCOL_NAME,
         "protocol_version": protocol.PROTOCOL_VERSION,
         "engine_version": protocol.engine_version(),
         "capabilities": dict(protocol.CAPABILITIES),
     }
+    if engine_instance_id is not None:
+        payload["engine_instance_id"] = engine_instance_id
+    return payload
 
 
 def success(request_id: Any, result: dict[str, Any] | None = None) -> dict[str, Any]:

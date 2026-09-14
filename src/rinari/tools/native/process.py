@@ -14,6 +14,7 @@ taskkill.
 from __future__ import annotations
 
 import contextlib
+import itertools
 import os
 import subprocess
 import sys
@@ -94,6 +95,7 @@ class _Handle:
     __slots__ = (
         "command",
         "cwd",
+        "ended_at",
         "exit_code",
         "id",
         "process",
@@ -101,6 +103,7 @@ class _Handle:
         "started_at",
         "stderr",
         "stdout",
+        "stop_requested",
     )
 
     def __init__(self, handle_id: str, command: str, cwd: str, process: subprocess.Popen) -> None:
@@ -111,18 +114,29 @@ class _Handle:
         self.stdout = _ProcessBuffer(MAX_PROCESS_OUTPUT_BYTES)
         self.stderr = _ProcessBuffer(MAX_PROCESS_OUTPUT_BYTES)
         self.exit_code: int | None = None
+        # First time the exit was observed (observation time, seconds
+        # since the epoch like started_at). None while running.
+        self.ended_at: float | None = None
         self.started_at = time.time()
         self.readers: list[threading.Thread] = []
+        # Set when the handle is terminated through registry.kill.
+        self.stop_requested = False
 
 
 class ProcessRegistry:
     """Thread-safe registry of live session processes."""
+
+    # Boot-scoped creation generation. Sequential handle ids restart in
+    # every registry, so desktops scope destructive preconditions to
+    # (engine_instance_id, registry generation, handle id).
+    _generations = itertools.count(1)
 
     def __init__(self, base_env: dict[str, str] | None = None) -> None:
         self._lock = threading.Lock()
         self._handles: dict[str, _Handle] = {}
         self._counter = 0
         self._base_env = dict(base_env or os.environ)
+        self.generation = next(ProcessRegistry._generations)
 
     def start(self, command: str, cwd: str | None = None, env: dict | None = None) -> str:
         kwargs: dict = {
@@ -165,6 +179,8 @@ class ProcessRegistry:
             handle = self._handles.get(handle_id)
             if handle is not None:
                 handle.exit_code = handle.process.poll()
+                if handle.exit_code is not None and handle.ended_at is None:
+                    handle.ended_at = time.time()
             return handle
 
     def list(self) -> list[_Handle]:
@@ -172,6 +188,8 @@ class ProcessRegistry:
             handles = list(self._handles.values())
             for handle in handles:
                 handle.exit_code = handle.process.poll()
+                if handle.exit_code is not None and handle.ended_at is None:
+                    handle.ended_at = time.time()
             return handles
 
     def wait(self, handle: _Handle, timeout: float | None) -> bool:
@@ -185,6 +203,8 @@ class ProcessRegistry:
 
     def _reap(self, handle: _Handle) -> None:
         handle.exit_code = handle.process.returncode
+        if handle.ended_at is None:
+            handle.ended_at = time.time()
         for reader in handle.readers:
             with contextlib.suppress(Exception):
                 reader.join(timeout=5)
@@ -212,6 +232,7 @@ class ProcessRegistry:
             return True
 
     def kill(self, handle: _Handle) -> None:
+        handle.stop_requested = True
         _kill_tree(handle.process)
 
     def _forget_dead_if_needed(self, handle: _Handle) -> None:
@@ -227,6 +248,10 @@ def _pump(stream, buffer, handle: _Handle, registry: ProcessRegistry) -> None:
             buffer.write(chunk)
     except (OSError, ValueError):
         pass
+    finally:
+        # Stream EOF closely follows process exit; first observation wins.
+        if handle.ended_at is None and handle.process.poll() is not None:
+            handle.ended_at = time.time()
 
 
 def _registry(ctx: ToolContext) -> ProcessRegistry | None:

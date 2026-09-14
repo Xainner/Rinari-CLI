@@ -1096,6 +1096,21 @@
             "integer",
             "null"
           ]
+        },
+        "generation": {
+          "type": "integer"
+        },
+        "ended_at": {
+          "type": "number"
+        },
+        "exit_reason": {
+          "type": "string"
+        },
+        "readiness": {
+          "type": "string"
+        },
+        "readiness_checked_at": {
+          "type": "number"
         }
       }
     },

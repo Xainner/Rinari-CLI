@@ -7,6 +7,7 @@ roundtrips, provider/model reads. Envelope contract is unchanged.
 
 from __future__ import annotations
 
+import secrets
 import threading
 import time
 from pathlib import Path
@@ -133,6 +134,9 @@ def _prepare_turn_attachments(
 class EngineServer:
     def __init__(self, services: ServiceContainer, user_home: Path | str | None = None) -> None:
         self._services = services
+        # Fresh per boot: sequential process ids may repeat after a
+        # restart, so desktops must scope destructive preconditions to it.
+        self._engine_instance_id = secrets.token_hex(16)
         home = Path(user_home) if user_home is not None else None
         self._user_home = home
         self._turns = TurnManager(services, user_home=home)
@@ -310,7 +314,7 @@ class EngineServer:
         return self._turns
 
     def hello(self) -> dict[str, Any]:
-        return hello()
+        return hello(self._engine_instance_id)
 
     def handle_line(self, line: str) -> dict[str, Any] | None:
         return self._dispatcher.dispatch(line)
@@ -338,6 +342,7 @@ class EngineServer:
             "protocol": protocol.PROTOCOL_NAME,
             "protocol_version": protocol.PROTOCOL_VERSION,
             "engine_version": protocol.engine_version(),
+            "engine_instance_id": self._engine_instance_id,
             "capabilities": dict(protocol.CAPABILITIES),
         }
 
