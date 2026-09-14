@@ -626,8 +626,9 @@ class TurnManager:
             turn.session.context.pending_attachments = tuple(turn.attachment_metadata or ())
             turn.session.context.pending_display_content = turn.display_message
             if turn.compaction_only:
-                from rinari.runtime.agent import TurnResult
                 from rinari.cli.agent_runtime import compact_session
+                from rinari.runtime.agent import TurnResult
+
                 compact_session(agent_session, self._activity_cb(turn))
                 result = TurnResult(kind="compaction", content="", tool_calls=0, usage=None)
             else:
@@ -920,10 +921,17 @@ class TurnManager:
                 return
             if event_name in {"turn.completed", "turn.failed", "turn.cancelled", "turn.stopped"}:
                 with self._lock:
-                    pending_visual = [dict(item) for item in turn.activities.values()
-                                      if item.get("event") in {"vision.started", "vision.queued", "vision.preparing"}]
+                    pending_visual = [
+                        dict(item)
+                        for item in turn.activities.values()
+                        if item.get("event")
+                        in {"vision.started", "vision.queued", "vision.preparing"}
+                    ]
                 for item in pending_visual:
-                    _on_activity("vision.cancelled" if event_name == "turn.cancelled" else "vision.failed", {**item, "error": "Turn ended before visual analysis completed"})
+                    _on_activity(
+                        "vision.cancelled" if event_name == "turn.cancelled" else "vision.failed",
+                        {**item, "error": "Turn ended before visual analysis completed"},
+                    )
             effective_event = (
                 payload.get("child_event", event_name)
                 if event_name == "agent.activity"
@@ -1006,8 +1014,14 @@ class TurnManager:
                 if turn.terminal_emitted:
                     return
                 _on_activity(event_name, payload)
-                if event_name in {"turn.completed", "turn.failed", "turn.cancelled", "turn.stopped"}:
+                if event_name in {
+                    "turn.completed",
+                    "turn.failed",
+                    "turn.cancelled",
+                    "turn.stopped",
+                }:
                     turn.terminal_emitted = True
+
         return _serialized
 
     def _activity_key(self, turn: _ActiveTurn, event_name: str, payload: dict[str, Any]) -> str:
@@ -1031,7 +1045,9 @@ class TurnManager:
             change_id = payload.get("id") or payload.get("changeset_id") or turn.turn_id
             return f"changeset:{change_id}"
         if event_name == "governor.compact":
-            return f"context:compact:{payload.get('compaction_id') or payload.get('history_size', 0)}"
+            return (
+                f"context:compact:{payload.get('compaction_id') or payload.get('history_size', 0)}"
+            )
         if event_name.startswith("verification."):
             return "verification:completion-gate"
         if event_name.startswith("agent.") and payload.get("agent_id"):

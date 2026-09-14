@@ -20,7 +20,7 @@ CAPABILITIES: dict[str, bool] = {
     "local_image_view_v1": True,
     "vision_routing_v1": True,
     "vision_routing_v2": True,
-            "vision_message_routing_v3": True,
+    "vision_message_routing_v3": True,
     "model_execution_policy_v1": True,
     "durable_turn_recovery_v1": True,
     "desktop_processes_v1": True,

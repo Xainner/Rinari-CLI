@@ -67,7 +67,9 @@ def test_context_settings_protocol_round_trip(server):
     saved = server.handle_line(_req("ctx-set", "context.settings.set", settings))
     assert saved["ok"] is True
     assert saved["result"]["compact_at_percent"] == 77
-    bad = server.handle_line(_req("ctx-bad", "context.settings.set", {**settings, "compact_at_percent": 0}))
+    bad = server.handle_line(
+        _req("ctx-bad", "context.settings.set", {**settings, "compact_at_percent": 0})
+    )
     assert bad["ok"] is False
 
 

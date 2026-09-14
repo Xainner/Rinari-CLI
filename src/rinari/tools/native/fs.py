@@ -93,8 +93,10 @@ def fs_read(input: dict, ctx: ToolContext) -> ToolResult:
     if not resolved.is_file():
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "Path is a directory; use fs.list")
     if resolved.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}:
-        return _fail(ToolErrorCode.INVALID_ARGUMENT,
-                     "This is an image. Use fs.read_image to view its pixels, not fs.read.")
+        return _fail(
+            ToolErrorCode.INVALID_ARGUMENT,
+            "This is an image. Use fs.read_image to view its pixels, not fs.read.",
+        )
     raw = read_text_bounded(resolved)
     return _ok(
         {

@@ -43,8 +43,8 @@ from rinari.cli.commands import trace as trace_cmd
 from rinari.cli.commands import trust as trust_cmd
 from rinari.cli.commands import undo as undo_cmd
 from rinari.cli.commands import update_cmd as update_cmd
-from rinari.cli.commands import work as work_cmd
 from rinari.cli.commands import vision as vision_cmd
+from rinari.cli.commands import work as work_cmd
 from rinari.cli.deps import CliParams, fail, set_params
 from rinari.cli.session_flow import start_flow
 from rinari.shared.errors import RinariError

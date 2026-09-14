@@ -158,23 +158,38 @@ def test_final_answer_waits_for_delegated_results(env):
 
     class Runner:
         def run(self, spec):
-            return AgentResult(agent="explore", objective=spec.objective,
-                               status="completed", summary="Repository has src and tests")
+            return AgentResult(
+                agent="explore",
+                objective=spec.objective,
+                status="completed",
+                summary="Repository has src and tests",
+            )
 
     orch = AgentOrchestrator(Runner())
     orch.spawn("explore", "Map the repository")
     env["ctx"].collect_subagent_results = orch.collect_for_final
-    model = FakeModel(scripted=[ModelResponse(content="The explorer is working."),
-                                ModelResponse(content="The repository has src and tests.")])
+    model = FakeModel(
+        scripted=[
+            ModelResponse(content="The explorer is working."),
+            ModelResponse(content="The repository has src and tests."),
+        ]
+    )
     activity = []
-    loop = AgentLoop(model, env["runtime"], env["assembler"],
-                     activity_sink=lambda name, payload: activity.append((name, payload)))
+    loop = AgentLoop(
+        model,
+        env["runtime"],
+        env["assembler"],
+        activity_sink=lambda name, payload: activity.append((name, payload)),
+    )
     result = loop.turn(env["ctx"], "Explore this repo")
     assert result.content == "The repository has src and tests."
-    assert any("Repository has src and tests" in (m.content or "")
-               for m in model.requests[-1].messages)
-    assert [p["output_kind"] for name, p in activity
-            if name == "model.content.completed"] == ["progress", "final"]
+    assert any(
+        "Repository has src and tests" in (m.content or "") for m in model.requests[-1].messages
+    )
+    assert [p["output_kind"] for name, p in activity if name == "model.content.completed"] == [
+        "progress",
+        "final",
+    ]
 
 
 def test_automatic_subagent_join_is_cancellable():
@@ -224,6 +239,7 @@ def test_local_image_visual_delivery(env, app_ctx, vision, confirmed, success, a
     source = str(path)
     if artifact_source:
         from rinari.artifacts.transfer import import_file
+
         source = import_file(store, env["ctx"].session_id, path).uri()
         path.unlink()
     env["ctx"].tool_ctx = replace(env["ctx"].tool_ctx, artifact_store=store)
@@ -254,6 +270,7 @@ def test_local_image_visual_delivery(env, app_ctx, vision, confirmed, success, a
     )
     if not success:
         from rinari.shared.errors import InvalidUsageError
+
         with pytest.raises(InvalidUsageError, match="Vision settings"):
             loop.turn(env["ctx"], "Mira la imagen")
         assert len(model.requests) == 1  # No repeated discovery after a deterministic block.
@@ -274,15 +291,22 @@ def test_local_image_visual_delivery(env, app_ctx, vision, confirmed, success, a
     )
     assert _message_to_responses(visual, {})[0]["content"][1]["type"] == "input_image"
     anthropic = _convert_to_anthropic(model.requests[-1].messages)[1]
-    results = [b for m in anthropic if isinstance(m["content"], list)
-               for b in m["content"] if b.get("type") == "tool_result"]
-    assert any(isinstance(b["content"], list) and
-               any(part.get("type") == "image" for part in b["content"]) for b in results)
-
+    results = [
+        b
+        for m in anthropic
+        if isinstance(m["content"], list)
+        for b in m["content"]
+        if b.get("type") == "tool_result"
+    ]
+    assert any(
+        isinstance(b["content"], list) and any(part.get("type") == "image" for part in b["content"])
+        for b in results
+    )
 
 
 def test_image_artifact_scope_integrity_and_no_reimport(env, app_ctx):
     from PIL import Image
+
     from rinari.artifacts.store import ArtifactStore
     from rinari.artifacts.transfer import import_file
 
@@ -290,10 +314,16 @@ def test_image_artifact_scope_integrity_and_no_reimport(env, app_ctx):
     path = env["root"] / "rinari.png"
     Image.new("RGB", (16, 16), "purple").save(path)
     record = import_file(store, env["ctx"].session_id, path)
-    ctx = replace(env["ctx"].tool_ctx, artifact_store=store, vision_allowed=True,
-                  profile=PermissionProfile.READ_ONLY)
+    ctx = replace(
+        env["ctx"].tool_ctx,
+        artifact_store=store,
+        vision_allowed=True,
+        profile=PermissionProfile.READ_ONLY,
+    )
+
     def read(uri):
         return env["runtime"].execute("fs.read_image", {"path": uri}, ctx)
+
     before = len(store.list(session_id=ctx.session_id))
     result = read(record.uri())
     assert result.ok and result.images[0].uri == record.uri()
@@ -347,6 +377,7 @@ def test_image_read_policy_formats_and_limits(env, app_ctx):
 
 def test_image_batches_bound_visual_context_without_losing_history(env, app_ctx):
     from PIL import Image
+
     from rinari.artifacts.store import ArtifactStore
 
     paths = []
@@ -360,21 +391,29 @@ def test_image_batches_bound_visual_context_without_losing_history(env, app_ctx)
         def capabilities(self):
             return ProviderCapabilities(vision=True, tool_calls=True)
 
-    model = VisionModel([
-        ModelResponse(content="", tool_calls=tuple(
-            ToolCall(f"image-{i}", "fs.read_image", {"path": str(path)})
-            for i, path in enumerate(paths))),
-        ModelResponse(content="", tool_calls=(
-            ToolCall("retry-fifth", "fs.read_image", {"path": str(paths[-1])}),)),
-        ModelResponse(content="Done"),
-    ])
+    model = VisionModel(
+        [
+            ModelResponse(
+                content="",
+                tool_calls=tuple(
+                    ToolCall(f"image-{i}", "fs.read_image", {"path": str(path)})
+                    for i, path in enumerate(paths)
+                ),
+            ),
+            ModelResponse(
+                content="",
+                tool_calls=(ToolCall("retry-fifth", "fs.read_image", {"path": str(paths[-1])}),),
+            ),
+            ModelResponse(content="Done"),
+        ]
+    )
     AgentLoop(model, env["runtime"], env["assembler"]).turn(env["ctx"], "Mira las imágenes")
     assert sum(len(m.images) for m in model.requests[1].messages) == 5
     assert sum(len(m.images) for m in model.requests[2].messages) == 1
     fifth = next(m for m in model.requests[1].messages if m.tool_call_id == "image-4")
     assert fifth.images
     oldest = next(m for m in model.requests[2].messages if m.tool_call_id == "image-0")
-    assert not oldest.images and 'artifact://' in oldest.content
+    assert not oldest.images and "artifact://" in oldest.content
     latest = next(m for m in model.requests[2].messages if m.tool_call_id == "retry-fifth")
     assert latest.images and latest.images[0].encoded()
 

@@ -19,9 +19,10 @@ def test_protocol_schema_matches_server_method_inventory() -> None:
         (root / "src/rinari/engine_protocol/schema/v1.json").read_text(encoding="utf-8")
     )
     source = (root / "src/rinari/engine_protocol/server.py").read_text(encoding="utf-8")
-    registered = set(re.findall(r'_dispatcher\.register\("([^"]+)"', source))
+    # `\s*` para tolerar llamadas partidas en varias líneas por el formateador.
+    registered = set(re.findall(r'_dispatcher\.register\(\s*"([^"]+)"', source))
     media_source = (root / "src/rinari/engine_protocol/media.py").read_text(encoding="utf-8")
-    registered.update(re.findall(r'dispatcher\.register\("([^"]+)"', media_source))
+    registered.update(re.findall(r'dispatcher\.register\(\s*"([^"]+)"', media_source))
     assert set(schema["$defs"]["method"]["enum"]) == registered
 
 

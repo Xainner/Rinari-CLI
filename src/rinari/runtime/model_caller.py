@@ -62,6 +62,7 @@ class SessionModelGateway:
 
     def visual_decision(self):
         from rinari.runtime.vision import visual_status
+
         return visual_status(self._current)
 
     def invoke(self, request: ModelRequest) -> ModelResponse:

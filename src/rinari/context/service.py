@@ -30,6 +30,7 @@ class ContextService:
 
     def prepare(self, *args):
         from rinari.context.preparation import prepare
+
         return prepare(self, *args)
 
     # -- evidence -----------------------------------------------------------
@@ -160,6 +161,7 @@ class ContextService:
         if record is None or not record.compact_state:
             return
         from rinari.context.projection import render
+
         agent_ctx.compact_state_text = render(record.compact_state)
 
     # -- internals -----------------------------------------------------------

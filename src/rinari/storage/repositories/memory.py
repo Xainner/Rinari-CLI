@@ -94,9 +94,7 @@ class MemoryRepository:
         )
         return row is not None
 
-    def suppression_insert(
-        self, *, topic_hash: str, text_hash: str, created_at: str
-    ) -> None:
+    def suppression_insert(self, *, topic_hash: str, text_hash: str, created_at: str) -> None:
         self._db.execute(
             """
             INSERT OR IGNORE INTO memory_suppressions
@@ -108,15 +106,17 @@ class MemoryRepository:
 
     def record_suppression_insert(self, memory_id: str, created_at: str) -> None:
         self._db.execute(
-            "INSERT OR IGNORE INTO memory_record_suppressions(memory_id, created_at) "
-            "VALUES (?, ?)",
+            "INSERT OR IGNORE INTO memory_record_suppressions(memory_id, created_at) VALUES (?, ?)",
             (memory_id, created_at),
         )
 
     def record_suppression_exists(self, memory_id: str) -> bool:
-        return self._db.query_one(
-            "SELECT 1 FROM memory_record_suppressions WHERE memory_id = ?", (memory_id,)
-        ) is not None
+        return (
+            self._db.query_one(
+                "SELECT 1 FROM memory_record_suppressions WHERE memory_id = ?", (memory_id,)
+            )
+            is not None
+        )
 
     def user_lineage_ids(self, memory_id: str) -> set[str]:
         rows = self._db.query(
@@ -147,8 +147,13 @@ class MemoryRepository:
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                row["id"], row["memory_id"], row["session_id"], row["message_id"],
-                row["source_hash"], row["quote"], row["created_at"],
+                row["id"],
+                row["memory_id"],
+                row["session_id"],
+                row["message_id"],
+                row["source_hash"],
+                row["quote"],
+                row["created_at"],
             ),
         )
 
@@ -199,10 +204,13 @@ class MemoryRepository:
         )
 
     def source_suppressed(self, session_id: str, message_id: str) -> bool:
-        return self._db.query_one(
-            "SELECT 1 FROM memory_source_suppressions WHERE session_id = ? AND message_id = ?",
-            (session_id, message_id),
-        ) is not None
+        return (
+            self._db.query_one(
+                "SELECT 1 FROM memory_source_suppressions WHERE session_id = ? AND message_id = ?",
+                (session_id, message_id),
+            )
+            is not None
+        )
 
     def suppressed_message_ids(self, session_id: str) -> set[str]:
         rows = self._db.query(
@@ -262,9 +270,18 @@ class MemoryRepository:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                row["id"], row["session_id"], row["message_id"], row["topic"], row["text"],
-                row["kind"], row["confidence"], row["classification"], row.get("reason", ""),
-                row.get("status", "pending"), row.get("memory_id"), row["created_at"],
+                row["id"],
+                row["session_id"],
+                row["message_id"],
+                row["topic"],
+                row["text"],
+                row["kind"],
+                row["confidence"],
+                row["classification"],
+                row.get("reason", ""),
+                row.get("status", "pending"),
+                row.get("memory_id"),
+                row["created_at"],
                 row.get("resolved_at"),
             ),
         )
@@ -295,9 +312,7 @@ class MemoryRepository:
         return int(row["watermark"]) if row else 0
 
     def ledger_advance(self) -> int:
-        self._db.execute(
-            "UPDATE memory_privacy_ledger SET watermark = watermark + 1 WHERE id = 1"
-        )
+        self._db.execute("UPDATE memory_privacy_ledger SET watermark = watermark + 1 WHERE id = 1")
         return self.ledger_watermark()
 
     def ledger_set_max(self, watermark: int) -> int:
