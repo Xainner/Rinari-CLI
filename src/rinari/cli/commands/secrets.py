@@ -11,8 +11,14 @@ import os
 import typer
 
 from rinari.application.credentials import SecretRef
+from rinari.application.credentials_gc import apply_cleanup_locked, plan_cleanup
+from rinari.application.credentials_vault import delete_credential, enumerate_credentials
 from rinari.cli.deps import is_json, services, with_error_handling
-from rinari.shared.errors import InvalidUsageError, NotFoundError
+from rinari.shared.errors import (
+    CredentialStoreUnavailableError,
+    InvalidUsageError,
+    NotFoundError,
+)
 
 from ..output import emit_json, success_envelope
 
@@ -26,7 +32,7 @@ def list_cmd(ctx: typer.Context) -> None:
     with services(ctx) as s:
         rows = []
         for record in s.providers.list():
-            ref = s.credentials.provider_secret_ref(record.id)
+            ref = _secret_ref(s, record)
             exists = s.credentials.exists(ref)
             rows.append(
                 {
@@ -128,7 +134,7 @@ def scopes(ctx: typer.Context) -> None:
     with services(ctx) as s:
         rows = []
         for record in s.providers.list():
-            ref = s.credentials.provider_secret_ref(record.id)
+            ref = _secret_ref(s, record)
             rows.append(
                 {"provider": record.alias, "ref": ref, "present": s.credentials.exists(ref)}
             )
@@ -148,7 +154,7 @@ def test(
     """Check that a provider's secret resolves (value is never printed)."""
     with services(ctx) as s:
         record = _find_provider(s, provider)
-        ref = s.credentials.provider_secret_ref(record.id)
+        ref = _secret_ref(s, record)
         try:
             value = s.credentials.resolve(ref)
             ok = bool(value)
@@ -159,6 +165,100 @@ def test(
             emit_json(success_envelope("secrets.test", data))
             return
         typer.echo(f"secret for {record.alias}: {'resolvable' if ok else 'NOT resolvable'}")
+
+
+@app.command("cleanup")
+@with_error_handling("secrets.cleanup")
+def cleanup(
+    ctx: typer.Context,
+    apply: bool = typer.Option(
+        False, "--apply", help="Delete the orphaned entries (default: dry run)."
+    ),
+    lock_timeout: float = typer.Option(
+        5.0,
+        "--lock-timeout",
+        help="Seconds to wait for other processes writing credentials.",
+    ),
+) -> None:
+    """Inspect (and optionally retire) orphaned entries in the OS vault.
+
+    Only entries this home can prove it owns are candidates: entries without a
+    home scope, from another home, or from another application are reported
+    and never deleted.
+    """
+    with services(ctx) as s:
+        scope = s.credentials.scope
+        try:
+            entries = enumerate_credentials()
+        except CredentialStoreUnavailableError as error:
+            data = {"supported": False, "status": "unsupported", "detail": error.message}
+            if is_json(ctx):
+                emit_json(success_envelope("secrets.cleanup", data))
+            else:
+                typer.echo(f"credential vault cleanup: {error.message}")
+            return
+        plan = plan_cleanup(
+            entries,
+            live_provider_ids={record.id for record in s.providers.list()},
+            retained_provider_ids=set(s.ctx.provider_repo.list_retained_credential_ids()),
+            scope=scope,
+        )
+        counts = plan.summary()
+        if not apply:
+            data = {
+                "supported": True,
+                "status": "plan",
+                "scope": scope,
+                "summary": counts,
+                "orphans": [entry.target for entry in plan.orphans],
+                "unknown": [entry.target for entry in plan.unknown],
+            }
+            if is_json(ctx):
+                emit_json(success_envelope("secrets.cleanup", data))
+                return
+            typer.echo(
+                f"vault: {counts['live']} live, {counts['retained']} retained, "
+                f"{counts['orphans']} orphaned, {counts['unknown']} unknown, "
+                f"{counts['foreign']} foreign"
+            )
+            for entry in plan.orphans:
+                typer.echo(f"  orphan  {entry.target}")
+            typer.echo("dry run: pass --apply to delete the orphaned entries")
+            return
+        report = apply_cleanup_locked(
+            plan,
+            delete=delete_credential,
+            # Revalidación: un alta reciente gana aunque el plan la marcara.
+            still_orphan=lambda provider_id: not s.ctx.provider_repo.credential_exists(provider_id),
+            lock_path=s.ctx.layout.credentials_lock,
+            timeout=lock_timeout,
+        )
+        data = {
+            "supported": True,
+            "status": "applied",
+            "scope": scope,
+            "summary": counts,
+            "deleted": report.deleted,
+            "skipped": report.skipped,
+            "failed": report.failed,
+            "failures": [
+                {"target": target, "detail": detail} for target, detail in report.failures
+            ],
+        }
+        if is_json(ctx):
+            emit_json(success_envelope("secrets.cleanup", data))
+            return
+        typer.echo(
+            f"deleted {report.deleted} orphaned entries "
+            f"({report.skipped} kept after revalidation, {report.failed} failures)"
+        )
+        for target, detail in report.failures:
+            typer.echo(f"  failed {target}: {detail}")
+
+
+def _secret_ref(s, record) -> str:
+    """Registered reference for the provider (keyring, file or environment)."""
+    return s.providers.credential_ref(record) or s.credentials.provider_secret_ref(record.id)
 
 
 def _find_provider(s, alias: str):

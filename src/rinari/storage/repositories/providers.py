@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 
 from rinari.storage.db import Database
@@ -101,6 +103,46 @@ class ProviderRepository:
             method=row["method"],
             updated_at=row["updated_at"],
         )
+
+    def retain_credential(self, ref: ProviderCredentialRef, retained_at: str) -> None:
+        """Record that a credential was kept on purpose after removing its provider.
+
+        Uses its own table on purpose: `provider_credentials_metadata` is
+        cascade-deleted with the provider row, so retention cannot live there.
+        """
+        self._db.execute(
+            """
+            INSERT INTO retained_credentials (provider_id, secret_ref, method, retained_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(provider_id) DO UPDATE SET
+                secret_ref = excluded.secret_ref,
+                method = excluded.method,
+                retained_at = excluded.retained_at
+            """,
+            (ref.provider_id, ref.secret_ref, ref.method, retained_at),
+        )
+
+    def list_retained_credential_ids(self) -> list[str]:
+        """Credential ids kept on purpose after the provider was removed."""
+        rows = self._db.query("SELECT provider_id FROM retained_credentials")
+        return [row["provider_id"] for row in rows]
+
+    def get_retained_credential(self, provider_id: str) -> ProviderCredentialRef | None:
+        row = self._db.query_one(
+            "SELECT * FROM retained_credentials WHERE provider_id = ?", (provider_id,)
+        )
+        if not row:
+            return None
+        return ProviderCredentialRef(
+            provider_id=row["provider_id"],
+            secret_ref=row["secret_ref"],
+            method=row["method"],
+            updated_at=row["retained_at"],
+        )
+
+    def credential_exists(self, provider_id: str) -> bool:
+        row = self._db.query_one("SELECT 1 FROM providers WHERE id = ?", (provider_id,))
+        return row is not None
 
     def delete_credential(self, provider_id: str) -> bool:
         cursor = self._db.execute(

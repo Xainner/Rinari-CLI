@@ -739,6 +739,12 @@ Todo con tests deterministas.
 - [x] Redacción base.
 - [x] Nunca persistir plaintext en config normal.
 - [x] Tests de no-leak.
+- [x] Rotación segura: la clave anterior sobrevive a una escritura fallida.
+- [x] Una entrada por secreto (sin huérfanas por reescritura del backend).
+- [x] Saneamiento del vault (`secrets cleanup`, solo huérfanas).
+- [x] Retención explícita (`remove --keep-credentials`) registrada en su propia tabla.
+- [x] Exclusión entre procesos para mutaciones del vault (lock compartido con la limpieza).
+- [ ] Migrar copias legacy sin scope demostrable (la copia anterior a una rotación queda en el vault).
 
 ## Provider Registry
 
@@ -3064,4 +3070,11 @@ EN FASE 5 (hasta el momento)
     (browser.read/browser.mutate), uploads por sandbox con provenance,
     downloads solo a artifact dir, cookies redactadas; 40 tests contra un
     fake CDP server en loopback (test_browser_cdp.py)
+    Credenciales (fix/credential-store-safety): patrón de escritura del store
+    keyring (servicio por clave + staging verificado; reescribir ya no deja
+    huérfanas), set_auth que nunca pierde la clave anterior, errores
+    estructurados CREDENTIAL_STORE_WRITE_FAILED / _UNAVAILABLE, inventario
+    nativo del vault (ctypes, sin dependencias) y saneamiento
+    `secrets cleanup [--apply]` (clasifica vivo/huérfano/ajeno y borra solo
+    huérfanas); 18 tests nuevos
 ```

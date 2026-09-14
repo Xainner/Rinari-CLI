@@ -1790,6 +1790,16 @@ rinari providers auth anthropic-work \
 
 Do not export plaintext secrets in normal config export.
 
+OS keychain writes keep one service name per secret, scoped by home
+(`rinari/<home-id>/providers/<id>`): two homes sharing an OS account never
+collide, and a cleanup run from one home cannot touch another home's secrets.
+A rotation writes the new value to a staging entry, copies the current value to
+a previous entry, and only then replaces the definitive target, which is
+deleted immediately before the write so no displaced copy is left behind. A
+failure in any phase therefore leaves the previous value resolvable and the new
+one staged for recovery; repeated writes do not accumulate orphaned entries.
+`rinari secrets cleanup --apply` retires leftovers written by this home.
+
 ---
 
 # 25. `config`
@@ -2290,9 +2300,21 @@ secrets remove
 secrets rotate
 secrets test
 secrets scopes
+secrets cleanup
 ```
 
 Do not expose a plaintext-oriented `secrets show` command.
+
+`secrets cleanup` reads the OS vault and classifies each entry as live (bound
+to a provider that still exists), retained (kept on purpose through
+`providers remove --keep-credentials`, recorded in its own retained_credentials table so it survives the provider row), orphaned (this home's namespace without
+a live or retained provider), unknown (rinari-shaped but with no provable home
+scope, such as the legacy shared service) or foreign (other applications). The
+default is a dry run; `--apply` deletes only the orphaned entries and
+revalidates each id against the database immediately before deleting it, so a
+concurrent provider addition always wins. Additions, rotations and this cleanup share an exclusive per-home lock (credentials.lock), so a deletion phase cannot interleave with an addition whose secret is already written but whose row is not yet committed; --lock-timeout SECONDS (default 5) bounds the wait and a busy lock fails with CREDENTIAL_STORE_BUSY instead of touching the vault. Entries without a provable scope are
+reported and never deleted. On systems without a native vault inventory the
+command reports `unsupported` instead of failing.
 
 Metadata is enough:
 

@@ -7,6 +7,7 @@ active provider (`use`) never deletes providers, models, or credentials.
 
 from __future__ import annotations
 
+import contextlib
 import os
 from dataclasses import dataclass, field
 from typing import Any
@@ -19,6 +20,7 @@ from rinari.providers.adapters.base import ProviderHealth
 from rinari.providers.registry import adapter_for, validate_provider_type
 from rinari.shared.clock import now_iso
 from rinari.shared.errors import ConflictError, InvalidUsageError, NotFoundError
+from rinari.shared.locking import file_lock
 from rinari.storage.records import (
     ConfigValue,
     ProviderCredentialRef,
@@ -88,7 +90,20 @@ class ProviderService:
 
     # -- lifecycle ------------------------------------------------------
 
+    def _credential_lock(self) -> Any:
+        """Exclusión con la limpieza del vault: un alta escribe la credencial
+        dentro de su transacción y hasta el commit otra conexión no ve la fila.
+        """
+        lock_path = getattr(self._credentials, "lock_path", None)
+        if lock_path is None:
+            return contextlib.nullcontext()
+        return file_lock(lock_path)
+
     def add(self, input: AddProviderInput) -> ProviderRecord:
+        with self._credential_lock():
+            return self._add(input)
+
+    def _add(self, input: AddProviderInput) -> ProviderRecord:
         validate_provider_type(
             input.provider_type, input.auth_method, input.settings.get("protocol")
         )
@@ -194,6 +209,12 @@ class ProviderService:
     def remove(
         self, ref: str, switch_to: str | None = None, keep_credentials: bool = False
     ) -> ProviderRecord:
+        with self._credential_lock():
+            return self._remove(ref, switch_to=switch_to, keep_credentials=keep_credentials)
+
+    def _remove(
+        self, ref: str, switch_to: str | None = None, keep_credentials: bool = False
+    ) -> ProviderRecord:
         record = self.get(ref)
         active_id = self._ctx.config_repo.get(KEY_ACTIVE_PROVIDER)
         was_active = active_id == record.id
@@ -223,6 +244,10 @@ class ProviderService:
                 else:
                     self._ctx.config_repo.delete(KEY_ACTIVE_PROVIDER)
                     self._ctx.config_repo.delete(KEY_ACTIVE_MODEL)
+            if keep_credentials and credential is not None:
+                # La retención se registra en su propia tabla: la metadata se
+                # borra en cascada con el proveedor y no sirve para esto.
+                self._ctx.provider_repo.retain_credential(credential, retained_at=self._now())
             self._ctx.provider_repo.delete(record.id)
         if credential is not None and not keep_credentials:
             self._credentials.delete(credential.secret_ref)
@@ -231,14 +256,23 @@ class ProviderService:
     def set_auth(
         self, ref: str, secret: str | None = None, secret_env: str | None = None
     ) -> ProviderRecord:
+        with self._credential_lock():
+            return self._set_auth(ref, secret=secret, secret_env=secret_env)
+
+    def _set_auth(
+        self, ref: str, secret: str | None = None, secret_env: str | None = None
+    ) -> ProviderRecord:
         record = self.get(ref)
         if (secret is None) == (secret_env is None):
             raise InvalidUsageError("Pass exactly one of --api-key or --api-key-env")
         now = self._now()
+        previous_ref: str | None = None
         with self._ctx.db.transaction():
             existing = self._ctx.provider_repo.get_credential(record.id)
-            if existing is not None:
-                self._credentials.delete(existing.secret_ref)
+            previous_ref = existing.secret_ref if existing is not None else None
+            # Store the new secret *before* retiring the old one: a failed
+            # rotation (full vault, locked store) must not lose the previous
+            # key, and a transaction rollback cannot restore a deleted secret.
             if secret is not None:
                 secret_ref = self._credentials.store_provider_secret(record.id, secret)
             else:
@@ -256,6 +290,9 @@ class ProviderService:
             record.status_checked_at = None
             record.updated_at = now
             self._ctx.provider_repo.update(record)
+        # Only now is the previous reference retired, and only if it changed.
+        if previous_ref is not None and previous_ref != secret_ref:
+            self._credentials.delete(previous_ref)
         return record
 
     def logout(self, ref: str) -> ProviderRecord:

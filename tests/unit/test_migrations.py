@@ -15,6 +15,7 @@ TABLES_AFTER_MIGRATIONS = {
     "schema_migrations",
     "providers",
     "provider_credentials_metadata",
+    "retained_credentials",
     "models",
     "projects",
     "sessions",
@@ -103,6 +104,7 @@ def test_migrate_fresh_database_applies_all(db):
         27,
         28,
         29,
+        30,
     ]
     assert _table_names(db) == TABLES_AFTER_MIGRATIONS
 
@@ -111,7 +113,7 @@ def test_migrate_is_idempotent(db):
     runner = MigrationRunner(db, FakeClock())
     runner.migrate()
     assert runner.migrate() == []
-    assert runner.current_version() == 29
+    assert runner.current_version() == 30
 
 
 def test_migrations_are_replayed_from_on_disk(db, tmp_path):

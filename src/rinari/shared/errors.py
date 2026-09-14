@@ -143,3 +143,55 @@ class PartialCompletionError(RinariError):
 class BlockedError(RinariError):
     exit_code = ExitCode.BLOCKED
     machine_code = "BLOCKED"
+
+
+class CredentialStoreUnavailableError(RinariError):
+    """The requested credential backend cannot operate on this system."""
+
+    exit_code = ExitCode.CONFIGURATION_ERROR
+    machine_code = "CREDENTIAL_STORE_UNAVAILABLE"
+
+
+class HomeIdUnavailableError(RinariError):
+    """Another process is publishing this home's identifier and the wait ended.
+
+    Nunca se devuelve un identificador alternativo para el mismo home: dos
+    procesos con ids distintos escribirían credenciales en namespaces que el
+    otro no puede leer.
+    """
+
+    exit_code = ExitCode.CONFLICT
+    machine_code = "HOME_ID_UNAVAILABLE"
+
+    @property
+    def retryable(self) -> bool:
+        return True
+
+
+class LockTimeoutError(RinariError):
+    """Another process is mutating the same shared resource (for example the
+    OS credential vault) and the lock could not be taken in time."""
+
+    exit_code = ExitCode.CONFLICT
+    machine_code = "CREDENTIAL_STORE_BUSY"
+
+    @property
+    def retryable(self) -> bool:
+        return True
+
+
+class CredentialWriteError(RinariError):
+    """The OS credential store refused a write (for example a full vault).
+
+    Raised before any previous value is removed, so a failed rotation keeps
+    the stored secret usable (see the CredWrite error 8 report).
+    """
+
+    exit_code = ExitCode.GENERIC_FAILURE
+    machine_code = "CREDENTIAL_STORE_WRITE_FAILED"
+
+    def __init__(
+        self, message: str, hint: str | None = None, *, details: dict | None = None
+    ) -> None:
+        super().__init__(message, hint=hint)
+        self.details = dict(details or {})
