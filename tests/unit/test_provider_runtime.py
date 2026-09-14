@@ -30,6 +30,14 @@ def _resp(status: int, **kwargs) -> httpx.Response:
     return httpx.Response(status, request=request, **kwargs)
 
 
+class _BytesStream(httpx.SyncByteStream):
+    def __init__(self, data: bytes) -> None:
+        self.data = data
+
+    def __iter__(self):
+        yield self.data
+
+
 # -- ModelItem -----------------------------------------------------------------
 
 
@@ -138,6 +146,63 @@ def test_classify_model_not_found_and_timeout() -> None:
     timeout = classify_http_error(_resp(408), "https://x.test")
     assert timeout.error_code == ProviderErrorCode.TIMEOUT
     assert timeout.retryable
+
+
+def test_classify_reads_anthropic_streaming_error_body() -> None:
+    response = _resp(
+        400,
+        headers={"request-id": "req_header"},
+        stream=_BytesStream(
+            b'{"type":"error","error":{"type":"invalid_request_error",'
+            b'"message":"tools.2.input_schema: invalid schema"}}'
+        ),
+    )
+    assert response.is_stream_consumed is False
+
+    err = classify_http_error(response, "https://api.anthropic.com/v1/messages", model="claude")
+
+    assert "tools.2.input_schema: invalid schema" in err.message
+    assert err.error_code == ProviderErrorCode.INVALID_TOOL_SCHEMA
+    assert err.details["request_id"] == "req_header"
+    assert err.details["provider_error_code"] == "INVALID_TOOL_SCHEMA"
+
+
+def test_classify_uses_body_request_id_and_structured_provider_fields() -> None:
+    response = _resp(
+        400,
+        json={
+            "type": "error",
+            "request_id": "req_body",
+            "error": {
+                "type": "invalid_request_error",
+                "code": "bad_parameter",
+                "message": "temperature is invalid",
+            },
+        },
+    )
+
+    err = classify_http_error(response, "https://api.test/v1/messages", provider="anthropic")
+
+    assert err.details == {
+        "provider_error_code": "SERVER_ERROR",
+        "request_id": "req_body",
+        "provider": "anthropic",
+        "provider_error_type": "invalid_request_error",
+        "provider_response_code": "bad_parameter",
+        "http_status": 400,
+    }
+
+
+def test_classify_bounds_provider_message_and_does_not_attach_raw_body() -> None:
+    secret = "sk-ant-secret-that-must-not-survive"
+    response = _resp(400, json={"error": {"message": "x" * 500}, "secret": secret})
+
+    err = classify_http_error(response, "https://api.test/v1/messages")
+
+    assert "x" * 300 in err.message
+    assert "x" * 301 not in err.message
+    assert secret not in err.message
+    assert secret not in repr(err.details)
 
 
 # -- model retry -------------------------------------------------------------------

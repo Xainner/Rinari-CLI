@@ -297,7 +297,7 @@ class AnthropicAdapter(ProviderAdapter):
                 {
                     "name": _wire_tool_name(tool.name, tool_aliases),
                     "description": tool.description,
-                    "input_schema": tool.parameters,
+                    "input_schema": _anthropic_input_schema(tool.parameters),
                 }
                 for tool in request.tools
             ]
@@ -309,6 +309,42 @@ class AnthropicAdapter(ProviderAdapter):
 
 
 # -- helpers -----------------------------------------------------------------
+
+
+def _anthropic_input_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Return an Anthropic-compatible wire schema without weakening Rinari.
+
+    Anthropic rejects ``oneOf``, ``anyOf`` and ``allOf`` at the root of a
+    tool input schema.  The wire schema therefore becomes a permissive
+    projection while ToolRuntime continues to validate model arguments
+    against the original definition before executing anything.  Simple
+    required-field alternatives are retained as model-facing guidance.
+    """
+    wire = dict(schema)
+    notes: list[str] = []
+    labels = {
+        "oneOf": "Provide exactly one of",
+        "anyOf": "Provide at least one of",
+        "allOf": "Satisfy all of",
+    }
+    for keyword, label in labels.items():
+        clauses = wire.pop(keyword, None)
+        if not isinstance(clauses, list):
+            continue
+        alternatives: list[str] = []
+        for clause in clauses:
+            required = clause.get("required") if isinstance(clause, dict) else None
+            if isinstance(required, list) and all(isinstance(item, str) for item in required):
+                alternatives.append(" + ".join(required))
+        if alternatives and len(alternatives) == len(clauses):
+            notes.append(f"{label}: " + "; ".join(alternatives) + ".")
+        else:
+            notes.append(f"{label} the alternatives defined by Rinari validation.")
+    if notes:
+        existing = wire.get("description")
+        prefix = f"{existing.strip()} " if isinstance(existing, str) and existing.strip() else ""
+        wire["description"] = prefix + " ".join(notes)
+    return wire
 
 
 def _wire_tool_name(name: str, tool_aliases: dict[str, str] | None) -> str:

@@ -175,24 +175,9 @@ def stream_timeout_error(
 
 def provider_error_detail(response: httpx.Response, url: str) -> str:
     """Best-effort human detail from an error body (no secret leakage)."""
-    # A streaming response body is not loaded until read(); without this the
-    # error path itself crashes with httpx.ResponseNotRead, masking the real
-    # provider error (openai/anthropic invoke_stream pass unread responses).
-    try:
-        if not response.is_stream_consumed:
-            response.read()
-    except Exception:
-        return f"Provider returned HTTP {response.status_code} for {url}"
-    try:
-        data = response.json()
-    except ValueError:
-        return f"Provider returned HTTP {response.status_code} for {url}"
-    error = data.get("error") if isinstance(data, dict) else None
-    if isinstance(error, dict):
-        message = error.get("message")
-        if isinstance(message, str):
-            return f"Provider returned HTTP {response.status_code}: {message[:300]}"
-    return f"Provider returned HTTP {response.status_code} for {url}"
+    from rinari.providers.errors import provider_error_message
+
+    return provider_error_message(response, url)
 
 
 def auth_failure(

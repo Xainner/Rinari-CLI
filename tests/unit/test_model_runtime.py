@@ -14,8 +14,9 @@ from rinari.models.types import (
     ToolSchema,
     Usage,
 )
-from rinari.providers.adapters.anthropic import AnthropicAdapter
+from rinari.providers.adapters.anthropic import AnthropicAdapter, _anthropic_input_schema
 from rinari.providers.adapters.openai_compatible import OpenAICompatibleAdapter
+from rinari.providers.errors import ProviderErrorCode
 from rinari.shared.clock import FakeClock
 from rinari.shared.errors import InvalidUsageError, ProviderModelError
 from rinari.shared.paths import ENV_HOME
@@ -321,6 +322,28 @@ def test_openai_omits_session_header_without_session() -> None:
 # -- Anthropic ---------------------------------------------------------------
 
 
+def test_anthropic_stream_preserves_provider_error_detail() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            headers={"request-id": "req_anthropic_1"},
+            stream=httpx.ByteStream(
+                b'{"type":"error","error":{"type":"invalid_request_error",'
+                b'"message":"tools.4.input_schema: unsupported keyword"}}'
+            ),
+        )
+
+    adapter = AnthropicAdapter(client=_client(handler))
+    with pytest.raises(ProviderModelError) as excinfo:
+        adapter.invoke_stream(_request(), "key", None, lambda _delta: None)
+
+    error = excinfo.value
+    assert "tools.4.input_schema: unsupported keyword" in error.message
+    assert error.error_code == ProviderErrorCode.INVALID_TOOL_SCHEMA
+    assert error.details["request_id"] == "req_anthropic_1"
+    assert error.details["provider_error_code"] == "INVALID_TOOL_SCHEMA"
+
+
 def test_anthropic_invoke_sends_opencode_session_header() -> None:
     seen: list[httpx.Request] = []
 
@@ -443,6 +466,45 @@ def test_anthropic_tools_in_payload() -> None:
     assert body["tools"] == [
         {"name": "fs_read", "description": "lee", "input_schema": {"type": "object"}}
     ]
+
+
+@pytest.mark.parametrize("keyword", ["oneOf", "anyOf", "allOf"])
+def test_anthropic_projects_unsupported_root_schema_combinators(keyword: str) -> None:
+    original = {
+        "type": "object",
+        "properties": {"path": {"type": "string"}, "paths": {"type": "array"}},
+        keyword: [{"required": ["path"]}, {"required": ["paths"]}],
+    }
+
+    wire = _anthropic_input_schema(original)
+
+    assert keyword not in wire
+    assert wire["type"] == "object"
+    assert "path" in wire["description"] and "paths" in wire["description"]
+    assert keyword in original, "the runtime validation schema must remain unchanged"
+
+
+def test_anthropic_payload_projects_root_combinator_but_keeps_runtime_schema() -> None:
+    seen: list[httpx.Request] = []
+    schema = {
+        "type": "object",
+        "properties": {"agent_id": {"type": "string"}, "agent_ids": {"type": "array"}},
+        "oneOf": [{"required": ["agent_id"]}, {"required": ["agent_ids"]}],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"content": [], "stop_reason": "end_turn", "usage": {}})
+
+    request = _request(
+        tools=(ToolSchema(name="agent.wait", description="wait", parameters=schema),)
+    )
+    AnthropicAdapter(client=_client(handler)).invoke(request, "key", None)
+    wire_schema = json.loads(seen[0].content)["tools"][0]["input_schema"]
+
+    assert "oneOf" not in wire_schema
+    assert "exactly one" in wire_schema["description"].lower()
+    assert "oneOf" in schema
 
 
 def test_anthropic_stream() -> None:

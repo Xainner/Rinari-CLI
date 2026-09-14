@@ -49,7 +49,14 @@ class ProviderError(ProviderModelError):
         model: str | None = None,
         hint: str | None = None,
     ) -> None:
-        super().__init__(message, hint=hint)
+        details: dict[str, Any] = {"provider_error_code": code.value}
+        if request_id:
+            details["request_id"] = request_id
+        if provider:
+            details["provider"] = provider
+        if model:
+            details["model"] = model
+        super().__init__(message, hint=hint, details=details)
         # NOTE: RinariError.code stays the ExitCode property; the taxonomy
         # code lives here so exit-code mapping never breaks.
         self.error_code = code
@@ -74,12 +81,59 @@ def _retry_after(response: httpx.Response) -> float | None:
         return None
 
 
-def _request_id(response: httpx.Response) -> str | None:
+def _request_id(response: httpx.Response, payload: Any = None) -> str | None:
     for header in ("x-request-id", "x-requestid", "request-id"):
         value = response.headers.get(header)
         if value:
             return value
+    if isinstance(payload, dict):
+        value = payload.get("request_id")
+        if isinstance(value, str) and value:
+            return value
     return None
+
+
+def _error_payload(response: httpx.Response) -> dict[str, Any] | None:
+    """Consume and decode a provider error response without leaking raw data.
+
+    ``httpx.Client.stream`` leaves the body unread.  Error classification is
+    the common boundary for streaming and non-streaming calls, so it must read
+    the body before asking httpx to decode JSON.  The raw body is deliberately
+    never returned or attached to the exception.
+    """
+    try:
+        if not response.is_stream_consumed:
+            response.read()
+        payload = response.json()
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _safe_error_fields(payload: dict[str, Any] | None) -> tuple[str, str | None, str | None]:
+    """Return bounded message/type/code fields from common provider envelopes."""
+    if not payload:
+        return "", None, None
+    error = payload.get("error")
+    if isinstance(error, dict):
+        raw_message = error.get("message")
+        message = str(raw_message)[:300] if isinstance(raw_message, str) else ""
+        raw_type = error.get("type")
+        error_type = str(raw_type)[:100] if isinstance(raw_type, str) else None
+        raw_code = error.get("code")
+        error_code = str(raw_code)[:100] if isinstance(raw_code, (str, int)) else None
+        return message, error_type, error_code
+    if isinstance(error, str):
+        return error[:300], None, None
+    return "", None, None
+
+
+def provider_error_message(response: httpx.Response, url: str) -> str:
+    """Build the safe, bounded message shared by all HTTP adapter paths."""
+    payload = _error_payload(response)
+    detail, _, _ = _safe_error_fields(payload)
+    suffix = f": {detail}" if detail else ""
+    return f"Provider returned HTTP {response.status_code} for {url}{suffix}"
 
 
 def classify_http_error(
@@ -91,20 +145,13 @@ def classify_http_error(
 ) -> ProviderError:
     """Map an HTTP failure to the taxonomy, preserving legacy messages."""
     status = response.status_code
-    try:
-        payload = response.json()
-    except Exception:
-        payload = None
-    detail = ""
-    if isinstance(payload, dict):
-        error = payload.get("error")
-        if isinstance(error, dict) and error.get("message"):
-            detail = f": {str(error['message'])[:300]}"
-        elif isinstance(error, str) and error:
-            detail = f": {error[:300]}"
+    payload = _error_payload(response)
+    error_message, provider_error_type, provider_error_code = _safe_error_fields(payload)
+    detail = f": {error_message}" if error_message else ""
     message = f"Provider returned HTTP {status} for {url}{detail}"
+    request_id = _request_id(response, payload)
     common: dict[str, Any] = {
-        "request_id": _request_id(response),
+        "request_id": request_id,
         "provider": provider,
         "model": model,
     }
@@ -151,6 +198,15 @@ def classify_http_error(
         )
         if explicit:
             return ProviderError(message, code=ProviderErrorCode.VISION_UNSUPPORTED, **common)
+        schema_signal = (provider_error_code or "").lower() in {
+            "invalid_tool_schema",
+            "invalid_function_parameters",
+        } or any(
+            marker in error_message.lower()
+            for marker in ("input_schema", "tool schema", "function schema")
+        )
+        if schema_signal:
+            return ProviderError(message, code=ProviderErrorCode.INVALID_TOOL_SCHEMA, **common)
     if status == 422:
         return ProviderError(message, code=ProviderErrorCode.INVALID_TOOL_ARGUMENTS, **common)
     if status == 429:
@@ -163,7 +219,13 @@ def classify_http_error(
         )
     if status >= 500 or status in (408, 409, 425, 502, 503, 504):
         return ProviderError(message, code=ProviderErrorCode.SERVER_ERROR, retryable=True, **common)
-    return ProviderError(message, code=ProviderErrorCode.SERVER_ERROR, **common)
+    result = ProviderError(message, code=ProviderErrorCode.SERVER_ERROR, **common)
+    if provider_error_type:
+        result.details["provider_error_type"] = provider_error_type
+    if provider_error_code:
+        result.details["provider_response_code"] = provider_error_code
+    result.details["http_status"] = status
+    return result
 
 
 T = TypeVar("T")
