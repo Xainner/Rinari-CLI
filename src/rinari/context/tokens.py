@@ -54,8 +54,18 @@ def estimate_tokens(
     for message in history:
         total += estimate_message_tokens(message)
     if tools:
-        total += sum(len(json.dumps({"name": t.name, "description": t.description,
-            "parameters": t.parameters}, default=str)) for t in tools) // CHARS_PER_TOKEN
+        total += (
+            sum(
+                len(
+                    json.dumps(
+                        {"name": t.name, "description": t.description, "parameters": t.parameters},
+                        default=str,
+                    )
+                )
+                for t in tools
+            )
+            // CHARS_PER_TOKEN
+        )
     return total
 
 

@@ -278,9 +278,13 @@ def test_builtin_catalog_covers_session_tools_without_executing_them():
 
     registry = builtin_catalog()
     assert len(registry.names()) == 106
-    assert {"fs.read_image", "ssh.inspect", "skills.activate", "agent.spawn", "capability.search"} <= set(
-        registry.names()
-    )
+    assert {
+        "fs.read_image",
+        "ssh.inspect",
+        "skills.activate",
+        "agent.spawn",
+        "capability.search",
+    } <= set(registry.names())
     result = registry.get("ssh.inspect").handler(
         {"target_id": "unconfigured", "section": "hardware"}, None
     )

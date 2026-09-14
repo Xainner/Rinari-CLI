@@ -55,9 +55,10 @@ class OperationStore:
         state = row["state"]
         if state in {"running", "cancelling"} and row["instance"] != self.instance:
             state = "uncertain"
-        return {
-            key: row[key] for key in ("operation_id", "session_id", "turn_id", "updated")
-        } | {"state": state, "memory_origin": row["memory_origin"]}
+        return {key: row[key] for key in ("operation_id", "session_id", "turn_id", "updated")} | {
+            "state": state,
+            "memory_origin": row["memory_origin"],
+        }
 
     def claim(
         self,

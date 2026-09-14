@@ -624,7 +624,9 @@ def _validate_pdf_options(options):
         or len(visual) > MAX_PDF_PAGES
         or any(type(p) is not int or p < 1 for p in visual)
     ):
-        raise ValueError("Visual page selection exceeds the document preparation limit or contains invalid pages")
+        raise ValueError(
+            "Visual page selection exceeds the document preparation limit or contains invalid pages"
+        )
     if len(set(visual)) != len(visual):
         raise ValueError("Visual page numbers must be unique")
 

@@ -193,7 +193,10 @@ class _DelayedHeadersHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         time.sleep(1.2)
-        body = b'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
+        body = (
+            b'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\n'
+            b"data: [DONE]\n\n"
+        )
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Content-Length", str(len(body)))
@@ -299,8 +302,12 @@ def test_timeout_details_survive_engine_mapping_and_runtime_activity() -> None:
 
 @pytest.mark.parametrize("kind", ADAPTERS)
 def test_eof_after_partial_content_is_failure(kind):
-    client = httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(200, content=_partial_event(kind))))
+    client = httpx.Client(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, content=_partial_event(kind)))
+    )
     with pytest.raises(NetworkError) as err:
-        _invoke_stream(kind, _adapter(kind, client), ModelRequest(model="test", messages=()), lambda _: None)
+        _invoke_stream(
+            kind, _adapter(kind, client), ModelRequest(model="test", messages=()), lambda _: None
+        )
     assert err.value.details["kind"] == "STREAM_INTERRUPTED"
     assert err.value.details["partial_text"] == "partial"

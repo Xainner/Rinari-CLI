@@ -113,6 +113,7 @@ __all__ = ["app"]
 def context_compact(ctx: typer.Context, session: str = typer.Option(..., "--session")) -> None:
     """Compact an existing conversation without resuming its task."""
     from rinari.cli.agent_runtime import build_agent_session, compact_session
+
     with services(ctx) as s:
         record = s.sessions.show(session)
         runtime = build_agent_session(s, record, interactive=not is_json(ctx))
@@ -126,17 +127,24 @@ def context_compact(ctx: typer.Context, session: str = typer.Option(..., "--sess
 
 @app.command("settings")
 @with_error_handling("context.settings")
-def context_settings(ctx: typer.Context,
-    summarizer: str | None = typer.Option(None, "--summarizer", help="Saved model or 'conversation'."),
+def context_settings(
+    ctx: typer.Context,
+    summarizer: str | None = typer.Option(
+        None, "--summarizer", help="Saved model or 'conversation'."
+    ),
     model: str | None = typer.Option(None, "--model"),
     window: int | None = typer.Option(None, "--window", help="0 restores automatic detection."),
-    threshold: int | None = typer.Option(None, "--threshold")) -> None:
+    threshold: int | None = typer.Option(None, "--threshold"),
+) -> None:
     """Inspect or configure the shared context policy."""
     from rinari.context.settings import load, save
+
     with services(ctx) as s:
         value = load(s.ctx)
         if summarizer is not None:
-            value["model_id"] = None if summarizer == "conversation" else s.models.resolve(summarizer).id
+            value["model_id"] = (
+                None if summarizer == "conversation" else s.models.resolve(summarizer).id
+            )
         if window is not None:
             if model is None:
                 raise typer.BadParameter("--window requires --model")
@@ -152,7 +160,10 @@ def context_settings(ctx: typer.Context,
         if is_json(ctx):
             emit_json(success_envelope("context.settings", value))
         else:
-            typer.echo(f"Automatic compaction: {value['enabled']} · threshold: {value['compact_at_percent']}%")
+            typer.echo(
+                f"Automatic compaction: {value['enabled']} · "
+                f"threshold: {value['compact_at_percent']}%"
+            )
             typer.echo(f"Summarizer: {value['model_id'] or 'conversation model'}")
-            for ref, size in value['model_windows'].items():
+            for ref, size in value["model_windows"].items():
                 typer.echo(f"{ref}: {size} tokens (manual)")

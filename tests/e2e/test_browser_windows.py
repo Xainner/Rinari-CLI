@@ -22,7 +22,10 @@ def test_same_session_runtimes_do_not_share_chrome_profile(tmp_path):
         second.launch()  # Previously Chrome exited with code 21 and empty stderr.
         assert first.profile_dir != second.profile_dir
         session = AgentSession(
-            services=None, record=None, caller=None, loop=None,
+            services=None,
+            record=None,
+            caller=None,
+            loop=None,
             context=SimpleNamespace(tool_ctx=SimpleNamespace(browser=first)),
         )
         session.end()
@@ -37,7 +40,7 @@ def test_same_session_runtimes_do_not_share_chrome_profile(tmp_path):
 
 @pytest.mark.skipif(os.environ.get("RINARI_TEST_REAL_BROWSER") != "1", reason="opt-in browser")
 def test_real_browser_idle_keyboard_capture_and_relaunch(tmp_path):
-    html = b'''<!doctype html><meta charset="utf-8"><title>Rinari browser QA</title>
+    html = b"""<!doctype html><meta charset="utf-8"><title>Rinari browser QA</title>
     <body style="background:#101426;color:white;font:24px sans-serif;padding:50px">
     <h1>Rinari browser QA</h1><p>Keyboard actions: <b id="count">0</b></p>
     <canvas width="400" height="200"></canvas><script>
@@ -46,7 +49,7 @@ def test_real_browser_idle_keyboard_capture_and_relaunch(tmp_path):
     addEventListener('keydown',e=>{if(e.code==='Space'){
       document.querySelector('#count').textContent=++window.hits;
       ctx.fillStyle='#42eeb0';ctx.fillRect(180,20,10,100);console.log('shot',hits);
-    }});</script>'''
+    }});</script>"""
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -85,9 +88,16 @@ def test_real_browser_idle_keyboard_capture_and_relaunch(tmp_path):
                 break
             time.sleep(0.05)
         for kind in ("keyDown", "keyUp"):
-            manager.call(target, "Input.dispatchKeyEvent", {
-                "type": kind, "key": " ", "code": "Space", "windowsVirtualKeyCode": 32,
-            })
+            manager.call(
+                target,
+                "Input.dispatchKeyEvent",
+                {
+                    "type": kind,
+                    "key": " ",
+                    "code": "Space",
+                    "windowsVirtualKeyCode": 32,
+                },
+            )
         assert manager.evaluate(target, "window.hits")["value"] == 1
         after = manager.screenshot(target)
         assert after.startswith(b"\x89PNG") and before != after

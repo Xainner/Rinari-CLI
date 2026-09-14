@@ -85,8 +85,13 @@ class AnthropicAdapter(ProviderAdapter):
         if not isinstance(data, dict):
             raise ProviderModelError(f"Unexpected model list payload for {url}")
         from rinari.context.windows import normalize
+
         return [
-            DiscoveredModel(provider_model_id=str(item["id"]), availability="available", capabilities=normalize(item) or None)
+            DiscoveredModel(
+                provider_model_id=str(item["id"]),
+                availability="available",
+                capabilities=normalize(item) or None,
+            )
             for item in data.get("data", [])
             if isinstance(item, dict) and item.get("id")
         ]

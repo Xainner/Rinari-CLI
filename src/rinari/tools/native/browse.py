@@ -97,8 +97,10 @@ def _run(ctx: ToolContext, fn: Callable[[], Any]) -> ToolResult:
         code = _CODE_MAP.get(exc.code, ToolErrorCode.UNKNOWN)
         return ToolResult(
             ok=False,
-            data={"browser_error": exc.code,
-                  "diagnostics": _manager_instance.diagnostics() if _manager_instance else {}},
+            data={
+                "browser_error": exc.code,
+                "diagnostics": _manager_instance.diagnostics() if _manager_instance else {},
+            },
             error=ToolErrorInfo(
                 code=code, message=exc.message, retryable=exc.retryable or code in _RETRYABLE
             ),
@@ -197,10 +199,13 @@ def browser_connect(input: dict, ctx: ToolContext) -> ToolResult:
     endpoint = input.get("endpoint")
     if not isinstance(endpoint, str) or not endpoint.startswith("ws://"):
         return _run_invalid("endpoint must be a ws:// URL")
-    return _run(ctx, lambda: {
-        "connected": _manager(ctx).connect(endpoint),
-        "diagnostics": _manager(ctx).diagnostics(),
-    })
+    return _run(
+        ctx,
+        lambda: {
+            "connected": _manager(ctx).connect(endpoint),
+            "diagnostics": _manager(ctx).diagnostics(),
+        },
+    )
 
 
 def browser_close(input: dict, ctx: ToolContext) -> ToolResult:

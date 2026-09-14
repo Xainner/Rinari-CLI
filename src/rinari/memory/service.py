@@ -746,9 +746,7 @@ class MemoryService:
                 parsed.text,
                 kind=parsed.kind,
                 topic=(
-                    candidate["topic"]
-                    if candidate["topic"].startswith("source:")
-                    else parsed.topic
+                    candidate["topic"] if candidate["topic"].startswith("source:") else parsed.topic
                 ),
                 provenance=f"session:{candidate['session_id']}/message:{candidate['message_id']}",
                 confidence=float(candidate["confidence"]),
