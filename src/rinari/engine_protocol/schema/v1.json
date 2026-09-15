@@ -1669,7 +1669,8 @@
         "message_id",
         "to_session_id",
         "state",
-        "hop"
+        "hop",
+        "origin"
       ],
       "properties": {
         "message_id": {
@@ -1726,14 +1727,7 @@
           ]
         },
         "origin": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/messageOrigin"
-            },
-            {
-              "type": "null"
-            }
-          ]
+          "$ref": "#/$defs/messageOrigin"
         },
         "error": {
           "type": [
