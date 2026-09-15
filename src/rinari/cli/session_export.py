@@ -54,6 +54,7 @@ def export_session(s, ref: str | None) -> dict:
                     for tc in (m.tool_calls or ())
                 ],
                 "created_at": m.created_at,
+                "origin": m.origin,
             }
             for m in messages
         ],
@@ -122,6 +123,7 @@ def import_session(s, text: str):
                 tool_call_id=m.get("tool_call_id"),
                 name=m.get("name"),
                 created_at=m.get("created_at") or now,
+                origin=m.get("origin") if isinstance(m.get("origin"), dict) else None,
             )
         )
     if messages:

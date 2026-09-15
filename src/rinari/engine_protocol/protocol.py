@@ -60,4 +60,7 @@ CAPABILITIES: dict[str, bool] = {
     "selective_memory_v1": True,
     "memory_privacy_v1": True,
     "personal_memory_controls_v1": True,
+    # Peer messaging between agent sessions (Boards): untrusted data, per-target
+    # consent, provenance ceiling in the receiving turn.
+    "session_peer_messaging_v1": True,
 }

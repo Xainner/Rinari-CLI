@@ -246,6 +246,17 @@ class ToolContext:
     # Public web snapshots only, bounded and scoped to the runtime session.
     web_snapshots: dict[str, Any] = field(default_factory=dict)
     channel_host: Any = None
+    # Trusted host binding for peer messaging between agent sessions (Boards):
+    # `session.peers` / `session.send` execute through it. The host resolves
+    # source session, group and turn; tool arguments never carry identity.
+    # None when the session is not a member of an enabled peer group.
+    peer_host: Any = None
+    # Provenance ceiling of the running turn: `user` (owner request),
+    # `peer` (started by a message from another agent) or `automation`.
+    # A peer-originated turn cannot mutate files, run shell, drive the
+    # browser, reach the network with side effects or spawn agents on the
+    # strength of that text alone; the runtime enforces it in code.
+    origin_kind: str = "user"
     # Engine-private owner message provenance for a memory tool write.  The
     # model cannot set this through a tool schema; the session host may attach
     # it only after validating a persisted owner message.

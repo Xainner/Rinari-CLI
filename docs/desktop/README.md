@@ -20,6 +20,11 @@ protocol.
 5. `05-runtime-surfaces.md` — PTY registry, artifact export, snapshot and
    cancellation contracts.
 6. `06-turn-governor.md` — stop/progress events and snapshot usage block.
+7. `06-interactive-workspace.md` — questions and session workspaces
+   (`interactive_questions_v1`, `desktop_workspace_v1`).
+8. `07-web-previews.md` — static/dev previews owned by the engine.
+9. `09-peer-messaging.md` — messages between the agent sessions of a board
+   (`session_peer_messaging_v1`): groups, consent, provenance ceiling.
 
 ## Priority (Code's view)
 

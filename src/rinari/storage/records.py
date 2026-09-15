@@ -126,6 +126,7 @@ class SessionMessageRecord:
     images: list[dict[str, str]] | None = None
     attachments: list[dict[str, Any]] | None = None
     display_content: str | None = None
+    origin: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)

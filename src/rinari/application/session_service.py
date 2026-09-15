@@ -354,6 +354,9 @@ class SessionService:
                 tool_call_id=message.tool_call_id,
                 name=message.name,
                 created_at=message.created_at,
+                # Provenance survives the fork: a peer delivery stays marked
+                # as untrusted data in the copy.
+                origin=message.origin,
             )
             for message in self._ctx.message_repo.list(source.id)
         ]

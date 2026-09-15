@@ -452,6 +452,9 @@ def build_agent_session(
     reasoning_effort: str | None = None,
     remote_target: dict | None = None,
     channel_host=None,
+    peer_host=None,
+    origin_kind: str = "user",
+    session_grants: list | None = None,
 ) -> AgentSession:
     def preparing(stage: str) -> None:
         if activity_sink is not None:
@@ -522,6 +525,8 @@ def build_agent_session(
         mcp=services.mcp,
         exposure=ToolExposure(),
         channel_host=channel_host,
+        peer_host=peer_host,
+        origin_kind=origin_kind,
     )
     parent_runtime = []
     orchestrator = _build_orchestrator(
@@ -529,7 +534,9 @@ def build_agent_session(
         record,
         root,
         token,
-        replace(tool_ctx, channel_host=None),
+        # Subagents never inherit peer messaging: the binding is per owner
+        # session and a child cannot message on the parent's behalf.
+        replace(tool_ctx, channel_host=None, peer_host=None),
         policy,
         gateway,
         activity_sink,
@@ -545,6 +552,8 @@ def build_agent_session(
         questions_enabled=question_prompt is not None,
         remote_target=remote_target,
         channel_host=channel_host,
+        peer_host=peer_host,
+        session_grants=session_grants,
         network_policy=network_policy,
         root=root,
         hook_engine=hook_engine,
@@ -817,6 +826,8 @@ def _build_tools(
     questions_enabled: bool = False,
     remote_target: dict | None = None,
     channel_host=None,
+    peer_host=None,
+    session_grants: list | None = None,
 ) -> ToolRuntime:
     from rinari.application.ssh_targets import TargetStore
     from rinari.tools.native.ssh import ssh_tools
@@ -849,6 +860,13 @@ def _build_tools(
                 from rinari.agents.tools import AgentToolHost, agent_tools
 
                 registry.register_all(agent_tools(AgentToolHost(orchestrator=orchestrator)))
+        if peer_host is not None:
+            # Deferred exposure: only sessions bound to an enabled peer group
+            # can even discover `session.peers` / `session.send`.
+            with registry.loading("peers"):
+                from rinari.tools.native.peers import peer_tools
+
+                registry.register_all(peer_tools(peer_host))
         # Unified capability search sees whatever is registered above it, so it
         # is added last (harness.md: search across native/plugin/MCP/OpenAPI/browser).
         from rinari.capability_search import capability_activation_tools, capability_search_tool
@@ -898,7 +916,11 @@ def _build_tools(
     return ToolRuntime(
         registry,
         policy if policy is not None else PolicyEngine(network=network_policy),
-        ApprovalEngine(prompt=ask, persistent_store=_persistent_grants_store(services)),
+        ApprovalEngine(
+            prompt=ask,
+            persistent_store=_persistent_grants_store(services),
+            session_grants=session_grants,
+        ),
         clock=services.ctx.clock,
         redactor=Redactor(_secrets_for_redaction(services)),
         event_sink=lambda event_type, payload: _persist_event(
@@ -1095,6 +1117,7 @@ def _record_to_message(rec: SessionMessageRecord) -> ChatMessage:
         name=rec.name,
         attachments=tuple(rec.attachments or ()),
         display_content=rec.display_content,
+        origin=rec.origin,
     )
 
 
@@ -1123,6 +1146,7 @@ def _message_to_record(
         or None,
         attachments=list(msg.attachments) or None,
         display_content=msg.display_content,
+        origin=dict(msg.origin) if msg.origin else None,
     )
 
 

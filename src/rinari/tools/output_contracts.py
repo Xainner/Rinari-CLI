@@ -69,6 +69,8 @@ FIELDS = {
     "agent.cancel": "agent_id:s cancelled:b",
     "agent.synthesize": "conflicts:a",
     "user.ask": "request_id:s status:s answers:o",
+    "session.peers": "peers:a",
+    "session.send": "message_id:s to_session_id:s state:s hop:i",
     "verify.record": "id:s kind:s result:s summary:s",
     "verify.plan": "checks:a",
     "verify.evaluate": "outcome:s reasons:a",

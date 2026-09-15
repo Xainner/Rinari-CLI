@@ -107,6 +107,7 @@ def test_migrate_fresh_database_applies_all(db):
         29,
         30,
         31,
+        32,
     ]
     assert _table_names(db) == TABLES_AFTER_MIGRATIONS
 
@@ -115,7 +116,7 @@ def test_migrate_is_idempotent(db):
     runner = MigrationRunner(db, FakeClock())
     runner.migrate()
     assert runner.migrate() == []
-    assert runner.current_version() == 31
+    assert runner.current_version() == 32
 
 
 def test_migrations_are_replayed_from_on_disk(db, tmp_path):

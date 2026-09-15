@@ -33,6 +33,7 @@ def message_to_dict(record: SessionMessageRecord) -> dict[str, Any]:
         "name": record.name,
         "created_at": record.created_at,
         "turn_id": record.turn_id,
+        "origin": record.origin,
     }
 
 
