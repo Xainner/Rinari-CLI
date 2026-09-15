@@ -3,7 +3,9 @@ paginated listing, ended_at/exit_reason and loopback readiness probes."""
 
 from __future__ import annotations
 
+import itertools
 import json
+import os
 import sys
 import threading
 import time
@@ -14,7 +16,7 @@ import pytest
 from rinari.application.provider_service import AddProviderInput
 from rinari.application.services import build_services
 from rinari.engine_protocol.errors import EngineProtocolError
-from rinari.engine_protocol.processes import DesktopProcesses, _probe_loopback
+from rinari.engine_protocol.processes import DesktopProcesses, _exit_reason, _probe_loopback
 from rinari.engine_protocol.protocol import CAPABILITIES
 from rinari.engine_protocol.server import EngineServer
 from rinari.tools.native.process import ProcessRegistry
@@ -382,3 +384,232 @@ def test_rows_carry_unknown_defaults_without_urls(tmp_path):
             if handle.process.poll() is None:
                 registry.kill(handle)
             registry.wait(handle, 3)
+
+
+def test_probe_never_resolves_dns_names():
+    # Hostnames that merely start with 127. must not be dialed: resolving
+    # them would turn the probe into an external scan.
+    assert _probe_loopback("http://127.0.0.1.evil.com/") == "unknown"
+    assert _probe_loopback("http://127.evil.com:80/") == "unknown"
+    assert _probe_loopback("http://127.0.0.1.evil.com:8080/x") == "unknown"
+
+
+def test_cursor_and_limit_edges(server, tmp_path):
+    session_id = _create_chat(server, tmp_path, tag="edge")
+    registry = ProcessRegistry()
+    server.turns._desktop_processes[session_id] = registry
+    try:
+        assert _list(server, session_id, {"limit": 1})["result"]["total"] == 0
+        for index, bad_limit in enumerate((0, 201, True, 2.0, "2")):
+            response = server.handle_line(
+                _req(
+                    f"edge-limit-{index}",
+                    "workspace.process.list",
+                    {"session_id": session_id, "limit": bad_limit},
+                )
+            )
+            assert not response["ok"] and response["error"]["code"] == "INVALID_PARAMS"
+        ok_limit = server.handle_line(
+            _req("edge-ok", "workspace.process.list", {"session_id": session_id, "limit": 200})
+        )
+        assert ok_limit["ok"]
+        for index, bad_cursor in enumerate(("bogus", "o", "o-5", "o\xb2", "o" + "9" * 5000, 5, "")):
+            response = server.handle_line(
+                _req(
+                    f"edge-cursor-{index}",
+                    "workspace.process.list",
+                    {"session_id": session_id, "cursor": bad_cursor},
+                )
+            )
+            assert not response["ok"] and response["error"]["code"] == "INVALID_PARAMS"
+        beyond = _list(server, session_id, {"cursor": "o999"})
+        assert beyond["result"]["processes"] == []
+        assert beyond["result"]["next_cursor"] is None
+        assert beyond["result"]["truncated"] is False
+    finally:
+        for handle in registry.list():
+            if handle.process.poll() is None:
+                registry.kill(handle)
+            registry.wait(handle, 3)
+
+
+_list_counter = itertools.count()
+
+
+def _list(server, session_id, params):
+    merged = {"session_id": session_id, **params}
+    response = server.handle_line(
+        _req(f"edge-{next(_list_counter)}", "workspace.process.list", merged)
+    )
+    assert response["ok"], response
+    return response
+
+
+def test_exit_reason_branches():
+    assert _exit_reason(None, False) is None
+    assert _exit_reason(None, True) is None
+    assert _exit_reason(0, False) == "exited"
+    assert _exit_reason(3, False) == "failed"
+    assert _exit_reason(-9, False) == "signaled"
+    assert _exit_reason(1, True) == "stopped"
+    assert _exit_reason("bogus", False) == "unknown"
+
+
+def test_exited_quick_process_reports_exited(tmp_path):
+    registry = ProcessRegistry()
+    handle_id = registry.start([sys.executable, "-c", "pass"], cwd=str(tmp_path))
+    try:
+        handle = registry.get(handle_id)
+        assert handle is not None
+        assert registry.wait(handle, 10)
+        row = _row_for(registry, handle_id)
+        assert row["exit_reason"] == "exited"
+        assert isinstance(row["ended_at"], float)
+    finally:
+        handle = registry.get(handle_id)
+        if handle is not None:
+            registry.wait(handle, 3)
+
+
+def test_ended_at_observed_without_wait(tmp_path):
+    registry = ProcessRegistry()
+    handle_id = registry.start([sys.executable, "-c", "pass"], cwd=str(tmp_path))
+    try:
+        deadline = time.monotonic() + 10
+        while registry.get(handle_id).process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        # get()/list() stamp ended_at on first observation, no wait() needed.
+        assert isinstance(registry.get(handle_id).ended_at, float)
+        assert isinstance(registry.list()[0].ended_at, float)
+    finally:
+        handle = registry.get(handle_id)
+        if handle is not None:
+            registry.wait(handle, 3)
+
+
+def _row_for(registry, handle_id):
+    from types import SimpleNamespace
+
+    shown = SimpleNamespace(show=lambda ref: ref)
+    fake_server = SimpleNamespace(
+        _services=SimpleNamespace(sessions=shown),
+        _turns=SimpleNamespace(_desktop_processes={"s": registry}),
+        _pty=SimpleNamespace(list=lambda: []),
+        _previews=SimpleNamespace(_lock=threading.RLock(), _items={}),
+        _engine_instance_id="boot",
+    )
+    rows = DesktopProcesses(fake_server).list({"session_id": "s"})["processes"]
+    return {row["id"]: row for row in rows}[f"process:{handle_id}"]
+
+
+def test_bad_precondition_subtypes_rejected(server, tmp_path):
+    session_id = _create_chat(server, tmp_path, tag="subtype")
+    registry = ProcessRegistry()
+    server.turns._desktop_processes[session_id] = registry
+    handle_id = _start_sleep(registry, tmp_path)
+    identity = f"process:{handle_id}"
+    try:
+        for index, params in enumerate(
+            (
+                {"generation": True},
+                {"generation": 1.0},
+                {"engine_instance_id": ""},
+            )
+        ):
+            response = server.handle_line(
+                _req(
+                    f"sub-{index}",
+                    "workspace.process.stop",
+                    {"session_id": session_id, "id": identity, **params},
+                )
+            )
+            assert not response["ok"] and response["error"]["code"] == "INVALID_PARAMS"
+    finally:
+        handle = registry.get(handle_id)
+        if handle is not None:
+            if handle.process.poll() is None:
+                registry.kill(handle)
+            registry.wait(handle, 3)
+
+
+def test_not_found_wins_over_stale_preconditions(server, tmp_path):
+    session_id = _create_chat(server, tmp_path, tag="precedence")
+    response = server.handle_line(
+        _req(
+            "sub",
+            "workspace.process.stop",
+            {
+                "session_id": session_id,
+                "id": "process:proc_999",
+                "engine_instance_id": "boot-from-another-world",
+                "generation": 99,
+            },
+        )
+    )
+    assert not response["ok"] and response["error"]["code"] == "NOT_FOUND"
+
+
+def test_pty_generation_and_rows():
+    from rinari.engine_protocol.pty import EnginePtyService
+
+    service = EnginePtyService(lambda event: None)
+    assert service.handle_generation("pty_999") == 1
+    service._handle_generation["pty_001"] = 4
+    assert service.handle_generation("pty_001") == 4
+
+
+needs_pty = pytest.mark.skipif(not hasattr(os, "openpty"), reason="PTY requires a POSIX platform")
+
+
+@needs_pty
+def test_pty_rows_carry_identity_fields(tmp_path):
+    from rinari.engine_protocol.pty import EnginePtyService
+
+    service = EnginePtyService(lambda event: None)
+    first = service.start("exit 0", cwd=str(tmp_path), session_id="s")
+    second = service.start("exit 0", cwd=str(tmp_path), session_id="s")
+    try:
+        assert service.handle_generation(second) > service.handle_generation(first) >= 1
+        rows = {row["pty_id"]: row for row in service.list()}
+        assert set((first, second)) <= set(rows)
+        assert "ended_at" in rows[first] and "stop_requested" in rows[first]
+    finally:
+        service.terminate(first)
+        service.terminate(second)
+        service.shutdown()
+
+
+def test_preview_rows_carry_identity_fields():
+    from types import SimpleNamespace
+
+    shown = SimpleNamespace(show=lambda ref: ref)
+    item = SimpleNamespace(
+        id="p1",
+        session_id="s",
+        process_id=None,
+        server=object(),
+        command=None,
+        root="C:/Site",
+        url="http://127.0.0.1:8123/",
+    )
+    fake_server = SimpleNamespace(
+        _services=SimpleNamespace(sessions=shown),
+        _turns=SimpleNamespace(_desktop_processes={}),
+        _pty=SimpleNamespace(list=lambda: []),
+        _previews=SimpleNamespace(_lock=threading.RLock(), _items={"p1": item}),
+        _engine_instance_id="boot-A",
+    )
+    api = DesktopProcesses(fake_server)
+    row = api.list({"session_id": "s"})["processes"][0]
+    assert row["kind"] == "preview"
+    assert row["generation"] == 1
+    assert row["engine_instance_id"] == "boot-A"
+    assert row["readiness"] in ("unknown", "listening", "not_listening")
+    assert row["ended_at"] is None
+
+
+def test_hello_without_instance_omits_field():
+    from rinari.engine_protocol.messages import hello
+
+    assert "engine_instance_id" not in hello()
+    assert hello("abc123")["engine_instance_id"] == "abc123"

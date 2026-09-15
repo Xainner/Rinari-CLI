@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import contextlib
+import ipaddress
+import re
 import socket
 import subprocess
 import time
@@ -16,6 +18,8 @@ from rinari.engine_protocol.errors import (
 
 LIST_DEFAULT_LIMIT = 100
 LIST_MAX_LIMIT = 200
+# Opaque offset cursors ("o{N}"). Bounded digits so int() cannot raise.
+_CURSOR_RE = re.compile(r"o\d{1,6}")
 # Loopback TCP probes backing the `readiness` field. Bounded by design:
 # loopback only, no HTTP bytes, one second, cached per resource.
 READINESS_TTL_S = 10.0
@@ -47,6 +51,10 @@ def _probe_loopback(url: str) -> str:
     Returns "listening" when something accepts the connection. Anything
     else is "not_listening"; non-loopback or unparsable URLs are never
     probed and report "unknown". Listening is not app readiness.
+
+    Only literal loopback IPs (127/8, ::1) and bare "localhost" are
+    dialed. DNS names are never resolved here: a name such as
+    127.0.0.1.evil.com must not turn this probe into an external scan.
     """
     try:
         parsed = urlparse(url)
@@ -57,7 +65,7 @@ def _probe_loopback(url: str) -> str:
     host = (parsed.hostname or "").lower()
     if host == "localhost":
         dial = "127.0.0.1"
-    elif host == "127.0.0.1" or host.startswith("127.") or host == "::1":
+    elif _is_loopback_literal(host):
         dial = host
     else:
         return READINESS_UNKNOWN
@@ -70,6 +78,15 @@ def _probe_loopback(url: str) -> str:
             return READINESS_LISTENING
     except OSError:
         return READINESS_NOT_LISTENING
+
+
+def _is_loopback_literal(host: str) -> bool:
+    """True only for literal loopback IPs, never DNS names."""
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return address.is_loopback
 
 
 class DesktopProcesses:
@@ -229,11 +246,9 @@ class DesktopProcesses:
         cursor = params.get("cursor")
         offset = 0
         if cursor is not None:
-            if (
-                not isinstance(cursor, str)
-                or not cursor.startswith("o")
-                or not cursor[1:].isdigit()
-            ):
+            # Strict shape before int(): isdigit() accepts unicode digits
+            # and unbounded lengths that int() then rejects with ValueError.
+            if not isinstance(cursor, str) or _CURSOR_RE.fullmatch(cursor) is None:
                 raise EngineProtocolError("INVALID_PARAMS", "Param 'cursor' is malformed.")
             offset = int(cursor[1:])
             if offset > total:
@@ -245,7 +260,10 @@ class DesktopProcesses:
     def list(self, params):
         entries = self._entries(params)
         identities = sorted(entries)
-        # Stable presentation order first; pagination slices it.
+        # Presentation order is deterministic per snapshot, but snapshots
+        # are point-in-time: a cursor is only valid against a stable total.
+        # Consumers paging live registries must re-list when `total`
+        # changes between pages instead of assuming offset stability.
         all_rows = [self._row(identity, entries[identity]) for identity in identities]
         all_rows.sort(key=lambda row: (not row["running"], -row.get("started_at", 0)))
         total = len(all_rows)

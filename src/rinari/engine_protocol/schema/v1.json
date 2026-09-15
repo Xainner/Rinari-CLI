@@ -1101,16 +1101,25 @@
           "type": "integer"
         },
         "ended_at": {
-          "type": "number"
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "exit_reason": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "readiness": {
           "type": "string"
         },
         "readiness_checked_at": {
-          "type": "number"
+          "type": [
+            "number",
+            "null"
+          ]
         }
       }
     },
