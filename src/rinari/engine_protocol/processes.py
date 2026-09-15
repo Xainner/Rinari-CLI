@@ -18,8 +18,9 @@ from rinari.engine_protocol.errors import (
 
 LIST_DEFAULT_LIMIT = 100
 LIST_MAX_LIMIT = 200
-# Opaque offset cursors ("o{N}"). Bounded digits so int() cannot raise.
-_CURSOR_RE = re.compile(r"o\d{1,6}")
+# Opaque offset cursors ("o{N}"). ASCII digits only (\d would accept
+# Unicode digits) and bounded so int() cannot raise.
+_CURSOR_RE = re.compile(r"o[0-9]{1,6}")
 # Loopback TCP probes backing the `readiness` field. Bounded by design:
 # loopback only, no HTTP bytes, one second, cached per resource.
 READINESS_TTL_S = 10.0
@@ -70,7 +71,7 @@ def _probe_loopback(url: str) -> str:
     else:
         return READINESS_UNKNOWN
     try:
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        port = parsed.port if parsed.port is not None else (443 if parsed.scheme == "https" else 80)
     except ValueError:
         return READINESS_UNKNOWN
     try:

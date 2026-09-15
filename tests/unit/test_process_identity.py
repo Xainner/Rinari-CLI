@@ -613,3 +613,157 @@ def test_hello_without_instance_omits_field():
 
     assert "engine_instance_id" not in hello()
     assert hello("abc123")["engine_instance_id"] == "abc123"
+
+
+def test_loopback_literal_spellings():
+    from rinari.engine_protocol.processes import _is_loopback_literal
+
+    assert _is_loopback_literal("127.0.0.1")
+    assert _is_loopback_literal("::1")
+    # Strict literals only: exotic but valid spellings fail closed to
+    # unknown rather than risking a misdial.
+    assert not _is_loopback_literal("127.1")
+    assert not _is_loopback_literal("localhost")
+    assert not _is_loopback_literal("127.0.0.1.")
+    assert not _is_loopback_literal("0x7f.0.0.1")
+    assert not _is_loopback_literal("2130706433")
+    assert not _is_loopback_literal("example.com")
+    assert not _is_loopback_literal("")
+
+
+def test_probe_port_zero_and_userinfo():
+    # Port 0 is never a real service: must not fall back to :80.
+    assert _probe_loopback("http://127.0.0.1:0/") == "not_listening"
+    # Userinfo is stripped by hostname parsing; the literal IP is dialed.
+    assert _probe_loopback("http://user:pass@127.0.0.1:9/") == "not_listening"
+
+
+def test_cursor_ascii_and_boundary_edges(server, tmp_path):
+    session_id = _create_chat(server, tmp_path, tag="cursor")
+    registry = ProcessRegistry()
+    server.turns._desktop_processes[session_id] = registry
+    try:
+        assert _list(server, session_id, {"cursor": "o0"})["result"]["total"] == 0
+        assert _list(server, session_id, {"cursor": "o007"})["result"]["processes"] == []
+        assert _list(server, session_id, {"cursor": "o123456"})["result"]["processes"] == []
+        # U+0661 ARABIC-INDIC DIGIT ONE matches \d but must be rejected.
+        for index, bad in enumerate(("o1234567", "o" + chr(0x661), "o007x")):
+            response = server.handle_line(
+                _req(
+                    f"cursor-edge-{index}",
+                    "workspace.process.list",
+                    {"session_id": session_id, "cursor": bad},
+                )
+            )
+            assert not response["ok"] and response["error"]["code"] == "INVALID_PARAMS"
+    finally:
+        for handle in registry.list():
+            if handle.process.poll() is None:
+                registry.kill(handle)
+            registry.wait(handle, 3)
+
+
+def test_pty_rows_surface_identity_and_end_state():
+    from types import SimpleNamespace
+
+    def pty_row(alive, code, ended_at, stop_requested):
+        return {
+            "pty_id": "pty_001",
+            "command": "sh",
+            "cwd": "C:/s",
+            "alive": alive,
+            "exit_code": code,
+            "ended_at": ended_at,
+            "stop_requested": stop_requested,
+            "session_id": "s",
+        }
+
+    def fake_server(rows):
+        shown = SimpleNamespace(show=lambda ref: ref)
+        owner = SimpleNamespace(list=lambda: rows, handle_generation=lambda pid: 9)
+        return SimpleNamespace(
+            _services=SimpleNamespace(sessions=shown),
+            _turns=SimpleNamespace(_desktop_processes={}),
+            _pty=owner,
+            _previews=SimpleNamespace(_lock=threading.RLock(), _items={}),
+            _engine_instance_id="boot",
+        )
+
+    running = DesktopProcesses(fake_server([pty_row(True, None, None, False)])).list(
+        {"session_id": "s"}
+    )["processes"][0]
+    assert running["generation"] == 9
+    assert running["engine_instance_id"] == "boot"
+    assert running["exit_reason"] is None
+    assert running["ended_at"] is None
+    assert running["readiness"] == "unknown"
+    stopped = DesktopProcesses(fake_server([pty_row(False, 0, 1700000060.0, True)])).list(
+        {"session_id": "s"}
+    )["processes"][0]
+    assert stopped["exit_reason"] == "stopped"
+    assert stopped["ended_at"] == 1700000060.0
+
+
+def test_preview_exited_row_reports_ended_unknown():
+    from types import SimpleNamespace
+
+    handle = SimpleNamespace(process=SimpleNamespace(poll=lambda: 3))
+    item = SimpleNamespace(
+        id="p1",
+        session_id="s",
+        process_id="h1",
+        server=None,
+        command="npm run dev",
+        root="C:/Site",
+        url=None,
+    )
+    shown = SimpleNamespace(show=lambda ref: ref)
+    fake_server = SimpleNamespace(
+        _services=SimpleNamespace(sessions=shown),
+        _turns=SimpleNamespace(_desktop_processes={}),
+        _pty=SimpleNamespace(list=lambda: []),
+        _previews=SimpleNamespace(
+            _lock=threading.RLock(),
+            _items={"p1": item},
+            processes=SimpleNamespace(get=lambda handle_id: handle),
+        ),
+        _engine_instance_id="boot",
+    )
+    row = DesktopProcesses(fake_server).list({"session_id": "s"})["processes"][0]
+    assert row["exit_reason"] == "failed"
+    assert row["ended_at"] is None
+    assert row["generation"] == 1
+
+
+def test_read_caches_loopback_readiness_number(tmp_path):
+    from types import SimpleNamespace
+
+    httpd = HTTPServer(("127.0.0.1", 0), _Quiet)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = httpd.server_port
+        item = SimpleNamespace(
+            id="p1",
+            session_id="s",
+            process_id=None,
+            server=object(),
+            command=None,
+            root="C:/Site",
+            url=f"http://127.0.0.1:{port}/",
+        )
+        shown = SimpleNamespace(show=lambda ref: ref)
+        fake_server = SimpleNamespace(
+            _services=SimpleNamespace(sessions=shown),
+            _turns=SimpleNamespace(_desktop_processes={}),
+            _pty=SimpleNamespace(list=lambda: []),
+            _previews=SimpleNamespace(_lock=threading.RLock(), _items={"p1": item}),
+            _engine_instance_id="boot",
+        )
+        api = DesktopProcesses(fake_server)
+        row = api.read({"session_id": "s", "id": "preview:p1"})["process"]
+        assert row["readiness"] == "listening"
+        assert isinstance(row["readiness_checked_at"], float)
+    finally:
+        httpd.shutdown()
+        thread.join(timeout=5)
