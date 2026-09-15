@@ -9,6 +9,14 @@ from rinari.tools.definition import ToolErrorCode, ToolErrorInfo, ToolResult
 
 
 def project_result(result: ToolResult, *, tool: str, budget: int, spill, force=False) -> ToolResult:
+    """Fit ``result`` into ``budget`` bytes without discarding evidence.
+
+    ``ToolResult.truncated`` means "the model did not observe the complete
+    result": it is set whenever the delivery is partial, so activity and
+    desktop presentation report the observation as incomplete even though the
+    full evidence stays recoverable through ``artifact.read``.
+    """
+
     def size(value):
         return len(value.to_model_text(tool).encode("utf-8"))
 
@@ -32,6 +40,7 @@ def project_result(result: ToolResult, *, tool: str, budget: int, spill, force=F
                     "truncated": end < data["size_bytes"],
                     "delivery_partial": count < len(text),
                 },
+                truncated=result.truncated or count < len(text),
             )
 
         low, high = 0, len(text)
@@ -103,7 +112,7 @@ def project_result(result: ToolResult, *, tool: str, budget: int, spill, force=F
         projected["file_count"] = len(files)
     else:
         collect(data, projected)
-    candidate = replace(result, data=projected, artifacts=tuple(artifacts))
+    candidate = replace(result, data=projected, artifacts=tuple(artifacts), truncated=True)
     if size(candidate) > budget:
         # Full evidence is durable even when mandatory batch metadata cannot fit.
         return replace(

@@ -10,7 +10,7 @@ import threading
 from pathlib import Path
 
 from rinari.artifacts.limits import limit
-from rinari.artifacts.store import ArtifactRecord
+from rinari.artifacts.store import ArtifactRecord, os_path
 from rinari.shared.clock import now_iso
 
 _lock = threading.RLock()
@@ -82,7 +82,7 @@ def import_file(
             destination = folder / name
             if expected_hash is not None and digest.hexdigest() != expected_hash:
                 raise ValueError("File changed after validation")
-            os.replace(temporary, destination)
+            os.replace(temporary, os_path(destination))
             record = ArtifactRecord(
                 id=name,
                 session_ref=session_id,

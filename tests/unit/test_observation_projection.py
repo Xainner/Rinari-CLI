@@ -65,6 +65,25 @@ def test_partial_source_is_distinct_from_delivery():
     assert output.data["source_partial"] and output.data["delivery_partial"]
 
 
+def test_partial_delivery_marks_observation_truncated():
+    """A recoverable spill is an incomplete observation even if the source was whole."""
+    complete = ToolResult(ok=True, data={"text": "x" * 10000})
+    delivered, _ = project(complete)
+    assert delivered.truncated is False and "delivery_partial" not in delivered.data
+
+    spilled, _ = project(complete, 2000)
+    assert spilled.ok and spilled.truncated is True
+    assert spilled.data["delivery_partial"] and not spilled.data["source_partial"]
+
+    page = ToolResult(
+        ok=True,
+        data={"uri": "artifact://s/n/a", "start_byte": 0, "size_bytes": 10000, "text": "y" * 10000},
+    )
+    repaged, saved = project(page, 2000, tool="artifact.read")
+    assert repaged.truncated is True and repaged.data["delivery_partial"]
+    assert not saved  # artifact pages are repaged, never spilled again
+
+
 def test_storage_failure_never_returns_fake_reference():
     import pytest
 

@@ -1,0 +1,13 @@
+# Deterministic line endings: generated hashes (Agent protocol codegen) and CI
+# run on Linux; Windows checkouts must not turn LF blobs into CRLF text.
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.png binary
+*.jpg binary
+*.ico binary
+*.gif binary
+*.webp binary
+*.woff binary
+*.woff2 binary
