@@ -325,6 +325,10 @@ def test_send_requires_consent_and_delivers_as_peer_turn(server, tmp_path, model
     assert peer_rows and peer_rows[0]["origin"]["kind"] == "peer"
     assert peer_rows[0]["content"] == "¿qué archivos cambiaste hoy?"
 
+    timeline_turns = _ok(server, "session.timeline", {"ref": b})["turns"]
+    assert timeline_turns[-1]["origin"]["kind"] == "peer"
+    assert timeline_turns[-1]["user_message"] == "¿qué archivos cambiaste hoy?"
+
     listed = _ok(server, "session.peer_message.list", {"session_id": b})["messages"]
     assert listed[0]["state"] == "completed"
     assert listed[0]["from_session_id"] == a

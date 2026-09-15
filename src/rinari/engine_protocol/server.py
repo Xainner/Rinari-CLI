@@ -973,6 +973,9 @@ class EngineServer:
                 turn["mode"] = payload.get("mode")
                 turn["started_at"] = payload.get("occurred_at") or row.created_at
                 turn["user_message"] = str(payload.get("message") or "")
+                if isinstance(payload.get("origin"), dict):
+                    # Provenance of the turn (peer / forwarded); Code renders it.
+                    turn["origin"] = payload["origin"]
                 if turn_id in redacted_turns:
                     turn["user_message"] = "[contenido omitido por privacidad]"
                 continue
