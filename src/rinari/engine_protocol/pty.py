@@ -199,14 +199,15 @@ class EnginePtyService:
         return handle
 
     def _resolve_cwd(self, cwd: str | None, session_id: str | None) -> Path:
-        if session_id is not None:
+        # session_id alone resolves the cwd default; with an explicit cwd it
+        # is only row attribution, so no resolver is required for it.
+        if session_id is not None and cwd is None:
             if self._resolve_session is None:
                 raise EngineProtocolError(
                     "INVALID_PARAMS", "Param 'session_id' is not supported here."
                 )
             record = self._resolve_session(session_id)
-            if cwd is None:
-                cwd = record.current_cwd
+            cwd = record.current_cwd
         if not isinstance(cwd, str) or not cwd:
             raise EngineProtocolError(
                 "INVALID_PARAMS", "Param 'cwd' (or a session default) is required."
