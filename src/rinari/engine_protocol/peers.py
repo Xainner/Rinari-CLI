@@ -259,7 +259,7 @@ class PeerBroker:
                 {
                     "session_id": record.id,
                     "label": member["label"],
-                    "project": record.project_root,
+                    "project": record.project_root_snapshot or record.current_cwd,
                     "model_id": record.model_id,
                     "provider_id": record.provider_id,
                     "busy": self._turns.has_active_turn(record.id),

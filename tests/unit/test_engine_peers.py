@@ -291,6 +291,45 @@ def test_peer_tools_are_not_exposed_without_binding(server, tmp_path, models):
     assert not server.turns.operations.inbox_list("ses_nobody")
 
 
+def test_session_peers_lists_group_members_with_project_and_flags(server, tmp_path, models):
+    """Regression: `session.peers` read a field SessionRecord does not have (AttributeError)."""
+    a = _create_chat(server, tmp_path, "a")
+    b = _create_chat(server, tmp_path, "b")
+    c = _create_chat(server, tmp_path, "c")
+    _set_group(
+        server,
+        "board-1",
+        [
+            (a, "Proyecto A", True, True),
+            (b, "Proyecto B", True, False),
+            (c, "Proyecto C", True, True),
+        ],
+    )
+    models[a] = ScriptedModel(
+        [
+            _tool("find", "capability.search", {"query": "session peers list"}),
+            _tool("list", "session.peers", {}),
+            _answer(),
+        ]
+    )
+    _start(server, a, "¿quiénes son mis pares?")
+    _wait_terminal(server, a)
+    outputs = _tool_results(models[a])
+    listing = next((o for o in outputs if '"tool": "session.peers"' in o), None)
+    assert listing is not None, outputs
+    payload = json.loads(listing)
+    assert payload["ok"] is True, payload
+    peers = {item["session_id"]: item for item in payload["data"]["peers"]}
+    assert set(peers) == {b, c}
+    assert peers[b]["label"] == "Proyecto B"
+    assert peers[b]["project"] == str(tmp_path)
+    assert peers[b]["busy"] is False
+    # B does not receive: listed, but sending is not allowed right now.
+    assert peers[b]["can_send"] is False
+    assert peers[c]["can_send"] is True
+    assert not _seen(server, "approval.requested")
+
+
 def test_send_requires_consent_and_delivers_as_peer_turn(server, tmp_path, models):
     a = _create_chat(server, tmp_path, "a")
     b = _create_chat(server, tmp_path, "b")
