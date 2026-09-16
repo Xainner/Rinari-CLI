@@ -156,6 +156,7 @@ class EnginePtyService:
                 "cwd": handle.cwd,
                 "alive": not handle.exited,
                 "exit_code": handle.exit_code,
+                "started_at": handle.started_at,
                 "ended_at": handle.ended_at,
                 "stop_requested": handle.stop_requested,
                 "session_id": session_of.get(handle.id),

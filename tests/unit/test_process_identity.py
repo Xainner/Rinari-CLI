@@ -761,9 +761,215 @@ def test_read_caches_loopback_readiness_number(tmp_path):
             _engine_instance_id="boot",
         )
         api = DesktopProcesses(fake_server)
-        row = api.read({"session_id": "s", "id": "preview:p1"})["process"]
+        # The probe runs off the dispatch thread, so the first read returns
+        # the previous (absent) observation and schedules one. Reading again
+        # picks up the result; nothing ever blocks handle_line on a dial.
+        first = api.read({"session_id": "s", "id": "preview:p1"})["process"]
+        assert first["readiness"] == "unknown"
+        assert first["readiness_checked_at"] is None
+        deadline = time.monotonic() + 5
+        row = first
+        while row["readiness"] != "listening" and time.monotonic() < deadline:
+            time.sleep(0.02)
+            row = api.read({"session_id": "s", "id": "preview:p1"})["process"]
         assert row["readiness"] == "listening"
         assert isinstance(row["readiness_checked_at"], float)
     finally:
         httpd.shutdown()
         thread.join(timeout=5)
+
+
+# -- exact duration: only where the engine owns real timestamps ----------
+
+
+def _preview_server(items, pty_rows=None, processes=None):
+    from types import SimpleNamespace
+
+    previews = SimpleNamespace(_lock=threading.RLock(), _items=items)
+    if processes is not None:
+        previews.processes = processes
+    return SimpleNamespace(
+        _services=SimpleNamespace(sessions=SimpleNamespace(show=lambda ref: ref)),
+        _turns=SimpleNamespace(_desktop_processes={}),
+        _pty=SimpleNamespace(list=lambda: list(pty_rows or [])),
+        _previews=previews,
+        _engine_instance_id="boot",
+    )
+
+
+@needs_pty
+def test_pty_row_exposes_real_started_at(tmp_path):
+    """A live pty reports its own start time, never the caller clock."""
+    from rinari.engine_protocol.pty import EnginePtyService
+
+    before = time.time()
+    service = EnginePtyService(lambda event: None)
+    pty_id = service.start("sleep 30", cwd=str(tmp_path), session_id="s")
+    try:
+        row = {item["pty_id"]: item for item in service.list()}[pty_id]
+        assert isinstance(row["started_at"], float)
+        assert before <= row["started_at"] <= time.time()
+        assert row["ended_at"] is None
+    finally:
+        service.terminate(pty_id)
+        service.shutdown()
+
+
+@needs_pty
+def test_finished_pty_reports_ended_at_after_started_at(tmp_path):
+    """Both ends are real observations, so the duration is never negative."""
+    from rinari.engine_protocol.pty import EnginePtyService
+
+    service = EnginePtyService(lambda event: None)
+    pty_id = service.start("exit 0", cwd=str(tmp_path), session_id="s")
+    try:
+        deadline = time.monotonic() + 10
+        row = {item["pty_id"]: item for item in service.list()}[pty_id]
+        while row["ended_at"] is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+            row = {item["pty_id"]: item for item in service.list()}[pty_id]
+        assert isinstance(row["started_at"], float)
+        assert isinstance(row["ended_at"], float)
+        assert row["ended_at"] >= row["started_at"]
+    finally:
+        service.shutdown()
+
+
+def test_preview_with_process_handle_propagates_timestamps():
+    """A process-backed preview carries the registry handle real times."""
+    from types import SimpleNamespace
+
+    handle = SimpleNamespace(
+        process=SimpleNamespace(poll=lambda: 0),
+        started_at=1_700_000_000.0,
+        ended_at=1_700_000_042.0,
+        stop_requested=True,
+    )
+    item = SimpleNamespace(
+        id="p1",
+        session_id="s",
+        process_id="h1",
+        server=None,
+        command="npm run dev",
+        root="C:/Site",
+        url=None,
+    )
+    fake_server = _preview_server(
+        {"p1": item},
+        processes=SimpleNamespace(get=lambda handle_id: handle),
+    )
+    row = DesktopProcesses(fake_server).list({"session_id": "s"})["processes"][0]
+    assert row["started_at"] == 1_700_000_000.0
+    assert row["ended_at"] == 1_700_000_042.0
+    # stop_requested wins over the exit code: this end was asked for.
+    assert row["exit_reason"] == "stopped"
+
+
+def test_external_preview_invents_no_duration():
+    """No handle means no timestamps: absent, never the current clock."""
+    from types import SimpleNamespace
+
+    item = SimpleNamespace(
+        id="p1",
+        session_id="s",
+        process_id=None,
+        server=object(),
+        command=None,
+        root="C:/Site",
+        url=None,
+    )
+    row = DesktopProcesses(_preview_server({"p1": item})).list({"session_id": "s"})["processes"][0]
+    assert row["started_at"] is None
+    assert row["ended_at"] is None
+
+
+def test_listing_sorts_rows_without_a_start_time():
+    """A null started_at must not reach the unary minus in the sort key."""
+    from types import SimpleNamespace
+
+    external = SimpleNamespace(
+        id="p1",
+        session_id="s",
+        process_id=None,
+        server=object(),
+        command=None,
+        root="C:/Site",
+        url=None,
+    )
+    pty_row = {
+        "pty_id": "t1",
+        "command": "bash",
+        "cwd": "C:/Site",
+        "alive": True,
+        "exit_code": None,
+        "started_at": 1_700_000_000.0,
+        "ended_at": None,
+        "stop_requested": False,
+        "session_id": "s",
+    }
+    result = DesktopProcesses(_preview_server({"p1": external}, pty_rows=[pty_row])).list(
+        {"session_id": "s"}
+    )
+    assert result["total"] == 2
+    # Running first; the timeless external preview sorts after it.
+    assert [row["id"] for row in result["processes"]] == ["pty:t1", "preview:p1"]
+
+
+def test_readiness_probe_never_runs_on_the_calling_thread():
+    """A row must not block on a dial: handle_line owns the stdin loop."""
+    from types import SimpleNamespace
+
+    from rinari.engine_protocol import processes as processes_module
+
+    item = SimpleNamespace(
+        id="p1",
+        session_id="s",
+        process_id=None,
+        server=object(),
+        command=None,
+        root="C:/Site",
+        url="http://127.0.0.1:9/",
+    )
+    caller = threading.get_ident()
+    seen: list[int] = []
+    original = processes_module._probe_loopback
+
+    def recording(url):
+        seen.append(threading.get_ident())
+        return original(url)
+
+    processes_module._probe_loopback = recording
+    try:
+        api = DesktopProcesses(_preview_server({"p1": item}))
+        started = time.monotonic()
+        row = api.list({"session_id": "s"})["processes"][0]
+        # The dial is not awaited, so listing stays under the probe timeout.
+        assert time.monotonic() - started < processes_module.READINESS_TIMEOUT_S
+        assert row["readiness"] == "unknown"
+        deadline = time.monotonic() + 5
+        while not seen and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert seen and caller not in seen
+    finally:
+        processes_module._probe_loopback = original
+
+
+def test_readiness_cache_stays_bounded():
+    """Preview ids are random per start: the cache must not grow forever."""
+    from rinari.engine_protocol import processes as processes_module
+
+    api = DesktopProcesses(_preview_server({}))
+    with api._readiness_lock:
+        for index in range(processes_module.READINESS_CACHE_MAX + 20):
+            api._readiness[f"preview:{index}"] = ("listening", float(index))
+        api._readiness_inflight.add("preview:new")
+    original = processes_module._probe_loopback
+    processes_module._probe_loopback = lambda url: "listening"
+    try:
+        api._probe_into_cache("preview:new", "http://127.0.0.1:1/")
+    finally:
+        processes_module._probe_loopback = original
+    assert len(api._readiness) == processes_module.READINESS_CACHE_MAX
+    assert "preview:new" in api._readiness
+    # Oldest checked_at evicted first.
+    assert "preview:0" not in api._readiness

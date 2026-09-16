@@ -67,6 +67,7 @@ class PtyHandle:
         "read_cursor",
         "reaper",
         "size",
+        "started_at",
         "stop_requested",
     )
 
@@ -83,6 +84,9 @@ class PtyHandle:
         self.reaper: threading.Thread | None = None
         self.read_cursor = 0
         self.size = None
+        # Real start time (seconds since the epoch, like ProcessRegistry
+        # handles) so a finished pty can report an exact duration.
+        self.started_at = time.time()
         self.stop_requested = False
 
     def pump(self) -> None:

@@ -7,6 +7,7 @@ import ipaddress
 import re
 import socket
 import subprocess
+import threading
 import time
 from typing import Any
 from urllib.parse import urlparse
@@ -25,6 +26,9 @@ _CURSOR_RE = re.compile(r"o[0-9]{1,6}")
 # loopback only, no HTTP bytes, one second, cached per resource.
 READINESS_TTL_S = 10.0
 READINESS_TIMEOUT_S = 1.0
+# Preview ids are random per start and never reused, so the cache would
+# otherwise keep one entry per preview ever opened during a boot.
+READINESS_CACHE_MAX = 256
 
 READINESS_UNKNOWN = "unknown"
 READINESS_LISTENING = "listening"
@@ -95,6 +99,9 @@ class DesktopProcesses:
         self.server = server
         # resource identity -> (readiness, checked_at); loopback only.
         self._readiness: dict[str, tuple[str, float]] = {}
+        # Probes run off the dispatch thread, so the cache is shared state.
+        self._readiness_lock = threading.Lock()
+        self._readiness_inflight: set[str] = set()
 
     @property
     def _engine_instance_id(self) -> str:
@@ -133,34 +140,56 @@ class DesktopProcesses:
             return 1
         return 1
 
-    def _readiness_for(self, identity: str, url: Any, *, refresh: bool) -> tuple[str, float | None]:
+    def _readiness_for(self, identity: str, url: Any) -> tuple[str, float | None]:
+        """Last probed readiness for a loopback URL, never probing here.
+
+        `handle_line` owns the stdin loop: only turns run in workers, so a
+        blocking dial would stall every other request (cancel included) for
+        the probe timeout. A cache entry older than the TTL schedules one
+        background probe and the caller gets the previous observation --
+        with its real `checked_at` -- or `unknown` until that probe lands.
+        """
         if not isinstance(url, str) or not url:
             return READINESS_UNKNOWN, None
-        cached = self._readiness.get(identity)
         now = time.time()
-        if cached is not None and not refresh and now - cached[1] < READINESS_TTL_S:
-            return cached
-        if not refresh:
-            if cached is not None:
+        with self._readiness_lock:
+            cached = self._readiness.get(identity)
+            if cached is not None and now - cached[1] < READINESS_TTL_S:
                 return cached
-            return READINESS_UNKNOWN, None
-        state = _probe_loopback(url)
-        if state == READINESS_UNKNOWN and cached is not None:
-            return cached
-        checked_at = now
-        if state == READINESS_UNKNOWN:
-            return READINESS_UNKNOWN, None
-        self._readiness[identity] = (state, checked_at)
-        return state, checked_at
+            if identity in self._readiness_inflight:
+                return cached if cached is not None else (READINESS_UNKNOWN, None)
+            self._readiness_inflight.add(identity)
+        threading.Thread(
+            target=self._probe_into_cache,
+            args=(identity, url),
+            daemon=True,
+        ).start()
+        return cached if cached is not None else (READINESS_UNKNOWN, None)
 
-    def _row(self, identity, entry, *, refresh_readiness: bool = False):
+    def _probe_into_cache(self, identity: str, url: str) -> None:
+        """Background probe. Only a decided state replaces the cached one."""
+        state = READINESS_UNKNOWN
+        try:
+            state = _probe_loopback(url)
+        finally:
+            with self._readiness_lock:
+                self._readiness_inflight.discard(identity)
+                if state != READINESS_UNKNOWN:
+                    self._readiness[identity] = (state, time.time())
+                    excess = len(self._readiness) - READINESS_CACHE_MAX
+                    if excess > 0:
+                        stale = sorted(self._readiness.items(), key=lambda item: item[1][1])
+                        for key, _ in stale[:excess]:
+                            del self._readiness[key]
+
+    def _row(self, identity, entry):
         kind, owner, item = entry
         instance_id = self._engine_instance_id
         generation = self._generation(identity, entry)
         if kind == "pty":
             running = bool(item["alive"])
             code = item["exit_code"]
-            readiness, checked_at = self._readiness_for(identity, None, refresh=False)
+            readiness, checked_at = self._readiness_for(identity, None)
             return {
                 "id": identity,
                 "kind": kind,
@@ -168,6 +197,9 @@ class DesktopProcesses:
                 "cwd": item["cwd"],
                 "running": running,
                 "exit_code": code,
+                # Real handle timestamps; a pty without them reports none
+                # rather than a duration invented from the clock.
+                "started_at": item.get("started_at"),
                 "ended_at": item.get("ended_at"),
                 "exit_reason": (
                     None
@@ -184,9 +216,13 @@ class DesktopProcesses:
             handle = owner.processes.get(item.process_id) if item.process_id else None
             running = handle.process.poll() is None if handle else item.server is not None
             code = handle.process.poll() if handle else None
-            readiness, checked_at = self._readiness_for(
-                identity, item.url, refresh=refresh_readiness
-            )
+            # A process-backed preview has the registry handle's real
+            # timestamps. An external or static one has none: the row says
+            # so instead of dressing up the current clock as a duration.
+            started_at = getattr(handle, "started_at", None) if handle else None
+            ended_at = getattr(handle, "ended_at", None) if handle else None
+            stop_requested = bool(getattr(handle, "stop_requested", False)) if handle else False
+            readiness, checked_at = self._readiness_for(identity, item.url)
             return {
                 "id": identity,
                 "kind": kind,
@@ -195,8 +231,11 @@ class DesktopProcesses:
                 "running": running,
                 "url": item.url,
                 "exit_code": code,
-                "ended_at": None,
-                "exit_reason": None if running else (_exit_reason(code, False) or "unknown"),
+                "started_at": started_at,
+                "ended_at": ended_at,
+                "exit_reason": (
+                    None if running else (_exit_reason(code, stop_requested) or "unknown")
+                ),
                 "can_stop": bool(handle or item.server),
                 "generation": generation,
                 "engine_instance_id": instance_id,
@@ -210,7 +249,7 @@ class DesktopProcesses:
         )
         code = item.process.poll()
         running = code is None
-        readiness, checked_at = self._readiness_for(identity, None, refresh=False)
+        readiness, checked_at = self._readiness_for(identity, None)
         return {
             "id": identity,
             "kind": kind,
@@ -266,7 +305,10 @@ class DesktopProcesses:
         # Consumers paging live registries must re-list when `total`
         # changes between pages instead of assuming offset stability.
         all_rows = [self._row(identity, entries[identity]) for identity in identities]
-        all_rows.sort(key=lambda row: (not row["running"], -row.get("started_at", 0)))
+        # `started_at` is present but null for resources the engine has no
+        # real start time for (external previews), so `or 0` -- not a
+        # `.get` default -- is what keeps the unary minus off None.
+        all_rows.sort(key=lambda row: (not row["running"], -(row.get("started_at") or 0)))
         total = len(all_rows)
         offset, end, next_cursor = self._pagination(params, total)
         return {
@@ -340,7 +382,7 @@ class DesktopProcesses:
                     for buffer in (handle.stdout, handle.stderr)
                 )
         return {
-            "process": self._row(identity, entry, refresh_readiness=True),
+            "process": self._row(identity, entry),
             "stdout": stdout[-64000:],
             "stderr": stderr[-64000:],
             "truncated": truncated or len(stdout) > 64000 or len(stderr) > 64000,
