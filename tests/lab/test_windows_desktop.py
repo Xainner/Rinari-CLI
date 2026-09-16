@@ -174,8 +174,20 @@ def test_lab_grant_gated_type_roundtrip(tmp_path, monkeypatch) -> None:
             # and read the clipboard (OS ground truth, no vision, no guessing).
             from rinari.computer import win32 as _w
 
-            # Never read foreign state: re-verify foreground immediately before
-            # touching shared channels, and never print clipboard content.
+            # Never read foreign state: re-focus the edit control and copy in
+            # immediate succession, and never print clipboard content.
+
+            refocus = runtime.execute(
+                "computer.click",
+                {
+                    "target": target,
+                    "x": mid_x,
+                    "y": mid_y,
+                    "observation_id": seen.data["observation_id"],
+                },
+                ctx,
+            )
+            assert refocus.ok, refocus.error
             if _w.get_foreground() != hwnd:
                 raise AssertionError("foreground moved before oracle; aborting")
             _w.select_all_and_copy()
