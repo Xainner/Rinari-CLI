@@ -424,7 +424,11 @@ def get_clipboard_text() -> str:
         user32.CloseClipboard()
 
 
-def select_all_and_copy() -> None:
+def select_all_and_copy(hwnd: int | None = None) -> None:
+    # Shared-machine guard: never touch shared channels unless our verified
+    # window still owns the foreground. Raises instead of leaking input.
+    if hwnd is not None and get_foreground() != hwnd:
+        raise OSError("foreground moved before shared-channel input; refusing")
     user32.CloseClipboard.argtypes = ()
     user32.CloseClipboard.restype = wintypes.BOOL
     ctrl_down = INPUT(
@@ -435,11 +439,13 @@ def select_all_and_copy() -> None:
         type=INPUT_KEYBOARD,
         u=_INPUT_UNION(ki=KEYBDINPUT(wVk=0x11, dwFlags=KEYEVENTF_KEYUP)),
     )
-    for vk in (0x41, 0x43):
-        _send(ctrl_down)
-        _send(_vkey(vk, False))
-        _send(_vkey(vk, True))
-    _send(ctrl_up)
+    _send(ctrl_down)
+    try:
+        for vk in (0x41, 0x43):
+            _send(_vkey(vk, False))
+            _send(_vkey(vk, True))
+    finally:
+        _send(ctrl_up)
 
 
 def descendant_texts(hwnd: int) -> list[tuple[str, str]]:

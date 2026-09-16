@@ -190,9 +190,16 @@ def test_lab_grant_gated_type_roundtrip(tmp_path, monkeypatch) -> None:
             assert refocus.ok, refocus.error
             if _w.get_foreground() != hwnd:
                 raise AssertionError("foreground moved before oracle; aborting")
-            _w.select_all_and_copy()
-            got = _w.get_clipboard_text()
-            assert got == MARKER, "oracle mismatch: clipboard holds " + str(len(got)) + " chars"
+            _w.select_all_and_copy(hwnd)
+            # The app processes the keys asynchronously: poll without logging content.
+            got = ""
+            end = time.monotonic() + 10.0
+            while time.monotonic() < end:
+                got = _w.get_clipboard_text()
+                if got == MARKER:
+                    break
+                time.sleep(0.2)
+            assert got == MARKER, "oracle mismatch: len=" + str(len(got))
             (tmp_path / "proof.png").write_bytes(backend.capture(target).png)
         finally:
             app.close()
