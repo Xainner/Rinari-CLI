@@ -323,3 +323,34 @@ def test_clipboard_roundtrip() -> None:
         assert _w.get_clipboard_text() == marker
     finally:
         _w.set_clipboard_text(saved)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="win32 mouse input")
+def test_mouse_events_carry_dwflags_and_virtualdesk(monkeypatch) -> None:
+    """Regression: mis-spelled MOUSEINPUT keywords and missing VIRTUALDESK.
+
+    ctypes accepts an unknown keyword on a Structure subclass as a plain
+    instance attribute, so ``MOUSEINPUT(..., flags=...)`` silently left
+    ``dwFlags`` at 0: every synthetic click became a no-op that SendInput
+    still counted as delivered, and the tool reported success.
+
+    The absolute move must also carry ``MOUSEEVENTF_VIRTUALDESK`` because
+    ``to_absolute()`` normalizes against the virtual desktop; without it
+    Windows maps the coordinates onto the primary monitor alone, halving
+    every x on a multi-monitor host.
+    """
+    from rinari.computer import win32 as _w
+
+    move = _w._mouse(_w.MOUSEEVENTF_MOVE | _w.MOUSEEVENTF_ABSOLUTE, 1000, 500)
+    assert move.u.mi.dwFlags == _w.MOUSEEVENTF_MOVE | _w.MOUSEEVENTF_ABSOLUTE
+
+    sent: list = []
+    monkeypatch.setattr(_w, "_send", lambda *events: sent.extend(events))
+    _w.mouse_click_screen(100.0, 200.0)
+
+    assert len(sent) == 3
+    move_event, down, up = sent
+    assert move_event.u.mi.dwFlags & _w.MOUSEEVENTF_VIRTUALDESK
+    assert move_event.u.mi.dwFlags & _w.MOUSEEVENTF_ABSOLUTE
+    assert down.u.mi.dwFlags == _w.MOUSEEVENTF_LEFTDOWN
+    assert up.u.mi.dwFlags == _w.MOUSEEVENTF_LEFTUP

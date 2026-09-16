@@ -28,6 +28,7 @@ MOUSEEVENTF_MIDDLEUP = 0x0040
 MOUSEEVENTF_RIGHTDOWN = 0x0008
 MOUSEEVENTF_RIGHTUP = 0x0010
 MOUSEEVENTF_ABSOLUTE = 0x8000
+MOUSEEVENTF_VIRTUALDESK = 0x4000
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_UNICODE = 0x0004
 VK_RETURN = 0x0D
@@ -192,12 +193,15 @@ def _send(*events: INPUT) -> None:
 
 
 def _mouse(flags: int, x: int = 0, y: int = 0) -> INPUT:
-    return INPUT(type=INPUT_MOUSE, u=_INPUT_UNION(mi=MOUSEINPUT(dx=x, dy=y, flags=flags)))
+    return INPUT(type=INPUT_MOUSE, u=_INPUT_UNION(mi=MOUSEINPUT(dx=x, dy=y, dwFlags=flags)))
 
 
 def mouse_click_screen(sx: float, sy: float) -> None:
     ax, ay = to_absolute(sx, sy)
-    move = _mouse(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, ax, ay)
+    # to_absolute() normalizes against the *virtual* desktop, so the event must
+    # carry VIRTUALDESK or Windows maps it against the primary monitor alone
+    # (on multi-monitor hosts that halves every x).
+    move = _mouse(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, ax, ay)
     down = _mouse(MOUSEEVENTF_LEFTDOWN)
     up = _mouse(MOUSEEVENTF_LEFTUP)
     _send(move)
