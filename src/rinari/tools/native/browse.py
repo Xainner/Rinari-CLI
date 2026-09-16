@@ -342,9 +342,9 @@ def browser_screenshot(input: dict, ctx: ToolContext) -> ToolResult:
             ok=False,
             error=ToolErrorInfo(code=code, message=exc.message, retryable=exc.retryable),
         )
-    observation_id = uuid.uuid4().hex[:12]
     stamp = int(time.time())
-    name = f"screenshot-{stamp}-{observation_id}.png"
+    provisional_id = uuid.uuid4().hex[:12]
+    name = f"screenshot-{stamp}-{provisional_id}.png"
     store = getattr(ctx, "artifact_store", None)
     if store is not None:
         try:
@@ -357,6 +357,13 @@ def browser_screenshot(input: dict, ctx: ToolContext) -> ToolResult:
                 provenance=f"browser.screenshot:{target or 'auto'}",
                 summary=f"Browser screenshot {target or 'auto'}",
             )
+            # Bind the capture to the observation registry so a later input can
+            # prove it acts on this exact state. Best-effort: the bytes are
+            # already immutable, so a binding failure only degrades metadata.
+            bound: dict[str, Any] | None = None
+            with contextlib.suppress(Exception):
+                bound = manager.note_observation(target, cancelled=_cancelled_fn(ctx))
+            observation_id = (bound or {}).get("observation_id") or provisional_id
             data = {
                 "uri": record.uri(),
                 "artifact": record.uri(),
@@ -367,6 +374,9 @@ def browser_screenshot(input: dict, ctx: ToolContext) -> ToolResult:
                 "observation_id": observation_id,
                 "captured_at": stamp,
             }
+            if bound is not None:
+                data["observed_url"] = bound.get("url")
+                data["observed_viewport"] = bound.get("viewport")
             try:
                 from rinari.models.images import ImageReference
 
@@ -381,6 +391,12 @@ def browser_screenshot(input: dict, ctx: ToolContext) -> ToolResult:
 
                 with _PILImage.open(ref.path) as _img:
                     data["width"], data["height"] = _img.size
+                # Transport downscales to 2048px (ImageReference.encoded): expose
+                # the transmitted geometry so callers map pixels back to CSS.
+                sent_scale = min(1.0, 2048.0 / max(data["width"], data["height"]))
+                data["sent_scale"] = sent_scale
+                data["sent_width"] = int(data["width"] * sent_scale)
+                data["sent_height"] = int(data["height"] * sent_scale)
                 data["visual"] = True
                 return ToolResult(
                     ok=True,
@@ -424,6 +440,9 @@ def browser_screenshot(input: dict, ctx: ToolContext) -> ToolResult:
         raise
     digest = _sha256(path)
     legacy = ArtifactRef(uri=f"file://{path}", name=path.name, kind="screenshot")
+    legacy_bound: dict[str, Any] | None = None
+    with contextlib.suppress(Exception):
+        legacy_bound = manager.note_observation(target, cancelled=_cancelled_fn(ctx))
     return _with_artifacts(
         {
             "artifact": legacy.uri,
@@ -431,7 +450,7 @@ def browser_screenshot(input: dict, ctx: ToolContext) -> ToolResult:
             "bytes": len(png),
             "sha256": digest,
             "target_id": target,
-            "observation_id": observation_id,
+            "observation_id": (legacy_bound or {}).get("observation_id") or provisional_id,
             "captured_at": stamp,
         },
         (legacy,),
@@ -452,6 +471,7 @@ def browser_click(input: dict, ctx: ToolContext) -> ToolResult:
             selector=selector,
             x=input.get("x"),
             y=input.get("y"),
+            observation_id=input.get("observation_id"),
             cancelled=_cancelled_fn(ctx),
         )
 
@@ -468,6 +488,7 @@ def browser_fill(input: dict, ctx: ToolContext) -> ToolResult:
             target,
             str(input.get("selector") or ""),
             str(input.get("value") or ""),
+            observation_id=input.get("observation_id"),
             cancelled=_cancelled_fn(ctx),
         ),
     )
@@ -484,6 +505,7 @@ def browser_type(input: dict, ctx: ToolContext) -> ToolResult:
             str(input.get("selector") or ""),
             str(input.get("text") or ""),
             press_enter=bool(input.get("press_enter")),
+            observation_id=input.get("observation_id"),
             cancelled=_cancelled_fn(ctx),
         ),
     )
@@ -555,6 +577,7 @@ def browser_drag(input: dict, ctx: ToolContext) -> ToolResult:
             from_y=input.get("from_y"),
             to_x=float(to_x),
             to_y=float(to_y),
+            observation_id=input.get("observation_id"),
             cancelled=_cancelled_fn(ctx),
         )
 
@@ -918,6 +941,7 @@ def browse_tools() -> list[ToolDefinition]:
                     "selector": {"type": "string"},
                     "x": {"type": "number"},
                     "y": {"type": "number"},
+                    "observation_id": {"type": "string"},
                 },
             },
             risk=RISK_MEDIUM,
@@ -939,6 +963,7 @@ def browse_tools() -> list[ToolDefinition]:
                     "target_id": {"type": "string"},
                     "selector": {"type": "string"},
                     "value": {"type": "string"},
+                    "observation_id": {"type": "string"},
                 },
                 "required": ["selector", "value"],
             },
@@ -961,6 +986,7 @@ def browse_tools() -> list[ToolDefinition]:
                     "selector": {"type": "string"},
                     "text": {"type": "string"},
                     "press_enter": {"type": "boolean"},
+                    "observation_id": {"type": "string"},
                 },
                 "required": ["selector", "text"],
             },
@@ -1044,6 +1070,7 @@ def browse_tools() -> list[ToolDefinition]:
                     "from_y": {"type": "number"},
                     "to_x": {"type": "number"},
                     "to_y": {"type": "number"},
+                    "observation_id": {"type": "string"},
                 },
                 "required": ["to_x", "to_y"],
             },

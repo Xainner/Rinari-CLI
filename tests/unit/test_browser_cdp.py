@@ -1286,6 +1286,110 @@ def test_browser_screenshot_populates_images(tmp_path, fake_cdp, monkeypatch) ->
         app.close()
 
 
+def test_browser_click_rejects_out_of_viewport_coordinates(tmp_path, fake_cdp, monkeypatch) -> None:
+    # Fake viewport is 1024x768: invalid coordinates are rejected before
+    # anything is dispatched.
+    manager = _connected_manager(tmp_path, fake_cdp, monkeypatch)
+    try:
+        before = len(fake_cdp.commands)
+        with pytest.raises(BrowserError) as exc_info:
+            manager.click("t1", x=-10.0, y=100.0)
+        assert exc_info.value.code == "INVALID_ARGUMENT"
+        with pytest.raises(BrowserError) as exc_info:
+            manager.click("t1", x=100.0, y=1000000.0)
+        assert exc_info.value.code == "INVALID_ARGUMENT"
+        dispatched = [c for c in fake_cdp.commands[before:] if c[0] == "Input.dispatchMouseEvent"]
+        assert dispatched == []
+    finally:
+        manager.close()
+
+
+def test_browser_input_rejects_unknown_observation(tmp_path, fake_cdp, monkeypatch) -> None:
+    manager = _connected_manager(tmp_path, fake_cdp, monkeypatch)
+    runtime = _runtime(tmp_path, manager=manager, network_mode="allow", answer="s")
+    ctx = _ctx(tmp_path, manager=manager, network=NetworkGuard(NetworkPolicy(mode="allow")))
+    try:
+        result = runtime.execute(
+            "browser.click", {"selector": "#a", "observation_id": "deadbeefcafe"}, ctx
+        )
+        assert not result.ok
+        assert result.error.code.value == "INVALID_ARGUMENT"
+    finally:
+        manager.close()
+
+
+def test_browser_observation_stale_after_navigate(tmp_path, fake_cdp, monkeypatch) -> None:
+    manager = _connected_manager(tmp_path, fake_cdp, monkeypatch)
+    try:
+        snap = manager.snapshot("t1")
+        assert snap["observation_id"]
+        manager.navigate("t1", "https://example.com/other")
+        with pytest.raises(BrowserError) as exc_info:
+            manager.click("t1", selector="#a", observation_id=snap["observation_id"])
+        assert exc_info.value.code == "INVALID_ARGUMENT"
+    finally:
+        manager.close()
+
+
+def test_browser_snapshot_binds_click_observation(tmp_path, fake_cdp, monkeypatch) -> None:
+    manager = _connected_manager(tmp_path, fake_cdp, monkeypatch)
+    try:
+        snap = manager.snapshot("t1")
+        out = manager.click("t1", selector="#a", observation_id=snap["observation_id"])
+        assert out["clicked"] == {"x": 100.5, "y": 200.25}
+    finally:
+        manager.close()
+
+
+def test_browser_click_releases_button_when_cancelled(tmp_path, fake_cdp, monkeypatch) -> None:
+    manager = _connected_manager(tmp_path, fake_cdp, monkeypatch)
+
+    def cancelled() -> bool:
+        # Trip as soon as our own press hit the wire, whatever internal
+        # cancellation boundaries the driver checks along the way.
+        return any(
+            method == "Input.dispatchMouseEvent" and params.get("type") == "mousePressed"
+            for method, params, _ in fake_cdp.commands
+        )
+
+    try:
+        with pytest.raises(BrowserError) as exc_info:
+            manager.click("t1", x=100.0, y=100.0, cancelled=cancelled)
+        assert exc_info.value.code == "CANCELLED"
+        mouse = [
+            params.get("type")
+            for method, params, _ in fake_cdp.commands
+            if method == "Input.dispatchMouseEvent"
+        ]
+        assert mouse == ["mouseMoved", "mousePressed", "mouseReleased"]
+    finally:
+        manager.close()
+
+
+def test_browser_type_releases_key_when_cancelled(tmp_path, fake_cdp, monkeypatch) -> None:
+    manager = _connected_manager(tmp_path, fake_cdp, monkeypatch)
+
+    def cancelled() -> bool:
+        # Trip as soon as our own keyDown hit the wire.
+        return any(
+            method == "Input.dispatchKeyEvent" and params.get("type") == "keyDown"
+            for method, params, _ in fake_cdp.commands
+        )
+
+    try:
+        with pytest.raises(BrowserError) as exc_info:
+            manager.type_text("t1", "#field", "ab", cancelled=cancelled)
+        assert exc_info.value.code == "CANCELLED"
+        keys = [
+            (params.get("type"), params.get("text"))
+            for method, params, _ in fake_cdp.commands
+            if method == "Input.dispatchKeyEvent"
+        ]
+        assert keys == [("keyDown", "a"), ("keyUp", "a")]
+    finally:
+        manager.close()
+
+
 def test_browser_upload_requires_sandbox_and_provenance(tmp_path, fake_cdp, monkeypatch) -> None:
     manager = _connected_manager(tmp_path, fake_cdp, monkeypatch)
     runtime = _runtime(tmp_path, manager=manager, network_mode="allow", answer="s")

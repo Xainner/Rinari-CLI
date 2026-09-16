@@ -94,11 +94,12 @@ FIELDS = {
     "browser.tabs_close": "closed:s",
     "browser.open": "target_id:s",
     "browser.navigate": "url:s frame_id:s? loader_id:s?",
-    "browser.snapshot": "html:s bytes:i truncated:b",
-    "browser.a11y": "nodes:a total:i truncated:b",
+    "browser.snapshot": "html:s bytes:i truncated:b target_id:s? observation_id:s? observation:o?",
+    "browser.a11y": "nodes:a total:i truncated:b target_id:s? observation_id:s? observation:o?",
     "browser.screenshot": (
         "uri:s bytes:i sha256:s width:i? height:i? observation_id:s? "
-        "target_id:s? artifact:s? mime_type:s? visual:b?"
+        "target_id:s? artifact:s? mime_type:s? visual:b? sent_width:i? "
+        "sent_height:i? sent_scale:n? observed_url:s? observed_viewport:o?"
     ),
     "browser.click": "clicked:o",
     "browser.fill": "filled:s chars:i",

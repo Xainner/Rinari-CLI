@@ -161,6 +161,7 @@ class BrowserManager:
         self._stderr_reader: threading.Thread | None = None
         self._generation = 0
         self._elements: dict[str, tuple[str | None, int]] = {}
+        self._observations: dict[str, dict[str, Any]] = {}
         # A desktop turn builds a new runtime. Never share Chromium's singleton
         # profile with a previous runtime (or another engine process).
         self._profile_instance = uuid.uuid4().hex
@@ -224,6 +225,7 @@ class BrowserManager:
         self._download_base.clear()
         self._generation += 1
         self._elements.clear()
+        self._observations.clear()
 
     def _raise_if_cancelled(self, cancelled: Callable[[], bool] | None) -> None:
         fn = cancelled if cancelled is not None else None
@@ -454,6 +456,102 @@ class BrowserManager:
             self._domains.add((target_id, domain))
         return session, self._attached[target_id]
 
+    def _resolve_target_id(
+        self, target_id: str | None, cancelled: Callable[[], bool] | None = None
+    ) -> str:
+        if target_id:
+            return target_id
+        session = self._require_session()
+        infos = [
+            info
+            for info in session.send("Target.getTargets").get("targetInfos", [])
+            if info.get("type") == "page"
+        ]
+        if not infos:
+            raise BrowserError("TARGET_NOT_FOUND", "no page target; open one first")
+        return infos[0]["targetId"]
+
+    def _current_state(
+        self, target_id: str | None, cancelled: Callable[[], bool] | None = None
+    ) -> tuple[str | None, dict[str, float] | None]:
+        url: str | None = None
+        viewport: dict[str, float] | None = None
+        with contextlib.suppress(Exception):
+            pages = self.targets()
+            match = next((p for p in pages if p.get("target_id") == target_id), None)
+            url = (match or {}).get("url")
+        with contextlib.suppress(Exception):
+            out = self.evaluate(target_id, _JS_VIEWPORT, cancelled=cancelled)
+            size = out.get("value") or []
+            if isinstance(size, list) and len(size) >= 2:
+                viewport = {"w": float(size[0]), "h": float(size[1])}
+            elif isinstance(size, dict):
+                viewport = {"w": float(size.get("w", 0)), "h": float(size.get("h", 0))}
+        return url, viewport
+
+    def note_observation(
+        self, target_id: str | None, *, cancelled: Callable[[], bool] | None = None
+    ) -> dict[str, Any]:
+        """Bind a fresh observation to the target's current state.
+
+        Records target, URL, viewport and session generation under a unique id,
+        so a later mutating input can prove it still acts on what was observed.
+        """
+        resolved = self._resolve_target_id(target_id, cancelled)
+        url, viewport = self._current_state(resolved, cancelled=cancelled)
+        record = {
+            "observation_id": uuid.uuid4().hex[:12],
+            "target_id": resolved,
+            "url": url,
+            "viewport": viewport,
+            "generation": self._generation,
+        }
+        self._observations[resolved] = record
+        return record
+
+    def check_observation(
+        self,
+        target_id: str | None,
+        observation_id: str,
+        *,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
+        """Reject input bound to a stale observation.
+
+        Fails closed when the target navigated, resized, was replaced, or the
+        id was never issued for it. The stored binding is immutable: a check
+        never mints a new id, so one observation can back several inputs until
+        an incompatible change invalidates it. Re-observe after any failure.
+        """
+        resolved = self._resolve_target_id(target_id, cancelled)
+        record = self._observations.get(resolved)
+        if record is None or record.get("observation_id") != observation_id:
+            raise BrowserError(
+                "INVALID_ARGUMENT",
+                "Stale or unknown observation_id for this target; "
+                "take a fresh snapshot/screenshot and retry",
+            )
+        if record.get("generation") != self._generation:
+            raise BrowserError(
+                "INVALID_ARGUMENT",
+                "Browser session changed since the observation; re-observe before input",
+            )
+        url, viewport = self._current_state(resolved, cancelled=cancelled)
+        if record.get("url") is not None and url != record.get("url"):
+            raise BrowserError(
+                "INVALID_ARGUMENT",
+                f"Page navigated since the observation ({record.get('url')} -> {url}); "
+                "re-observe before input",
+            )
+        old_view = record.get("viewport") or {}
+        new_view = viewport or {}
+        if old_view and new_view and old_view != new_view:
+            raise BrowserError(
+                "INVALID_ARGUMENT",
+                "Viewport changed since the observation; re-observe before input",
+            )
+        return record
+
     def targets(self) -> list[dict[str, Any]]:
         session = self._require_session()
         result = session.send("Target.getTargets")
@@ -478,6 +576,7 @@ class BrowserManager:
         session = self._require_session()
         session.send("Target.closeTarget", {"targetId": target_id})
         self._attached.pop(target_id, None)
+        self._observations.pop(target_id, None)
         return {"closed": target_id}
 
     # -- page operations ---------------------------------------------------------
@@ -543,8 +642,10 @@ class BrowserManager:
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         self._raise_if_cancelled(cancelled)
+        resolved = self._resolve_target_id(target_id, cancelled)
+        self._observations.pop(resolved, None)
         result = self.call(
-            target_id,
+            resolved,
             "Page.navigate",
             {"url": url},
             domain="Page",
@@ -570,10 +671,14 @@ class BrowserManager:
         html = out.get("value") or ""
         if not isinstance(html, str):
             html = json.dumps(html, ensure_ascii=False, default=str)
+        observation = self.note_observation(target_id, cancelled=cancelled)
         return {
             "html": html[:MAX_SNAPSHOT_CHARS],
             "bytes": len(html.encode("utf-8")),
             "truncated": len(html) > MAX_SNAPSHOT_CHARS,
+            "target_id": observation["target_id"],
+            "observation_id": observation["observation_id"],
+            "observation": observation,
         }
 
     def a11y_tree(
@@ -611,7 +716,15 @@ class BrowserManager:
                     "child_ids": node.get("childIds") or [],
                 }
             )
-        return {"nodes": kept, "total": len(nodes), "truncated": len(nodes) > max_nodes}
+        observation = self.note_observation(target_id, cancelled=cancelled)
+        return {
+            "nodes": kept,
+            "total": len(nodes),
+            "truncated": len(nodes) > max_nodes,
+            "target_id": observation["target_id"],
+            "observation_id": observation["observation_id"],
+            "observation": observation,
+        }
 
     def screenshot(
         self,
@@ -671,7 +784,18 @@ class BrowserManager:
             return float(point["x"]), float(point["y"])
         if x is None or y is None:
             raise BrowserError("INVALID_ARGUMENT", "x and y must be given together")
-        return float(x), float(y)
+        px, py = float(x), float(y)
+        # CDP mouse coordinates are CSS pixels, same space as innerWidth/Height.
+        # Unknown viewport cannot prove staleness, so it never blocks; a known
+        # one rejects blind input before anything is dispatched.
+        _, viewport = self._current_state(target_id, cancelled=cancelled)
+        if viewport is not None and not (0 <= px <= viewport["w"] and 0 <= py <= viewport["h"]):
+            raise BrowserError(
+                "INVALID_ARGUMENT",
+                f"Coordinates ({px}, {py}) are outside the "
+                f"{viewport['w']}x{viewport['h']} viewport; re-observe and retry",
+            )
+        return px, py
 
     def click(
         self,
@@ -680,15 +804,41 @@ class BrowserManager:
         selector: str | None = None,
         x: float | None = None,
         y: float | None = None,
+        observation_id: str | None = None,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
+        if observation_id is not None:
+            self.check_observation(target_id, observation_id, cancelled=cancelled)
         px, py = self._point(target_id, selector, x, y, cancelled)
-        for event in (
+        released = {
+            "type": "mouseReleased",
+            "x": px,
+            "y": py,
+            "button": "left",
+            "clickCount": 1,
+        }
+        self.call(
+            target_id,
+            "Input.dispatchMouseEvent",
             {"type": "mouseMoved", "x": px, "y": py, "button": "none"},
+            cancelled=cancelled,
+        )
+        self.call(
+            target_id,
+            "Input.dispatchMouseEvent",
             {"type": "mousePressed", "x": px, "y": py, "button": "left", "clickCount": 1},
-            {"type": "mouseReleased", "x": px, "y": py, "button": "left", "clickCount": 1},
-        ):
-            self.call(target_id, "Input.dispatchMouseEvent", event, cancelled=cancelled)
+            cancelled=cancelled,
+        )
+        try:
+            self.call(target_id, "Input.dispatchMouseEvent", released, cancelled=cancelled)
+        except BrowserError as exc:
+            if exc.code == "CANCELLED":
+                # Complete our own gesture: CDP input is per-target, never OS
+                # focus, so this release cannot leak onto another window; it
+                # only un-sticks the button we pressed. Then report cancelled.
+                with contextlib.suppress(Exception):
+                    self.call(target_id, "Input.dispatchMouseEvent", released, cancelled=None)
+            raise
         return {"clicked": {"x": px, "y": py}}
 
     def fill(
@@ -697,14 +847,35 @@ class BrowserManager:
         selector: str,
         value: str,
         *,
+        observation_id: str | None = None,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
+        if observation_id is not None:
+            self.check_observation(target_id, observation_id, cancelled=cancelled)
         self.evaluate(
             target_id,
             _JS_FILL % (json.dumps(selector), json.dumps(value), json.dumps(value)),
             cancelled=cancelled,
         )
         return {"filled": selector, "chars": len(value)}
+
+    def _key_pair(
+        self,
+        target_id: str | None,
+        down: dict[str, Any],
+        up: dict[str, Any],
+        cancelled: Callable[[], bool] | None,
+    ) -> None:
+        self.call(target_id, "Input.dispatchKeyEvent", down, cancelled=cancelled)
+        try:
+            self.call(target_id, "Input.dispatchKeyEvent", up, cancelled=cancelled)
+        except BrowserError as exc:
+            if exc.code == "CANCELLED":
+                # Never leave our own key held: the matching keyUp is
+                # uncancellable cleanup, then the cancellation is reported.
+                with contextlib.suppress(Exception):
+                    self.call(target_id, "Input.dispatchKeyEvent", up, cancelled=None)
+            raise
 
     def type_text(
         self,
@@ -713,30 +884,32 @@ class BrowserManager:
         text: str,
         *,
         press_enter: bool = False,
+        observation_id: str | None = None,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         if len(text) > MAX_TYPED_CHARS:
             raise BrowserError(
                 "INVALID_ARGUMENT", f"text is limited to {MAX_TYPED_CHARS} characters"
             )
+        if observation_id is not None:
+            self.check_observation(target_id, observation_id, cancelled=cancelled)
         self.evaluate(target_id, _JS_FOCUS % json.dumps(selector), cancelled=cancelled)
         for char in text:
             code = _virtual_key_code(char)
-            for event_type in ("keyDown", "keyUp"):
-                self.call(
-                    target_id,
-                    "Input.dispatchKeyEvent",
-                    {"type": event_type, "text": char, "key": char, "windowsVirtualKeyCode": code},
-                    cancelled=cancelled,
-                )
+            event = {"text": char, "key": char, "windowsVirtualKeyCode": code}
+            self._key_pair(
+                target_id,
+                {"type": "keyDown", **event},
+                {"type": "keyUp", **event},
+                cancelled,
+            )
         if press_enter:
-            for event_type in ("keyDown", "keyUp"):
-                self.call(
-                    target_id,
-                    "Input.dispatchKeyEvent",
-                    {"type": event_type, "key": "Enter", "windowsVirtualKeyCode": 13},
-                    cancelled=cancelled,
-                )
+            self._key_pair(
+                target_id,
+                {"type": "keyDown", "key": "Enter", "windowsVirtualKeyCode": 13},
+                {"type": "keyUp", "key": "Enter", "windowsVirtualKeyCode": 13},
+                cancelled,
+            )
         return {"typed": len(text), "enter": press_enter}
 
     def select_option(
@@ -810,10 +983,13 @@ class BrowserManager:
         to_x: float,
         to_y: float,
         steps: int = 5,
+        observation_id: str | None = None,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         if steps < 1:
             raise BrowserError("INVALID_ARGUMENT", "steps must be >= 1")
+        if observation_id is not None:
+            self.check_observation(target_id, observation_id, cancelled=cancelled)
         sx, sy = self._point(target_id, from_selector, from_x, from_y, cancelled)
         self.call(
             target_id,
@@ -821,25 +997,43 @@ class BrowserManager:
             {"type": "mousePressed", "x": sx, "y": sy, "button": "left", "clickCount": 1},
             cancelled=cancelled,
         )
-        for i in range(1, steps + 1):
-            t = i / steps
+        lx, ly = sx, sy
+        try:
+            for i in range(1, steps + 1):
+                t = i / steps
+                lx = sx + (to_x - sx) * t
+                ly = sy + (to_y - sy) * t
+                self.call(
+                    target_id,
+                    "Input.dispatchMouseEvent",
+                    {"type": "mouseMoved", "x": lx, "y": ly, "button": "left"},
+                    cancelled=cancelled,
+                )
             self.call(
                 target_id,
                 "Input.dispatchMouseEvent",
-                {
-                    "type": "mouseMoved",
-                    "x": sx + (to_x - sx) * t,
-                    "y": sy + (to_y - sy) * t,
-                    "button": "left",
-                },
+                {"type": "mouseReleased", "x": to_x, "y": to_y, "button": "left", "clickCount": 1},
                 cancelled=cancelled,
             )
-        self.call(
-            target_id,
-            "Input.dispatchMouseEvent",
-            {"type": "mouseReleased", "x": to_x, "y": to_y, "button": "left", "clickCount": 1},
-            cancelled=cancelled,
-        )
+        except BrowserError as exc:
+            if exc.code == "CANCELLED":
+                # Release where the pointer actually is: same per-target
+                # reasoning as click — our gesture, our cleanup.
+                cleanup = {
+                    "type": "mouseReleased",
+                    "x": lx,
+                    "y": ly,
+                    "button": "left",
+                    "clickCount": 1,
+                }
+                with contextlib.suppress(Exception):
+                    self.call(
+                        target_id,
+                        "Input.dispatchMouseEvent",
+                        cleanup,
+                        cancelled=None,
+                    )
+            raise
         return {"from": {"x": sx, "y": sy}, "to": {"x": to_x, "y": to_y}}
 
     # -- upload / download ---------------------------------------------------------

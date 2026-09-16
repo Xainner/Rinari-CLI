@@ -85,6 +85,22 @@ def test_load_manifest_sections_and_body():
     )
 
 
+def test_load_manifest_browser_use_skill():
+    from rinari.tools.native import all_native_tools
+
+    root = (
+        Path(__file__).resolve().parents[2] / "src" / "rinari" / "assets" / "skills" / "browser-use"
+    )
+    m = load_skill_manifest(root, "packaged")
+    assert m.name == "browser-use"
+    assert m.risk == "high"
+    assert not m.can_delegate
+    assert m.procedure and m.verification and m.failure_policy and m.success_criteria
+    known = {tool.name for tool in all_native_tools()}
+    assert validate_skill(m, known) == []
+    assert "observation_id" in m.procedure
+
+
 def test_validate_flags_unknown_tool_and_missing_sections():
     from rinari.skills.manifest import SkillManifest
 
