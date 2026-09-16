@@ -12,8 +12,10 @@ Contract for every backend (real or fake):
   CreateForWindow) is not OS-focus dependent, so same-target cleanup cannot
   leak onto another window.
 
-Only the fake backend ships. Anything else fails closed until selected,
-reviewed and lab-approved (docs/adr/0001-windows-desktop-backend.md).
+The fake backend is the default. The Windows backend exists for explicit,
+user-authorized lab proving only: it refuses to construct without lab=True
+and RINARI_COMPUTER_LAB=1, resolves explicit targets, and never enumerates
+untargeted surfaces (docs/adr/0001-windows-desktop-backend.md).
 """
 
 from __future__ import annotations
@@ -177,37 +179,123 @@ class FakeBackend(GraphicBackend):
 
 
 class WindowsBackend(GraphicBackend):
-    """Real Windows backend seam. NOT implemented in this build.
+    """Lab Windows backend: explicit-HWND capture and bounded native input.
 
-    Intended direction (pending ADR approval and lab proving): per-window
-    capture via Windows Graphics Capture CreateForWindow against an explicit
-    HWND, accessibility via UI Automation, and native input with strict
-    preconditions. SendInput is subject to UIPI and never resets keys held
-    elsewhere, so it is not per-window isolated input: the ADR must resolve
-    that before any real implementation lands. Every method fails closed.
+    Lab-approved (user-authorized physical proving, 2026-09-16): user-mode
+    ctypes only, no elevation, no hooks. Targets resolve from explicit
+    hwnd:/pid: ids or from a PID allowlist owned by the lab harness; window
+    titles are never enumerated to callers, so targets() discloses nothing
+    beyond allowlisted surfaces. Input refuses fullscreen surfaces and
+    non-foreground targets; capture is a read-only region screenshot.
     """
 
     name = "windows"
 
-    def _unavailable(self) -> ComputerError:
-        return ComputerError(
-            "BACKEND_UNAVAILABLE",
-            "no approved Windows graphic backend in this build; "
-            "see docs/adr/0001-windows-desktop-backend.md",
-        )
+    def __init__(self, *, lab: bool = False, pid_allowlist: tuple = ()) -> None:
+        import os
+        import sys
+
+        if sys.platform != "win32":
+            raise ComputerError("BACKEND_UNAVAILABLE", "Windows backend needs Windows")
+        if not lab or os.environ.get("RINARI_COMPUTER_LAB") != "1":
+            raise ComputerError(
+                "BACKEND_UNAVAILABLE",
+                "Windows backend requires explicit lab opt-in (lab=True and "
+                "RINARI_COMPUTER_LAB=1); refusing on this host. "
+                "See docs/adr/0001-windows-desktop-backend.md",
+            )
+        self.events: list[dict[str, Any]] = []
+        self._pid_allowlist = tuple(pid_allowlist)
+
+    def _resolve(self, target_id: str) -> int:
+        from rinari.computer import win32 as _w
+
+        hwnd = 0
+        if target_id.startswith("hwnd:"):
+            hwnd = int(target_id.split(":", 1)[1])
+        elif target_id.startswith("pid:"):
+            pid = int(target_id.split(":", 1)[1])
+            if self._pid_allowlist and pid not in self._pid_allowlist:
+                raise ComputerError("TARGET_NOT_FOUND", "pid outside lab allowlist")
+            found = _w.enum_windows_for_pid(pid)
+            if not found:
+                raise ComputerError("TARGET_NOT_FOUND", "no visible window for pid")
+            hwnd = found[0]
+        else:
+            raise ComputerError("INVALID_ARGUMENT", "target must look like hwnd:<n> or pid:<n>")
+        if not _w.user32.IsWindow(hwnd) or not _w.user32.IsWindowVisible(hwnd):
+            raise ComputerError("TARGET_NOT_FOUND", "target window is gone")
+        if self._pid_allowlist:
+            owner = _w.wintypes.DWORD()
+            _w.user32.GetWindowThreadProcessId(hwnd, _w.ctypes.byref(owner))
+            if owner.value not in self._pid_allowlist:
+                raise ComputerError("TARGET_NOT_FOUND", "window outside lab allowlist")
+        return hwnd
+
+    def _check_fullscreen(self, hwnd: int) -> None:
+        from rinari.computer import win32 as _w
+
+        left, top, right, bottom = _w.window_rect(hwnd)
+        _vx, _vy, vw, vh = _w.virtual_screen()
+        if (right - left) * (bottom - top) >= int(vw * vh * 0.95):
+            raise ComputerError("INVALID_ARGUMENT", "refusing input on a fullscreen surface")
 
     def targets(self) -> list[dict[str, Any]]:
-        raise self._unavailable()
+        from rinari.computer import win32 as _w
+
+        out: list[dict[str, Any]] = []
+        for pid in self._pid_allowlist:
+            for hwnd in _w.enum_windows_for_pid(pid):
+                out.append({"target_id": f"hwnd:{hwnd}", "title": "", "kind": "lab"})
+        return out
 
     def capture(
         self, target_id: str, *, cancelled: Callable[[], bool] | None = None
     ) -> GraphicFrame:
-        raise self._unavailable()
+        from rinari.computer import win32 as _w
+
+        _raise_if_cancelled(cancelled)
+        hwnd = self._resolve(target_id)
+        left, top, right, bottom = _w.window_rect(hwnd)
+        if right <= left or bottom <= top:
+            raise ComputerError("CAPTURE_FAILED", "target window has no area")
+        from PIL import ImageGrab
+
+        shot = ImageGrab.grab(bbox=(left, top, right, bottom))
+        import io
+
+        buf = io.BytesIO()
+        shot.save(buf, format="PNG")
+        self.events.append({"op": "capture", "target_id": target_id})
+        return GraphicFrame(
+            png=buf.getvalue(),
+            width=shot.width,
+            height=shot.height,
+            dpi_scale=_w.dpi_scale(hwnd),
+        )
+
+    def _ensure_foreground(self, hwnd: int) -> None:
+        from rinari.computer import win32 as _w
+
+        if not _w.focus_window(hwnd):
+            raise ComputerError("INPUT_FAILED", "target is not foreground; refusing blind input")
 
     def click(
         self, target_id: str, x: float, y: float, *, cancelled: Callable[[], bool] | None = None
     ) -> dict[str, Any]:
-        raise self._unavailable()
+        from rinari.computer import win32 as _w
+
+        _raise_if_cancelled(cancelled)
+        hwnd = self._resolve(target_id)
+        self._check_fullscreen(hwnd)
+        self._ensure_foreground(hwnd)
+        left, top, _right, _bottom = _w.window_rect(hwnd)
+        try:
+            _w.mouse_click_screen(left + x, top + y)
+        except OSError as exc:
+            raise ComputerError("INPUT_FAILED", "mouse click failed: " + str(exc)) from exc
+        self.events.append({"op": "click", "target_id": target_id, "x": x, "y": y})
+        return {"clicked": {"x": x, "y": y}}
 
     def type_text(
         self,
@@ -217,10 +305,52 @@ class WindowsBackend(GraphicBackend):
         submit: bool = False,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        raise self._unavailable()
+        from rinari.computer import win32 as _w
+
+        _raise_if_cancelled(cancelled)
+        hwnd = self._resolve(target_id)
+        self._check_fullscreen(hwnd)
+        self._ensure_foreground(hwnd)
+
+        def check() -> bool:
+            if cancelled is not None and cancelled():
+                return True
+            # Shared-machine guard: stop at the first char that would land
+            # outside our verified window instead of typing blind.
+            return _w.get_foreground() != hwnd
+
+        try:
+            _w.type_unicode(text, cancelled=check, pacing_s=0.02)
+        except TimeoutError as exc:
+            try:
+                _w.mouse_release_all()
+            finally:
+                if _w.get_foreground() != hwnd:
+                    raise ComputerError(
+                        "CANCELLED", "foreground lost mid-type; stopped cleanly"
+                    ) from exc
+                raise ComputerError("CANCELLED", str(exc)) from exc
+        except OSError as exc:
+            raise ComputerError("INPUT_FAILED", "keyboard input failed: " + str(exc)) from exc
+        if submit:
+            _w.press_enter()
+        self.events.append({"op": "type", "target_id": target_id, "chars": len(text)})
+        return {"typed": len(text), "submit": submit}
 
     def release_all(self, target_id: str) -> None:
-        raise self._unavailable()
+        import contextlib
+
+        from rinari.computer import win32 as _w
+
+        with contextlib.suppress(Exception):
+            _w.mouse_release_all()
+        self.events.append({"op": "release_all", "target_id": target_id})
+
+    def read_text(self, target_id: str) -> str:
+        """Lab verification helper (not a tool): readable text of the surface."""
+        from rinari.computer import win32 as _w
+
+        return _w.read_text(self._resolve(target_id))
 
 
 def select_backend(name: str | None, *, fake: FakeBackend | None = None) -> GraphicBackend:
@@ -241,11 +371,7 @@ def select_backend(name: str | None, *, fake: FakeBackend | None = None) -> Grap
                 "windows-lab backend requires RINARI_COMPUTER_LAB=1 in a separate "
                 "lab environment; refusing on this host",
             )
-        raise ComputerError(
-            "BACKEND_UNAVAILABLE",
-            "windows-lab backend selected but no approved implementation exists yet; "
-            "see docs/adr/0001-windows-desktop-backend.md",
-        )
+        return WindowsBackend(lab=True)
     raise ComputerError("INVALID_ARGUMENT", f"unknown graphic backend: {name!r}")
 
 

@@ -1,6 +1,6 @@
 # ADR 0001: Windows desktop backend for computer use
 
-Status: PROPOSED (not approved, not implemented)
+Status: LAB-PROVING (user-authorized on own PC, 2026-09-16; ctypes stdlib only)
 Date: 2026-09-16
 Branch: feat/computer-use
 
@@ -60,3 +60,17 @@ grant with target, scopes, visual destination and expiry.
 Remote control, unattended operation of real accounts, simultaneous
 Linux/macOS desktop backends, automatic privileged installation,
 continuous surveillance, sensitive actions without proper intervention.
+
+## Lab findings (2026-09-16, live host)
+
+- Win11 will not yield foreground to background processes (SetForegroundWindow
+  + AttachThreadInput + SwitchToThisWindow all refused): input needs either
+  an idle desktop or one user click into the lab window. Every injection
+  re-verifies foreground first and aborts honestly otherwise.
+- Win11 Notepad ignores WM_GETTEXT: verification oracle is select-all +
+  copy + clipboard read (foreground re-verified, content never logged).
+- Typing holds per-char foreground checks: on a live machine a focus steal
+  stops the string instead of leaking it elsewhere (proven by partial
+  captures); a full pass needs a short hands-off window.
+- Capture, grant TTL expiry, observation binding and click dispatch verified
+  physically. Full type roundtrip pending quiescent host.
