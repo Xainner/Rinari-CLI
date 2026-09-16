@@ -8,6 +8,7 @@ persistence → approval → error → retry → resume) are covered.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -261,24 +262,69 @@ def test_e2e_large_output_spills_and_stays_bounded(tmp_path) -> None:
         handler=lambda args, ctx: big,
     )
     env = _harness(tmp_path, approvals="y", extra_tools=[tool])
+    tool_ctx = env["ctx"].tool_ctx
     result = env["runtime"].execute(
         "test.big",
         {"path": str(env["root"] / "src" / "a.py")},
-        env["ctx"].tool_ctx,
+        tool_ctx,
         tool_call_id="big1",
     )
-    assert result.ok and result.truncated
+
+    assert result.ok
+    assert result.truncated is False
+    assert isinstance(result.data, dict)
+    assert result.data["delivery_partial"] is True
+    assert result.data["source_partial"] is False
     assert len(result.artifacts) == 1
-    uri = result.artifacts[0].uri
-    text = result.to_model_text("test.big")
-    assert len(text) < 100_000
-    back = env["runtime"].execute(
-        "artifact.read",
-        {"uri": uri, "start_byte": 0, "max_bytes": 16},
-        env["ctx"].tool_ctx,
-        tool_call_id="big2",
+
+    uri = result.data["result_ref"]
+    assert uri == result.artifacts[0].uri
+    assert result.data["recovery"]["tool"] == "artifact.read"
+    assert result.data["recovery"]["uri"] == uri
+    assert result.data["recovery"]["start_byte"] == 0
+    assert len(result.to_model_text("test.big").encode("utf-8")) <= (
+        tool_ctx.observation_budget_bytes
     )
-    assert back.ok
+
+    # El artefacto contiene el envelope JSON completo, no solo la cadena big.
+    # Recuperarlo por la herramienta pública verifica también sus cursores.
+    pages: list[str] = []
+    offset = 0
+    size_bytes = None
+    for page_number in range(256):
+        back = env["runtime"].execute(
+            "artifact.read",
+            {"uri": uri, "start_byte": offset, "max_bytes": 16_384},
+            tool_ctx,
+            tool_call_id=f"big-read-{page_number}",
+        )
+        assert back.ok
+        assert isinstance(back.data, dict)
+        page = back.data
+        assert page["start_byte"] == offset
+        assert page["end_byte"] == offset + len(page["text"].encode("utf-8"))
+        if size_bytes is None:
+            size_bytes = page["size_bytes"]
+        assert page["size_bytes"] == size_bytes
+        assert len(back.to_model_text("artifact.read").encode("utf-8")) <= (
+            tool_ctx.observation_budget_bytes
+        )
+        pages.append(page["text"])
+        next_offset = page["next_start_byte"]
+        if next_offset is None:
+            assert page["end_byte"] == size_bytes
+            break
+        assert offset < next_offset == page["end_byte"]
+        offset = next_offset
+    else:
+        pytest.fail("La recuperación del artefacto no alcanzó EOF")
+
+    recovered_text = "".join(pages)
+    assert len(recovered_text.encode("utf-8")) == size_bytes
+    recovered = json.loads(recovered_text)
+    assert recovered["ok"] is True
+    assert recovered["tool"] == "test.big"
+    assert recovered["data"] == big
 
 
 # -- approval deny: no execution, no double exec ----------------------------------------------
