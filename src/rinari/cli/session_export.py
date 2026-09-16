@@ -50,7 +50,15 @@ def export_session(s, ref: str | None) -> dict:
                 "tool_call_id": m.tool_call_id,
                 "name": m.name,
                 "tool_calls": [
-                    {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
+                    (
+                        {
+                            "id": tc.get("id", ""),
+                            "name": tc.get("name", ""),
+                            "arguments": tc.get("arguments") or {},
+                        }
+                        if isinstance(tc, dict)
+                        else {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
+                    )
                     for tc in (m.tool_calls or ())
                 ],
                 "created_at": m.created_at,

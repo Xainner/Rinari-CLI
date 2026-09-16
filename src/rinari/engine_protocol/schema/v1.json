@@ -613,6 +613,8 @@
         "state": {
           "enum": [
             "active",
+            "interrupted",
+            "stopped",
             "closed",
             "archived"
           ]
