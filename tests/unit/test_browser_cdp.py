@@ -1390,6 +1390,40 @@ def test_browser_type_releases_key_when_cancelled(tmp_path, fake_cdp, monkeypatc
         manager.close()
 
 
+def test_screenshot_images_expand_to_model_messages(tmp_path, fake_cdp, monkeypatch) -> None:
+    import io
+
+    from PIL import Image as _PILImage
+
+    from rinari.models.images import expand_tool_images
+    from rinari.models.types import ChatMessage
+
+    buf = io.BytesIO()
+    _PILImage.new("RGB", (64, 48), "blue").save(buf, format="PNG")
+    real_png = buf.getvalue()
+    manager = _connected_manager(tmp_path, fake_cdp, monkeypatch)
+    monkeypatch.setattr(manager, "screenshot", lambda *args, **kwargs: real_png)
+    runtime = _runtime(tmp_path, manager=manager, network_mode="allow")
+    ctx, app = _ctx_with_store(tmp_path, monkeypatch, manager)
+    try:
+        result = runtime.execute("browser.screenshot", {"target_id": "t1"}, ctx)
+        assert result.ok, result.error
+        assert len(result.images) == 1
+        tool_msg = ChatMessage(
+            role="tool",
+            content=result.to_model_text("browser.screenshot"),
+            images=result.images,
+            tool_call_id="shot1",
+        )
+        projected = expand_tool_images([tool_msg])
+        visual = [m for m in projected if m.role == "user" and m.images]
+        assert len(visual) == 1
+        assert visual[0].images == result.images
+    finally:
+        manager.close()
+        app.close()
+
+
 def test_browser_upload_requires_sandbox_and_provenance(tmp_path, fake_cdp, monkeypatch) -> None:
     manager = _connected_manager(tmp_path, fake_cdp, monkeypatch)
     runtime = _runtime(tmp_path, manager=manager, network_mode="allow", answer="s")
