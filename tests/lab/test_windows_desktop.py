@@ -109,6 +109,11 @@ def test_lab_grant_gated_type_roundtrip(tmp_path, monkeypatch) -> None:
     hwnd, pid, _seed = _open_lab_notepad(tmp_path)
     try:
         target = "hwnd:" + str(hwnd)
+        import contextlib
+
+        from rinari.computer import win32 as _cbw
+
+        saved_clipboard = _cbw.get_clipboard_text()
         home = tmp_path / "rinari-home-lab"
         app = build_app_context(home=str(home), clock=FakeClock())
         try:
@@ -202,6 +207,8 @@ def test_lab_grant_gated_type_roundtrip(tmp_path, monkeypatch) -> None:
             assert got == MARKER, "oracle mismatch: len=" + str(len(got))
             (tmp_path / "proof.png").write_bytes(backend.capture(target).png)
         finally:
+            with contextlib.suppress(Exception):
+                _cbw.set_clipboard_text(saved_clipboard)
             app.close()
     finally:
         _kill(pid)

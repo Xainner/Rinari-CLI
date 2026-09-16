@@ -425,6 +425,39 @@ def get_clipboard_text() -> str:
 
 
 def select_all_and_copy(hwnd: int | None = None) -> None:
+
+
+def set_clipboard_text(text: str) -> None:
+    user32.OpenClipboard.argtypes = (wintypes.HWND,)
+    user32.OpenClipboard.restype = wintypes.BOOL
+    user32.EmptyClipboard.restype = wintypes.BOOL
+    user32.SetClipboardData.argtypes = (wintypes.UINT, wintypes.HANDLE)
+    user32.SetClipboardData.restype = wintypes.HANDLE
+    kernel32.GlobalAlloc.argtypes = (wintypes.UINT, ctypes.c_size_t)
+    kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+    kernel32.GlobalLock.argtypes = (wintypes.HGLOBAL,)
+    kernel32.GlobalLock.restype = wintypes.LPVOID
+    kernel32.GlobalUnlock.argtypes = (wintypes.HGLOBAL,)
+    GMEM_MOVEABLE = 0x0002
+    if not user32.OpenClipboard(None):
+        raise OSError("OpenClipboard failed")
+    try:
+        user32.EmptyClipboard()
+        data = text.encode("utf-16-le") + b"\x00\x00"
+        handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+        if not handle:
+            raise OSError("GlobalAlloc failed")
+        locked = kernel32.GlobalLock(handle)
+        if not locked:
+            raise OSError("GlobalLock failed")
+        try:
+            ctypes.memmove(locked, data, len(data))
+        finally:
+            kernel32.GlobalUnlock(handle)
+        if not user32.SetClipboardData(CF_UNICODETEXT, handle):
+            raise OSError("SetClipboardData failed")
+    finally:
+        user32.CloseClipboard()
     # Shared-machine guard: never touch shared channels unless our verified
     # window still owns the foreground. Raises instead of leaking input.
     if hwnd is not None and get_foreground() != hwnd:
