@@ -18,8 +18,10 @@ Capability model (phase 5 "Browser engine" decision, AGENTS.md 11):
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -340,11 +342,99 @@ def browser_screenshot(input: dict, ctx: ToolContext) -> ToolResult:
             ok=False,
             error=ToolErrorInfo(code=code, message=exc.message, retryable=exc.retryable),
         )
-    path = _artifact_dir(ctx) / f"screenshot-{int(time.time())}.png"
-    path.write_bytes(png)
-    ref = ArtifactRef(uri=f"file://{path}", name=path.name, kind="screenshot")
+    observation_id = uuid.uuid4().hex[:12]
+    stamp = int(time.time())
+    name = f"screenshot-{stamp}-{observation_id}.png"
+    store = getattr(ctx, "artifact_store", None)
+    if store is not None:
+        try:
+            record = store.create(
+                ctx.session_id,
+                "browser",
+                name,
+                png,
+                content_type="image/png",
+                provenance=f"browser.screenshot:{target or 'auto'}",
+                summary=f"Browser screenshot {target or 'auto'}",
+            )
+            data = {
+                "uri": record.uri(),
+                "artifact": record.uri(),
+                "sha256": record.sha256,
+                "bytes": len(png),
+                "mime_type": record.content_type,
+                "target_id": target,
+                "observation_id": observation_id,
+                "captured_at": stamp,
+            }
+            try:
+                from rinari.models.images import ImageReference
+
+                ref = ImageReference(
+                    record.uri(),
+                    store._storage_path(record.storage_path),
+                    record.sha256,
+                    record.content_type,
+                )
+                ref.encoded()  # validate pixels now; replay stays lazy
+                from PIL import Image as _PILImage
+
+                with _PILImage.open(ref.path) as _img:
+                    data["width"], data["height"] = _img.size
+                data["visual"] = True
+                return ToolResult(
+                    ok=True,
+                    data=data,
+                    images=(ref,),
+                    artifacts=(ArtifactRef(record.uri(), name, "screenshot"),),
+                    presentation={"kind": "image", "image": data},
+                )
+            except Exception as vex:  # bytes kept; vision skipped explicitly
+                data["visual"] = False
+                data["visual_error"] = f"{vex.__class__.__name__}: {vex}"
+                return ToolResult(
+                    ok=True,
+                    data=data,
+                    artifacts=(ArtifactRef(record.uri(), name, "screenshot"),),
+                )
+        except Exception as exc:  # defensive: a crash must never look like success
+            return ToolResult(
+                ok=False,
+                error=ToolErrorInfo(
+                    code=ToolErrorCode.UNKNOWN, message=f"{exc.__class__.__name__}: {exc}"
+                ),
+            )
+    # Legacy fallback when no session media store is wired (minimal hosts).
+    # Still unique and atomic so rapid captures never overwrite each other.
+    import os
+    import tempfile
+
+    directory = _artifact_dir(ctx)
+    fd, tmpname = tempfile.mkstemp(dir=directory, prefix=".screenshot-")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(png)
+            handle.flush()
+            os.fsync(handle.fileno())
+        path = directory / name
+        os.replace(tmpname, path)
+    except Exception:
+        with contextlib.suppress(Exception):
+            Path(tmpname).unlink(missing_ok=True)
+        raise
+    digest = _sha256(path)
+    legacy = ArtifactRef(uri=f"file://{path}", name=path.name, kind="screenshot")
     return _with_artifacts(
-        {"artifact": ref.uri, "bytes": len(png), "sha256": _sha256(path)}, (ref,)
+        {
+            "artifact": legacy.uri,
+            "uri": legacy.uri,
+            "bytes": len(png),
+            "sha256": digest,
+            "target_id": target,
+            "observation_id": observation_id,
+            "captured_at": stamp,
+        },
+        (legacy,),
     )
 
 
@@ -804,7 +894,10 @@ def browse_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="browser.screenshot",
-            description="Screenshot the page as PNG; saved to the session artifact dir.",
+            description=(
+                "Screenshot the page as PNG; returns an immutable artifact URI "
+                "plus a visual observation for vision-capable models."
+            ),
             input_schema=optional_target,
             risk=RISK_LOW,
             side_effects=SIDE_EFFECT_LOCAL_REVERSIBLE,

@@ -1212,6 +1212,80 @@ def test_browser_screenshot_artifact(tmp_path, fake_cdp, monkeypatch) -> None:
     manager.close()
 
 
+def _ctx_with_store(tmp_path, monkeypatch, manager):
+    import dataclasses
+
+    from rinari.application.context import build_app_context
+    from rinari.artifacts.store import ArtifactStore
+
+    monkeypatch.setenv("RINARI_KEYRING", "0")
+    app = build_app_context(home=str(tmp_path / "rinari-home-shot"), clock=FakeClock())
+    store = ArtifactStore(app)
+    ctx = _ctx(tmp_path, manager=manager, network=NetworkGuard(NetworkPolicy(mode="allow")))
+    return dataclasses.replace(ctx, artifact_store=store), app
+
+
+def test_browser_screenshot_canonical_artifact(tmp_path, fake_cdp, monkeypatch) -> None:
+    manager = _connected_manager(tmp_path, fake_cdp, monkeypatch)
+    runtime = _runtime(tmp_path, manager=manager, network_mode="allow")
+    ctx, app = _ctx_with_store(tmp_path, monkeypatch, manager)
+    try:
+        result = runtime.execute("browser.screenshot", {"target_id": "t1"}, ctx)
+        assert result.ok, result.error
+        assert result.data["uri"].startswith("artifact://")
+        assert result.data["artifact"] == result.data["uri"]
+        assert result.data["sha256"] == hashlib.sha256(base64.b64decode(_PNG)).hexdigest()
+        assert result.data["observation_id"]
+        assert result.data["target_id"] == "t1"
+        assert result.artifacts[0].uri == result.data["uri"]
+        # Fake CDP bytes are not a decodable PNG: evidence kept, vision skipped explicitly.
+        assert result.data["visual"] is False
+        assert result.images == ()
+    finally:
+        manager.close()
+        app.close()
+
+
+def test_browser_screenshots_are_unique(tmp_path, fake_cdp, monkeypatch) -> None:
+    manager = _connected_manager(tmp_path, fake_cdp, monkeypatch)
+    runtime = _runtime(tmp_path, manager=manager, network_mode="allow")
+    ctx, app = _ctx_with_store(tmp_path, monkeypatch, manager)
+    try:
+        first = runtime.execute("browser.screenshot", {"target_id": "t1"}, ctx)
+        second = runtime.execute("browser.screenshot", {"target_id": "t1"}, ctx)
+        assert first.ok and second.ok
+        assert first.data["uri"] != second.data["uri"]
+        assert first.data["observation_id"] != second.data["observation_id"]
+    finally:
+        manager.close()
+        app.close()
+
+
+def test_browser_screenshot_populates_images(tmp_path, fake_cdp, monkeypatch) -> None:
+    import io
+
+    from PIL import Image as _PILImage
+
+    buf = io.BytesIO()
+    _PILImage.new("RGB", (64, 48), "red").save(buf, format="PNG")
+    real_png = buf.getvalue()
+    manager = _connected_manager(tmp_path, fake_cdp, monkeypatch)
+    monkeypatch.setattr(manager, "screenshot", lambda *args, **kwargs: real_png)
+    runtime = _runtime(tmp_path, manager=manager, network_mode="allow")
+    ctx, app = _ctx_with_store(tmp_path, monkeypatch, manager)
+    try:
+        result = runtime.execute("browser.screenshot", {"target_id": "t1"}, ctx)
+        assert result.ok, result.error
+        assert result.data.get("visual") is True
+        assert len(result.images) == 1
+        assert result.images[0].uri == result.data["uri"]
+        assert result.data["width"] == 64
+        assert result.data["height"] == 48
+    finally:
+        manager.close()
+        app.close()
+
+
 def test_browser_upload_requires_sandbox_and_provenance(tmp_path, fake_cdp, monkeypatch) -> None:
     manager = _connected_manager(tmp_path, fake_cdp, monkeypatch)
     runtime = _runtime(tmp_path, manager=manager, network_mode="allow", answer="s")

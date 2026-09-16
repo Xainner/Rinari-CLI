@@ -96,7 +96,10 @@ FIELDS = {
     "browser.navigate": "url:s frame_id:s? loader_id:s?",
     "browser.snapshot": "html:s bytes:i truncated:b",
     "browser.a11y": "nodes:a total:i truncated:b",
-    "browser.screenshot": "path:s bytes:i sha256:s",
+    "browser.screenshot": (
+        "uri:s bytes:i sha256:s width:i? height:i? observation_id:s? "
+        "target_id:s? artifact:s? mime_type:s? visual:b?"
+    ),
     "browser.click": "clicked:o",
     "browser.fill": "filled:s chars:i",
     "browser.type": "typed:i",
