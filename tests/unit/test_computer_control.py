@@ -126,16 +126,12 @@ def test_select_backend_defaults_fake_and_lab_refuses(tmp_path, monkeypatch) -> 
     with pytest.raises(ComputerError) as exc_info:
         select_backend("nope")
     assert exc_info.value.code == "INVALID_ARGUMENT"
-    windows = WindowsBackend()
-    for op in (
-        lambda: windows.targets(),
-        lambda: windows.capture("t"),
-        lambda: windows.click("t", 1.0, 2.0),
-        lambda: windows.type_text("t", "hi"),
-    ):
-        with pytest.raises(ComputerError) as exc_info:
-            op()
-        assert exc_info.value.code == "BACKEND_UNAVAILABLE"
+    with pytest.raises(ComputerError) as exc_info:
+        WindowsBackend()
+    assert exc_info.value.code == "BACKEND_UNAVAILABLE"
+    with pytest.raises(ComputerError) as exc_info:
+        WindowsBackend(lab=True)
+    assert exc_info.value.code == "BACKEND_UNAVAILABLE"
 
 
 def test_tools_deny_without_service(tmp_path, monkeypatch) -> None:

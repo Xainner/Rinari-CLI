@@ -510,9 +510,12 @@ def _owned_popup(hwnd: int | None) -> bool:
     user32.GetWindow.restype = wintypes.HWND
     GW_OWNER = 4
     for candidate, _title, _pid in visible_windows():
-        if candidate != hwnd and user32.GetWindow(candidate, GW_OWNER) == hwnd:
-            if user32.IsWindowVisible(candidate):
-                return True
+        if (
+            candidate != hwnd
+            and user32.GetWindow(candidate, GW_OWNER) == hwnd
+            and user32.IsWindowVisible(candidate)
+        ):
+            return True
     return False
 
 
