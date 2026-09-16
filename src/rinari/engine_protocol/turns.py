@@ -178,6 +178,7 @@ class TurnManager:
         self._events: queue.Queue[dict[str, Any]] = queue.Queue()
         self._turns: dict[str, _ActiveTurn] = {}
         self._desktop_browsers: dict[str, Any] = {}
+        self._desktop_computer: dict[str, Any] = {}
         self._desktop_processes: dict[str, Any] = {}
         self._threads: dict[str, threading.Thread] = {}
         self._preparation_threads: set[threading.Thread] = set()
@@ -565,6 +566,147 @@ class TurnManager:
                 "error": str(exc),
             }
 
+    # -- graphic control (computer use) ------------------------------------
+
+    def _computer_service(self, session_id: str, *, create: bool):
+        from rinari.computer.backend import ComputerError, WindowsBackend
+        from rinari.computer.service import GraphicControlService
+
+        with self._lock:
+            current = self._desktop_computer.get(session_id)
+        if current is not None and not isinstance(current, Exception):
+            return current
+        if current is not None or not create:
+            return current
+        try:
+            service = GraphicControlService(
+                session_id=session_id,
+                backend=WindowsBackend(lab=True),
+                artifact_store=self._services.artifacts,
+            )
+        except ComputerError as exc:
+            with self._lock:
+                self._desktop_computer[session_id] = exc
+            return exc
+        with self._lock:
+            self._desktop_computer[session_id] = service
+        return service
+
+    def _computer_grants_view(self, service) -> list[dict[str, Any]]:
+        import time as _time
+
+        now = _time.time()
+        return [
+            {
+                "grant_id": grant.grant_id,
+                "target": grant.target,
+                "scopes": sorted(grant.scopes),
+                "expires_in_s": max(0, int(grant.expires_at - now)),
+            }
+            for grant in service.grants.active_grants(service.session_id)
+        ]
+
+    def computer_state(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Status of the session graphic-control plane for desktop UI."""
+        session_id = str(params.get("session_id") or "")
+        try:
+            self._services.sessions.show(session_id)
+            service = self._computer_service(session_id, create=False)
+            if service is None:
+                return {
+                    "state": "unavailable",
+                    "session_id": session_id,
+                    "available": False,
+                    "backend": "none",
+                    "error": "no graphic-control service attached to this session",
+                }
+            if isinstance(service, Exception):
+                return {
+                    "state": "unavailable",
+                    "session_id": session_id,
+                    "available": False,
+                    "backend": "none",
+                    "error": str(service),
+                }
+            status = service.state()
+            return {
+                "state": "ready" if status.get("available", True) else "degraded",
+                "session_id": session_id,
+                "available": True,
+                "backend": str(status.get("backend", "")),
+                "targets": status.get("targets", []),
+                "observations": int(status.get("observations", 0)),
+                "actions": int(status.get("actions", 0)),
+                "grants": self._computer_grants_view(service),
+            }
+        except Exception as exc:
+            return {
+                "state": "unavailable",
+                "session_id": session_id,
+                "available": False,
+                "backend": "none",
+                "error": str(exc),
+            }
+
+    def computer_grant_issue(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Issue a user-authorized graphic-control grant (desktop gesture)."""
+        from rinari.computer.backend import ComputerError
+        from rinari.computer.grants import GrantDenied
+
+        session_id = str(params.get("session_id") or "")
+        denied = {"granted": False, "session_id": session_id}
+        try:
+            self._services.sessions.show(session_id)
+            target = params.get("target")
+            scopes = params.get("scopes") or []
+            ttl = params.get("ttl_s", 300)
+            if not isinstance(target, str) or not target:
+                return {**denied, "error": "target must be a non-empty surface id"}
+            if not isinstance(scopes, list) or not scopes:
+                return {**denied, "error": "scopes must be a non-empty list"}
+            if not isinstance(ttl, (int, float)) or isinstance(ttl, bool):
+                return {**denied, "error": "ttl_s must be a number"}
+            if not 30 <= float(ttl) <= 3600:
+                return {**denied, "error": "ttl_s must be between 30 and 3600 seconds"}
+            service = self._computer_service(session_id, create=True)
+            if service is None or isinstance(service, Exception):
+                reason = "no graphic-control backend on this host"
+                if isinstance(service, Exception):
+                    reason = str(service)
+                return {**denied, "error": reason}
+            grant = service.issue_grant(
+                target, scopes, float(ttl), note=str(params.get("note") or "desktop")
+            )
+            return {
+                "granted": True,
+                "session_id": session_id,
+                "grant_id": grant.grant_id,
+                "target": grant.target,
+                "scopes": sorted(grant.scopes),
+                "expires_in_s": int(float(ttl)),
+            }
+        except (GrantDenied, ComputerError, ValueError) as exc:
+            return {**denied, "error": str(exc)}
+        except Exception as exc:
+            return {**denied, "error": str(exc)}
+
+    def computer_grant_revoke(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Revoke a graphic-control grant (desktop gesture)."""
+        session_id = str(params.get("session_id") or "")
+        answer: dict[str, Any] = {"revoked": False, "session_id": session_id}
+        try:
+            self._services.sessions.show(session_id)
+            service = self._computer_service(session_id, create=False)
+            if service is None or isinstance(service, Exception):
+                return {**answer, "error": "no graphic-control service on this session"}
+            grant_id = params.get("grant_id")
+            if not isinstance(grant_id, str) or not grant_id:
+                return {**answer, "error": "grant_id must be a non-empty string"}
+            answer["revoked"] = bool(service.revoke_grant(grant_id))
+            return answer
+        except Exception as exc:
+            return {**answer, "error": str(exc)}
+
     def _run_turn(
         self,
         turn_id: str,
@@ -601,6 +743,16 @@ class TurnManager:
                         self._desktop_browsers[turn.session_id] = browser
                 if browser is not None:
                     context.tool_ctx = replace(context.tool_ctx, browser=browser)
+                computer = self._desktop_computer.get(turn.session_id)
+                if computer is None:
+                    computer = getattr(context.tool_ctx, "computer", None)
+                    if computer is not None and not isinstance(computer, Exception):
+                        self._desktop_computer[turn.session_id] = computer
+                if computer is not None and not isinstance(computer, Exception):
+                    from rinari.computer.service import GraphicControlService
+
+                    if isinstance(computer, GraphicControlService):
+                        context.tool_ctx = replace(context.tool_ctx, computer=computer)
             tracker = self._services.changes.begin(
                 self._services,
                 record,

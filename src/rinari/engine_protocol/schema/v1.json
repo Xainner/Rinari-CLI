@@ -19,6 +19,8 @@
     "toolSummary",
     "browserPage",
     "browserView",
+    "computerState",
+    "computerGrant",
     "managedProcess",
     "processOutput",
     "viewedImage",
@@ -358,6 +360,9 @@
         "attachment.prepare.cancel",
         "model.vision.set",
         "browser.view.get",
+        "computer.state.get",
+        "computer.grant.issue",
+        "computer.grant.revoke",
         "workspace.process.list",
         "workspace.process.read",
         "workspace.process.stop",
@@ -1050,6 +1055,85 @@
           "items": {
             "$ref": "#/$defs/browserPage"
           }
+        }
+      }
+    },
+    "computerState": {
+      "type": "object",
+      "required": [
+        "state",
+        "session_id",
+        "available"
+      ],
+      "properties": {
+        "state": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "available": {
+          "type": "boolean"
+        },
+        "backend": {
+          "type": "string"
+        },
+        "targets": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "observations": {
+          "type": "integer"
+        },
+        "actions": {
+          "type": "integer"
+        },
+        "grants": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "error": {
+          "type": "string"
+        }
+      }
+    },
+    "computerGrant": {
+      "type": "object",
+      "required": [
+        "granted",
+        "session_id"
+      ],
+      "properties": {
+        "granted": {
+          "type": "boolean"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "grant_id": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        },
+        "scopes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "expires_in_s": {
+          "type": "integer"
+        },
+        "revoked": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
         }
       }
     },

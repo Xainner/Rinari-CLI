@@ -27,6 +27,7 @@ CAPABILITIES: dict[str, bool] = {
     "agent_inheritance_v1": True,
     "agent_activity_v1": True,
     "browser_view_v1": True,
+    "computer_control_v1": True,
     "tool_contracts_v1": True,
     "durable_operations_v1": True,
     "channel_tools_v1": True,

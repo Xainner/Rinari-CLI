@@ -75,6 +75,12 @@ class GrantStore:
             self._revoked.add(grant_id)
             return True
 
+    def active_grants(self, session_id: str) -> list[GraphicGrant]:
+        with self._lock:
+            live = [g for g in self._grants.values() if g.grant_id not in self._revoked]
+        now = self._clock()
+        return [g for g in live if g.session_id == session_id and g.expires_at > now]
+
     def check(self, session_id: str, target: str, scope: str) -> GraphicGrant:
         with self._lock:
             live = [g for g in self._grants.values() if g.grant_id not in self._revoked]
