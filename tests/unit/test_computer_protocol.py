@@ -132,3 +132,37 @@ def test_grant_revoke_unknown(server, services, tmp_path) -> None:
     result = server._turns.computer_grant_revoke({"session_id": sid})
     assert result["revoked"] is False
     assert result["error"]
+
+
+def test_wire_envelopes_end_to_end(server, services, tmp_path) -> None:
+    import json
+
+    sid = _session(services, tmp_path)
+    _attach(server, services, sid)
+
+    def call(mid: str, method: str, params: dict):
+        return server.handle_line(json.dumps({"id": mid, "method": method, "params": params}))
+
+    result = call("1", "computer.state.get", {"session_id": sid})
+    assert result["id"] == "1"
+    assert result["ok"] is True
+    assert result["result"]["available"] is True
+    assert result["result"]["backend"] == "fake"
+    assert result["result"]["grants"] == []
+    result = call(
+        "2",
+        "computer.grant.issue",
+        {"session_id": sid, "target": "lab-app", "scopes": ["observe"], "ttl_s": 120},
+    )
+    assert result["ok"] is True
+    assert result["result"]["granted"] is True
+    grant_id = result["result"]["grant_id"]
+    result = call("3", "computer.state.get", {"session_id": sid})
+    assert [g["grant_id"] for g in result["result"]["grants"]] == [grant_id]
+    result = call("4", "computer.grant.revoke", {"session_id": sid, "grant_id": grant_id})
+    assert result["ok"] is True
+    assert result["result"]["revoked"] is True
+    result = call("5", "computer.state.get", {"session_id": sid})
+    assert result["result"]["grants"] == []
+    unknown = call("6", "computer.nope", {})
+    assert unknown["ok"] is False
