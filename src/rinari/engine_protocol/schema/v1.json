@@ -1098,6 +1098,30 @@
             "integer",
             "null"
           ]
+        },
+        "generation": {
+          "type": "integer"
+        },
+        "ended_at": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "exit_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "readiness": {
+          "type": "string"
+        },
+        "readiness_checked_at": {
+          "type": [
+            "number",
+            "null"
+          ]
         }
       }
     },
