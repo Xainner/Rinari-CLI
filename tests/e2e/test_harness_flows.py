@@ -267,8 +267,13 @@ def test_e2e_large_output_spills_and_stays_bounded(tmp_path) -> None:
         env["ctx"].tool_ctx,
         tool_call_id="big1",
     )
-    assert result.ok and result.truncated
+    assert result.ok
     assert len(result.artifacts) == 1
+    assert isinstance(result.data, dict)
+    assert result.data.get("delivery_partial") is True
+    assert result.data.get("result_ref")
+    recovery = result.data.get("recovery") or {}
+    assert recovery.get("tool") == "artifact.read"
     uri = result.artifacts[0].uri
     text = result.to_model_text("test.big")
     assert len(text) < 100_000
