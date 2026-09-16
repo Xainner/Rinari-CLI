@@ -424,9 +424,6 @@ def get_clipboard_text() -> str:
         user32.CloseClipboard()
 
 
-def select_all_and_copy(hwnd: int | None = None) -> None:
-
-
 def set_clipboard_text(text: str) -> None:
     user32.OpenClipboard.argtypes = (wintypes.HWND,)
     user32.OpenClipboard.restype = wintypes.BOOL
@@ -458,12 +455,37 @@ def set_clipboard_text(text: str) -> None:
             raise OSError("SetClipboardData failed")
     finally:
         user32.CloseClipboard()
+
+
+def select_all_and_copy(hwnd: int | None = None) -> None:
     # Shared-machine guard: never touch shared channels unless our verified
     # window still owns the foreground. Raises instead of leaking input.
     if hwnd is not None and get_foreground() != hwnd:
         raise OSError("foreground moved before shared-channel input; refusing")
     user32.CloseClipboard.argtypes = ()
     user32.CloseClipboard.restype = wintypes.BOOL
+    # NOTE: selection uses Shift+End/Home, never Ctrl+A: on Spanish-locale
+    # Windows Ctrl+A means File>Open when the edit control lacks focus, and
+    # that accelerator must never fire from automation. Ctrl+C is safe: with
+    # wrong focus it is a no-op, never a dialog.
+    if _owned_popup(hwnd):
+        raise OSError("owned dialog open on target; refusing input")
+    _send(_vkey(0x24, False))
+    _send(_vkey(0x24, True))
+    shift_down = INPUT(
+        type=INPUT_KEYBOARD,
+        u=_INPUT_UNION(ki=KEYBDINPUT(wVk=0x10, dwFlags=0)),
+    )
+    shift_up = INPUT(
+        type=INPUT_KEYBOARD,
+        u=_INPUT_UNION(ki=KEYBDINPUT(wVk=0x10, dwFlags=KEYEVENTF_KEYUP)),
+    )
+    _send(shift_down)
+    try:
+        _send(_vkey(0x23, False))
+        _send(_vkey(0x23, True))
+    finally:
+        _send(shift_up)
     ctrl_down = INPUT(
         type=INPUT_KEYBOARD,
         u=_INPUT_UNION(ki=KEYBDINPUT(wVk=0x11, dwFlags=0)),
@@ -474,11 +496,24 @@ def set_clipboard_text(text: str) -> None:
     )
     _send(ctrl_down)
     try:
-        for vk in (0x41, 0x43):
-            _send(_vkey(vk, False))
-            _send(_vkey(vk, True))
+        _send(_vkey(0x43, False))
+        _send(_vkey(0x43, True))
     finally:
         _send(ctrl_up)
+
+
+def _owned_popup(hwnd: int | None) -> bool:
+    if hwnd is None:
+        return False
+
+    user32.GetWindow.argtypes = (wintypes.HWND, wintypes.UINT)
+    user32.GetWindow.restype = wintypes.HWND
+    GW_OWNER = 4
+    for candidate, _title, _pid in visible_windows():
+        if candidate != hwnd and user32.GetWindow(candidate, GW_OWNER) == hwnd:
+            if user32.IsWindowVisible(candidate):
+                return True
+    return False
 
 
 def descendant_texts(hwnd: int) -> list[tuple[str, str]]:

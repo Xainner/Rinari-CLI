@@ -72,5 +72,10 @@ continuous surveillance, sensitive actions without proper intervention.
 - Typing holds per-char foreground checks: on a live machine a focus steal
   stops the string instead of leaking it elsewhere (proven by partial
   captures); a full pass needs a short hands-off window.
+- Locale accelerators are input hazards: on Spanish Windows Ctrl+A means
+  File>Open when the edit lacks focus (observed as an auto-opened dialog
+  during proving). Selection uses Shift+End/Home; Ctrl+C stays as the only
+  Ctrl combo (a no-op under wrong focus, never a dialog). Owned popups
+  abort input honestly.
 - Capture, grant TTL expiry, observation binding and click dispatch verified
   physically. Full type roundtrip pending quiescent host.
