@@ -252,6 +252,9 @@ class ToolContext:
     memory_source: dict[str, str] | None = None
     tool_call_id: str = ""
     artifact_store: Any = None
+    # Session-scoped GraphicControlService (rinari.computer); None when the
+    # session has no authorized graphic target. Computer tools fail closed.
+    computer: Any = None
     vision_allowed: bool = False
     image_slots: int | None = None  # Deprecated compatibility field; no session quota.
 

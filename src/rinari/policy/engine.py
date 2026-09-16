@@ -57,6 +57,12 @@ CAPABILITY_STATE_WRITE = "state.write"
 #                   require explicit consent (AGENTS.md 11)
 CAPABILITY_BROWSER_READ = "browser.read"
 CAPABILITY_BROWSER_WRITE = "browser.mutate"
+# Graphic-control capabilities (computer use). Observation reads the state of
+# an explicitly authorized graphic target; operation changes it. The durable
+# user-issued grant is the real gate (checked by the control service); policy
+# only draws the read-only boundary, mirroring the browser model.
+CAPABILITY_COMPUTER_OBSERVE = "computer.observe"
+CAPABILITY_COMPUTER_OPERATE = "computer.operate"
 # MCP capabilities (phase 5). MCP servers are external capability providers:
 #   mcp.read  read-only MCP calls (server-declared readOnlyHint)
 #   mcp.call  any other MCP tool call; external side effects require consent
@@ -319,6 +325,38 @@ class PolicyEngine:
                 action=PolicyAction.ASK,
                 capability=capability,
                 reason="browser control can cause external side effects (consent required)",
+                risk=risk,
+                risk_class=risk_class,
+            )
+        if capability == CAPABILITY_COMPUTER_OBSERVE:
+            if scope.profile is PermissionProfile.READ_ONLY:
+                return PolicyDecision(
+                    action=PolicyAction.DENY,
+                    capability=capability,
+                    reason="read-only profile does not observe graphic targets",
+                    risk=risk,
+                    risk_class=risk_class,
+                )
+            return PolicyDecision(
+                action=PolicyAction.ALLOW,
+                capability=capability,
+                reason="graphic observation is gated by the user-issued grant",
+                risk=risk,
+                risk_class=risk_class,
+            )
+        if capability == CAPABILITY_COMPUTER_OPERATE:
+            if scope.profile is PermissionProfile.READ_ONLY:
+                return PolicyDecision(
+                    action=PolicyAction.DENY,
+                    capability=capability,
+                    reason="read-only profile does not operate graphic targets",
+                    risk=risk,
+                    risk_class=risk_class,
+                )
+            return PolicyDecision(
+                action=PolicyAction.ALLOW,
+                capability=capability,
+                reason="graphic input is gated by the user-issued grant",
                 risk=risk,
                 risk_class=risk_class,
             )

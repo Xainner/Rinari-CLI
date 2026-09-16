@@ -112,6 +112,14 @@ FIELDS = {
     "browser.console": "events:a",
     "browser.network": "events:a",
     "browser.cookies": "cookies:a",
+    "computer.state": "backend:s available:b",
+    "computer.capture": (
+        "uri:s bytes:i sha256:s width:i? height:i? observation_id:s? "
+        "target_id:s? artifact:s? mime_type:s? visual:b? sent_width:i? "
+        "sent_height:i? sent_scale:n? dpi_scale:n? dispatch:s?"
+    ),
+    "computer.click": "action_id:s dispatch:s clicked:o target_id:s? observation_id:s?",
+    "computer.type": "action_id:s dispatch:s typed:i target_id:s? observation_id:s? submit:b?",
     "browser.set_cookie": "set:s",
     "browser.upload": "selector:s file:s",
     "browser.download": "path:s bytes:i sha256:s",
