@@ -168,6 +168,31 @@ def _blocked_turn(server, session_id, monkeypatch):
     return gate, abort
 
 
+def test_runtime_states_stay_visible_in_default_list(server, services, tmp_path) -> None:
+    from dataclasses import replace
+
+    ids = {}
+    for index, state in enumerate(("active", "interrupted", "stopped", "closed", "archived")):
+        created = _ok(
+            server.handle_line(
+                _req(f"vis-{index}", "session.create", {"cwd": str(tmp_path), "chat": True})
+            )
+        )
+        ids[state] = created["session"]["id"]
+    for state in ("interrupted", "stopped", "closed", "archived"):
+        record = services.sessions.show(ids[state])
+        services.ctx.session_repo.update(replace(record, state=state))
+    default = set(_list_ids(server))
+    assert ids["active"] in default
+    assert ids["interrupted"] in default
+    assert ids["stopped"] in default
+    assert ids["closed"] not in default
+    assert ids["archived"] not in default
+    everything = set(_list_ids(server, include_closed=True))
+    for session_id in ids.values():
+        assert session_id in everything
+
+
 def test_close_hides_from_default_list_and_resume_restores(server, services, tmp_path) -> None:
     session_id = _create_chat(server, tmp_path)
     closed = _ok(server.handle_line(_req("c1", "session.close", {"ref": session_id})))["session"]
