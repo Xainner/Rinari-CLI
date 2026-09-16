@@ -566,8 +566,8 @@ def test_pty_rows_carry_identity_fields(tmp_path):
     from rinari.engine_protocol.pty import EnginePtyService
 
     service = EnginePtyService(lambda event: None)
-    first = service.start("exit 0", cwd=str(tmp_path), session_id="s")
-    second = service.start("exit 0", cwd=str(tmp_path), session_id="s")
+    first = service.start("exit 0", cwd=str(tmp_path), session_id="s")["pty_id"]
+    second = service.start("exit 0", cwd=str(tmp_path), session_id="s")["pty_id"]
     try:
         assert service.handle_generation(second) > service.handle_generation(first) >= 1
         rows = {row["pty_id"]: row for row in service.list()}
@@ -804,7 +804,7 @@ def test_pty_row_exposes_real_started_at(tmp_path):
 
     before = time.time()
     service = EnginePtyService(lambda event: None)
-    pty_id = service.start("sleep 30", cwd=str(tmp_path), session_id="s")
+    pty_id = service.start("sleep 30", cwd=str(tmp_path), session_id="s")["pty_id"]
     try:
         row = {item["pty_id"]: item for item in service.list()}[pty_id]
         assert isinstance(row["started_at"], float)
@@ -821,7 +821,7 @@ def test_finished_pty_reports_ended_at_after_started_at(tmp_path):
     from rinari.engine_protocol.pty import EnginePtyService
 
     service = EnginePtyService(lambda event: None)
-    pty_id = service.start("exit 0", cwd=str(tmp_path), session_id="s")
+    pty_id = service.start("exit 0", cwd=str(tmp_path), session_id="s")["pty_id"]
     try:
         deadline = time.monotonic() + 10
         row = {item["pty_id"]: item for item in service.list()}[pty_id]
