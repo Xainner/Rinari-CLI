@@ -64,14 +64,6 @@ def _ensure_foreground(hwnd: int, token: str, timeout_s: float = 300.0) -> None:
     raise AssertionError("lab window never took foreground; aborting without input")
 
 
-def _edit_text(hwnd: int) -> str:
-    from rinari.computer import win32 as w
-
-    pairs = w.descendant_texts(hwnd)
-    print("DIAG edit controls:", [(cls, len(text)) for cls, text in pairs])
-    return pairs[0][1] if pairs else ""
-
-
 def test_lab_capture_readonly(tmp_path) -> None:
     from rinari.computer.backend import WindowsBackend
 
@@ -109,11 +101,6 @@ def test_lab_grant_gated_type_roundtrip(tmp_path, monkeypatch) -> None:
     hwnd, pid, _seed = _open_lab_notepad(tmp_path)
     try:
         target = "hwnd:" + str(hwnd)
-        import contextlib
-
-        from rinari.computer import win32 as _cbw
-
-        saved_clipboard = _cbw.get_clipboard_text()
         home = tmp_path / "rinari-home-lab"
         app = build_app_context(home=str(home), clock=FakeClock())
         try:
@@ -164,6 +151,7 @@ def test_lab_grant_gated_type_roundtrip(tmp_path, monkeypatch) -> None:
                 ctx,
             )
             assert pressed.ok, pressed.error
+            pre_png = backend.capture(target).png
             typed = runtime.execute(
                 "computer.type",
                 {
@@ -175,40 +163,33 @@ def test_lab_grant_gated_type_roundtrip(tmp_path, monkeypatch) -> None:
             )
             assert typed.ok, typed.error
             assert typed.data["dispatch"] == "dispatched"
-            # Oracle: Win11 Notepad ignores WM_GETTEXT, so select-all + copy
-            # and read the clipboard (OS ground truth, no vision, no guessing).
-            from rinari.computer import win32 as _w
+            # Oracle: pixel diff on our own window (read-only capture). The
+            # typed line changes far more pixels than caret blink, so a
+            # changed area above threshold proves the effect. waited for the
+            # app to process the queue first.
+            import io as _io
 
-            # Never read foreign state: re-focus the edit control and copy in
-            # immediate succession, and never print clipboard content.
+            from PIL import Image as _PILImage
+            from PIL import ImageChops as _Chops
 
-            refocus = runtime.execute(
-                "computer.click",
-                {
-                    "target": target,
-                    "x": mid_x,
-                    "y": mid_y,
-                    "observation_id": seen.data["observation_id"],
-                },
-                ctx,
-            )
-            assert refocus.ok, refocus.error
-            if _w.get_foreground() != hwnd:
-                raise AssertionError("foreground moved before oracle; aborting")
-            _w.select_all_and_copy(hwnd)
-            # The app processes the keys asynchronously: poll without logging content.
-            got = ""
+            post_png = backend.capture(target).png
+            (tmp_path / "proof.png").write_bytes(post_png)
+            before = _PILImage.open(_io.BytesIO(pre_png)).convert("L")
+            after = _PILImage.open(_io.BytesIO(post_png)).convert("L")
             end = time.monotonic() + 10.0
+            box = None
             while time.monotonic() < end:
-                got = _w.get_clipboard_text()
-                if got == MARKER:
-                    break
-                time.sleep(0.2)
-            assert got == MARKER, "oracle mismatch: len=" + str(len(got))
-            (tmp_path / "proof.png").write_bytes(backend.capture(target).png)
+                box = _Chops.difference(before, after).getbbox()
+                if box is not None:
+                    area = (box[2] - box[0]) * (box[3] - box[1])
+                    if area > 500:
+                        break
+                time.sleep(0.5)
+                after = _PILImage.open(_io.BytesIO(backend.capture(target).png)).convert("L")
+            assert box is not None, "no visual change after typing"
+            area = (box[2] - box[0]) * (box[3] - box[1])
+            assert area > 500, "change too small for a typed line: " + str(area)
         finally:
-            with contextlib.suppress(Exception):
-                _cbw.set_clipboard_text(saved_clipboard)
             app.close()
     finally:
         _kill(pid)

@@ -7,6 +7,7 @@ backend proving belongs to the lab gate (docs/adr/0001-windows-desktop-backend.m
 from __future__ import annotations
 
 import dataclasses
+import sys
 from pathlib import Path
 
 import pytest
@@ -307,3 +308,18 @@ def test_computer_tools_registered() -> None:
     assert "computer.capture" in by_name
     assert by_name["computer.click"].idempotent is False
     assert by_name["computer.type"].idempotent is False
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="win32 clipboard API")
+def test_clipboard_roundtrip() -> None:
+    import uuid as _uuid
+
+    from rinari.computer import win32 as _w
+
+    saved = _w.get_clipboard_text()
+    try:
+        marker = "rinari-clipboard-" + _uuid.uuid4().hex[:8]
+        _w.set_clipboard_text(marker)
+        assert _w.get_clipboard_text() == marker
+    finally:
+        _w.set_clipboard_text(saved)
