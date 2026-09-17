@@ -140,6 +140,24 @@ def test_engine_info(server) -> None:
     info = response["result"]
     assert info["protocol_version"] == 1
     assert info["capabilities"]["projects"] is True
+    # home_id is a stable digest of the resolved home path; the instance id is not.
+    from rinari.engine_protocol import protocol as protocol_module
+
+    assert info["home_id"] == protocol_module.home_id(server._services.ctx.home)
+    assert len(info["home_id"]) == 16 and info["home_id"] != info["engine_instance_id"]
+    assert server.hello()["home_id"] == info["home_id"]
+
+
+def test_home_id_is_stable_per_home_and_differs_between_homes(tmp_path) -> None:
+    from rinari.engine_protocol import protocol as protocol_module
+
+    a = tmp_path / "home-a"
+    b = tmp_path / "home-b"
+    a.mkdir()
+    b.mkdir()
+    assert protocol_module.home_id(a) == protocol_module.home_id(str(a))
+    assert protocol_module.home_id(a) == protocol_module.home_id(a / ".." / "home-a")
+    assert protocol_module.home_id(a) != protocol_module.home_id(b)
 
 
 def test_personal_memory_protocol_is_engine_authority(server) -> None:

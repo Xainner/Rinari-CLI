@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+
 PROTOCOL_NAME = "rinari-engine"
 PROTOCOL_VERSION = 1
 
@@ -63,4 +65,20 @@ CAPABILITIES: dict[str, bool] = {
     "selective_memory_v1": True,
     "memory_privacy_v1": True,
     "personal_memory_controls_v1": True,
+    # Peer messaging between agent sessions (Boards): untrusted data, per-target
+    # consent, provenance ceiling in the receiving turn.
+    "session_peer_messaging_v1": True,
 }
+
+
+def home_id(home) -> str:
+    """Stable identity of an Engine home: a digest of its resolved path.
+
+    It changes only when the home moves; `engine_instance_id` changes on every
+    start. Clients use it to namespace presentation state (layouts, anchors)
+    so two homes never share it. Not a secret and not reversible in practice.
+    """
+    from pathlib import Path
+
+    resolved = str(Path(home).expanduser().resolve())
+    return hashlib.sha256(resolved.encode("utf-8")).hexdigest()[:16]

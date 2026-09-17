@@ -13,8 +13,10 @@ them.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
+import sys
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -35,6 +37,30 @@ _SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 MAX_INLINE_BYTES = 256 * 1024
 SEARCH_CONTENT_BYTES = 512 * 1024
+
+# Legacy Win32 MAX_PATH is 260 characters including the terminator; directory
+# creation stops even earlier.  Derived artifact names carry full digests, so a
+# long home/temp directory pushes them past that limit and every open() fails
+# with ENOENT.  Paths at or beyond this length use the extended-length form.
+_WINDOWS_LONG_PATH_THRESHOLD = 240
+
+
+def os_path(path: Path) -> Path:
+    """Return ``path`` in a form the OS can open regardless of its length.
+
+    On Windows a path close to MAX_PATH is rewritten with the ``\\\\?\\`` prefix
+    (``\\\\?\\UNC\\`` for network shares), which bypasses the legacy limit without
+    depending on the user's ``LongPathsEnabled`` registry setting.  Other
+    platforms and short paths are returned unchanged.
+    """
+    if sys.platform != "win32":
+        return path
+    text = os.path.abspath(path)
+    if text.startswith("\\\\?\\") or len(text) < _WINDOWS_LONG_PATH_THRESHOLD:
+        return path
+    if text.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + text[2:])
+    return Path("\\\\?\\" + text)
 
 
 class ArtifactURIError(ValidationFailureError):
@@ -117,7 +143,7 @@ class ArtifactStore:
             candidate.relative_to(self._root())
         except ValueError as exc:
             raise ArtifactURIError(f"Artifact outside artifacts dir: {storage_path!r}") from exc
-        return candidate
+        return os_path(candidate)
 
     # -- write -----------------------------------------------------------
 

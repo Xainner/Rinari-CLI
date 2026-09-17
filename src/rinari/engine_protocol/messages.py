@@ -7,7 +7,7 @@ from typing import Any
 from rinari.engine_protocol import protocol
 
 
-def hello(engine_instance_id: str | None = None) -> dict[str, Any]:
+def hello(engine_instance_id: str | None = None, home_id: str | None = None) -> dict[str, Any]:
     payload = {
         "type": "hello",
         "protocol": protocol.PROTOCOL_NAME,
@@ -17,6 +17,10 @@ def hello(engine_instance_id: str | None = None) -> dict[str, Any]:
     }
     if engine_instance_id is not None:
         payload["engine_instance_id"] = engine_instance_id
+    if home_id is not None:
+        # Stable across restarts (unlike engine_instance_id): lets a desktop
+        # namespace per-session presentation state by Engine home.
+        payload["home_id"] = home_id
     return payload
 
 

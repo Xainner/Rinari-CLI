@@ -271,7 +271,9 @@ def test_e2e_large_output_spills_and_stays_bounded(tmp_path) -> None:
     )
 
     assert result.ok
-    assert result.truncated is False
+    # `truncated` means "the model did not observe the complete result": partial
+    # delivery sets it even though the source was read whole (docs/tool-results.md).
+    assert result.truncated is True
     assert isinstance(result.data, dict)
     assert result.data["delivery_partial"] is True
     assert result.data["source_partial"] is False

@@ -30,7 +30,12 @@
     "contextSettings",
     "contextStatus",
     "contextActivity",
-    "toolResultDelivery"
+    "toolResultDelivery",
+    "messageOrigin",
+    "peerGroupMember",
+    "peerGroup",
+    "peerMessage",
+    "queuedPromptEntry"
   ],
   "$defs": {
     "webPreview": {
@@ -324,6 +329,13 @@
         "session.queue.add",
         "session.queue.list",
         "session.queue.clear",
+        "session.queue.resume",
+        "session.peer_group.set",
+        "session.peer_group.get",
+        "session.peer_group.revoke",
+        "session.peer_message.list",
+        "session.peer_message.cancel",
+        "session.peer_message.forward",
         "session.branch",
         "workspace.file.search",
         "artifact.list",
@@ -419,7 +431,10 @@
         "vision.started",
         "vision.completed",
         "vision.failed",
-        "vision.cancelled"
+        "vision.cancelled",
+        "session.peer.group.updated",
+        "session.peer.message",
+        "session.peer.message.updated"
       ]
     },
     "attachment": {
@@ -1544,6 +1559,251 @@
           "type": "boolean"
         },
         "result_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "messageOrigin": {
+      "type": "object",
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "user",
+            "peer",
+            "automation"
+          ]
+        },
+        "message_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_turn_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "group_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "chain_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hop": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "quoted_source": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      }
+    },
+    "peerGroupMember": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "label",
+        "send",
+        "receive"
+      ],
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "send": {
+          "type": "boolean"
+        },
+        "receive": {
+          "type": "boolean"
+        }
+      }
+    },
+    "peerGroup": {
+      "type": "object",
+      "required": [
+        "group_id",
+        "board_id",
+        "revision",
+        "authorization_epoch",
+        "enabled",
+        "members"
+      ],
+      "properties": {
+        "group_id": {
+          "type": "string"
+        },
+        "board_id": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "authorization_epoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/peerGroupMember"
+          }
+        }
+      }
+    },
+    "peerMessage": {
+      "type": "object",
+      "required": [
+        "message_id",
+        "to_session_id",
+        "state",
+        "hop",
+        "origin"
+      ],
+      "properties": {
+        "message_id": {
+          "type": "string"
+        },
+        "from_session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "to_session_id": {
+          "type": "string"
+        },
+        "group_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "chain_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hop": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "state": {
+          "enum": [
+            "queued",
+            "dispatching",
+            "running",
+            "completed",
+            "failed",
+            "cancelled",
+            "stopped",
+            "paused",
+            "uncertain"
+          ]
+        },
+        "turn_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "display_message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "origin": {
+          "$ref": "#/$defs/messageOrigin"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_at": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "updated_at": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      }
+    },
+    "queuedPromptEntry": {
+      "type": "object",
+      "required": [
+        "message_id",
+        "message",
+        "state",
+        "origin"
+      ],
+      "properties": {
+        "message_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "queued",
+            "paused",
+            "uncertain"
+          ]
+        },
+        "origin": {
+          "$ref": "#/$defs/messageOrigin"
+        },
+        "error": {
           "type": [
             "string",
             "null"

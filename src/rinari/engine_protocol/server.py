@@ -137,6 +137,7 @@ class EngineServer:
         # Fresh per boot: sequential process ids may repeat after a
         # restart, so desktops must scope destructive preconditions to it.
         self._engine_instance_id = secrets.token_hex(16)
+        self._home_id = protocol.home_id(services.ctx.home)
         home = Path(user_home) if user_home is not None else None
         self._user_home = home
         self._turns = TurnManager(services, user_home=home)
@@ -284,6 +285,13 @@ class EngineServer:
         self._dispatcher.register("session.queue.add", self._queue_add)
         self._dispatcher.register("session.queue.list", self._queue_list)
         self._dispatcher.register("session.queue.clear", self._queue_clear)
+        self._dispatcher.register("session.queue.resume", self._queue_resume)
+        self._dispatcher.register("session.peer_group.set", self._peer_group_set)
+        self._dispatcher.register("session.peer_group.get", self._peer_group_get)
+        self._dispatcher.register("session.peer_group.revoke", self._peer_group_revoke)
+        self._dispatcher.register("session.peer_message.list", self._peer_message_list)
+        self._dispatcher.register("session.peer_message.cancel", self._peer_message_cancel)
+        self._dispatcher.register("session.peer_message.forward", self._peer_message_forward)
         self._dispatcher.register("profile_bundle.list", self._bundle_list)
         self._dispatcher.register("profile_bundle.get", self._bundle_get)
         self._dispatcher.register("profile_bundle.create", self._bundle_create)
@@ -314,7 +322,7 @@ class EngineServer:
         return self._turns
 
     def hello(self) -> dict[str, Any]:
-        return hello(self._engine_instance_id)
+        return hello(self._engine_instance_id, home_id=self._home_id)
 
     def handle_line(self, line: str) -> dict[str, Any] | None:
         return self._dispatcher.dispatch(line)
@@ -343,6 +351,7 @@ class EngineServer:
             "protocol_version": protocol.PROTOCOL_VERSION,
             "engine_version": protocol.engine_version(),
             "engine_instance_id": self._engine_instance_id,
+            "home_id": self._home_id,
             "capabilities": dict(protocol.CAPABILITIES),
         }
 
@@ -393,7 +402,9 @@ class EngineServer:
                 f"Session {record.id} has a running turn; cancel it before archiving.",
                 details={"session_id": record.id},
             )
-        return {"session": session_to_dict(self._services.sessions.archive(ref))}
+        result = self._services.sessions.archive(ref)
+        self._turns.peers.on_session_gone(record.id)
+        return {"session": session_to_dict(result)}
 
     def _session_restore(self, params: dict[str, Any]) -> dict[str, Any]:
         ref = self._need_str(params, "ref")
@@ -414,6 +425,7 @@ class EngineServer:
         self._previews.stop_session(record.id)
         self._turns.close_browser(record.id)
         self._turns.close_processes(record.id)
+        self._turns.peers.on_session_gone(record.id)
         return {"session": session_to_dict(result)}
 
     def _session_delete(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -450,6 +462,7 @@ class EngineServer:
         self._previews.stop_session(record.id)
         self._turns.close_browser(record.id)
         self._turns.close_processes(record.id)
+        self._turns.peers.on_session_gone(record.id)
         if cascade:
             artifacts_removed = self._services.artifacts.gc(session_id=sid)
             artifacts_kept = 0
@@ -967,6 +980,9 @@ class EngineServer:
                 turn["mode"] = payload.get("mode")
                 turn["started_at"] = payload.get("occurred_at") or row.created_at
                 turn["user_message"] = str(payload.get("message") or "")
+                if isinstance(payload.get("origin"), dict):
+                    # Provenance of the turn (peer / forwarded); Code renders it.
+                    turn["origin"] = payload["origin"]
                 if turn_id in redacted_turns:
                     turn["user_message"] = "[contenido omitido por privacidad]"
                 continue
@@ -2103,6 +2119,29 @@ class EngineServer:
 
     def _queue_clear(self, params: dict[str, Any]) -> dict[str, Any]:
         return self._turns.queue_clear((params or {}).get("session_id", ""))
+
+    def _queue_resume(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._turns.queue_resume(params or {})
+
+    # -- peer messaging between sessions (Boards) ------------------------------
+
+    def _peer_group_set(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._turns.peers.set_group(params or {})
+
+    def _peer_group_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._turns.peers.get_group(params or {})
+
+    def _peer_group_revoke(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._turns.peers.revoke_group(params or {})
+
+    def _peer_message_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._turns.peers.list_messages(params or {})
+
+    def _peer_message_cancel(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._turns.peers.cancel_message(params or {})
+
+    def _peer_message_forward(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._turns.peers.forward(params or {})
 
     # -- profile bundles (Phase 11) -----------------------------------------------
 

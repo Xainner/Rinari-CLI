@@ -341,6 +341,9 @@ class _SubagentRunner:
             browser=browser,
             pty=None,
             channel_host=None,
+            # Children never message peers: the binding belongs to the owner
+            # session and the provenance ceiling of the parent turn carries over.
+            peer_host=None,
             memory_source=None,
             ask_user=None,
             web_snapshots={},

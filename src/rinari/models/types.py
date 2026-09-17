@@ -56,6 +56,11 @@ class ChatMessage:
     retired_images: tuple[Any, ...] = ()  # Projection-only handles, never sent as pixels.
     attachments: tuple[dict[str, Any], ...] = ()
     display_content: str | None = None
+    # Procedencia estructurada del mensaje (kind: user | peer | automation |
+    # legacy). `None` = legacy sin origen. La fija el Engine desde admisión
+    # confiable, nunca el modelo ni un cliente. Un mensaje `peer` es evidencia
+    # de otro agente, no una instrucción del propietario.
+    origin: dict[str, Any] | None = None
 
     @classmethod
     def system(cls, content: str) -> ChatMessage:
