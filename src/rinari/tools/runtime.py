@@ -243,6 +243,17 @@ class ToolRuntime:
                 "a turn started by another agent's message cannot delegate work; "
                 "the owner must send this as their own task",
             )
+        if tool.precheck is not None:
+            # Reject what no approval could make valid before asking for one.
+            rejected = tool.precheck(arguments, ctx)
+            if rejected is not None and not rejected.ok:
+                error = rejected.error
+                return self._error(
+                    ctx,
+                    error.code if error is not None else ToolErrorCode.UNKNOWN,
+                    error.message if error is not None else "precheck rejected the call",
+                    details=dict(error.details or {}) if error is not None else None,
+                )
         for action in actions:
             scope = scope_from_context(ctx)
             if tool_name.startswith("channel.") and ctx.channel_host is None:

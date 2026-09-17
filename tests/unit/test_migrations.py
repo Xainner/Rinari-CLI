@@ -119,6 +119,65 @@ def test_migrate_is_idempotent(db):
     assert runner.current_version() == 32
 
 
+def _previous_home_migrations(tmp_path: Path, upto: int) -> Path:
+    """Bundled migrations 0001..upto, as an install that predates the rest."""
+    custom = tmp_path / "migrations"
+    custom.mkdir()
+    for source in sorted(BUNDLED_0001.parent.glob("*.sql")):
+        if int(source.name[:4]) <= upto:
+            (custom / source.name).write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    return custom
+
+
+def test_peer_origin_migration_keeps_previous_messages(db, tmp_path):
+    """0032 runs over a home written before peer messaging existed: rows keep
+    their content and read back with no origin; new rows round-trip theirs."""
+    from rinari.storage.records import SessionMessageRecord
+    from rinari.storage.repositories.sessions import SessionMessageRepository
+
+    previous = _previous_home_migrations(tmp_path, upto=31)
+    runner = MigrationRunner(db, FakeClock(), directory=previous)
+    runner.migrate()
+    assert runner.current_version() == 31
+    columns = {row["name"] for row in db.query("PRAGMA table_info(session_messages)")}
+    assert "origin_json" not in columns
+    db.execute(
+        "INSERT INTO sessions (id, kind, created_cwd, current_cwd, provider_id, model_id, "
+        "state, created_at, updated_at, last_active_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("ses_old", "CHAT", "/w", "/w", "prov", "mdl", "active", "t0", "t0", "t0"),
+    )
+    db.execute(
+        "INSERT INTO session_messages (id, session_id, seq, role, content, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("msg_old", "ses_old", 1, "user", "antes de peers", "t0"),
+    )
+
+    applied = MigrationRunner(db, FakeClock()).migrate()
+    assert applied == [32]
+    columns = {row["name"] for row in db.query("PRAGMA table_info(session_messages)")}
+    assert "origin_json" in columns
+
+    repo = SessionMessageRepository(db)
+    old = repo.list("ses_old")
+    assert [m.id for m in old] == ["msg_old"]
+    assert old[0].content == "antes de peers"
+    assert old[0].origin is None
+
+    origin = {"kind": "peer", "source_session_id": "ses_b", "hop": 1}
+    repo.append_many(
+        "ses_old",
+        [
+            SessionMessageRecord(
+                id="msg_new", session_id="ses_old", seq=0, role="user", origin=origin
+            )
+        ],
+    )
+    listed = repo.list("ses_old")
+    assert [m.id for m in listed] == ["msg_old", "msg_new"]
+    assert listed[0].origin is None
+    assert listed[1].origin == origin
+
+
 def test_migrations_are_replayed_from_on_disk(db, tmp_path):
     # Simulate an install that only saw 0001, then a code update exposing 0002.
     custom = tmp_path / "migrations"

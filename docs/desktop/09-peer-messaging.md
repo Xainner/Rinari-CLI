@@ -76,6 +76,16 @@ exactly and lives in an engine-process store keyed by session; it is dropped
 on group revision changes that bump the epoch, on session close and on engine
 restart. It is never written to the persistent grants file.
 
+Precheck and revalidation: `session.send` declares a `ToolDefinition.precheck`
+that runs after schema validation and before policy/approval. A destination
+that is missing, closed, outside the group, not receiving, or a sender without
+`send`, is rejected there with the same error codes the delivery would raise
+(`PEER_NOT_ALLOWED`, `PEER_RECEIVE_DISABLED`, `PEER_TARGET_MISSING`,
+`PEER_TARGET_CLOSED`), so the owner is never asked for a consent the call could
+not use. The precheck is not the authorization: after approval, `deliver`
+re-reads the group and the target state (membership and `authorization_epoch`
+may have changed while the prompt was open) and refuses on the fresh snapshot.
+
 ### Delivery and provenance
 
 - Message limits: 32 000 chars; 5 sends per turn; 3 hops per chain
@@ -111,10 +121,15 @@ restart. It is never written to the persistent grants file.
 
 Group idempotency/revision/epoch/displacement; consent per exact target and
 non-leakage to the persistent store; delivery to idle and busy receivers;
-denial for non-members, `receive = false`, `send = false`, read-only;
+denial for non-members, `receive = false`, `send = false`, missing/closed
+targets and self-targets before any consent prompt; membership or `receive`
+revoked while a consent prompt is open is refused after approval; read-only;
 provenance ceiling (shell/write/spawn denied without approval prompts);
 hop cut, per-turn rate limit, dedupe; Stop pause + resume; user forward; cancel
-of a queued delivery; restart recovery.
+of a queued delivery; restart recovery; operations database upgraded from a
+pre-peer schema without losing dispatch identities. `tests/unit/test_migrations.py`
+covers 0032 over a home written before peer messaging (old rows read back with
+no origin).
 
 ## Non-goals
 

@@ -21,6 +21,9 @@ from rinari.tools.definition import (
 )
 
 MAX_PEER_MESSAGE_CHARS = 32_000
+# Must match rinari.engine_protocol.peers.PEER_SEND_PRECHECK (not imported to
+# keep the tool layer independent from the protocol layer).
+PEER_SEND_PRECHECK = "session.send.precheck"
 
 
 def peer_tools(host) -> list[ToolDefinition]:
@@ -73,6 +76,9 @@ def peer_tools(host) -> list[ToolDefinition]:
                 CAPABILITY_SESSION_MESSAGE, str(args.get("target_session_id") or "")
             ),
             handler=lambda args, ctx: host("session.send", args, ctx),
+            # Rejects destinations no consent could make valid (missing, closed,
+            # outside the group, not receiving) before the owner is asked.
+            precheck=lambda args, ctx: host(PEER_SEND_PRECHECK, args, ctx),
             namespace="session",
             capabilities=(CAPABILITY_SESSION_MESSAGE,),
             always_loaded=False,
@@ -82,4 +88,4 @@ def peer_tools(host) -> list[ToolDefinition]:
     ]
 
 
-__all__ = ["MAX_PEER_MESSAGE_CHARS", "peer_tools"]
+__all__ = ["MAX_PEER_MESSAGE_CHARS", "PEER_SEND_PRECHECK", "peer_tools"]

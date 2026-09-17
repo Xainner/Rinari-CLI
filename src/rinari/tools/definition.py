@@ -293,6 +293,12 @@ class ToolDefinition:
     max_output_bytes: int | None = None
     handler: Callable[[dict, ToolContext], ToolResult] | None = None
     classify: Callable[[dict], ClassifiedAction] | None = None
+    # Cheap, side-effect-free validation that runs after schema validation and
+    # before policy/approvals. Returning a failed ToolResult rejects the call
+    # without asking the owner for consent the call could never use (e.g. a
+    # peer message to a session outside the group). It never replaces the
+    # checks the handler performs after approval: state can change in between.
+    precheck: Callable[[dict, ToolContext], ToolResult | None] | None = None
     always_loaded: bool = True
     concurrency: str = "serial"
     namespace: str = "core"

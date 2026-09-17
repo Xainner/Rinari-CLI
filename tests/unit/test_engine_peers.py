@@ -420,15 +420,41 @@ def test_send_rejected_when_not_allowed(server, tmp_path, models):
         ]
     )
     _start(server, a, "prueba")
-    # Consent is asked per destination before the group check runs.
-    assert _approve(server, a)["target"] == b
-    assert _approve(server, a)["target"] == c
     _wait_terminal(server, a)
+    # Neither destination could become valid through consent, so the owner is
+    # never asked: the precheck rejects before policy/approval.
+    assert not _seen(server, "approval.requested")
     outputs = _tool_results(models[a])
     assert any("PEER_RECEIVE_DISABLED" in o for o in outputs), outputs
     assert any("PEER_NOT_ALLOWED" in o for o in outputs), outputs
     assert not server.turns.operations.inbox_list(b)
     assert not server.turns.operations.inbox_list(c)
+
+
+def test_send_to_missing_or_closed_target_is_rejected_before_consent(server, tmp_path, models):
+    a = _create_chat(server, tmp_path, "a")
+    b = _create_chat(server, tmp_path, "b")
+    _set_group(server, "board-1", [(a, "A", True, True), (b, "B", True, True)])
+    _ok(server, "session.close", {"ref": b})
+    models[a] = ScriptedModel(
+        [
+            _tool("find", "capability.search", {"query": "session send peer"}),
+            _tool("s1", "session.send", {"target_session_id": "ses_nope", "message": "hola"}),
+            _tool("s2", "session.send", {"target_session_id": b, "message": "hola B"}),
+            _tool("s3", "session.send", {"target_session_id": a, "message": "yo"}),
+            _answer(),
+        ]
+    )
+    _start(server, a, "prueba")
+    _wait_terminal(server, a)
+    assert not _seen(server, "approval.requested")
+    outputs = _tool_results(models[a])
+    # Unknown session: not a member of any group the sender belongs to.
+    assert any("PEER_NOT_ALLOWED" in o for o in outputs), outputs
+    # Closing B removed it from the group, so it is no longer a peer either.
+    assert sum("PEER_NOT_ALLOWED" in o for o in outputs) >= 2, outputs
+    assert any("cannot message itself" in o for o in outputs), outputs
+    assert not server.turns.operations.inbox_list(b)
 
 
 def test_send_denied_when_source_cannot_send(server, tmp_path, models):
@@ -437,10 +463,60 @@ def test_send_denied_when_source_cannot_send(server, tmp_path, models):
     _set_group(server, "board-1", [(a, "A", False, True), (b, "B", True, True)])
     models[a] = ScriptedModel(_send_script(b, "hola"))
     _start(server, a, "prueba")
-    _approve(server, a)
     _wait_terminal(server, a)
+    assert not _seen(server, "approval.requested")
     outputs = _tool_results(models[a])
     assert any("Sending is disabled" in o for o in outputs), outputs
+    assert not server.turns.operations.inbox_list(b)
+
+
+def test_membership_revoked_while_consent_pending_is_rejected_after_approval(
+    server, tmp_path, models
+):
+    """PEER-01: the precheck passed, the owner is asked, and B leaves the group
+    before the answer arrives. The approval is not a stale permit: delivery
+    re-reads the group after consent and refuses."""
+    a = _create_chat(server, tmp_path, "a")
+    b = _create_chat(server, tmp_path, "b")
+    _set_group(server, "board-1", [(a, "A", True, True), (b, "B", True, True)])
+    models[a] = ScriptedModel(_send_script(b, "hola B"))
+    _start(server, a, "prueba")
+    requested = _wait_event(server, "approval.requested", session_id=a)["payload"]
+    assert requested["tool"] == "session.message" and requested["target"] == b
+    before = _ok(server, "session.peer_group.get", {"board_id": "board-1"})["group"]
+    _set_group(server, "board-1", [(a, "A", True, True)])
+    after = _ok(server, "session.peer_group.get", {"board_id": "board-1"})["group"]
+    assert after["revision"] > before["revision"]
+    _ok(
+        server,
+        "approval.resolve",
+        {"approval_id": requested["approval_id"], "decision": "allow_session"},
+    )
+    _wait_terminal(server, a)
+    outputs = _tool_results(models[a])
+    assert any("PEER_NOT_ALLOWED" in o for o in outputs), outputs
+    assert not server.turns.operations.inbox_list(b)
+    assert not server.turns.has_active_turn(b)
+
+
+def test_receive_disabled_while_consent_pending_is_rejected_after_approval(
+    server, tmp_path, models
+):
+    a = _create_chat(server, tmp_path, "a")
+    b = _create_chat(server, tmp_path, "b")
+    _set_group(server, "board-1", [(a, "A", True, True), (b, "B", True, True)])
+    models[a] = ScriptedModel(_send_script(b, "hola B"))
+    _start(server, a, "prueba")
+    requested = _wait_event(server, "approval.requested", session_id=a)["payload"]
+    _set_group(server, "board-1", [(a, "A", True, True), (b, "B", True, False)])
+    _ok(
+        server,
+        "approval.resolve",
+        {"approval_id": requested["approval_id"], "decision": "allow_once"},
+    )
+    _wait_terminal(server, a)
+    outputs = _tool_results(models[a])
+    assert any("PEER_RECEIVE_DISABLED" in o for o in outputs), outputs
     assert not server.turns.operations.inbox_list(b)
 
 
@@ -715,6 +791,64 @@ def test_cancel_queued_peer_message(server, tmp_path, models):
     time.sleep(0.2)
     assert not server.turns.has_active_turn(b)
     assert len(models[b].requests) == 1
+
+
+def test_operation_store_upgrades_previous_home_without_losing_operations(tmp_path):
+    """The inbox/peer tables are added to an operations database written by a
+    pre-peer engine (schema 1: no memory_origin, no peer tables). Existing
+    dispatch identities survive, so nothing uncertain is ever replayed."""
+    import sqlite3
+
+    from rinari.engine_protocol.operations import OperationStore
+
+    root = tmp_path / "home"
+    root.mkdir()
+    previous = sqlite3.connect(root / "engine-operations.sqlite")
+    with previous:
+        previous.execute(
+            "CREATE TABLE operations (operation_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, "
+            "session_id TEXT NOT NULL, turn_id TEXT NOT NULL, instance TEXT NOT NULL, "
+            "state TEXT NOT NULL, updated REAL NOT NULL)"
+        )
+        previous.execute(
+            "INSERT INTO operations VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("op_old", "fp", "ses_a", "turn_1", "instance_old", "completed", 1.0),
+        )
+        previous.execute("PRAGMA user_version=1")
+    previous.close()
+
+    store = OperationStore(root)
+    with store.connect() as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
+        tables = {
+            row[0]
+            for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        assert {"peer_groups", "peer_group_members", "session_inbox", "peer_chain_counters"} <= (
+            tables
+        )
+        columns = {row[1] for row in db.execute("PRAGMA table_info(operations)")}
+        assert "memory_origin" in columns
+        row = db.execute("SELECT * FROM operations WHERE operation_id='op_old'").fetchone()
+        assert row is not None and row["state"] == "completed"
+        assert row["memory_origin"] is None
+    assert store.inbox_recover_after_restart() == 0
+    assert store.inbox_list("ses_a") == []
+
+
+def test_operation_store_rejects_unknown_future_schema(tmp_path):
+    import sqlite3
+
+    from rinari.engine_protocol.operations import OperationStore
+
+    root = tmp_path / "home"
+    root.mkdir()
+    future = sqlite3.connect(root / "engine-operations.sqlite")
+    with future:
+        future.execute("PRAGMA user_version=99")
+    future.close()
+    with pytest.raises(RuntimeError, match="Unsupported operation schema"):
+        OperationStore(root)
 
 
 def test_inbox_entries_are_paused_after_engine_restart(services, tmp_path, models):
