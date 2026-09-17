@@ -112,6 +112,9 @@ class AgentContext:
     pending_images: tuple[Any, ...] = ()
     pending_attachments: tuple[dict[str, Any], ...] = ()
     pending_display_content: str | None = None
+    # Provenance of the next user-role message (peer/automation deliveries);
+    # None means the owner typed it. Consumed once, like the attachments.
+    pending_origin: dict[str, Any] | None = None
     allow_unconfirmed_vision: bool = False
     collect_subagent_results: Callable[[CancellationToken], str | None] | None = None
 
@@ -183,6 +186,7 @@ class AgentLoop:
                 raise InvalidUsageError(decision.reason)
         metadata, ctx.pending_attachments = ctx.pending_attachments, ()
         display, ctx.pending_display_content = ctx.pending_display_content, None
+        origin, ctx.pending_origin = ctx.pending_origin, None
         ctx.history.append(
             ChatMessage(
                 role="user",
@@ -190,6 +194,7 @@ class AgentLoop:
                 images=images,
                 attachments=metadata,
                 display_content=display if display is not None else user_message,
+                origin=origin,
             )
         )
         # Hierarchical ledger (P0.10): the turn's meter becomes the parent

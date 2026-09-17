@@ -21,7 +21,13 @@ from pathlib import Path
 from typing import Any
 
 from rinari.policy.approvals import ApprovalEngine, ApprovalRequest
-from rinari.policy.engine import CAPABILITY_NETWORK, PolicyAction, PolicyEngine, SessionScope
+from rinari.policy.engine import (
+    CAPABILITY_NETWORK,
+    CAPABILITY_SESSION_MESSAGE,
+    PolicyAction,
+    PolicyEngine,
+    SessionScope,
+)
 from rinari.policy.sandbox import FilesystemSandbox
 from rinari.shared.clock import Clock, SystemClock, now_iso
 from rinari.shared.errors import (
@@ -48,6 +54,24 @@ EventSink = Callable[[str, dict], None]
 # Network audit hook: (session_id, tool, host, action, reason) per gate
 # decision on a network.outbound action (network_events table, phase 4).
 NetworkEventLog = Callable[[str, str, str, str, str], None]
+
+
+# Capabilities a peer-originated turn may never exercise on the strength of
+# another agent's text. Reads and discovery stay available; acting requires
+# the owner to turn the message into a task of their own ("Usar como tarea").
+PEER_ORIGIN_DENIED_CAPABILITIES = frozenset(
+    {
+        "fs.write",
+        "shell.exec",
+        "process.local",
+        "browser.mutate",
+        "network.outbound",
+        "mcp.call",
+        "state.write",
+        "git.local",
+    }
+)
+PEER_ORIGIN_DENIED_TOOLS = frozenset({"agent.spawn", "agent.message", "agent.synthesize"})
 
 
 def scope_from_context(ctx: ToolContext) -> SessionScope:
@@ -212,10 +236,26 @@ class ToolRuntime:
             actions = tool.classify_actions(arguments)
         except (TypeError, ValueError, KeyError) as exc:
             return self._error(ctx, ToolErrorCode.INVALID_ARGUMENT, str(exc))
+        if ctx.origin_kind == "peer" and tool_name in PEER_ORIGIN_DENIED_TOOLS:
+            return self._error(
+                ctx,
+                ToolErrorCode.POLICY_DENIED,
+                "a turn started by another agent's message cannot delegate work; "
+                "the owner must send this as their own task",
+            )
         for action in actions:
             scope = scope_from_context(ctx)
             if tool_name.startswith("channel.") and ctx.channel_host is None:
                 return self._error(ctx, ToolErrorCode.PERMISSION_DENIED, "No channel binding")
+            if tool_name in ("session.peers", "session.send") and ctx.peer_host is None:
+                return self._error(ctx, ToolErrorCode.PERMISSION_DENIED, "No peer binding")
+            if ctx.origin_kind == "peer" and action.capability in PEER_ORIGIN_DENIED_CAPABILITIES:
+                return self._error(
+                    ctx,
+                    ToolErrorCode.POLICY_DENIED,
+                    f"{action.capability} is not available in a turn started by another "
+                    "agent's message; the owner must request it as their own task",
+                )
             self._event("PolicyChecked", {"tool": tool_name, "capability": action.capability})
             decision = self.policy.decide(
                 action.capability,
@@ -225,6 +265,7 @@ class ToolRuntime:
                 host=action.target if action.capability == CAPABILITY_NETWORK else None,
                 risk=tool.risk,
                 risk_class=tool.side_effects,
+                target=action.target if action.capability == CAPABILITY_SESSION_MESSAGE else None,
             )
             self._event(
                 "PolicyDecision",
@@ -463,6 +504,7 @@ class ToolRuntime:
             rule_id=decision.rule_id,
             reusable=decision.reusable,
             choices=decision.choices,
+            binding_mode=decision.binding_mode,
         )
         outcome = self.approvals.check(request)
         self._event(

@@ -62,6 +62,10 @@ CAPABILITY_BROWSER_WRITE = "browser.mutate"
 #   mcp.call  any other MCP tool call; external side effects require consent
 CAPABILITY_MCP_READ = "mcp.read"
 CAPABILITY_MCP_WRITE = "mcp.call"
+# Peer messaging (Boards). Sending text to another agent session starts a
+# turn there and may forward data to a different provider: always consent,
+# bound exactly to one destination; PLAN/REVIEW/read-only never send.
+CAPABILITY_SESSION_MESSAGE = "session.message"
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +92,9 @@ class PolicyDecision:
     rule_id: str = "default"
     reusable: bool = True
     choices: tuple[str, ...] = ("deny", "allow_once", "allow_session")
+    # `capability`: a session grant covers later targets of the same
+    # capability (legacy). `exact`: every grant is bound to this target only.
+    binding_mode: str = "capability"
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,7 +243,44 @@ class PolicyEngine:
         host: str | None = None,
         risk: str = "low",
         risk_class: str = "none",
+        target: str | None = None,
     ) -> PolicyDecision:
+        if capability == CAPABILITY_SESSION_MESSAGE:
+            if scope.profile is PermissionProfile.READ_ONLY:
+                return PolicyDecision(
+                    action=PolicyAction.DENY,
+                    capability=capability,
+                    reason="PLAN, REVIEW and read-only sessions do not message other agents",
+                    target=target,
+                    risk=risk,
+                    risk_class=risk_class,
+                    reusable=False,
+                    choices=("deny",),
+                )
+            if not target:
+                return PolicyDecision(
+                    action=PolicyAction.DENY,
+                    capability=capability,
+                    reason="peer message without a destination session",
+                    risk=risk,
+                    risk_class=risk_class,
+                    reusable=False,
+                    choices=("deny",),
+                )
+            # Full access does not waive this consent: the receiver may run on
+            # another provider and the message starts a turn there.
+            return PolicyDecision(
+                action=PolicyAction.ASK,
+                capability=capability,
+                reason="sending a message to another agent session (consent per destination)",
+                target=target,
+                risk=risk,
+                risk_class=risk_class,
+                rule_id="peer-message",
+                reusable=True,
+                choices=("deny", "allow_once", "allow_session"),
+                binding_mode="exact",
+            )
         if scope.profile is PermissionProfile.READ_ONLY and capability in (
             CAPABILITY_FS_WRITE,
             CAPABILITY_SHELL,

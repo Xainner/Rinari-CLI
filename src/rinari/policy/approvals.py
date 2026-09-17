@@ -37,6 +37,9 @@ class ApprovalRequest:
     reusable: bool = True
     choices: tuple[str, ...] = ("deny", "allow_once", "allow_session")
     cancellation: object | None = field(default=None, repr=False, compare=False)
+    # `exact`: grants bind to this target (never widened to the capability)
+    # and a capability-wide grant cannot cover this request.
+    binding_mode: str = "capability"
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,9 +74,15 @@ class ApprovalEngine:
         self,
         prompt: AnswerPrompt | None = None,
         persistent_store: dict | None = None,
+        session_grants: list[ApprovalGrant] | None = None,
     ) -> None:
         self._prompt = prompt
-        self._session_grants: list[ApprovalGrant] = []
+        # The host may inject a session-bound list so grants outlive the tool
+        # runtime of a single turn (desktop turns rebuild it every time) and
+        # die with the session, a revocation or a new engine process.
+        self._session_grants: list[ApprovalGrant] = (
+            session_grants if session_grants is not None else []
+        )
         self._project_grants: list[ApprovalGrant] = []
         self._store = persistent_store
         self._audit: list[ApprovalOutcome] = []
@@ -98,11 +107,19 @@ class ApprovalEngine:
             return self._record(
                 self._issue(request, GrantScope.SESSION, reason="approved for session")
             )
-        if answer in ("p", "project", "always-project"):
+        # Legacy (capability-bound) requests keep the CLI answers p/a. An
+        # exact-bound request (peer messaging) is honored only for the choices
+        # it offered: hiding a button in a client is not a security boundary.
+        wide_ok = request.binding_mode != "exact"
+        if answer in ("p", "project", "always-project") and (
+            wide_ok or "allow_project" in request.choices
+        ):
             return self._record(
                 self._issue(request, GrantScope.PROJECT, reason="approved for project")
             )
-        if answer in ("a", "always", "persistent"):
+        if answer in ("a", "always", "persistent") and (
+            wide_ok or "allow_persistent" in request.choices
+        ):
             return self._record(
                 self._issue(request, GrantScope.PERSISTENT, reason="approved persistently")
             )
@@ -129,9 +146,13 @@ class ApprovalEngine:
 
     @staticmethod
     def _matches(grant: ApprovalGrant, request: ApprovalRequest) -> bool:
-        return grant.capability == request.capability and (
-            grant.target is None or grant.target == request.target
-        )
+        if grant.capability != request.capability:
+            return False
+        if request.binding_mode == "exact":
+            # A wildcard grant never covers an exact request; the target must
+            # match byte for byte.
+            return grant.target is not None and grant.target == request.target
+        return grant.target is None or grant.target == request.target
 
     def _issue(
         self, request: ApprovalRequest, scope: GrantScope, *, reason: str
@@ -140,9 +161,14 @@ class ApprovalEngine:
             capability=request.capability,
             scope=scope,
             # A session grant intentionally covers subsequent targets of the
-            # same capability in this session. Policy and sandbox boundaries
-            # still apply before approval is consulted.
-            target=None if scope is GrantScope.SESSION else request.target,
+            # same capability in this session (legacy binding). Exact-bound
+            # requests keep their target on every scope. Policy and sandbox
+            # boundaries still apply before approval is consulted.
+            target=(
+                request.target
+                if request.binding_mode == "exact" or scope is not GrantScope.SESSION
+                else None
+            ),
             session_id=request.session_id,
             project_id=request.project_id,
         )

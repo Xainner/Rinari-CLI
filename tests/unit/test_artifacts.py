@@ -106,3 +106,28 @@ def test_remove_and_gc(app_ctx):
 
     assert store.remove(live.uri()) is True
     assert store.remove(live.uri()) is False
+
+
+def test_long_artifact_paths_are_readable_and_writable(app_ctx, tmp_path):
+    """Derived names carry full digests; the store must survive legacy MAX_PATH.
+
+    Regression for Windows CI: a 240+ character absolute path made every
+    ``open()`` fail with ENOENT although the directory existed.
+    """
+    from rinari.artifacts.store import os_path
+    from rinari.artifacts.transfer import import_file
+
+    store = ArtifactStore(app_ctx)
+    name = "vision-" + "a" * 64 + "-" + "b" * 64 + "-" + "c" * 32 + ".txt"
+    assert len(str(store._root() / "ses_long" / "derived" / name)) > 240
+    record = store.create_text("ses_long", "derived", name, "observed", provenance="test")
+    assert store.get(record.uri()) == b"observed"
+    assert store.read_text(record.uri()) == ("observed", False)
+
+    source = tmp_path / ("s" * 90 + ".txt")
+    source.write_text("imported", encoding="utf-8")
+    imported = import_file(store, "ses_long", source)
+    assert store.get(imported.uri()) == b"imported"
+
+    assert store.remove(record.uri()) is True
+    assert not os_path(store._root() / "ses_long" / "derived" / name).exists()
