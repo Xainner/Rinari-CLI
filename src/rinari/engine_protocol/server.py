@@ -137,6 +137,7 @@ class EngineServer:
         # Fresh per boot: sequential process ids may repeat after a
         # restart, so desktops must scope destructive preconditions to it.
         self._engine_instance_id = secrets.token_hex(16)
+        self._home_id = protocol.home_id(services.ctx.home)
         home = Path(user_home) if user_home is not None else None
         self._user_home = home
         self._turns = TurnManager(services, user_home=home)
@@ -321,7 +322,7 @@ class EngineServer:
         return self._turns
 
     def hello(self) -> dict[str, Any]:
-        return hello(self._engine_instance_id)
+        return hello(self._engine_instance_id, home_id=self._home_id)
 
     def handle_line(self, line: str) -> dict[str, Any] | None:
         return self._dispatcher.dispatch(line)
@@ -350,6 +351,7 @@ class EngineServer:
             "protocol_version": protocol.PROTOCOL_VERSION,
             "engine_version": protocol.engine_version(),
             "engine_instance_id": self._engine_instance_id,
+            "home_id": self._home_id,
             "capabilities": dict(protocol.CAPABILITIES),
         }
 
