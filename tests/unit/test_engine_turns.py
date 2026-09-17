@@ -1493,3 +1493,32 @@ def test_cancelled_stream_keeps_partial_text_durable(server, services, tmp_path,
     assert any(e["event"] == "turn.cancelled" for e in _collect_until(server, sid))
     rows = services.ctx.message_repo.list(sid)
     assert sum("retained partial" in (r.content or "") for r in rows) == 1
+
+
+def test_starting_a_turn_refreshes_session_recency(server, tmp_path, monkeypatch) -> None:
+    """Sending a message is the activity a recency order is meant to show.
+
+    Nothing on this path refreshed it, so a conversation stayed where it was
+    however much was said in it, while merely opening one jumped it to the
+    top. Both halves of that are wrong; this is the half that must bump.
+    """
+    session_id = _create_chat(server, tmp_path, tag="recency")
+    before = server.handle_line(_req("recency-s1", "session.get", {"ref": session_id}))
+    assert before is not None and before["ok"] is True
+    was = before["result"]["session"]["last_active_at"]
+
+    fake = FakeModel(scripted=[_answer()])
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda services, rec: fake)
+    started = server.handle_line(
+        _req(
+            "recency-t",
+            "session.turn.start",
+            {"session_id": session_id, "message": "hola"},
+        )
+    )
+    assert started is not None and started["ok"] is True
+    _collect_until(server, session_id)
+
+    after = server.handle_line(_req("recency-s2", "session.get", {"ref": session_id}))
+    assert after is not None and after["ok"] is True
+    assert after["result"]["session"]["last_active_at"] > was

@@ -258,3 +258,32 @@ def test_title_generation_failure_keeps_fallback(services, home):
         record.id, "Revisar el proyecto", title_factory=unavailable
     )
     assert result.title == "Revisar el proyecto"
+
+
+def test_opening_an_active_session_does_not_bump_recency(services, home) -> None:
+    """Clicking a conversation to read it must not reorder the list."""
+    _configure(services, home)
+    cwd = home / "loose"
+    cwd.mkdir()
+    started = services.sessions.start(cwd)
+    before = services.sessions.show(started.session.id).last_active_at
+
+    reopened = services.sessions.resume(ref=started.session.id)
+
+    assert reopened.session.state == "active"
+    assert services.sessions.show(started.session.id).last_active_at == before
+
+
+def test_resuming_an_interrupted_session_does_bump_recency(services, home) -> None:
+    """A real resume is activity; only a no-op open is not."""
+    _configure(services, home)
+    cwd = home / "loose2"
+    cwd.mkdir()
+    started = services.sessions.start(cwd)
+    closed = services.sessions.close(started.session.id)
+    before = closed.last_active_at
+
+    services.sessions.resume(ref=started.session.id)
+
+    assert services.sessions.show(started.session.id).last_active_at >= before
+    assert services.sessions.show(started.session.id).state == "active"

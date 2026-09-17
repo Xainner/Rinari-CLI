@@ -332,6 +332,12 @@ class TurnManager:
                 f"Session {record.id} is closed; resume it before starting turns.",
                 details={"session_id": record.id},
             )
+        # A turn is what recency means, and nothing else refreshed it here, so
+        # a session stayed where it was however much was said in it. Compaction
+        # is housekeeping the user did not ask for and must not reorder a list.
+        # Runs on the caller's thread, before any worker exists.
+        if not compaction_only:
+            record = self._services.sessions.touch(record.id)
         turn_id = turn_id or self._services.ctx.ids.new("turn")
         turn = _ActiveTurn(
             turn_id=turn_id,

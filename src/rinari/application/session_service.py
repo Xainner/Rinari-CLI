@@ -211,10 +211,12 @@ class SessionService:
 
     def resume(self, ref: str | None = None, cwd: Path | None = None) -> StartedSession:
         record: SessionRecord | None = None
+        resumed = False
         if ref is not None:
             record = self._resolve(ref)
             if record.state != SESSION_STATE_ACTIVE:
                 record.state = SESSION_STATE_ACTIVE
+                resumed = True
         else:
             return self.start(cwd or Path.cwd())
 
@@ -223,7 +225,11 @@ class SessionService:
             record.current_cwd = str(Path(cwd).expanduser().resolve())
         now = self._now()
         record.updated_at = now
-        record.last_active_at = now
+        # Only a real resume counts as activity. Desktops call session.open
+        # just to display a session, and bumping recency there reordered the
+        # list on a click: opening something to read it is not working on it.
+        if resumed:
+            record.last_active_at = now
         self._ctx.session_repo.update(record)
         return StartedSession(
             session=record, created=False, warnings=report.warnings, findings=report.findings
