@@ -44,7 +44,7 @@ def _services(messages):
     )
 
 
-def _message(tool_calls):
+def _message(tool_calls, origin=None):
     return SimpleNamespace(
         role="assistant",
         content="hi",
@@ -52,6 +52,7 @@ def _message(tool_calls):
         name=None,
         tool_calls=tool_calls,
         created_at="2026-09-15T00:00:00.000Z",
+        origin=origin,
     )
 
 
@@ -69,6 +70,13 @@ def test_export_accepts_object_tool_calls() -> None:
     assert document["messages"][0]["tool_calls"] == [
         {"id": "c2", "name": "fs.write", "arguments": {"path": "a"}}
     ]
+
+
+def test_export_preserves_message_origin() -> None:
+    origin = {"kind": "peer", "session_id": "ses_peer", "message_id": "pm_1"}
+    document = export_session(_services([_message([], origin=origin), _message([])]), "ses_test")
+    assert document["messages"][0]["origin"] == origin
+    assert document["messages"][1]["origin"] is None
 
 
 def test_export_preserves_runtime_session_state() -> None:
