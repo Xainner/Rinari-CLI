@@ -291,11 +291,19 @@ class FakeCdpServer:
                 )
             return
         with suppress(OSError):
+            # Scripted events go out before the command result, so a caller
+            # that has seen the result has already had them queued: one
+            # ordered socket, one reader, events pushed before the future
+            # resolves. Sending them after made every "enable then read"
+            # test a race -- the reader could still be mid-flight, and a
+            # retry cannot recover it because draining is destructive and
+            # Network.responseReceived is dropped once its
+            # requestWillBeSent is gone.
+            for event in events:
+                self._ws_send(conn, json.dumps(event))
             self._ws_send(
                 conn, json.dumps({"id": message_id, "result": result if result is not None else {}})
             )
-            for event in events:
-                self._ws_send(conn, json.dumps(event))
         if close_after:
             with suppress(OSError):
                 self._ws_send_frame(conn, 0x8, struct.pack(">H", 1000))
