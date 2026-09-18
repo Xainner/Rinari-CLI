@@ -282,7 +282,9 @@ def browser_open(input: dict, ctx: ToolContext) -> ToolResult:
         code = _CODE_MAP.get(exc.code, ToolErrorCode.UNKNOWN)
         return ToolResult(
             ok=False,
-            error=ToolErrorInfo(code=code, message=exc.message, retryable=exc.retryable),
+            error=ToolErrorInfo(
+                code=code, message=exc.message, retryable=_retryable_for(exc, code)
+            ),
         )
 
 
@@ -324,7 +326,9 @@ def browser_snapshot(input: dict, ctx: ToolContext) -> ToolResult:
         code = _CODE_MAP.get(exc.code, ToolErrorCode.UNKNOWN)
         return ToolResult(
             ok=False,
-            error=ToolErrorInfo(code=code, message=exc.message, retryable=exc.retryable),
+            error=ToolErrorInfo(
+                code=code, message=exc.message, retryable=_retryable_for(exc, code)
+            ),
         )
     data: dict[str, Any] = {"bytes": snap["bytes"], "truncated": snap["truncated"]}
     artifacts: list[ArtifactRef] = []
@@ -362,7 +366,9 @@ def browser_screenshot(input: dict, ctx: ToolContext) -> ToolResult:
         code = _CODE_MAP.get(exc.code, ToolErrorCode.UNKNOWN)
         return ToolResult(
             ok=False,
-            error=ToolErrorInfo(code=code, message=exc.message, retryable=exc.retryable),
+            error=ToolErrorInfo(
+                code=code, message=exc.message, retryable=_retryable_for(exc, code)
+            ),
         )
     path = _artifact_dir(ctx) / f"screenshot-{int(time.time())}.png"
     path.write_bytes(png)
@@ -604,7 +610,9 @@ def browser_upload(input: dict, ctx: ToolContext) -> ToolResult:
         code = _CODE_MAP.get(exc.code, ToolErrorCode.UNKNOWN)
         return ToolResult(
             ok=False,
-            error=ToolErrorInfo(code=code, message=exc.message, retryable=exc.retryable),
+            error=ToolErrorInfo(
+                code=code, message=exc.message, retryable=_retryable_for(exc, code)
+            ),
         )
     out.update(
         {
@@ -631,7 +639,9 @@ def browser_download(input: dict, ctx: ToolContext) -> ToolResult:
         code = _CODE_MAP.get(exc.code, ToolErrorCode.UNKNOWN)
         return ToolResult(
             ok=False,
-            error=ToolErrorInfo(code=code, message=exc.message, retryable=exc.retryable),
+            error=ToolErrorInfo(
+                code=code, message=exc.message, retryable=_retryable_for(exc, code)
+            ),
         )
     if ref is None:
         return ToolResult(
