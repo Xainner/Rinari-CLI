@@ -66,7 +66,7 @@ class BrowserError(Exception):
         super().__init__(message)
         # BROWSER_DISCONNECTED | BROWSER_DEPENDENCY | BROWSER_LAUNCH_FAILED |
         # BROWSER_TIMEOUT | BROWSER_PROTOCOL | JS_ERROR | TARGET_NOT_FOUND |
-        # RESOURCE_EXHAUSTED | CANCELLED
+        # RESOURCE_EXHAUSTED | CANCELLED | BROWSER_UNSUPPORTED
         self.code = code
         self.message = message
         self.retryable = retryable
@@ -139,7 +139,14 @@ class BrowserManager:
         command: str | None = None,
         headless: bool = True,
         timeout_s: float = 15.0,
+        backend: Any | None = None,
     ) -> None:
+        # Backend inyectado (documento 03 §4.1): cuando lo hay, las operaciones
+        # page-level no se ejecutan sobre una CdpSession propia sino donde diga
+        # el backend —hoy, la WebContentsView que el usuario está viendo—. Los
+        # límites, los errores públicos y la interfaz que usan tools y policy
+        # no cambian, que es justo lo que pide el documento.
+        self._backend = backend
         self.session_id = session_id
         self._home_root = Path(home_root)
         self._endpoint_cfg = endpoint
@@ -169,6 +176,8 @@ class BrowserManager:
 
     @property
     def connected(self) -> bool:
+        if self._backend is not None:
+            return bool(self._backend.connected)
         session = self._session
         return session is not None and not session.closed and session.fatal is None
 
@@ -177,6 +186,13 @@ class BrowserManager:
         return self._home_root / "browser" / "profiles" / self.session_id / self._profile_instance
 
     def status(self) -> dict[str, Any]:
+        if self._backend is not None:
+            # El estado del backend nativo no tiene endpoint ni proceso que
+            # enseñar, y fingir uno sería mentir sobre lo que hay detrás
+            # (§6.3: «no fingir un proceso Chromium externo cuando no existe»).
+            status = dict(self._backend.status())
+            status["targets"] = len(self.targets()) if self.connected else 0
+            return status
         state = (
             "connected"
             if self.connected
@@ -315,6 +331,9 @@ class BrowserManager:
 
     def close(self) -> dict[str, Any]:
         closed: list[str] = []
+        if self._backend is not None:
+            self._backend.close()
+            closed.append("host-context")
         if self._session is not None:
             try:
                 self._session.close()
@@ -423,6 +442,16 @@ class BrowserManager:
     # -- targets ---------------------------------------------------------------
 
     def _require_session(self) -> CdpSession:
+        if self._backend is not None:
+            # Con backend inyectado no hay CdpSession propia. Las operaciones
+            # que aún dependen de una (cookies, consola, red, descargas) tienen
+            # que decirlo con claridad: el §6.3 prohíbe que una herramienta
+            # desaparezca en silencio del escritorio.
+            raise BrowserError(
+                "BROWSER_UNSUPPORTED",
+                "this operation still requires the external browser backend; "
+                "it is not implemented for the desktop browser yet",
+            )
         session = self._session
         if session is None:
             raise BrowserError(
@@ -455,6 +484,8 @@ class BrowserManager:
         return session, self._attached[target_id]
 
     def targets(self) -> list[dict[str, Any]]:
+        if self._backend is not None:
+            return list(self._backend.targets())
         session = self._require_session()
         result = session.send("Target.getTargets")
         out: list[dict[str, Any]] = []
@@ -470,11 +501,17 @@ class BrowserManager:
         return out
 
     def new_page(self, url: str = "about:blank") -> dict[str, Any]:
+        if self._backend is not None:
+            return dict(self._backend.new_page(url))
         session = self._require_session()
         result = session.send("Target.createTarget", {"url": url})
         return {"target_id": result["targetId"], "url": url}
 
     def close_page(self, target_id: str) -> dict[str, Any]:
+        if self._backend is not None:
+            result = dict(self._backend.close_page(target_id))
+            self._attached.pop(target_id, None)
+            return result
         session = self._require_session()
         session.send("Target.closeTarget", {"targetId": target_id})
         self._attached.pop(target_id, None)
@@ -493,6 +530,15 @@ class BrowserManager:
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         self._raise_if_cancelled(cancelled)
+        if self._backend is not None:
+            return self._backend.send(
+                target_id,
+                method,
+                params,
+                domain=domain,
+                timeout_s=timeout_s,
+                cancelled=cancelled,
+            )
         session, session_id = self._session_for(target_id, domain)
         try:
             return session.send(method, params, session_id=session_id, timeout_s=timeout_s)
@@ -509,17 +555,17 @@ class BrowserManager:
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         self._raise_if_cancelled(cancelled)
-        session, session_id = self._session_for(target_id, "Runtime")
-        self._raise_if_cancelled(cancelled)
-        try:
-            result = session.send(
-                "Runtime.evaluate",
-                {"expression": expression, "returnByValue": True, "awaitPromise": await_promise},
-                session_id=session_id,
-                timeout_s=10.0,
-            )
-        except CdpError as exc:
-            raise _cdp_to_browser(exc) from exc
+        # Por `call` para que el backend inyectado también reciba esta ruta:
+        # `snapshot`, `click` y `fill` se apoyan en `evaluate`, así que dejarla
+        # atada a la CdpSession habría dejado fuera media interfaz.
+        result = self.call(
+            target_id,
+            "Runtime.evaluate",
+            {"expression": expression, "returnByValue": True, "awaitPromise": await_promise},
+            domain="Runtime",
+            timeout_s=10.0,
+            cancelled=cancelled,
+        )
         if result.get("exceptionDetails"):
             raise BrowserError(
                 "JS_ERROR", f"JavaScript error: {_exception_text(result['exceptionDetails'])}"

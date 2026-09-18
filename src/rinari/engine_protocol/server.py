@@ -149,8 +149,25 @@ class EngineServer:
         self._dispatcher = EngineDispatcher()
         self._model_jobs: dict[str, dict[str, Any]] = {}
         self._model_jobs_lock = threading.Lock()
+        # Broker del browser nativo (documento 03 §5). El bridge existe siempre;
+        # lo que decide si hay browser nativo es que un host se registre. Un
+        # Engine sin host de escritorio no cambia de comportamiento.
+        from rinari.browser.registry import BrowserRegistry
+        from rinari.engine_protocol.browser_host import BrowserHostBridge
+
+        self._browser_host = BrowserHostBridge(self._turns.emit_external, self._engine_instance_id)
+        self._browser_registry = BrowserRegistry(self._browser_host, self._services.ctx.home)
+        self._turns.set_browser_registry(self._browser_registry)
+
         self._dispatcher.register("engine.info", self._engine_info)
         self._dispatcher.register("browser.view.get", self._turns.browser_view)
+        # `host.browser.*` no está en la allowlist del preload: sólo el
+        # supervisor de main puede emitirlos (§5.2).
+        self._dispatcher.register("host.browser.register", self._browser_host.register)
+        self._dispatcher.register("host.browser.unregister", self._browser_host.unregister)
+        self._dispatcher.register("host.browser.reply", self._browser_host.reply)
+        self._dispatcher.register("host.browser.event", self._browser_host.event)
+        self._dispatcher.register("browser.context.get", self._browser_context_get)
         self._dispatcher.register("target.list", self._target_list)
         self._dispatcher.register("target.add", self._target_add)
         self._dispatcher.register("session.list", self._session_list)
@@ -353,6 +370,27 @@ class EngineServer:
             "engine_instance_id": self._engine_instance_id,
             "home_id": self._home_id,
             "capabilities": dict(protocol.CAPABILITIES),
+        }
+
+    def _browser_context_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        """`browser.context.get` (documento 03 §5.2): disponibilidad y metadata.
+
+        Lo que **no** devuelve: endpoints, cookies, ids del host ni
+        `webContentsId`. La UI necesita saber si hay browser nativo y en qué
+        estado, y nada de eso requiere un identificador con el que se pueda
+        operar desde fuera.
+        """
+        session_id = params.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            raise EngineProtocolError(INVALID_PARAMS, "session_id is required")
+        # Que la sesión exista se comprueba contra el store, no contra la
+        # registry: preguntar por una sesión ajena no debe revelar si tiene
+        # contexto.
+        record = self._services.sessions.show(session_id)
+        return {
+            "session_id": record.id,
+            "supported": True,
+            **self._browser_registry.describe(record.id),
         }
 
     # -- sessions --------------------------------------------------------

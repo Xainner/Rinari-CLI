@@ -54,6 +54,12 @@ class ToolErrorCode(StrEnum):
     PARTIAL_FAILURE = "PARTIAL_FAILURE"
     VALIDATION_FAILED = "VALIDATION_FAILED"
     TOOL_NOT_FOUND = "TOOL_NOT_FOUND"
+    # La operación existe pero este backend no la implementa. Se distingue de
+    # DEPENDENCY_ERROR a propósito: aquel es reintentable y este no lo es
+    # —volver a intentarlo dará lo mismo—. Lo pide el documento 03 §4.2, que
+    # exige correspondencia explícita para «operación no soportada» en vez de
+    # dejar que una herramienta desaparezca en silencio del escritorio.
+    UNSUPPORTED = "UNSUPPORTED"
     UNKNOWN = "UNKNOWN"
 
 

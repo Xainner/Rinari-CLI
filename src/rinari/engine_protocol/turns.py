@@ -194,6 +194,9 @@ class TurnManager:
         self._events: queue.Queue[dict[str, Any]] = queue.Queue()
         self._turns: dict[str, _ActiveTurn] = {}
         self._desktop_browsers: dict[str, Any] = {}
+        # Registry de contextos nativos (documento 03 §4.1). La pone el
+        # servidor al construirse; sin ella el comportamiento es el de siempre.
+        self._browser_registry: Any | None = None
         self._desktop_processes: dict[str, Any] = {}
         self._threads: dict[str, threading.Thread] = {}
         self._preparation_threads: set[threading.Thread] = set()
@@ -214,6 +217,10 @@ class TurnManager:
         self.peers = PeerBroker(self)
         # A new engine process never replays deliveries accepted by an older one.
         self.peers.on_engine_start()
+
+    def set_browser_registry(self, registry: Any) -> None:
+        """Registry de contextos de browser nativo, puesta por el servidor."""
+        self._browser_registry = registry
 
     # -- outbox ----------------------------------------------------------
 
@@ -633,6 +640,14 @@ class TurnManager:
                 )
                 context.tool_ctx = replace(context.tool_ctx, processes=processes)
                 browser = self._desktop_browsers.get(turn.session_id)
+                if browser is None and self._browser_registry is not None:
+                    # El browser del escritorio tiene preferencia cuando existe:
+                    # es la página que el usuario está viendo. Una vez elegido
+                    # se queda cacheado, para que la sesión no cambie de
+                    # backend entre turnos (§1).
+                    browser = self._browser_registry.acquire(turn.session_id)
+                    if browser is not None:
+                        self._desktop_browsers[turn.session_id] = browser
                 if browser is None:
                     browser = getattr(context.tool_ctx, "browser", None)
                     if browser is not None:

@@ -57,6 +57,9 @@ _CODE_MAP: dict[str, ToolErrorCode] = {
     "RESOURCE_EXHAUSTED": ToolErrorCode.RESOURCE_EXHAUSTED,
     "INVALID_ARGUMENT": ToolErrorCode.INVALID_ARGUMENT,
     "CANCELLED": ToolErrorCode.CANCELLED,
+    # Backend nativo del escritorio con una operación aún no portada. No entra
+    # en `_RETRYABLE`: reintentar no la hace aparecer.
+    "BROWSER_UNSUPPORTED": ToolErrorCode.UNSUPPORTED,
 }
 _RETRYABLE = {ToolErrorCode.TIMEOUT, ToolErrorCode.DEPENDENCY_ERROR}
 
