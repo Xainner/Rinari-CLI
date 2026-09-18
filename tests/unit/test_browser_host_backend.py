@@ -12,6 +12,8 @@ passthrough le daría a una herramienta ámbito mayor que su propio target.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from rinari.browser.host_backend import HostBackend
@@ -268,6 +270,135 @@ class TestNadaBloqueaElLoopDeStdio:
         release.set()
         # Vuelve enseguida aunque el host tarde: el aviso va en segundo plano.
         assert elapsed < 1.0
+
+
+class TestIncertidumbre:
+    """Documento 03 §5.4: una mutación de entrega incierta no se reintenta.
+
+    Lo que hay que distinguir no es «falló» de «funcionó», sino **lo que nunca
+    llegó a empezar** de **lo que pudo aplicarse**. Lo primero se puede repetir
+    sin consecuencias; lo segundo, repetido, hace la acción dos veces.
+    """
+
+    def test_sin_host_la_operacion_no_empezó_y_se_puede_repetir(self) -> None:
+        real = BrowserHostBridge(lambda payload: None, "engine-1")
+        host = HostBackend(real, session_id="s1", context_id="c1")
+        with pytest.raises(BrowserError) as raised:
+            host.send("t1", "Page.navigate", {"url": "http://127.0.0.1/x"})
+        assert raised.value.code == "BROWSER_DISCONNECTED"
+        assert raised.value.uncertain is False
+
+    def test_un_timeout_tras_emitir_deja_el_resultado_incierto(self) -> None:
+        from rinari.engine_protocol.browser_host import HostOperationError
+
+        class TimedOut(FakeBridge):
+            def request(self, operation, params, **kw):
+                raise HostOperationError(
+                    "BROWSER_TIMEOUT", "el host no respondió", outcome="outcome_unknown"
+                )
+
+        host, _ = backend(TimedOut())
+        with pytest.raises(BrowserError) as raised:
+            host.send("t1", "Input.dispatchMouseEvent", {"type": "mousePressed"})
+        assert raised.value.uncertain is True
+        # No reintentable: el click pudo haberse aplicado.
+        assert raised.value.retryable is False
+
+    def test_la_herramienta_no_anuncia_reintentable_una_mutacion_incierta(self) -> None:
+        """El mapa de categorías no puede devolver `retryable` a `True`.
+
+        `BROWSER_TIMEOUT` cae en TIMEOUT y `BROWSER_DISCONNECTED` en
+        DEPENDENCY_ERROR, que son categorías reintentables. Para una mutación
+        que quizá se aplicó, eso es información de seguridad equivocada: el
+        contrato del §5.4 pide reobservar, no repetir.
+        """
+        from rinari.tools.definition import ToolErrorCode
+        from rinari.tools.native.browse import _CODE_MAP, _RETRYABLE, _retryable_for
+
+        for code in ("BROWSER_TIMEOUT", "BROWSER_DISCONNECTED"):
+            mapped = _CODE_MAP[code]
+            assert mapped in _RETRYABLE, "si deja de estarlo, esta prueba pierde sentido"
+            incierto = BrowserError(code, "entrega incierta", uncertain=True)
+            assert _retryable_for(incierto, mapped) is False
+            # Y lo que no es incierto conserva el comportamiento de siempre.
+            claro = BrowserError(code, "no empezó")
+            assert _retryable_for(claro, mapped) is True
+
+        # Un código no reintentable sigue sin serlo.
+        assert (
+            _retryable_for(BrowserError("BROWSER_INTERVENED", "x"), ToolErrorCode.CONFLICT) is False
+        )
+
+
+class TestNativeNoCaeAlCaminoExterno:
+    """Documento 03 §1: un contexto no cambia de backend.
+
+    `launch()` sólo retornaba temprano si el manager estaba conectado. Con
+    backend nativo y el host caído eso es falso, así que seguía hasta
+    `find_browser`/`Popen` y habría abierto un Chromium externo para una sesión
+    que es nativa — dos autoridades sobre páginas distintas, y el usuario
+    mirando la que ya no manda.
+    """
+
+    def manager(self, monkeypatch, connected: bool = False):
+        from rinari.browser import manager as manager_module
+
+        estalla = lambda *a, **k: pytest.fail("no se debe tocar el camino externo")  # noqa: E731
+        monkeypatch.setattr(manager_module, "find_browser", estalla)
+        monkeypatch.setattr(manager_module.subprocess, "Popen", estalla)
+        monkeypatch.setattr(manager_module.CdpSession, "__init__", estalla)
+
+        fake = FakeBridge(available=connected)
+        backend_obj = HostBackend(fake, session_id="s1", context_id="c1")
+        return manager_module.BrowserManager(
+            session_id="s1", home_root=Path("."), backend=backend_obj
+        ), fake
+
+    def test_launch_con_host_caido_no_lanza_un_navegador_externo(self, monkeypatch) -> None:
+        mgr, _ = self.manager(monkeypatch, connected=False)
+        with pytest.raises(BrowserError) as raised:
+            mgr.launch()
+        assert raised.value.code == "BROWSER_DISCONNECTED"
+
+    def test_launch_con_host_vivo_devuelve_el_contexto_nativo(self, monkeypatch) -> None:
+        mgr, _ = self.manager(monkeypatch, connected=True)
+        assert mgr.launch() == "electron-native"
+
+    def test_connect_no_deja_que_una_tool_elija_backend(self, monkeypatch) -> None:
+        # §4.1: «un argumento de herramienta no puede elegir `electron-native`,
+        # `host_id` ni `webContentsId` para escapar de la sesión». Al revés
+        # también: no puede sacar a una sesión nativa hacia un endpoint ajeno.
+        mgr, _ = self.manager(monkeypatch, connected=True)
+        with pytest.raises(BrowserError) as raised:
+            mgr.connect("ws://127.0.0.1:9222/devtools/browser/abc")
+        assert raised.value.code == "BROWSER_UNSUPPORTED"
+
+    def test_un_endpoint_en_el_entorno_tampoco_lo_saca(self, monkeypatch) -> None:
+        monkeypatch.setenv("RINARI_BROWSER_CDP", "ws://127.0.0.1:9222/devtools/browser/abc")
+        mgr, _ = self.manager(monkeypatch, connected=True)
+        with pytest.raises(BrowserError):
+            mgr.connect()
+
+
+class TestContextoCerrado:
+    def test_un_backend_cerrado_falla_antes_de_emitir(self) -> None:
+        host, fake = backend()
+        host.close()
+        fake.calls.clear()
+        with pytest.raises(BrowserError) as raised:
+            host.send("t1", "Page.navigate", {"url": "http://127.0.0.1/x"})
+        assert raised.value.code == "BROWSER_DISCONNECTED"
+        # Una petición atrasada no puede recrear un contexto ya dispuesto.
+        assert fake.calls == []
+
+    def test_cerrado_tampoco_enumera_ni_crea_paginas(self) -> None:
+        host, fake = backend()
+        host.close()
+        fake.calls.clear()
+        for call in (lambda: host.targets(), lambda: host.new_page("about:blank")):
+            with pytest.raises(BrowserError):
+                call()
+        assert fake.calls == []
 
 
 def test_los_targets_salen_de_la_registry_del_contexto() -> None:

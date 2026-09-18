@@ -54,19 +54,27 @@ class BrowserRegistry:
         with self._lock:
             existing = self._contexts.get(session_id)
             if existing is not None:
-                # Se devuelve aunque el host se haya ido. Un contexto que
-                # empezó nativo sigue siéndolo hasta que se cierre: si se
-                # sustituyera por el backend externo, la sesión abriría otro
-                # navegador con la misma URL y creería que es el suyo, que es
-                # justo lo que el §1 prohíbe. Sin host, las operaciones fallan
-                # con BROWSER_DISCONNECTED, que es información verdadera.
-                return existing["manager"]
+                if not existing["manager"].is_disposed:
+                    # Se devuelve aunque el host se haya ido. Un contexto que
+                    # empezó nativo sigue siéndolo hasta que se cierre: si se
+                    # sustituyera por el backend externo, la sesión abriría
+                    # otro navegador con la misma URL y creería que es el suyo,
+                    # que es justo lo que el §1 prohíbe. Sin host, las
+                    # operaciones fallan con BROWSER_DISCONNECTED, que es
+                    # información verdadera.
+                    return existing["manager"]
+                # Dispuesto: se retira en vez de devolverse. Entregar un
+                # manager cerrado hacía que una sesión reabierta creyera tener
+                # browser mientras cada operación fallaba.
+                self._contexts.pop(session_id, None)
 
             if not self.native_available():
                 return None
 
             # El id lo acuña el componente confiable y se mapea a objetos
-            # internos; nunca viaja un identificador elegido fuera (§5.3).
+            # internos; nunca viaja un identificador elegido fuera (§5.3). Una
+            # reapertura acuña uno nuevo: el contexto anterior queda cerrado y
+            # su backend rechaza lo que llegue tarde a su nombre.
             context_id = secrets.token_hex(16)
             backend = HostBackend(self._bridge, session_id=session_id, context_id=context_id)
             manager = BrowserManager(

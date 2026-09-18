@@ -51,23 +51,68 @@ class HostUnavailable(Exception):
 
 
 class HostOperationError(Exception):
-    """El host devolvió un error con código propio."""
+    """El host devolvió un error con código propio.
 
-    def __init__(self, code: str, message: str, *, retryable: bool = False) -> None:
+    `outcome` dice qué se sabe de la ejecución, que no es lo mismo que el
+    código del error:
+
+    - `not_started` — la solicitud no llegó a emitirse. Repetirla es seguro.
+    - `outcome_unknown` — se emitió y no se sabe si se aplicó. Repetirla
+      podría hacer la acción dos veces (§5.4).
+    """
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        retryable: bool = False,
+        outcome: str = "not_started",
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.retryable = retryable
+        self.outcome = outcome
 
 
 class _Pending:
-    __slots__ = ("binding_id", "created_at", "done", "error", "result")
+    """Una solicitud en vuelo, con la identidad completa del recurso.
 
-    def __init__(self, binding_id: str) -> None:
+    Guardar sólo el binding hacía que el crash de **un** contexto fallara los
+    pendientes de todos: un mismo binding sirve a todas las sesiones, así que
+    una pestaña rota se llevaba por delante el trabajo de las demás.
+    """
+
+    __slots__ = (
+        "binding_id",
+        "context_id",
+        "created_at",
+        "done",
+        "error",
+        "operation",
+        "result",
+        "session_id",
+        "target_id",
+    )
+
+    def __init__(
+        self,
+        binding_id: str,
+        *,
+        session_id: str,
+        context_id: str,
+        target_id: str | None,
+        operation: str,
+    ) -> None:
         self.done = threading.Event()
         self.result: dict[str, Any] | None = None
         self.error: HostOperationError | None = None
         self.binding_id = binding_id
+        self.session_id = session_id
+        self.context_id = context_id
+        self.target_id = target_id
+        self.operation = operation
         self.created_at = time.time()
 
 
@@ -171,7 +216,13 @@ class BrowserHostBridge:
                     retryable=True,
                 )
             request_id = secrets.token_hex(12)
-            pending = _Pending(binding_id)
+            pending = _Pending(
+                binding_id,
+                session_id=session_id,
+                context_id=context_id,
+                target_id=target_id,
+                operation=operation,
+            )
             self._pending[request_id] = pending
 
         deadline = timeout_s if timeout_s is not None else DEFAULT_TIMEOUT_S
@@ -203,14 +254,21 @@ class BrowserHostBridge:
         while True:
             if pending.done.wait(timeout=0.1):
                 break
+            # Cancelar y expirar ocurren **después** de emitir, así que el host
+            # puede estar ejecutando la operación ahora mismo. Se retira el
+            # pendiente para no esperar más, pero el resultado queda declarado
+            # desconocido: cancelar no deshace lo remoto (§5.4).
             if cancelled is not None and cancelled():
                 self._drop(request_id)
-                raise HostOperationError("CANCELLED", f"{operation} was cancelled")
+                raise HostOperationError(
+                    "CANCELLED", f"{operation} was cancelled", outcome="outcome_unknown"
+                )
             if time.time() >= end:
                 self._drop(request_id)
                 raise HostOperationError(
                     "BROWSER_TIMEOUT",
                     f"the desktop host did not answer {operation} in {deadline:.0f}s",
+                    outcome="outcome_unknown",
                 )
 
         self._drop(request_id)
@@ -264,22 +322,40 @@ class BrowserHostBridge:
     def event(self, params: dict[str, Any]) -> dict[str, Any]:
         """`host.browser.event`: navegación, crash, pérdida de control.
 
-        Una pérdida de control invalida los pendientes de ese binding: el §5.4
-        prohíbe reintentar mutaciones tras una desconexión, así que lo que
-        estuviera en vuelo termina con error en vez de esperar al timeout.
+        Una pérdida de control invalida los pendientes **del recurso
+        afectado**, no los de todo el binding: un mismo binding sirve a todas
+        las sesiones, y una pestaña que se cae no puede llevarse por delante el
+        trabajo de las demás.
         """
         binding_id = params.get("binding_id")
         kind = params.get("kind")
         with self._lock:
             if binding_id != self._binding_id:
                 return {"accepted": False, "reason": "binding_mismatch"}
-        if kind in {"detached", "crashed", "context_closed"}:
-            self._fail_all(
-                str(binding_id),
-                "BROWSER_DISCONNECTED",
-                f"the desktop browser context reported {kind}",
-            )
-        return {"accepted": True}
+        # Un evento dirigido a otra instancia del Engine no es de esta.
+        instance = params.get("engine_instance_id")
+        if instance is not None and instance != self._engine_instance_id:
+            return {"accepted": False, "reason": "engine_instance_mismatch"}
+
+        if kind not in {"detached", "crashed", "context_closed"}:
+            return {"accepted": True}
+
+        context_id = params.get("context_id")
+        target_id = params.get("target_id")
+        if not isinstance(context_id, str) or not context_id:
+            # Sin contexto no se puede acotar el daño. Se rechaza en vez de
+            # tratarlo como pérdida global: el §5.4 no autoriza a invalidar
+            # trabajo ajeno por un evento mal formado.
+            return {"accepted": False, "reason": "missing_context"}
+
+        failed = self._fail_matching(
+            str(binding_id),
+            context_id=context_id,
+            target_id=target_id if isinstance(target_id, str) and target_id else None,
+            code="BROWSER_DISCONNECTED",
+            message=f"the desktop browser context reported {kind}",
+        )
+        return {"accepted": True, "invalidated": failed}
 
     # -- internos ----------------------------------------------------------
 
@@ -287,7 +363,43 @@ class BrowserHostBridge:
         with self._lock:
             self._pending.pop(request_id, None)
 
+    def _fail_matching(
+        self,
+        binding_id: str,
+        *,
+        context_id: str,
+        target_id: str | None,
+        code: str,
+        message: str,
+    ) -> int:
+        """Falla sólo lo que pertenece al recurso afectado.
+
+        Con `target_id` se acota a esa página; sin él, al contexto entero. Lo
+        de otras sesiones sigue esperando su respuesta.
+        """
+
+        def affected(pending: _Pending) -> bool:
+            if pending.binding_id != binding_id or pending.context_id != context_id:
+                return False
+            if target_id is None:
+                return True
+            # Una operación sin target concreto se resolvía contra la página
+            # por defecto del contexto, así que también queda afectada.
+            return pending.target_id in (None, target_id)
+
+        with self._lock:
+            victims = [p for p in self._pending.values() if affected(p)]
+            for request_id, pending in list(self._pending.items()):
+                if affected(pending):
+                    self._pending.pop(request_id, None)
+        for pending in victims:
+            if not pending.done.is_set():
+                pending.error = HostOperationError(code, message, outcome="outcome_unknown")
+                pending.done.set()
+        return len(victims)
+
     def _fail_all(self, binding_id: str, code: str, message: str) -> None:
+        """Pérdida global: el host se fue o su binding se revocó."""
         with self._lock:
             victims = [
                 pending for pending in self._pending.values() if pending.binding_id == binding_id
@@ -297,7 +409,9 @@ class BrowserHostBridge:
                     self._pending.pop(request_id, None)
         for pending in victims:
             if not pending.done.is_set():
-                pending.error = HostOperationError(code, message)
+                # Estaba emitida: el host pudo haberla ejecutado antes de
+                # caerse, así que su resultado es desconocido, no fallido.
+                pending.error = HostOperationError(code, message, outcome="outcome_unknown")
                 pending.done.set()
 
     def shutdown(self) -> None:
@@ -308,12 +422,51 @@ class BrowserHostBridge:
             self._fail_all(binding_id, "BROWSER_DISCONNECTED", "the engine is shutting down")
 
 
+#: Profundidad máxima de una respuesta. Una estructura más honda que esto no
+#: se mide: se rechaza, porque recorrerla ya sería el ataque.
+MAX_REPLY_DEPTH = 32
+
+
 def _too_big(result: dict[str, Any]) -> bool:
-    """Tamaño aproximado sin serializar dos veces la respuesta entera."""
-    total = 0
-    for value in result.values():
-        if isinstance(value, (str, bytes, bytearray)):
-            total += len(value)
-        if total > MAX_REPLY_BYTES:
-            return True
-    return False
+    """¿Excede la respuesta el presupuesto de bytes que puede viajar?
+
+    Se miden **bytes UTF-8 de todo el árbol**, no caracteres del primer nivel.
+    Las dos cosas importan: la forma normal de una respuesta CDP es anidada
+    —`{"result": {"value": ...}}`, `{"nodes": [...]}`— y un carácter no ASCII
+    ocupa hasta cuatro bytes, así que contar `len()` de una cadena subestima
+    lo que de verdad ocupa la línea.
+
+    El recorrido se corta en cuanto pasa el tope, de modo que una respuesta
+    enorme no se serializa entera para descubrir que era enorme.
+    """
+    return _measure(result, MAX_REPLY_DEPTH, 0) > MAX_REPLY_BYTES
+
+
+def _measure(value: Any, depth: int, total: int) -> int:
+    """Bytes acumulados, con salida temprana al superar el presupuesto."""
+    if total > MAX_REPLY_BYTES:
+        return total
+    if depth <= 0:
+        # Demasiado honda para medirla: se trata como excedida.
+        return MAX_REPLY_BYTES + 1
+
+    if isinstance(value, str):
+        return total + len(value.encode("utf-8", "surrogatepass"))
+    if isinstance(value, (bytes, bytearray)):
+        return total + len(value)
+    if isinstance(value, dict):
+        for key, item in value.items():
+            total = _measure(key, depth - 1, total)
+            total = _measure(item, depth - 1, total)
+            if total > MAX_REPLY_BYTES:
+                return total
+        return total
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            total = _measure(item, depth - 1, total)
+            if total > MAX_REPLY_BYTES:
+                return total
+        return total
+    # Números, booleanos y null ocupan poco pero no cero: se cuentan por su
+    # forma serializada para que una lista larga de ellos también tope.
+    return total + len(repr(value))

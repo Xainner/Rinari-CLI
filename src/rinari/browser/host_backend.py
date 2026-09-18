@@ -105,6 +105,11 @@ class HostBackend:
     # -- estado ------------------------------------------------------------
 
     @property
+    def closed(self) -> bool:
+        """Dispuesto: no vuelve. Distinto de que el host esté caído."""
+        return self._closed
+
+    @property
     def connected(self) -> bool:
         return not self._closed and self._bridge.available
 
@@ -253,6 +258,15 @@ class HostBackend:
     ) -> dict[str, Any]:
         from rinari.browser.manager import BrowserError
 
+        # Un contexto dispuesto no revive por recibir una petición atrasada.
+        # La comprobación va antes de emitir para que tampoco lo recree el host
+        # al resolver la sesión (§5.3).
+        if self._closed and operation != "context.close":
+            raise BrowserError(
+                "BROWSER_DISCONNECTED",
+                "this browser context was already disposed; reopening is an explicit action",
+            )
+
         try:
             return self._bridge.request(
                 operation,
@@ -264,9 +278,22 @@ class HostBackend:
                 cancelled=cancelled,
             )
         except HostUnavailable as exc:
+            # Nunca se emitió: repetirla es seguro.
             raise BrowserError("BROWSER_DISCONNECTED", str(exc)) from exc
         except HostOperationError as exc:
-            raise BrowserError(exc.code, exc.message, retryable=exc.retryable) from exc
+            # La incertidumbre sólo importa si la operación cambia la página.
+            # Una lectura que expiró se puede repetir sin consecuencias; un
+            # click, no: pudo haberse aplicado (§5.4).
+            uncertain = exc.outcome == "outcome_unknown" and operation in _MUTATING
+            raise BrowserError(
+                exc.code,
+                f"{exc.message} — no se sabe si la operación llegó a aplicarse; "
+                "vuelve a observar la página antes de actuar"
+                if uncertain
+                else exc.message,
+                retryable=exc.retryable and not uncertain,
+                uncertain=uncertain,
+            ) from exc
 
 
 def _unsupported(message: str) -> Exception:

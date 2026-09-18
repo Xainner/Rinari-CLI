@@ -541,11 +541,15 @@ class TurnManager:
         with self._lock:
             browsers = list(self._desktop_browsers.values())
             self._desktop_browsers.clear()
+            registry = self._browser_registry
         for session_id in list(self._desktop_processes):
             self.close_processes(session_id)
         for browser in browsers:
             with contextlib.suppress(Exception):
                 browser.close()
+        if registry is not None:
+            with contextlib.suppress(Exception):
+                registry.release_all()
 
     def close_processes(self, session_id: str) -> None:
         with self._lock:
@@ -559,8 +563,14 @@ class TurnManager:
     def close_browser(self, session_id: str) -> None:
         with self._lock:
             browser = self._desktop_browsers.pop(session_id, None)
+            registry = self._browser_registry
         if browser is not None:
             browser.close()
+        # La registry es la autoridad de ownership del contexto nativo. Sin
+        # esto, cerrar la sesión retiraba el manager de esta caché pero lo
+        # dejaba en la otra, y un `acquire` posterior devolvía uno ya cerrado.
+        if registry is not None:
+            registry.release(session_id)
 
     def browser_view(self, params: dict[str, Any]) -> dict[str, Any]:
         """Observe the exact CDP page used by the engine; never launch or navigate."""

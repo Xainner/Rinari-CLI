@@ -95,6 +95,19 @@ def _need_manager(ctx: ToolContext) -> tuple[BrowserManager | None, ToolResult |
     return manager, None
 
 
+def _retryable_for(exc: BrowserError, code: ToolErrorCode) -> bool:
+    """¿Debe el runtime reintentar esto?
+
+    La categoría del código es una heurística —TIMEOUT y DEPENDENCY_ERROR
+    suelen merecer otro intento—, pero **no puede ganarle a un error que ya
+    declaró que la operación pudo aplicarse**. Repetir un click que quizá
+    ocurrió lo ejecuta dos veces, y el §5.4 pide reobservar en vez de repetir.
+    """
+    if exc.uncertain:
+        return False
+    return exc.retryable or code in _RETRYABLE
+
+
 def _run(ctx: ToolContext, fn: Callable[[], Any]) -> ToolResult:
     _manager_instance, error = _need_manager(ctx)
     if error is not None:
@@ -107,10 +120,13 @@ def _run(ctx: ToolContext, fn: Callable[[], Any]) -> ToolResult:
             ok=False,
             data={
                 "browser_error": exc.code,
+                # Se dice en los datos, no sólo en el texto: el runtime y el
+                # modelo tienen que poder distinguir «no pasó» de «no se sabe».
+                "outcome": "unknown" if exc.uncertain else "failed",
                 "diagnostics": _manager_instance.diagnostics() if _manager_instance else {},
             },
             error=ToolErrorInfo(
-                code=code, message=exc.message, retryable=exc.retryable or code in _RETRYABLE
+                code=code, message=exc.message, retryable=_retryable_for(exc, code)
             ),
         )
     except SandboxViolationError as exc:

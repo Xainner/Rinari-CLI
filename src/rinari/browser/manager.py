@@ -62,8 +62,15 @@ _CDP_TO_BROWSER = {
 class BrowserError(Exception):
     """Structured browser failure (maps to tool error codes)."""
 
-    def __init__(self, code: str, message: str, *, retryable: bool = False) -> None:
+    def __init__(
+        self, code: str, message: str, *, retryable: bool = False, uncertain: bool = False
+    ) -> None:
         super().__init__(message)
+        # ¿Pudo la operación haberse aplicado pese al error? Un timeout o una
+        # desconexión **después** de emitir una mutación dejan ese estado: la
+        # acción quizá ocurrió. El §5.4 obliga entonces a reobservar antes de
+        # actuar, no a repetir, así que esto vence a la categoría del código.
+        self.uncertain = uncertain
         # BROWSER_DISCONNECTED | BROWSER_DEPENDENCY | BROWSER_LAUNCH_FAILED |
         # BROWSER_TIMEOUT | BROWSER_PROTOCOL | JS_ERROR | TARGET_NOT_FOUND |
         # RESOURCE_EXHAUSTED | CANCELLED | BROWSER_UNSUPPORTED
@@ -175,6 +182,18 @@ class BrowserManager:
     # -- state ----------------------------------------------------------------
 
     @property
+    def is_disposed(self) -> bool:
+        """¿Se cerró este browser? Sólo aplica al backend inyectado.
+
+        Distinto de `connected`: un contexto vivo cuyo host se cayó está
+        desconectado pero no dispuesto, y puede recuperarse. Uno dispuesto no
+        vuelve, y entregarlo otra vez daría una sesión con browser aparente
+        donde cada operación falla.
+        """
+        backend = self._backend
+        return bool(backend is not None and getattr(backend, "closed", False))
+
+    @property
     def connected(self) -> bool:
         if self._backend is not None:
             return bool(self._backend.connected)
@@ -252,6 +271,16 @@ class BrowserManager:
     # -- lifecycle ------------------------------------------------------------
 
     def connect(self, endpoint: str | None = None) -> str:
+        if self._backend is not None:
+            # Una sesión nativa no sale hacia un endpoint ajeno. El §4.1 no
+            # deja que un argumento de herramienta elija backend, y el §1 que
+            # un contexto lo cambie: serían dos autoridades sobre páginas
+            # distintas, con el usuario mirando la que ya no manda.
+            raise BrowserError(
+                "BROWSER_UNSUPPORTED",
+                "this session uses the desktop browser; connecting to an external CDP "
+                "endpoint would leave the visible page without an owner",
+            )
         target = endpoint or self._endpoint_cfg or os.environ.get(ENV_ENDPOINT) or self._endpoint
         if not target:
             raise BrowserError(
@@ -271,6 +300,19 @@ class BrowserManager:
         return self._endpoint or target
 
     def launch(self, command: str | None = None, port: int | None = None) -> str:
+        if self._backend is not None:
+            # El contexto nativo ya existe o no existe; no hay proceso que
+            # lanzar. La comprobación va **antes** que `self.connected`: con el
+            # host caído esa condición es falsa y el flujo seguía hasta
+            # `find_browser`/`Popen`, abriendo un Chromium externo para una
+            # sesión nativa (§6.3: «no fingir un proceso Chromium externo»).
+            if not self.connected:
+                raise BrowserError(
+                    "BROWSER_DISCONNECTED",
+                    "the desktop browser host is not available; its context cannot be "
+                    "relaunched from here",
+                )
+            return self._backend.kind
         if self.connected:
             return self._endpoint or ""
         external = self._endpoint_cfg or os.environ.get(ENV_ENDPOINT)

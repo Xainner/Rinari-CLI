@@ -208,10 +208,30 @@ class TestCaducidadYReplay:
         br, events, reg = registered()
         out: dict = {}
         thread = ask(br, out, timeout_s=30)
-        emitted(events)
-        br.event({"binding_id": reg["binding_id"], "kind": "detached"})
+        request = emitted(events)
+        br.event(
+            {
+                "binding_id": reg["binding_id"],
+                "kind": "detached",
+                "context_id": request["context_id"],
+            }
+        )
         thread.join(timeout=3)
         assert out["error"].code == "BROWSER_DISCONNECTED"
+        # Pudo haberse aplicado antes del detach: no se reintenta sola.
+        assert out["error"].outcome == "outcome_unknown"
+
+    def test_un_evento_sin_contexto_no_invalida_nada(self) -> None:
+        # Sin contexto no se puede acotar el daño, y tratarlo como pérdida
+        # global dejaría que un evento mal formado tirara trabajo ajeno.
+        br, events, reg = registered()
+        out: dict = {}
+        thread = ask(br, out, timeout_s=1)
+        emitted(events)
+        answer = br.event({"binding_id": reg["binding_id"], "kind": "crashed"})
+        assert answer == {"accepted": False, "reason": "missing_context"}
+        thread.join(timeout=4)
+        assert out["error"].code == "BROWSER_TIMEOUT"
 
     def test_un_evento_de_otro_binding_no_toca_los_pendientes(self) -> None:
         br, events, _ = registered()
@@ -222,6 +242,107 @@ class TestCaducidadYReplay:
         thread.join(timeout=4)
         # Terminó por su propio timeout, no por el evento ajeno.
         assert out["error"].code == "BROWSER_TIMEOUT"
+
+
+class TestAislamientoEntreContextos:
+    """CRASH-01: el fallo de un browser no derriba los demás.
+
+    Un mismo binding sirve a todas las sesiones, así que fallar por binding
+    significaba que una pestaña rota se llevaba por delante el trabajo de
+    cualquier otra sesión que tuviera algo en vuelo.
+    """
+
+    def ask_in(self, br, out, *, session_id, context_id, target_id=None):
+        def run() -> None:
+            try:
+                out["result"] = br.request(
+                    "page.navigate",
+                    {"url": "http://127.0.0.1/x"},
+                    session_id=session_id,
+                    context_id=context_id,
+                    target_id=target_id,
+                    timeout_s=10,
+                )
+            except Exception as exc:
+                out["error"] = exc
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        return thread
+
+    def wait_for(self, events: list[dict], count: int) -> list[dict]:
+        for _ in range(100):
+            found = [e["payload"] for e in events if e.get("event") == "host.browser.request"]
+            if len(found) >= count:
+                return found
+            time.sleep(0.02)
+        raise AssertionError(f"sólo se emitieron {len(found)} de {count}")
+
+    def test_el_crash_de_un_contexto_solo_falla_ese_contexto(self) -> None:
+        br, events, reg = registered()
+        a: dict = {}
+        b: dict = {}
+        ta = self.ask_in(br, a, session_id="s-a", context_id="ctx-a")
+        tb = self.ask_in(br, b, session_id="s-b", context_id="ctx-b")
+        requests = self.wait_for(events, 2)
+
+        br.event({"binding_id": reg["binding_id"], "kind": "crashed", "context_id": "ctx-a"})
+        ta.join(timeout=3)
+        assert a["error"].code == "BROWSER_DISCONNECTED"
+
+        # B sigue viva y su respuesta la completa con normalidad.
+        assert "error" not in b and "result" not in b
+        target = next(r for r in requests if r["context_id"] == "ctx-b")
+        br.reply(
+            {
+                "request_id": target["request_id"],
+                "binding_id": reg["binding_id"],
+                "engine_instance_id": "engine-1",
+                "result": {"frameId": "f-b"},
+            }
+        )
+        tb.join(timeout=3)
+        assert b["result"] == {"frameId": "f-b"}
+
+    def test_un_evento_de_un_target_no_toca_los_otros_del_mismo_contexto(self) -> None:
+        br, events, reg = registered()
+        uno: dict = {}
+        otro: dict = {}
+        t1 = self.ask_in(br, uno, session_id="s", context_id="ctx", target_id="t1")
+        t2 = self.ask_in(br, otro, session_id="s", context_id="ctx", target_id="t2")
+        self.wait_for(events, 2)
+
+        br.event(
+            {
+                "binding_id": reg["binding_id"],
+                "kind": "crashed",
+                "context_id": "ctx",
+                "target_id": "t1",
+            }
+        )
+        t1.join(timeout=3)
+        assert uno["error"].code == "BROWSER_DISCONNECTED"
+        assert "error" not in otro
+        br.shutdown()
+        t2.join(timeout=3)
+
+    def test_un_evento_de_otra_instancia_del_engine_se_rechaza(self) -> None:
+        br, events, reg = registered()
+        out: dict = {}
+        thread = self.ask_in(br, out, session_id="s", context_id="ctx")
+        self.wait_for(events, 1)
+        answer = br.event(
+            {
+                "binding_id": reg["binding_id"],
+                "engine_instance_id": "engine-anterior",
+                "kind": "crashed",
+                "context_id": "ctx",
+            }
+        )
+        assert answer["accepted"] is False
+        assert "error" not in out
+        br.shutdown()
+        thread.join(timeout=3)
 
 
 class TestCapacidad:
@@ -245,6 +366,27 @@ class TestCapacidad:
         br.shutdown()
         for thread in threads:
             thread.join(timeout=3)
+
+    def test_el_presupuesto_cuenta_bytes_serializados_y_no_solo_el_primer_nivel(self) -> None:
+        """El límite es de bytes que viajan, no de caracteres de primer nivel.
+
+        Contar `len(value)` sólo en las claves de arriba deja pasar dos cosas
+        que sí ocupan la línea: una respuesta CDP anidada —que es la forma
+        normal de `Runtime.evaluate` o `Accessibility.getFullAXTree`— y una
+        cadena no ASCII, donde un carácter puede ser cuatro bytes.
+        """
+        from rinari.engine_protocol.browser_host import MAX_REPLY_BYTES, _too_big
+
+        anidado = {"result": {"value": "A" * (MAX_REPLY_BYTES + 1024)}}
+        assert _too_big(anidado) is True
+
+        # 3 MiB de caracteres de dos bytes = 6 MiB; por debajo del límite.
+        assert _too_big({"data": "ñ" * (3 * 1024 * 1024)}) is False
+        # 3 MiB de caracteres de cuatro bytes = 12 MiB; por encima.
+        assert _too_big({"data": "\U0001f600" * (3 * 1024 * 1024)}) is True
+
+        # Y no se dispara con lo que cabe de sobra.
+        assert _too_big({"result": {"value": "A" * 1024}}) is False
 
     def test_una_respuesta_desmesurada_no_se_acepta(self) -> None:
         br, events, reg = registered()
