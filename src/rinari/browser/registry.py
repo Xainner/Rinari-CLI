@@ -77,6 +77,21 @@ class BrowserRegistry:
             # su backend rechaza lo que llegue tarde a su nombre.
             context_id = secrets.token_hex(16)
             backend = HostBackend(self._bridge, session_id=session_id, context_id=context_id)
+            # La transición se confirma en un worker, así que su resultado
+            # llega por evento. Main monta o retira la barrera **aquí**, que es
+            # el orden del §7: «solo después main habilita input manual».
+            backend.on_control_change(
+                lambda state, sid=session_id, cid=context_id: self._bridge.publish(
+                    "browser.control.changed",
+                    {
+                        "session_id": sid,
+                        "context_id": cid,
+                        "control": backend.control,
+                        "control_state": state,
+                        "control_revision": backend.control_revision,
+                    },
+                )
+            )
             manager = BrowserManager(
                 session_id=session_id,
                 home_root=self._home_root,
@@ -169,7 +184,8 @@ class BrowserRegistry:
             "state": state,
             "context_id": entry["context_id"],
             "control": backend.control,
-            "control_revision": backend.status().get("control_revision"),
+            "control_state": backend.status().get("control_state"),
+            "control_revision": backend.control_revision,
             "targets": targets,
             "active_target_id": observed.get("active_target_id"),
         }

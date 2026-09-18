@@ -154,6 +154,49 @@ class TestCorrelacion:
         assert answer["accepted"] is False
         assert answer["reason"] == "engine_instance_mismatch"
 
+    def test_una_segunda_respuesta_no_pisa_la_primera(self) -> None:
+        """REPLY-01: una sola resolución, y atómica.
+
+        Comprobar el pendiente y escribir su resultado en pasos separados
+        dejaba que dos respuestas simultáneas pasaran ambas y la segunda
+        sobrescribiera lo que el worker ya podía estar leyendo.
+        """
+        br, events, reg = registered()
+        out: dict = {}
+        thread = ask(br, out, timeout_s=5)
+        request = emitted(events)
+        base = {
+            "request_id": request["request_id"],
+            "binding_id": reg["binding_id"],
+            "engine_instance_id": "engine-1",
+        }
+        assert br.reply({**base, "result": {"frameId": "primera"}}) == {"accepted": True}
+        assert br.reply({**base, "result": {"frameId": "segunda"}}) == {
+            "accepted": False,
+            "reason": "already_settled",
+        }
+        thread.join(timeout=3)
+        assert out["result"] == {"frameId": "primera"}
+
+    def test_una_respuesta_de_error_tampoco_pisa_un_resultado_aceptado(self) -> None:
+        br, events, reg = registered()
+        out: dict = {}
+        thread = ask(br, out, timeout_s=5)
+        request = emitted(events)
+        base = {
+            "request_id": request["request_id"],
+            "binding_id": reg["binding_id"],
+            "engine_instance_id": "engine-1",
+        }
+        br.reply({**base, "result": {"ok": True}})
+        assert (
+            br.reply({**base, "error": {"code": "TARGET_NOT_FOUND", "message": "no"}})["accepted"]
+            is False
+        )
+        thread.join(timeout=3)
+        assert out["result"] == {"ok": True}
+        assert "error" not in out
+
     def test_el_error_del_host_llega_con_su_codigo(self) -> None:
         br, events, reg = registered()
         out: dict = {}

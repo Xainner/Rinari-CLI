@@ -12,6 +12,7 @@ passthrough le daría a una herramienta ámbito mayor que su propio target.
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import pytest
@@ -186,10 +187,15 @@ class TestArbitraje:
         # monta main al recibir la revisión confirmada, que es el orden del §7.
         host, fake = backend()
         fake.calls.clear()
-        first = host.set_control("user")
-        assert first == {"control": "user", "control_revision": 2}
-        second = host.set_control("agent")
-        assert second == {"control": "agent", "control_revision": 3}
+
+        host.set_control("user")
+        assert host.wait_for_control(timeout=5) == "user"
+        assert host.control == "user"
+        assert host.control_revision == 2
+
+        host.set_control("agent")
+        assert host.wait_for_control(timeout=5) == "agent"
+        assert host.control_revision == 3
         assert fake.calls == []
 
     def test_pedir_el_mismo_control_no_mueve_la_revision(self) -> None:
@@ -270,6 +276,149 @@ class TestNadaBloqueaElLoopDeStdio:
         release.set()
         # Vuelve enseguida aunque el host tarde: el aviso va en segundo plano.
         assert elapsed < 1.0
+
+
+class TestLeasesDeControl:
+    """Documento 03 §7: tomar el control espera a lo ya admitido.
+
+    La carrera que fijan estas pruebas: una mutación pasa el guard con control
+    `agent` → el usuario toma control → se confirma `user` → la operación
+    anterior llega al host y muta la página mientras el usuario cree tener
+    exclusión. Un booleano de control no la evita; hace falta que la
+    transición sepa qué hay admitido y espere.
+    """
+
+    def blocking_backend(self):
+        """Backend cuyo `request` se queda dentro hasta que se le suelte."""
+        entered = threading.Event()
+        release = threading.Event()
+
+        class Held(FakeBridge):
+            def request(self, operation, params, **kw):
+                self.calls.append((operation, params))
+                entered.set()
+                release.wait(10)
+                return {}
+
+        host, fake = backend(Held())
+        return host, fake, entered, release
+
+    def test_tomar_el_control_no_se_confirma_con_una_mutacion_en_vuelo(self) -> None:
+        host, _, entered, release = self.blocking_backend()
+
+        out: dict = {}
+
+        def mutate() -> None:
+            try:
+                out["result"] = host.send("t1", "Page.navigate", {"url": "http://127.0.0.1/x"})
+            except Exception as exc:  # pragma: no cover - diagnóstico
+                out["error"] = exc
+
+        worker = threading.Thread(target=mutate, daemon=True)
+        worker.start()
+        assert entered.wait(5), "la mutación no llegó a admitirse"
+
+        # El usuario pide control mientras la navegación está dentro.
+        pending = host.set_control("user")
+        assert pending["control_state"] == "taking-user-control"
+        # **No** se concede todavía: el agente sigue teniendo la página.
+        assert pending["control"] == "agent"
+        assert host.control == "agent"
+
+        release.set()
+        worker.join(timeout=5)
+        assert host.wait_for_control(timeout=5) == "user"
+        assert host.control == "user"
+
+    def test_mientras_se_toma_el_control_no_se_admiten_mutaciones_nuevas(self) -> None:
+        host, fake, entered, release = self.blocking_backend()
+
+        worker = threading.Thread(
+            target=lambda: host.send("t1", "Page.navigate", {"url": "http://127.0.0.1/x"}),
+            daemon=True,
+        )
+        worker.start()
+        assert entered.wait(5)
+        host.set_control("user")
+
+        # La admisión se cierra en el mismo instante en que se pide el control,
+        # no cuando se confirma: si no, la ventana entre ambos deja pasar otra.
+        fake.calls.clear()
+        with pytest.raises(BrowserError) as raised:
+            host.send("t1", "Input.dispatchMouseEvent", {"type": "mousePressed"})
+        assert raised.value.code == "BROWSER_INTERVENED"
+        assert fake.calls == []
+
+        release.set()
+        worker.join(timeout=5)
+
+    def test_si_lo_admitido_no_termina_no_se_conceden_dos_controladores(self) -> None:
+        host, _, entered, release = self.blocking_backend()
+        worker = threading.Thread(
+            target=lambda: host.send("t1", "Page.navigate", {"url": "http://127.0.0.1/x"}),
+            daemon=True,
+        )
+        worker.start()
+        assert entered.wait(5)
+
+        host.set_control("user", drain_timeout_s=0.3)
+        state = host.wait_for_control(timeout=5)
+
+        # No se puede afirmar exclusión: la operación sigue viva.
+        assert state == "uncertain"
+        assert host.control == "agent"
+        assert host.status()["control_state"] == "uncertain"
+
+        release.set()
+        worker.join(timeout=5)
+
+    def test_una_lectura_no_retiene_la_transicion(self) -> None:
+        # El §7 permite observar mientras el usuario controla, así que una
+        # lectura no adquiere lease ni puede retrasar el traspaso.
+        host, _, entered, release = self.blocking_backend()
+        worker = threading.Thread(
+            target=lambda: host.send("t1", "Page.captureScreenshot", {}), daemon=True
+        )
+        worker.start()
+        assert entered.wait(5)
+
+        host.set_control("user", drain_timeout_s=2)
+        assert host.wait_for_control(timeout=5) == "user"
+
+        release.set()
+        worker.join(timeout=5)
+
+    def test_devolver_el_control_invalida_las_referencias_viejas(self) -> None:
+        # §7: «devolver el control obliga a refrescar observación antes de usar
+        # coordenadas/referencias viejas».
+        host, _ = backend()
+        seen: list[str] = []
+        host.on_control_change(lambda state: seen.append(state))
+        host.set_control("user")
+        host.wait_for_control(timeout=5)
+        host.set_control("agent")
+        host.wait_for_control(timeout=5)
+        assert host.control == "agent"
+        assert "user" in seen and seen[-1] == "agent"
+
+    def test_una_revision_desfasada_se_rechaza_antes_de_cerrar_la_admision(self) -> None:
+        host, _ = backend()
+        host.set_control("user")
+        host.wait_for_control(timeout=5)
+        with pytest.raises(BrowserError) as raised:
+            host.set_control("agent", expected_revision=1)
+        assert raised.value.code == "BROWSER_CONTROL_CONFLICT"
+        assert host.control == "user"
+
+    @pytest.mark.parametrize("bad", [True, False, -1, 1.5, "2", None])
+    def test_la_revision_tiene_que_ser_un_entero_no_negativo(self, bad) -> None:
+        # `True` es `int` en Python y colaba como revisión 1.
+        host, _ = backend()
+        if bad is None:
+            return
+        with pytest.raises(BrowserError) as raised:
+            host.set_control("user", expected_revision=bad)
+        assert raised.value.code in {"INVALID_ARGUMENT", "BROWSER_CONTROL_CONFLICT"}
 
 
 class TestIncertidumbre:

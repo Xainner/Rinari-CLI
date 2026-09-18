@@ -292,6 +292,31 @@ class BrowserHostBridge:
             # Una respuesta dirigida a otra instancia del Engine no es de esta.
             return {"accepted": False, "reason": "engine_instance_mismatch"}
 
+        # El contenido se interpreta **fuera** del lock —medir una respuesta
+        # grande no debe retener a nadie— y se instala **dentro**, de una vez.
+        error = params.get("error")
+        outcome: HostOperationError | dict[str, Any]
+        if isinstance(error, dict):
+            outcome = HostOperationError(
+                str(error.get("code") or "BROWSER_PROTOCOL"),
+                str(error.get("message") or "the desktop host reported an error"),
+                retryable=bool(error.get("retryable")),
+                outcome=str(error.get("outcome") or "not_started"),
+            )
+        else:
+            result = params.get("result")
+            if not isinstance(result, dict):
+                outcome = HostOperationError(
+                    "BROWSER_PROTOCOL", "the host reply carried no result object"
+                )
+            elif _too_big(result):
+                outcome = HostOperationError(
+                    "RESOURCE_EXHAUSTED",
+                    f"the host reply exceeds {MAX_REPLY_BYTES} bytes",
+                )
+            else:
+                outcome = result
+
         with self._lock:
             pending = self._pending.get(request_id)
             current = self._binding_id
@@ -301,28 +326,16 @@ class BrowserHostBridge:
                 return {"accepted": False, "reason": "unknown_or_expired_request"}
             if binding_id != pending.binding_id or binding_id != current:
                 return {"accepted": False, "reason": "binding_mismatch"}
-
-        error = params.get("error")
-        if isinstance(error, dict):
-            pending.error = HostOperationError(
-                str(error.get("code") or "BROWSER_PROTOCOL"),
-                str(error.get("message") or "the desktop host reported an error"),
-                retryable=bool(error.get("retryable")),
-            )
-        else:
-            result = params.get("result")
-            if not isinstance(result, dict):
-                pending.error = HostOperationError(
-                    "BROWSER_PROTOCOL", "the host reply carried no result object"
-                )
-            elif _too_big(result):
-                pending.error = HostOperationError(
-                    "RESOURCE_EXHAUSTED",
-                    f"the host reply exceeds {MAX_REPLY_BYTES} bytes",
-                )
+            # Una sola vez. Comprobar y escribir en pasos separados dejaba que
+            # dos respuestas simultáneas pasaran ambas y la segunda pisara el
+            # resultado que el worker ya podía estar leyendo.
+            if pending.done.is_set():
+                return {"accepted": False, "reason": "already_settled"}
+            if isinstance(outcome, HostOperationError):
+                pending.error = outcome
             else:
-                pending.result = result
-        pending.done.set()
+                pending.result = outcome
+            pending.done.set()
         return {"accepted": True}
 
     def event(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -377,6 +390,10 @@ class BrowserHostBridge:
         return {"accepted": True, "invalidated": failed}
 
     # -- internos ----------------------------------------------------------
+
+    def publish(self, event_type: str, payload: dict[str, Any]) -> None:
+        """Emite un evento del Engine por la cola ordenada de siempre."""
+        self._emit(event(event_type, payload))
 
     def observed(self, context_id: str) -> dict[str, Any]:
         """Lo último que el host contó de este contexto. Consulta local."""

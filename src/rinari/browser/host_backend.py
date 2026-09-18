@@ -20,7 +20,9 @@ passthrough le daría a una herramienta ámbito mayor que su propio target.
 from __future__ import annotations
 
 import contextlib
+import secrets
 import threading
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -104,6 +106,19 @@ class HostBackend:
         #: bajo el control anterior no se cuele después.
         self._control = "agent"
         self._control_revision = 1
+        #: Estado de la transición, distinto del propietario. `agent` y `user`
+        #: son estables; `taking-user-control` es el hueco entre pedirlo y
+        #: confirmarlo, y `uncertain` es no haber podido garantizar exclusión.
+        self._control_state = "agent"
+        #: Mutaciones admitidas y todavía sin terminar. Tomar el control espera
+        #: a que se vacíe: un booleano no impide que una operación que ya pasó
+        #: el guard se aplique después de confirmar al usuario.
+        self._leases: dict[str, str] = {}
+        self._control_lock = threading.RLock()
+        self._drained = threading.Condition(self._control_lock)
+        self._settled = threading.Event()
+        self._settled.set()
+        self._on_control_change: Callable[[str], None] | None = None
 
     # -- estado ------------------------------------------------------------
 
@@ -124,6 +139,7 @@ class HostBackend:
             "context_id": self._context_id,
             "session_id": self._session_id,
             "control": self._control,
+            "control_state": self._control_state,
             "control_revision": self._control_revision,
         }
 
@@ -131,33 +147,146 @@ class HostBackend:
     def control(self) -> str:
         return self._control
 
-    def set_control(self, owner: str, *, expected_revision: int | None = None) -> dict[str, Any]:
-        """Transición de control con `expected_revision` (§7).
+    @property
+    def control_revision(self) -> int:
+        return self._control_revision
 
-        Devolver el control **no** basta para reutilizar coordenadas o
-        referencias viejas: el §7 obliga a refrescar la observación, y eso lo
-        hace la herramienta. Aquí sólo se garantiza que la transición fue la
-        que el solicitante creía estar pidiendo.
+    def on_control_change(self, listener: Callable[[str], None]) -> None:
+        """Avisa de cada transición ya resuelta. Main monta la barrera aquí."""
+        self._on_control_change = listener
+
+    def wait_for_control(self, timeout: float = 10.0) -> str:
+        """Espera a que la transición en curso se resuelva. **No** para el loop.
+
+        La usan los tests y los workers; `browser.control.set` no la llama,
+        porque se despacha en el loop de stdio y ahí no se puede esperar nada
+        (§5.4).
+        """
+        self._settled.wait(timeout)
+        return self._control_state
+
+    def set_control(
+        self,
+        owner: str,
+        *,
+        expected_revision: int | None = None,
+        drain_timeout_s: float = 10.0,
+    ) -> dict[str, Any]:
+        """Pide una transición de control (§7). **Vuelve enseguida.**
+
+        Tomar el control cierra la admisión de mutaciones de inmediato y
+        después espera —en un worker— a que termine lo que ya se había
+        admitido. Sólo entonces se confirma `user`. Esa espera no puede ocurrir
+        aquí: `browser.control.set` se despacha en el loop de stdio del Engine
+        y ahí una espera es un bloqueo permanente (§5.4).
+
+        Si lo admitido no termina a tiempo, el estado queda `uncertain` y el
+        control **no** cambia: el §7 prohíbe conceder dos controladores sobre
+        la misma página.
         """
         if owner not in {"agent", "user"}:
             raise _invalid(f"unknown control owner: {owner}")
-        if expected_revision is not None and expected_revision != self._control_revision:
-            raise _conflict(
-                f"the browser control moved on: expected revision {expected_revision}, "
-                f"current is {self._control_revision}"
-            )
-        if owner != self._control:
-            self._control = owner
+        # `True` es `int` en Python y colaba como revisión 1.
+        if expected_revision is not None:
+            if isinstance(expected_revision, bool) or not isinstance(expected_revision, int):
+                raise _invalid("expected_revision must be an integer")
+            if expected_revision < 0:
+                raise _invalid("expected_revision must not be negative")
+
+        with self._control_lock:
+            if expected_revision is not None and expected_revision != self._control_revision:
+                raise _conflict(
+                    f"the browser control moved on: expected revision {expected_revision}, "
+                    f"current is {self._control_revision}"
+                )
+            if owner == self._control and self._control_state == owner:
+                return self.status()
+
+            if owner == "agent":
+                # Devolver el control es inmediato: mientras mandaba el usuario
+                # no se admitió ninguna mutación del agente, así que no hay
+                # nada que drenar.
+                self._settle("agent", "agent")
+                return self.status()
+
+            # Tomar el control: la admisión se cierra **ya**, no al confirmar.
+            # El hueco entre pedirlo y concederlo es justo donde se colaba otra
+            # mutación.
+            self._control_state = "taking-user-control"
+            self._settled.clear()
+            outstanding = len(self._leases)
+
+        threading.Thread(
+            target=self._drain_then_grant,
+            args=(drain_timeout_s,),
+            name="browser-control-handoff",
+            daemon=True,
+        ).start()
+        return {**self.status(), "outstanding_mutations": outstanding}
+
+    def _drain_then_grant(self, timeout_s: float) -> None:
+        """Espera a las mutaciones admitidas y confirma —o no— la transición."""
+        deadline = time.monotonic() + timeout_s
+        with self._drained:
+            while self._leases:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._drained.wait(remaining)
+            if self._control_state != "taking-user-control":
+                # Alguien resolvió la transición mientras tanto.
+                self._settled.set()
+                return
+            if self._leases:
+                # No se puede garantizar exclusión. Se informa y el control se
+                # queda donde estaba; conceder aquí serían dos controladores.
+                self._control_state = "uncertain"
+                listener, state = self._on_control_change, "uncertain"
+            else:
+                self._settle("user", "user")
+                listener, state = self._on_control_change, "user"
+            self._settled.set()
+        if listener is not None:
+            listener(state)
+
+    def _settle(self, owner: str, state: str) -> None:
+        """Fija propietario y estado, subiendo la revisión si cambió el dueño."""
+        changed = owner != self._control
+        self._control = owner
+        self._control_state = state
+        if changed:
             self._control_revision += 1
-        # No se le pide nada al host desde aquí. `browser.control.set` se
-        # despacha en el loop de stdio, que atiende en serie, así que esperar
-        # una respuesta del host sería un bloqueo permanente (§5.4).
-        #
-        # Tampoco hace falta: quien pide la transición es el propio host, y el
-        # §7 marca ese orden —el Engine cierra las mutaciones del agente y
-        # confirma la revisión, «solo después main habilita input manual»—. La
-        # barrera la monta main al recibir esta confirmación.
-        return {"control": self._control, "control_revision": self._control_revision}
+        self._settled.set()
+        if changed and self._on_control_change is not None:
+            self._on_control_change(state)
+
+    def _admit(self, operation: str) -> str | None:
+        """Admite una mutación y devuelve su lease, o la rechaza.
+
+        Observar no toma lease: el §7 deja al agente leer mientras el usuario
+        controla, y una lectura larga no debe retrasar el traspaso.
+        """
+        if operation not in _MUTATING:
+            return None
+        from rinari.browser.manager import BrowserError
+
+        with self._control_lock:
+            if self._control_state != "agent":
+                raise BrowserError(
+                    "BROWSER_INTERVENED",
+                    f"the user is taking control of this browser; {operation} is not "
+                    "available until control returns to the agent",
+                )
+            lease = secrets.token_hex(8)
+            self._leases[lease] = operation
+            return lease
+
+    def _release(self, lease: str | None) -> None:
+        if lease is None:
+            return
+        with self._drained:
+            self._leases.pop(lease, None)
+            self._drained.notify_all()
 
     # -- targets -----------------------------------------------------------
 
@@ -168,8 +297,11 @@ class HostBackend:
         return list(pages) if isinstance(pages, list) else []
 
     def new_page(self, url: str = "about:blank") -> dict[str, Any]:
-        self._guard_control("context.newPage")
-        return self._request("context.newPage", {"url": url})
+        lease = self._admit("context.newPage")
+        try:
+            return self._request("context.newPage", {"url": url})
+        finally:
+            self._release(lease)
 
     def select_target(self, target_id: str) -> dict[str, Any]:
         """Elige la pestaña visible del contexto.
@@ -177,28 +309,18 @@ class HostBackend:
         Una operación sin `target_id` va a la activa, así que esto decide sobre
         qué página se opera después.
         """
-        self._guard_control("context.selectTarget")
-        return self._request("context.selectTarget", {"target_id": target_id})
+        lease = self._admit("context.selectTarget")
+        try:
+            return self._request("context.selectTarget", {"target_id": target_id})
+        finally:
+            self._release(lease)
 
     def close_page(self, target_id: str) -> dict[str, Any]:
-        self._guard_control("context.closePage")
-        return self._request("context.closePage", {}, target_id=target_id)
-
-    def _guard_control(self, operation: str) -> None:
-        """El agente no muta mientras el usuario tiene el control (§7).
-
-        Se devuelve un error no reintentable y con nombre: el §7 pide que una
-        herramienta mutable «reciba un estado de intervención/no disponible, no
-        ejecutarse a escondidas ni quedarse en retry infinito».
-        """
-        if self._control == "user" and operation in _MUTATING:
-            from rinari.browser.manager import BrowserError
-
-            raise BrowserError(
-                "BROWSER_INTERVENED",
-                f"the user has taken control of this browser; {operation} is not available "
-                "until control returns to the agent",
-            )
+        lease = self._admit("context.closePage")
+        try:
+            return self._request("context.closePage", {}, target_id=target_id)
+        finally:
+            self._release(lease)
 
     # -- operaciones -------------------------------------------------------
 
@@ -225,14 +347,19 @@ class HostBackend:
             # el hecho de existir. Aparece aquí o no viaja.
             raise _unsupported(f"{method} is not an allowed desktop browser operation")
         del domain  # El host mantiene sus propios dominios habilitados.
-        self._guard_control(operation)
-        return self._request(
-            operation,
-            dict(params or {}),
-            target_id=target_id,
-            timeout_s=timeout_s,
-            cancelled=cancelled,
-        )
+        lease = self._admit(operation)
+        try:
+            return self._request(
+                operation,
+                dict(params or {}),
+                target_id=target_id,
+                timeout_s=timeout_s,
+                cancelled=cancelled,
+            )
+        finally:
+            # El lease se suelta pase lo que pase: si un fallo lo dejara
+            # colgado, tomar el control no se confirmaría nunca.
+            self._release(lease)
 
     def close(self) -> dict[str, Any]:
         """Suelta el contexto en el host. Idempotente y sin levantar errores.

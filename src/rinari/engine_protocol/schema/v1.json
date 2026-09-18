@@ -398,6 +398,7 @@
         "turn.failed",
         "turn.cancelled",
         "host.browser.request",
+        "browser.control.changed",
         "turn.stopped",
         "model.started",
         "model.content.delta",
@@ -1928,6 +1929,16 @@
           "items": {
             "$ref": "#/$defs/browserTarget"
           }
+        },
+        "control_state": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "taking-user-control",
+            "user",
+            "uncertain"
+          ],
+          "description": "Estado de la transicion, distinto del propietario: `uncertain` es no haber podido garantizar exclusion."
         }
       }
     },
@@ -1949,6 +1960,21 @@
         "control_revision": {
           "type": "integer",
           "minimum": 0
+        },
+        "control_state": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "taking-user-control",
+            "user",
+            "uncertain"
+          ],
+          "description": "Estado de la transicion, distinto del propietario: `uncertain` es no haber podido garantizar exclusion."
+        },
+        "outstanding_mutations": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Mutaciones admitidas que la transicion esta esperando."
         }
       }
     },
