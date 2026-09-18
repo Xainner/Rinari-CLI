@@ -168,6 +168,7 @@ class EngineServer:
         self._dispatcher.register("host.browser.reply", self._browser_host.reply)
         self._dispatcher.register("host.browser.event", self._browser_host.event)
         self._dispatcher.register("browser.context.get", self._browser_context_get)
+        self._dispatcher.register("browser.control.set", self._browser_control_set)
         self._dispatcher.register("target.list", self._target_list)
         self._dispatcher.register("target.add", self._target_add)
         self._dispatcher.register("session.list", self._session_list)
@@ -392,6 +393,22 @@ class EngineServer:
             "supported": True,
             **self._browser_registry.describe(record.id),
         }
+
+    def _browser_control_set(self, params: dict[str, Any]) -> dict[str, Any]:
+        """`browser.control.set` (documento 03 §7): tomar o devolver el control.
+
+        Lleva `expected_revision` a propósito: si el control se movió entre que
+        la UI lo leyó y lo pidió, la transición se rechaza en vez de conceder
+        dos controladores sobre la misma página.
+        """
+        record = self._services.sessions.show(self._need_str(params, "session_id"))
+        owner = self._need_str(params, "owner")
+        expected = params.get("expected_revision")
+        if expected is not None and not isinstance(expected, int):
+            raise EngineProtocolError(
+                INVALID_PARAMS, "Param 'expected_revision' must be an integer."
+            )
+        return self._browser_registry.set_control(record.id, owner, expected)
 
     # -- sessions --------------------------------------------------------
 

@@ -190,9 +190,12 @@ class BrowserManager:
             # El estado del backend nativo no tiene endpoint ni proceso que
             # enseñar, y fingir uno sería mentir sobre lo que hay detrás
             # (§6.3: «no fingir un proceso Chromium externo cuando no existe»).
-            status = dict(self._backend.status())
-            status["targets"] = len(self.targets()) if self.connected else 0
-            return status
+            #
+            # No se enumeran targets aquí: contarlos sería una ida y vuelta al
+            # host, y `status()` se llama desde handlers que corren en el loop
+            # de stdio. Quien necesite la lista llama a `targets()` desde un
+            # worker (§5.4).
+            return dict(self._backend.status())
         state = (
             "connected"
             if self.connected

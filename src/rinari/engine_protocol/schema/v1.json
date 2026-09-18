@@ -371,6 +371,7 @@
         "model.vision.set",
         "browser.view.get",
         "browser.context.get",
+        "browser.control.set",
         "host.browser.register",
         "host.browser.unregister",
         "host.browser.reply",

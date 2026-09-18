@@ -77,6 +77,21 @@ class BrowserRegistry:
             self._contexts[session_id] = {"manager": manager, "context_id": context_id}
             return manager
 
+    def set_control(
+        self, session_id: str, owner: str, expected_revision: int | None = None
+    ) -> dict[str, Any]:
+        """Transición de control de la sesión (§7, `browser.control.set`)."""
+        with self._lock:
+            entry = self._contexts.get(session_id)
+        if entry is None:
+            from rinari.browser.manager import BrowserError
+
+            raise BrowserError(
+                "BROWSER_DISCONNECTED", "this session has no desktop browser context"
+            )
+        backend = entry["manager"]._backend
+        return backend.set_control(owner, expected_revision=expected_revision)
+
     def release(self, session_id: str) -> None:
         """Cierra el contexto de una sesión. Idempotente."""
         with self._lock:

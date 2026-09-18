@@ -60,6 +60,11 @@ _CODE_MAP: dict[str, ToolErrorCode] = {
     # Backend nativo del escritorio con una operación aún no portada. No entra
     # en `_RETRYABLE`: reintentar no la hace aparecer.
     "BROWSER_UNSUPPORTED": ToolErrorCode.UNSUPPORTED,
+    # El usuario tomó el control del browser (documento 03 §7). La herramienta
+    # recibe un estado de intervención explícito en vez de ejecutarse a
+    # escondidas o quedarse reintentando.
+    "BROWSER_INTERVENED": ToolErrorCode.CONFLICT,
+    "BROWSER_CONTROL_CONFLICT": ToolErrorCode.CONFLICT,
 }
 _RETRYABLE = {ToolErrorCode.TIMEOUT, ToolErrorCode.DEPENDENCY_ERROR}
 

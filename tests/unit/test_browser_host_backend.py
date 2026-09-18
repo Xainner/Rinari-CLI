@@ -128,6 +128,148 @@ class TestEstado:
         assert host.close() == {"closed": True}
 
 
+class TestArbitraje:
+    """Documento 03 §7: el agente no muta mientras el usuario tiene el control."""
+
+    def test_el_agente_arranca_con_el_control(self) -> None:
+        host, _ = backend()
+        assert host.control == "agent"
+        assert host.status()["control_revision"] == 1
+
+    def test_tomar_el_control_bloquea_las_operaciones_que_cambian_la_pagina(self) -> None:
+        host, fake = backend()
+        host.set_control("user")
+        fake.calls.clear()
+        for method in ("Page.navigate", "Input.dispatchMouseEvent", "Input.dispatchKeyEvent"):
+            with pytest.raises(BrowserError) as raised:
+                host.send("t1", method, {})
+            assert raised.value.code == "BROWSER_INTERVENED"
+            assert raised.value.retryable is False
+        # No es que fallen al llegar: es que no salen.
+        assert fake.calls == []
+
+    def test_evaluate_cuenta_como_mutacion(self) -> None:
+        # El §4.2: «no afirmar que `Runtime.evaluate` sea una operación de
+        # lectura por su nombre: puede producir efectos».
+        host, fake = backend()
+        host.set_control("user")
+        fake.calls.clear()
+        with pytest.raises(BrowserError) as raised:
+            host.send("t1", "Runtime.evaluate", {"expression": "document.title = 'x'"})
+        assert raised.value.code == "BROWSER_INTERVENED"
+        assert fake.calls == []
+
+    def test_observar_sigue_permitido_con_el_usuario_al_mando(self) -> None:
+        # El §7 permite que el agente observe según policy mientras el usuario
+        # controla; lo que no puede es mutar a escondidas.
+        host, fake = backend()
+        host.set_control("user")
+        fake.calls.clear()
+        host.send("t1", "Page.captureScreenshot", {})
+        host.send("t1", "Accessibility.getFullAXTree", {})
+        assert [call[0] for call in fake.calls] == ["page.screenshot", "page.a11y"]
+
+    def test_devolver_el_control_vuelve_a_habilitar_la_mutacion(self) -> None:
+        host, fake = backend()
+        host.set_control("user")
+        host.set_control("agent")
+        fake.calls.clear()
+        host.send("t1", "Page.navigate", {"url": "http://127.0.0.1/x"})
+        assert fake.calls == [("page.navigate", {"url": "http://127.0.0.1/x"})]
+
+    def test_cada_transicion_sube_la_revision_sin_esperar_al_host(self) -> None:
+        # `browser.control.set` se despacha en el loop de stdio del Engine, que
+        # atiende en serie: una espera al host aquí no se resolvería nunca,
+        # porque su respuesta necesita ese mismo loop (§5.4). La barrera la
+        # monta main al recibir la revisión confirmada, que es el orden del §7.
+        host, fake = backend()
+        fake.calls.clear()
+        first = host.set_control("user")
+        assert first == {"control": "user", "control_revision": 2}
+        second = host.set_control("agent")
+        assert second == {"control": "agent", "control_revision": 3}
+        assert fake.calls == []
+
+    def test_pedir_el_mismo_control_no_mueve_la_revision(self) -> None:
+        host, fake = backend()
+        fake.calls.clear()
+        assert host.set_control("agent")["control_revision"] == 1
+        assert fake.calls == []
+
+    def test_una_revision_desfasada_no_concede_la_transicion(self) -> None:
+        # §7: la transición lleva `expected_revision`. Si el control se movió
+        # entre leerlo y pedirlo, se rechaza en vez de conceder dos
+        # controladores sobre la misma página.
+        host, _ = backend()
+        host.set_control("user")  # revisión 2
+        with pytest.raises(BrowserError) as raised:
+            host.set_control("agent", expected_revision=1)
+        assert raised.value.code == "BROWSER_CONTROL_CONFLICT"
+        assert host.control == "user"
+
+    def test_la_revision_correcta_sí_concede(self) -> None:
+        host, _ = backend()
+        host.set_control("user")
+        assert host.set_control("agent", expected_revision=2)["control"] == "agent"
+
+    def test_un_dueño_desconocido_se_rechaza(self) -> None:
+        host, _ = backend()
+        with pytest.raises(BrowserError) as raised:
+            host.set_control("nadie")
+        assert raised.value.code == "INVALID_ARGUMENT"
+        assert host.control == "agent"
+
+
+class TestNadaBloqueaElLoopDeStdio:
+    """Documento 03 §5.4, aprendido rompiéndolo.
+
+    El loop de stdio del Engine despacha en serie, y la respuesta del host
+    entra por ese mismo loop. Un handler de protocolo que espere al host no se
+    queda lento: se queda bloqueado para siempre, y con él todo el canal de
+    control —ni Stop, ni cancelación, ni `engine.info`—.
+
+    Lo que se fija aquí es qué operaciones pueden llamarse desde un handler:
+    las que no hablan con el host.
+    """
+
+    def test_status_no_consulta_al_host(self) -> None:
+        # `browser.view.get` lo llama desde el loop.
+        host, fake = backend()
+        fake.calls.clear()
+        host.status()
+        assert fake.calls == []
+
+    def test_set_control_no_consulta_al_host(self) -> None:
+        # `browser.control.set` se despacha en el loop.
+        host, fake = backend()
+        fake.calls.clear()
+        host.set_control("user")
+        host.set_control("agent")
+        assert fake.calls == []
+
+    def test_close_vuelve_sin_esperar_al_host(self) -> None:
+        # `session.close` y `session.delete` se despachan en el loop.
+        import threading
+        import time
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        class Slow(FakeBridge):
+            def request(self, operation, params, **kw):
+                entered.set()
+                release.wait(5)
+                return {}
+
+        host, _ = backend(Slow())
+        started = time.time()
+        assert host.close() == {"closed": True}
+        elapsed = time.time() - started
+        release.set()
+        # Vuelve enseguida aunque el host tarde: el aviso va en segundo plano.
+        assert elapsed < 1.0
+
+
 def test_los_targets_salen_de_la_registry_del_contexto() -> None:
     # §5.3: «la enumeración solo devuelve las páginas registradas en ese
     # contexto, no `Target.getTargets` global».

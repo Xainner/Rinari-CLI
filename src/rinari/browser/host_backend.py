@@ -20,6 +20,7 @@ passthrough le daría a una herramienta ámbito mayor que su propio target.
 from __future__ import annotations
 
 import contextlib
+import threading
 from collections.abc import Callable
 from typing import Any
 
@@ -62,6 +63,22 @@ _NOT_YET: dict[str, str] = {
 #: sin viajar: convertirlos en error rompería `manager` sin motivo.
 _NO_OP = {"DOM.enable", "Page.enable", "Runtime.enable", "Network.enable", "Accessibility.enable"}
 
+#: Operaciones que **cambian** la página. Mientras el usuario tiene el control,
+#: el agente no las ejecuta (§7).
+#:
+#: `page.evaluate` está aquí a propósito. El §4.2 avisa: «no afirmar que
+#: `Runtime.evaluate` sea una operación de lectura por su nombre: puede
+#: producir efectos». Clasificarla como observación por parecer una lectura
+#: sería la forma cómoda de saltarse el arbitraje.
+_MUTATING = {
+    "page.navigate",
+    "page.mouse",
+    "page.key",
+    "page.evaluate",
+    "context.newPage",
+    "context.closePage",
+}
+
 
 class HostBackend:
     """Operaciones page-level ejecutadas por el host sobre la vista visible."""
@@ -79,6 +96,11 @@ class HostBackend:
         self._session_id = session_id
         self._context_id = context_id
         self._closed = False
+        #: Quién manda y en qué revisión (§7). El agente arranca con el control;
+        #: la revisión sube en cada transición para que una operación admitida
+        #: bajo el control anterior no se cuele después.
+        self._control = "agent"
+        self._control_revision = 1
 
     # -- estado ------------------------------------------------------------
 
@@ -93,7 +115,41 @@ class HostBackend:
             "state": "connected" if self.connected else "disconnected",
             "context_id": self._context_id,
             "session_id": self._session_id,
+            "control": self._control,
+            "control_revision": self._control_revision,
         }
+
+    @property
+    def control(self) -> str:
+        return self._control
+
+    def set_control(self, owner: str, *, expected_revision: int | None = None) -> dict[str, Any]:
+        """Transición de control con `expected_revision` (§7).
+
+        Devolver el control **no** basta para reutilizar coordenadas o
+        referencias viejas: el §7 obliga a refrescar la observación, y eso lo
+        hace la herramienta. Aquí sólo se garantiza que la transición fue la
+        que el solicitante creía estar pidiendo.
+        """
+        if owner not in {"agent", "user"}:
+            raise _invalid(f"unknown control owner: {owner}")
+        if expected_revision is not None and expected_revision != self._control_revision:
+            raise _conflict(
+                f"the browser control moved on: expected revision {expected_revision}, "
+                f"current is {self._control_revision}"
+            )
+        if owner != self._control:
+            self._control = owner
+            self._control_revision += 1
+        # No se le pide nada al host desde aquí. `browser.control.set` se
+        # despacha en el loop de stdio, que atiende en serie, así que esperar
+        # una respuesta del host sería un bloqueo permanente (§5.4).
+        #
+        # Tampoco hace falta: quien pide la transición es el propio host, y el
+        # §7 marca ese orden —el Engine cierra las mutaciones del agente y
+        # confirma la revisión, «solo después main habilita input manual»—. La
+        # barrera la monta main al recibir esta confirmación.
+        return {"control": self._control, "control_revision": self._control_revision}
 
     # -- targets -----------------------------------------------------------
 
@@ -104,10 +160,28 @@ class HostBackend:
         return list(pages) if isinstance(pages, list) else []
 
     def new_page(self, url: str = "about:blank") -> dict[str, Any]:
+        self._guard_control("context.newPage")
         return self._request("context.newPage", {"url": url})
 
     def close_page(self, target_id: str) -> dict[str, Any]:
+        self._guard_control("context.closePage")
         return self._request("context.closePage", {}, target_id=target_id)
+
+    def _guard_control(self, operation: str) -> None:
+        """El agente no muta mientras el usuario tiene el control (§7).
+
+        Se devuelve un error no reintentable y con nombre: el §7 pide que una
+        herramienta mutable «reciba un estado de intervención/no disponible, no
+        ejecutarse a escondidas ni quedarse en retry infinito».
+        """
+        if self._control == "user" and operation in _MUTATING:
+            from rinari.browser.manager import BrowserError
+
+            raise BrowserError(
+                "BROWSER_INTERVENED",
+                f"the user has taken control of this browser; {operation} is not available "
+                "until control returns to the agent",
+            )
 
     # -- operaciones -------------------------------------------------------
 
@@ -134,6 +208,7 @@ class HostBackend:
             # el hecho de existir. Aparece aquí o no viaja.
             raise _unsupported(f"{method} is not an allowed desktop browser operation")
         del domain  # El host mantiene sus propios dominios habilitados.
+        self._guard_control(operation)
         return self._request(
             operation,
             dict(params or {}),
@@ -151,8 +226,18 @@ class HostBackend:
         if self._closed:
             return {"closed": True}
         self._closed = True
-        with contextlib.suppress(Exception):
-            self._request("context.close", {}, timeout_s=5.0)
+
+        # Se avisa al host en segundo plano y se vuelve enseguida. Cerrar una
+        # sesión se despacha en el loop de stdio, y ahí una espera al host no
+        # se resuelve nunca: su respuesta necesita ese mismo loop (§5.4).
+        #
+        # Que sea sin esperar no pierde nada: si el host está, dispone el
+        # contexto; si no está, no hay nada que disponer.
+        def notify_host() -> None:
+            with contextlib.suppress(Exception):
+                self._request("context.close", {}, timeout_s=5.0)
+
+        threading.Thread(target=notify_host, name="browser-context-close", daemon=True).start()
         return {"closed": True}
 
     # -- internos ----------------------------------------------------------
@@ -188,3 +273,15 @@ def _unsupported(message: str) -> Exception:
     from rinari.browser.manager import BrowserError
 
     return BrowserError(UNSUPPORTED, message)
+
+
+def _invalid(message: str) -> Exception:
+    from rinari.browser.manager import BrowserError
+
+    return BrowserError("INVALID_ARGUMENT", message)
+
+
+def _conflict(message: str) -> Exception:
+    from rinari.browser.manager import BrowserError
+
+    return BrowserError("BROWSER_CONTROL_CONFLICT", message)

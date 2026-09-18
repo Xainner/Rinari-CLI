@@ -54,10 +54,17 @@ def ask(br: BrowserHostBridge, out: dict, **kw) -> threading.Thread:
 
 
 def emitted(events: list[dict]) -> dict:
+    """La carga de la solicitud, sacada del sobre de evento normal.
+
+    Va en el mismo sobre que cualquier otro evento a propósito: el transporte
+    del host sólo clasifica como evento lo que llega con `type: "event"`, así
+    que una envoltura propia se habría quedado sin entregar. Lo efímero es a
+    quién va dirigida, no su forma.
+    """
     for _ in range(50):
-        for event in events:
-            if event.get("type") == "host.browser.request":
-                return event
+        for entry in events:
+            if entry.get("type") == "event" and entry.get("event") == "host.browser.request":
+                return entry["payload"]
         time.sleep(0.02)
     raise AssertionError("no se emitió host.browser.request")
 
@@ -223,7 +230,7 @@ class TestCapacidad:
         outs = [{} for _ in range(MAX_INFLIGHT)]
         threads = [ask(br, out, timeout_s=10) for out in outs]
         for _ in range(100):
-            if len([e for e in events if e.get("type") == "host.browser.request"]) >= MAX_INFLIGHT:
+            if len([e for e in events if e.get("event") == "host.browser.request"]) >= MAX_INFLIGHT:
                 break
             time.sleep(0.02)
 

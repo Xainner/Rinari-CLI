@@ -570,6 +570,25 @@ class TurnManager:
             browser = self._desktop_browsers.get(session_id)
         if browser is None:
             return {"state": "disconnected", "session_id": session_id}
+
+        # Con browser nativo esto **no** consulta al host. Este handler corre
+        # en el loop de stdio, que despacha en serie, y la respuesta del host
+        # sólo puede entrar por ese mismo loop: pedirle algo aquí es un
+        # bloqueo permanente, no una espera lenta. El §5.4 lo dice al revés
+        # —lo que espera al host va en workers—, y esta es la cara del Engine
+        # de esa regla.
+        #
+        # Además no haría falta: el §10 conserva `browser.view.get` como
+        # visor de capturas del backend externo, y con vista nativa la UI
+        # muestra la superficie real, no una imagen de ella.
+        if getattr(browser, "_backend", None) is not None:
+            return {
+                "state": "connected" if browser.connected else "disconnected",
+                "session_id": session_id,
+                "backend": "electron-native",
+                "native_surface": True,
+            }
+
         try:
             status = browser.status()
             result = {**status, "session_id": session_id, "instance": str(browser.profile_dir)}

@@ -32,6 +32,7 @@ from collections.abc import Callable
 from typing import Any
 
 from rinari.engine_protocol.errors import INVALID_PARAMS, EngineProtocolError
+from rinari.engine_protocol.messages import event
 
 #: Tope de solicitudes en vuelo. El §5.4 pide reservar capacidad de entrega
 #: para cancelación y replies: si las operaciones del browser pudieran llenar
@@ -174,20 +175,26 @@ class BrowserHostBridge:
             self._pending[request_id] = pending
 
         deadline = timeout_s if timeout_s is not None else DEFAULT_TIMEOUT_S
+        # Sobre de evento normal. Es efímero por su destinatario —main lo
+        # consume y no lo pasa al timeline—, no por llevar una envoltura
+        # distinta: un sobre propio no lo reconocería el transporte del host,
+        # que sólo clasifica como evento lo que viene con `type: "event"`.
         self._emit(
-            {
-                "type": "host.browser.request",
-                "request_id": request_id,
-                "binding_id": binding_id,
-                "engine_instance_id": self._engine_instance_id,
-                "session_id": session_id,
-                "context_id": context_id,
-                "generation": generation,
-                "operation": operation,
-                "target_id": target_id,
-                "params": params,
-                "timeout_ms": int(deadline * 1000),
-            }
+            event(
+                "host.browser.request",
+                {
+                    "request_id": request_id,
+                    "binding_id": binding_id,
+                    "engine_instance_id": self._engine_instance_id,
+                    "session_id": session_id,
+                    "context_id": context_id,
+                    "generation": generation,
+                    "operation": operation,
+                    "target_id": target_id,
+                    "params": params,
+                    "timeout_ms": int(deadline * 1000),
+                },
+            )
         )
 
         # Espera troceada para poder atender la cancelación sin perder el
