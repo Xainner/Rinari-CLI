@@ -943,6 +943,23 @@ def test_manager_fill_select_and_check(tmp_path, monkeypatch, fake_cdp) -> None:
     manager.close()
 
 
+def test_manager_rejects_an_empty_screenshot(tmp_path, monkeypatch) -> None:
+    """Un PNG vacío es un fallo, no una captura.
+
+    Reportado en uso real contra el backend nativo: la vista nunca se compuso,
+    `capturePage` devolvió cero bytes y la herramienta contestó `ok`. Quien lo
+    lee cree entonces que tiene la página y la describe sin haberla visto, que
+    es peor que no tenerla. Había tope por arriba y ninguno por abajo.
+    """
+    manager = _manager(tmp_path)
+    monkeypatch.setattr(BrowserManager, "call", lambda *args, **kwargs: {"data": ""})
+    with pytest.raises(BrowserError) as excinfo:
+        manager.screenshot("t1")
+    assert excinfo.value.code == "CAPTURE_EMPTY"
+    # Y no es reintentable: otro intento devuelve otro PNG vacío.
+    assert excinfo.value.retryable is False
+
+
 def test_manager_screenshot_and_a11y(tmp_path, monkeypatch, fake_cdp) -> None:
     monkeypatch.delenv("RINARI_BROWSER_CDP", raising=False)
     manager = _manager(tmp_path)

@@ -718,6 +718,15 @@ class BrowserManager:
             cancelled=cancelled,
         )
         data = base64.b64decode(result.get("data", ""))
+        # Había tope por arriba y ninguno por abajo, así que una captura de cero
+        # bytes se devolvía como éxito. Quien la recibe cree entonces que tiene
+        # la página y la describe sin haberla visto. Un PNG vacío es un fallo,
+        # y se dice aquí para que valga en los dos backends.
+        if not data:
+            raise BrowserError(
+                "CAPTURE_EMPTY",
+                "The screenshot came back empty; the page was never rendered on screen",
+            )
         if len(data) > MAX_SCREENSHOT_BYTES:
             raise BrowserError(
                 "RESOURCE_EXHAUSTED", f"Screenshot exceeds budget: {len(data)} bytes"

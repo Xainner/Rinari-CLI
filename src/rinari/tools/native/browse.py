@@ -60,6 +60,12 @@ _CODE_MAP: dict[str, ToolErrorCode] = {
     # Backend nativo del escritorio con una operación aún no portada. No entra
     # en `_RETRYABLE`: reintentar no la hace aparecer.
     "BROWSER_UNSUPPORTED": ToolErrorCode.UNSUPPORTED,
+    # La vista existe y la operación también, así que no es UNSUPPORTED: lo que
+    # no hay es imagen, porque esa página nunca se compuso. Tampoco es
+    # reintentable —otro intento devuelve otro PNG vacío—; hay que presentarla.
+    # El código crudo viaja en `browser_error`, que es lo que lo distingue de
+    # cualquier otro UNKNOWN.
+    "CAPTURE_EMPTY": ToolErrorCode.UNKNOWN,
     # El usuario tomó el control del browser (documento 03 §7). La herramienta
     # recibe un estado de intervención explícito en vez de ejecutarse a
     # escondidas o quedarse reintentando.
