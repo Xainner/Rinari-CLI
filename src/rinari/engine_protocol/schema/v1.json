@@ -35,7 +35,10 @@
     "peerGroupMember",
     "peerGroup",
     "peerMessage",
-    "queuedPromptEntry"
+    "queuedPromptEntry",
+    "browserTarget",
+    "browserContext",
+    "browserControl"
   ],
   "$defs": {
     "webPreview": {
@@ -1811,6 +1814,323 @@
           "$ref": "#/$defs/messageOrigin"
         },
         "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "browserTarget": {
+      "description": "Una pestaña del contexto nativo. Metadata segura: sin endpoints, ids de Electron ni cookies.",
+      "type": "object",
+      "required": [
+        "target_id",
+        "url",
+        "title",
+        "active"
+      ],
+      "properties": {
+        "target_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "url": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "active": {
+          "type": "boolean",
+          "description": "La que se ve y la que recibe una operación sin target."
+        }
+      }
+    },
+    "browserContext": {
+      "description": "Respuesta de browser.context.get. Soporte, registro y contexto son cosas distintas (doc 03 §5.2).",
+      "type": "object",
+      "required": [
+        "session_id",
+        "supported",
+        "host_registered",
+        "context_state"
+      ],
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "supported": {
+          "type": "boolean",
+          "description": "El Engine y el host hablan la extensión."
+        },
+        "host_registered": {
+          "type": "boolean",
+          "description": "Hay un binding vivo."
+        },
+        "context_state": {
+          "type": "string",
+          "enum": [
+            "absent",
+            "creating",
+            "ready",
+            "disconnected",
+            "disposed"
+          ]
+        },
+        "state": {
+          "type": "string",
+          "description": "Alias de context_state, por compatibilidad."
+        },
+        "available": {
+          "type": "boolean",
+          "description": "Listo para enseñar: contexto y pestaña."
+        },
+        "backend": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "electron-native",
+            null
+          ]
+        },
+        "context_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "control": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "user"
+          ]
+        },
+        "control_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "active_target_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "targets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/browserTarget"
+          }
+        }
+      }
+    },
+    "browserControl": {
+      "description": "Respuesta de browser.control.set: quien manda y en que revision.",
+      "type": "object",
+      "required": [
+        "control",
+        "control_revision"
+      ],
+      "properties": {
+        "control": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "user"
+          ]
+        },
+        "control_revision": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "hostBrowserBinding": {
+      "description": "Resultado de host.browser.register. Reservado a main; no se expone por preload.",
+      "type": "object",
+      "required": [
+        "binding_id",
+        "engine_instance_id",
+        "generation"
+      ],
+      "properties": {
+        "binding_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "engine_instance_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "host_instance_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      }
+    },
+    "hostBrowserRequest": {
+      "description": "Carga del evento efimero host.browser.request. Identidad completa: el receptor valida todo antes de tocar una pagina (doc 03 §5.3).",
+      "type": "object",
+      "required": [
+        "request_id",
+        "binding_id",
+        "engine_instance_id",
+        "session_id",
+        "context_id",
+        "generation",
+        "operation",
+        "params",
+        "timeout_ms"
+      ],
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "binding_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "engine_instance_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "context_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "operation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "target_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256
+        },
+        "params": {
+          "type": "object"
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "hostBrowserReply": {
+      "description": "Parametros de host.browser.reply. Replica la correlacion; una respuesta vieja no satisface una solicitud nueva.",
+      "type": "object",
+      "required": [
+        "request_id",
+        "binding_id",
+        "engine_instance_id"
+      ],
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "binding_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "engine_instance_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "result": {
+          "type": "object"
+        },
+        "error": {
+          "$ref": "#/$defs/protocolError"
+        }
+      }
+    },
+    "hostBrowserEvent": {
+      "description": "Parametros de host.browser.event: cambios de pestana y perdidas de control, acotados a su contexto.",
+      "type": "object",
+      "required": [
+        "binding_id",
+        "kind",
+        "context_id"
+      ],
+      "properties": {
+        "binding_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "engine_instance_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "targets",
+            "detached",
+            "crashed",
+            "context_closed"
+          ]
+        },
+        "context_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "target_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "targets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/browserTarget"
+          }
+        },
+        "active_target_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "detail": {
           "type": [
             "string",
             "null"

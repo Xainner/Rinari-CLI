@@ -105,6 +105,7 @@ class BrowserRegistry:
         with self._lock:
             entry = self._contexts.pop(session_id, None)
         if entry is not None:
+            self._bridge.forget(entry["context_id"])
             # Cerrar una sesión no falla porque el host ya no esté.
             with contextlib.suppress(Exception):
                 entry["manager"].close()
@@ -123,18 +124,52 @@ class BrowserRegistry:
         Sin endpoints, sin cookies, sin ids del host: el §5.2 acota esto a
         «metadata segura y disponibilidad».
         """
+        supported = (
+            self._bridge.available and "browser_native_view_v1" in self._bridge.capabilities()
+        )
         with self._lock:
             entry = self._contexts.get(session_id)
+
         if entry is None:
             return {
-                "available": self.native_available(),
-                "backend": "electron-native" if self.native_available() else None,
+                "supported": supported,
+                "host_registered": self._bridge.available,
+                "available": supported,
+                "backend": "electron-native" if supported else None,
+                "context_state": "absent",
                 "state": "absent",
+                "targets": [],
+                "active_target_id": None,
             }
+
         manager = entry["manager"]
+        backend = manager._backend
+        observed = self._bridge.observed(entry["context_id"])
+        targets = observed.get("targets") or []
+
+        # `ready` exige contexto **y** una página lista. Anunciarlo sólo por
+        # tener binding haría que la UI mostrara un browser que aún no puede
+        # enseñar nada (§5.2: soporte + registro + contexto listo).
+        if manager.is_disposed:
+            state = "disposed"
+        elif not manager.connected:
+            state = "disconnected"
+        elif targets:
+            state = "ready"
+        else:
+            state = "creating"
+
         return {
-            "available": True,
+            "supported": supported,
+            "host_registered": self._bridge.available,
+            "available": state == "ready",
             "backend": "electron-native",
-            "state": "ready" if manager.connected else "disconnected",
+            "context_state": state,
+            # Se conserva `state` por compatibilidad con el consumidor actual.
+            "state": state,
             "context_id": entry["context_id"],
+            "control": backend.control,
+            "control_revision": backend.status().get("control_revision"),
+            "targets": targets,
+            "active_target_id": observed.get("active_target_id"),
         }

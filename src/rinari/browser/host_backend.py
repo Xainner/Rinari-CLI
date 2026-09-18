@@ -77,6 +77,9 @@ _MUTATING = {
     "page.evaluate",
     "context.newPage",
     "context.closePage",
+    # Cambiar de pestaña no muta el DOM, pero sí cambia **qué página** recibe
+    # la siguiente operación. Con el usuario al mando eso es intervenir.
+    "context.selectTarget",
 }
 
 
@@ -167,6 +170,15 @@ class HostBackend:
     def new_page(self, url: str = "about:blank") -> dict[str, Any]:
         self._guard_control("context.newPage")
         return self._request("context.newPage", {"url": url})
+
+    def select_target(self, target_id: str) -> dict[str, Any]:
+        """Elige la pestaña visible del contexto.
+
+        Una operación sin `target_id` va a la activa, así que esto decide sobre
+        qué página se opera después.
+        """
+        self._guard_control("context.selectTarget")
+        return self._request("context.selectTarget", {"target_id": target_id})
 
     def close_page(self, target_id: str) -> dict[str, Any]:
         self._guard_control("context.closePage")

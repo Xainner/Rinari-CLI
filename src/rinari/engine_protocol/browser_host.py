@@ -131,6 +131,12 @@ class BrowserHostBridge:
         self._generation = 0
         self._host_capabilities: set[str] = set()
         self._pending: dict[str, _Pending] = {}
+        #: Última foto conocida de cada contexto, empujada por el host.
+        #:
+        #: Se cachea porque `browser.context.get` se despacha en el loop de
+        #: stdio: preguntarle al host desde ahí sería un bloqueo permanente
+        #: (§5.4). El host avisa cuando algo cambia y la consulta es local.
+        self._observed: dict[str, dict[str, Any]] = {}
 
     # -- registro ----------------------------------------------------------
 
@@ -337,10 +343,23 @@ class BrowserHostBridge:
         if instance is not None and instance != self._engine_instance_id:
             return {"accepted": False, "reason": "engine_instance_mismatch"}
 
+        context_id = params.get("context_id")
+
+        # Foto de estado que el host empuja al cambiar de pestaña, abrirla o
+        # cerrarla. Se guarda saneada: ni ids de Electron, ni bindings, ni
+        # endpoints — sólo lo que la toolbar necesita enseñar.
+        if kind == "targets" and isinstance(context_id, str) and context_id:
+            self._observed[context_id] = {
+                "targets": _safe_targets(params.get("targets")),
+                "active_target_id": params.get("active_target_id")
+                if isinstance(params.get("active_target_id"), str)
+                else None,
+            }
+            return {"accepted": True}
+
         if kind not in {"detached", "crashed", "context_closed"}:
             return {"accepted": True}
 
-        context_id = params.get("context_id")
         target_id = params.get("target_id")
         if not isinstance(context_id, str) or not context_id:
             # Sin contexto no se puede acotar el daño. Se rechaza en vez de
@@ -358,6 +377,16 @@ class BrowserHostBridge:
         return {"accepted": True, "invalidated": failed}
 
     # -- internos ----------------------------------------------------------
+
+    def observed(self, context_id: str) -> dict[str, Any]:
+        """Lo último que el host contó de este contexto. Consulta local."""
+        with self._lock:
+            snapshot = self._observed.get(context_id)
+            return dict(snapshot) if snapshot else {"targets": [], "active_target_id": None}
+
+    def forget(self, context_id: str) -> None:
+        with self._lock:
+            self._observed.pop(context_id, None)
 
     def _drop(self, request_id: str) -> None:
         with self._lock:
@@ -425,6 +454,33 @@ class BrowserHostBridge:
 #: Profundidad máxima de una respuesta. Una estructura más honda que esto no
 #: se mide: se rechaza, porque recorrerla ya sería el ataque.
 MAX_REPLY_DEPTH = 32
+
+
+def _safe_targets(value: Any) -> list[dict[str, Any]]:
+    """Sanea la lista de pestañas que llega del host.
+
+    Sólo pasan los campos que la UI enseña. Lo demás se descarta aquí y no
+    porque el consumidor se acuerde de ignorarlo: el §5.2 acota esta metadata
+    a «segura», sin endpoints, cookies ni ids internos de Electron.
+    """
+    if not isinstance(value, list):
+        return []
+    safe: list[dict[str, Any]] = []
+    for entry in value[:64]:
+        if not isinstance(entry, dict):
+            continue
+        target_id = entry.get("target_id")
+        if not isinstance(target_id, str) or not target_id:
+            continue
+        safe.append(
+            {
+                "target_id": target_id,
+                "url": str(entry.get("url") or "")[:2048],
+                "title": str(entry.get("title") or "")[:512],
+                "active": bool(entry.get("active")),
+            }
+        )
+    return safe
 
 
 def _too_big(result: dict[str, Any]) -> bool:
