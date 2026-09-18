@@ -29,6 +29,7 @@ from rinari.engine_protocol.errors import (
     TURN_RUNNING,
     EngineProtocolError,
 )
+from rinari.engine_protocol.flow import collect_flow
 from rinari.engine_protocol.messages import event, hello
 from rinari.engine_protocol.observability import (
     clamp_read_bytes,
@@ -46,7 +47,11 @@ from rinari.engine_protocol.turns import TurnManager
 from rinari.engine_protocol.workspace import InvalidGitError, git_diff, git_files
 from rinari.models.router import ModelRouter
 from rinari.projects.detector import is_home_root
-from rinari.shared.errors import InvalidUsageError, NotFoundError, PermissionDeniedError
+from rinari.shared.errors import (
+    InvalidUsageError,
+    NotFoundError,
+    PermissionDeniedError,
+)
 from rinari.soul.store import SoulStore
 
 _TEXT_EXTENSIONS = {
@@ -201,6 +206,7 @@ class EngineServer:
         self._dispatcher.register("approval.resolve", self._approval_resolve)
         self._dispatcher.register("channel.resolve", self._turns.channels.resolve)
         self._dispatcher.register("channel.pending", lambda params: self._turns.channels.list())
+        self._dispatcher.register("flow.get", self._flow_get)
         self._dispatcher.register("task.tree", self._task_tree)
         self._dispatcher.register("task.get", self._task_get)
         self._dispatcher.register("verification.latest", self._verification_latest)
@@ -1085,6 +1091,18 @@ class EngineServer:
             )
         )
         return {"session": view}
+
+    # -- flow (project_flow_v1) ----------------------------------------------------
+
+    def _flow_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Stages of a project or of a lone chat, derived from persisted facts."""
+        project_id = self._opt_str(params, "project_id")
+        session_id = self._opt_str(params, "session_id")
+        if bool(project_id) == bool(session_id):
+            raise EngineProtocolError(
+                INVALID_PARAMS, "Provide exactly one of 'project_id' or 'session_id'."
+            )
+        return collect_flow(self._services, project_id=project_id, session_id=session_id)
 
     # -- tasks / verification / checkpoints / working tree --------------------
 
