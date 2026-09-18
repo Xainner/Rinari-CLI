@@ -169,6 +169,7 @@ class EngineServer:
         self._dispatcher.register("host.browser.event", self._browser_host.event)
         self._dispatcher.register("browser.context.get", self._browser_context_get)
         self._dispatcher.register("browser.control.set", self._browser_control_set)
+        self._dispatcher.register("browser.context.prepare", self._browser_context_prepare)
         self._dispatcher.register("target.list", self._target_list)
         self._dispatcher.register("target.add", self._target_add)
         self._dispatcher.register("session.list", self._session_list)
@@ -388,6 +389,26 @@ class EngineServer:
         # registry: preguntar por una sesión ajena no debe revelar si tiene
         # contexto.
         record = self._services.sessions.show(session_id)
+        return {
+            "session_id": record.id,
+            "supported": True,
+            **self._browser_registry.describe(record.id),
+        }
+
+    def _browser_context_prepare(self, params: dict[str, Any]) -> dict[str, Any]:
+        """`browser.context.prepare` (documento 03 §6.2): crea el contexto.
+
+        Existe aparte de `browser.context.get` porque abrir el panel antes de
+        un turno necesita **crear** algo, y una consulta no puede tener
+        efectos: si `get` creara contextos, mirar el estado desde la UI
+        abriría un navegador.
+
+        No abre una página: la vista nace en blanco y la primera navegación la
+        pide el usuario o una herramienta. Crear el contexto aquí es lo que
+        permite que la UI enseñe el browser sin esperar a un turno.
+        """
+        record = self._services.sessions.show(self._need_str(params, "session_id"))
+        self._browser_registry.acquire(record.id)
         return {
             "session_id": record.id,
             "supported": True,
