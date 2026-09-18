@@ -55,8 +55,6 @@ _OPERATIONS: dict[str, str] = {
 #: nombre de la operación, y la entrega F las completa.
 _NOT_YET: dict[str, str] = {
     "DOM.setFileInputFiles": "subir archivos",
-    "Network.getCookies": "leer cookies",
-    "Network.setCookie": "escribir cookies",
     "Browser.setDownloadBehavior": "descargas",
 }
 
@@ -82,6 +80,8 @@ _MUTATING = {
     # Cambiar de pestaña no muta el DOM, pero sí cambia **qué página** recibe
     # la siguiente operación. Con el usuario al mando eso es intervenir.
     "context.selectTarget",
+    # Escribir una cookie cambia el estado del sitio para la sesión.
+    "context.setCookie",
 }
 
 
@@ -312,6 +312,70 @@ class HostBackend:
         lease = self._admit("context.selectTarget")
         try:
             return self._request("context.selectTarget", {"target_id": target_id})
+        finally:
+            self._release(lease)
+
+    def observed_events(
+        self,
+        target_id: str | None,
+        kind: str,
+        *,
+        limit: int = 100,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Consola o red observadas por el host.
+
+        Es observación, no mutación: no toma lease y sigue disponible mientras
+        el usuario tiene el control (§7). El host devuelve los eventos crudos
+        ya filtrados por su allowlist; darles forma es del manager, para que
+        las dos rutas produzcan lo mismo.
+        """
+        operation = "page.consoleEvents" if kind == "console" else "page.networkEvents"
+        result = self._request(
+            operation,
+            {"limit": int(limit)},
+            target_id=target_id,
+            cancelled=cancelled,
+        )
+        events = result.get("events")
+        return (
+            [event for event in events if isinstance(event, dict)]
+            if isinstance(events, list)
+            else []
+        )
+
+    def cookies(
+        self,
+        target_id: str | None,
+        *,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
+        """Cookies de la partición de este contexto (§6.3).
+
+        El host **no devuelve los valores**: el contrato de la herramienta ya
+        los redacta, y pasearlos por el broker sería mover una credencial sin
+        que nadie la necesite. La forma es la de `Network.getCookies` para que
+        el manager no distinga de dónde vino.
+        """
+        del target_id  # Las cookies son del contexto, no de una página.
+        return self._request("context.cookies", {}, cancelled=cancelled)
+
+    def set_cookie(
+        self,
+        target_id: str | None,
+        name: str,
+        value: str,
+        url: str | None = None,
+        *,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
+        del target_id
+        lease = self._admit("context.setCookie")
+        try:
+            params: dict[str, Any] = {"name": name, "value": value}
+            if url:
+                params["url"] = url
+            return self._request("context.setCookie", params, cancelled=cancelled)
         finally:
             self._release(lease)
 

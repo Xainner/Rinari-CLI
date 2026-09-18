@@ -1021,13 +1021,21 @@ class BrowserManager:
         cancelled: Callable[[], bool] | None = None,
     ) -> list[dict[str, Any]]:
         self._raise_if_cancelled(cancelled)
-        session, session_id = self._session_for(target_id, "Runtime")
-        events = session.events(
-            session_id=session_id,
-            methods={"Runtime.consoleAPICalled", "Runtime.exceptionThrown"},
-            limit=limit,
-            wait_s=0.5,
-        )
+        if self._backend is not None:
+            # El host bufferiza la observación: aquí no hay `CdpSession` de la
+            # que drenar. La forma la da el mismo código de abajo, para que la
+            # herramienta no note de qué backend vino.
+            events = self._backend.observed_events(
+                target_id, "console", limit=limit, cancelled=cancelled
+            )
+        else:
+            session, session_id = self._session_for(target_id, "Runtime")
+            events = session.events(
+                session_id=session_id,
+                methods={"Runtime.consoleAPICalled", "Runtime.exceptionThrown"},
+                limit=limit,
+                wait_s=0.5,
+            )
         out: list[dict[str, Any]] = []
         for event in events:
             params = event.get("params", {})
@@ -1053,17 +1061,22 @@ class BrowserManager:
         cancelled: Callable[[], bool] | None = None,
     ) -> list[dict[str, Any]]:
         self._raise_if_cancelled(cancelled)
-        session, session_id = self._session_for(target_id, "Network")
-        events = session.events(
-            session_id=session_id,
-            methods={
-                "Network.requestWillBeSent",
-                "Network.responseReceived",
-                "Network.loadingFailed",
-            },
-            limit=limit * 3,
-            wait_s=0.5,
-        )
+        if self._backend is not None:
+            events = self._backend.observed_events(
+                target_id, "network", limit=limit * 3, cancelled=cancelled
+            )
+        else:
+            session, session_id = self._session_for(target_id, "Network")
+            events = session.events(
+                session_id=session_id,
+                methods={
+                    "Network.requestWillBeSent",
+                    "Network.responseReceived",
+                    "Network.loadingFailed",
+                },
+                limit=limit * 3,
+                wait_s=0.5,
+            )
         requests: dict[str, dict[str, Any]] = {}
         order: list[str] = []
         for event in events:
@@ -1095,11 +1108,15 @@ class BrowserManager:
         cancelled: Callable[[], bool] | None = None,
     ) -> list[dict[str, Any]]:
         self._raise_if_cancelled(cancelled)
-        session, session_id = self._session_for(target_id, "Network")
-        try:
-            result = session.send("Network.getCookies", {}, session_id=session_id)
-        except CdpError as exc:
-            raise _cdp_to_browser(exc) from exc
+        if self._backend is not None:
+            # Las cookies son de la partición del contexto, no de una página.
+            result = self._backend.cookies(target_id, cancelled=cancelled)
+        else:
+            session, session_id = self._session_for(target_id, "Network")
+            try:
+                result = session.send("Network.getCookies", {}, session_id=session_id)
+            except CdpError as exc:
+                raise _cdp_to_browser(exc) from exc
         out: list[dict[str, Any]] = []
         for cookie in result.get("cookies", []):
             out.append(
@@ -1124,6 +1141,9 @@ class BrowserManager:
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         self._raise_if_cancelled(cancelled)
+        if self._backend is not None:
+            self._backend.set_cookie(target_id, name, value, url, cancelled=cancelled)
+            return {"set": name}
         session, session_id = self._session_for(target_id, "Network")
         params: dict[str, Any] = {"name": name, "value": value}
         if url:

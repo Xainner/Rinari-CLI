@@ -93,7 +93,7 @@ class TestAllowlist:
         # El §6.3: una herramienta que antes funcionaba no desaparece en
         # silencio del escritorio.
         host, fake = backend()
-        for method in ("Network.getCookies", "DOM.setFileInputFiles"):
+        for method in ("DOM.setFileInputFiles", "Browser.setDownloadBehavior"):
             with pytest.raises(BrowserError) as raised:
                 host.send("t1", method, {})
             assert raised.value.code == "BROWSER_UNSUPPORTED"
@@ -419,6 +419,75 @@ class TestLeasesDeControl:
         with pytest.raises(BrowserError) as raised:
             host.set_control("user", expected_revision=bad)
         assert raised.value.code in {"INVALID_ARGUMENT", "BROWSER_CONTROL_CONFLICT"}
+
+
+class TestObservacion:
+    """Consola y red por el host (documento 03 §6.3, R10-13).
+
+    El backend externo las drena del buffer de su `CdpSession`; con backend
+    nativo no hay ninguna, así que las recoge el host. Lo que se fija aquí es
+    que sigan siendo **observación**: ni toman lease, ni se bloquean cuando el
+    usuario tiene el control.
+    """
+
+    def test_consola_y_red_piden_su_operacion_con_el_limite(self) -> None:
+        host, fake = backend()
+        fake.answer = {"events": [{"method": "Runtime.consoleAPICalled", "params": {}}]}
+        assert host.observed_events("t1", "console", limit=25) == [
+            {"method": "Runtime.consoleAPICalled", "params": {}}
+        ]
+        assert fake.calls == [("page.consoleEvents", {"limit": 25})]
+
+        fake.calls.clear()
+        host.observed_events("t1", "network", limit=50)
+        assert fake.calls == [("page.networkEvents", {"limit": 50})]
+
+    def test_observar_no_se_bloquea_con_el_usuario_al_mando(self) -> None:
+        # §7: el agente puede observar mientras el usuario controla; lo que no
+        # puede es mutar a escondidas.
+        host, fake = backend()
+        host.set_control("user")
+        host.wait_for_control(timeout=5)
+        fake.calls.clear()
+        fake.answer = {"events": []}
+        host.observed_events("t1", "console")
+        host.observed_events("t1", "network")
+        assert [call[0] for call in fake.calls] == ["page.consoleEvents", "page.networkEvents"]
+
+    def test_una_respuesta_sin_eventos_no_revienta(self) -> None:
+        host, fake = backend()
+        for answer in ({}, {"events": None}, {"events": ["no es un dict", 7]}):
+            fake.answer = answer
+            assert host.observed_events("t1", "console") == []
+
+    def test_las_cookies_son_del_contexto_y_no_devuelven_valores(self) -> None:
+        # §6.3: operaciones de la partición correcta. El valor no cruza el
+        # broker: la herramienta ya lo redacta, y pasearlo sería mover una
+        # credencial sin que nadie la necesite.
+        host, fake = backend()
+        fake.answer = {"cookies": [{"name": "sid", "domain": "x", "path": "/"}]}
+        assert host.cookies("t1")["cookies"][0]["name"] == "sid"
+        assert fake.calls == [("context.cookies", {})]
+        assert "value" not in fake.answer["cookies"][0]
+
+    def test_escribir_una_cookie_cuenta_como_mutacion(self) -> None:
+        host, fake = backend()
+        host.set_control("user")
+        host.wait_for_control(timeout=5)
+        fake.calls.clear()
+        with pytest.raises(BrowserError) as raised:
+            host.set_cookie("t1", "sid", "secreto")
+        assert raised.value.code == "BROWSER_INTERVENED"
+        assert fake.calls == []
+
+    def test_un_contexto_cerrado_no_observa(self) -> None:
+        host, fake = backend()
+        host.close()
+        fake.calls.clear()
+        with pytest.raises(BrowserError) as raised:
+            host.observed_events("t1", "console")
+        assert raised.value.code == "BROWSER_DISCONNECTED"
+        assert fake.calls == []
 
 
 class TestIncertidumbre:
