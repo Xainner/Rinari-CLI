@@ -232,6 +232,35 @@ class TestArbitraje:
         assert host.control_revision == 3
         assert fake.calls == []
 
+    def test_pedirlo_dos_veces_mientras_se_toma_no_arranca_otra_transicion(self) -> None:
+        """Documento 03 §7: el traspaso lo decide **un** hilo.
+
+        Durante `taking-user-control` el propietario sigue siendo el agente,
+        así que un segundo click en «tomar control» —o un reintento de la UI—
+        no coincidía con la salida temprana y caía abajo: otro worker de drain
+        sobre el mismo estado, dos hilos resolviendo la misma transición.
+        """
+        host, _ = backend()
+        lease = host._admit("page.navigate")  # una mutación admitida que no acaba
+        assert lease is not None
+
+        primera = host.set_control("user")
+        assert primera["control_state"] == "taking-user-control"
+        hilos_antes = threading.active_count()
+
+        segunda = host.set_control("user")
+        assert segunda["control_state"] == "taking-user-control"
+        # Misma transición: ni revisión nueva ni propietario nuevo.
+        assert segunda["control_revision"] == primera["control_revision"]
+        assert segunda["control"] == primera["control"]
+        assert segunda["outstanding_mutations"] == 1
+        assert threading.active_count() == hilos_antes
+
+        # Y al soltar la mutación la transición confirma **una** vez.
+        host._release(lease)
+        assert host.wait_for_control(5.0) == "user"
+        assert host.control == "user"
+
     def test_pedir_el_mismo_control_no_mueve_la_revision(self) -> None:
         host, fake = backend()
         fake.calls.clear()

@@ -214,6 +214,16 @@ class HostBackend:
             if owner == self._control and self._control_state == owner:
                 return self.status()
 
+            # Pedirlo otra vez mientras ya se está tomando **no** arranca otra
+            # transición. Sin esto, `owner` seguía siendo `agent` durante
+            # `taking-user-control`, así que un segundo click en «tomar
+            # control» —o un reintento de la UI— caía abajo y lanzaba un
+            # segundo worker de drain sobre el mismo estado: dos hilos
+            # decidiendo la misma transición, y la revisión moviéndose por algo
+            # que el usuario ya había pedido.
+            if owner == "user" and self._control_state == "taking-user-control":
+                return {**self.status(), "outstanding_mutations": len(self._leases)}
+
             if owner == "agent":
                 # Devolver el control es inmediato: mientras mandaba el usuario
                 # no se admitió ninguna mutación del agente, así que no hay
