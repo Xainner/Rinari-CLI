@@ -68,6 +68,7 @@ CAPABILITIES: dict[str, bool] = {
     # Peer messaging between agent sessions (Boards): untrusted data, per-target
     # consent, provenance ceiling in the receiving turn.
     "session_peer_messaging_v1": True,
+    "project_flow_v1": True,
 }
 
 

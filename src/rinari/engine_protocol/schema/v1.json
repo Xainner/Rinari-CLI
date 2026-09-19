@@ -35,7 +35,18 @@
     "peerGroupMember",
     "peerGroup",
     "peerMessage",
-    "queuedPromptEntry"
+    "queuedPromptEntry",
+    "flowScope",
+    "flowExecutor",
+    "flowAgent",
+    "flowSessionRef",
+    "flowFile",
+    "flowVerification",
+    "flowAnchor",
+    "flowStage",
+    "flowTasks",
+    "flowSummary",
+    "flowResult"
   ],
   "$defs": {
     "webPreview": {
@@ -308,6 +319,7 @@
         "plugin.diagnostics",
         "tool.list",
         "policy.get",
+        "flow.get",
         "task.tree",
         "task.get",
         "verification.latest",
@@ -1808,6 +1820,400 @@
             "string",
             "null"
           ]
+        }
+      }
+    },
+    "flowScope": {
+      "type": "object",
+      "required": [
+        "kind",
+        "id",
+        "title",
+        "root"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "project",
+            "session"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "root": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "flowExecutor": {
+      "type": "object",
+      "required": [
+        "model",
+        "calls"
+      ],
+      "properties": {
+        "model": {
+          "type": "string"
+        },
+        "calls": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "flowAgent": {
+      "type": "object",
+      "required": [
+        "agent",
+        "runs"
+      ],
+      "properties": {
+        "agent": {
+          "type": "string"
+        },
+        "runs": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "flowSessionRef": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "title",
+        "turns"
+      ],
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "turns": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "flowFile": {
+      "type": "object",
+      "required": [
+        "path",
+        "kind",
+        "turn_id"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "turn_id": {
+          "type": "string"
+        }
+      }
+    },
+    "flowVerification": {
+      "type": "object",
+      "required": [
+        "passed",
+        "failed"
+      ],
+      "properties": {
+        "passed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "flowAnchor": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "turn_id"
+      ],
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "turn_id": {
+          "type": "string"
+        }
+      }
+    },
+    "flowStage": {
+      "type": "object",
+      "required": [
+        "id",
+        "index",
+        "cycle_index",
+        "kind",
+        "mode",
+        "title",
+        "excerpt",
+        "status",
+        "started_at",
+        "completed_at",
+        "duration_ms",
+        "progress",
+        "turns",
+        "executors",
+        "agents",
+        "sessions",
+        "files",
+        "files_more",
+        "verification",
+        "checkpoints",
+        "origin_peer_turns",
+        "anchor"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "cycle_index": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "planning",
+            "implementation",
+            "review"
+          ]
+        },
+        "mode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": "string"
+        },
+        "excerpt": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "active",
+            "needs_you",
+            "done",
+            "failed",
+            "stopped"
+          ]
+        },
+        "started_at": {
+          "type": "string"
+        },
+        "completed_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "duration_ms": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "progress": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "turns": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "executors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/flowExecutor"
+          }
+        },
+        "agents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/flowAgent"
+          }
+        },
+        "sessions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/flowSessionRef"
+          }
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/flowFile"
+          }
+        },
+        "files_more": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "verification": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/flowVerification"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "checkpoints": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "origin_peer_turns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "anchor": {
+          "$ref": "#/$defs/flowAnchor"
+        }
+      }
+    },
+    "flowTasks": {
+      "type": "object",
+      "required": [
+        "total",
+        "done",
+        "open"
+      ],
+      "properties": {
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "done": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "open": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "flowSummary": {
+      "type": "object",
+      "required": [
+        "stages_total",
+        "stages_done",
+        "stages_active",
+        "turns_total",
+        "turns_failed",
+        "files_changed",
+        "tasks",
+        "progress",
+        "started_at",
+        "last_activity_at"
+      ],
+      "properties": {
+        "stages_total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "stages_done": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "stages_active": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "turns_total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "turns_failed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "files_changed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tasks": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/flowTasks"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "progress": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "started_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "last_activity_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "flowResult": {
+      "type": "object",
+      "required": [
+        "scope",
+        "summary",
+        "stages"
+      ],
+      "properties": {
+        "scope": {
+          "$ref": "#/$defs/flowScope"
+        },
+        "summary": {
+          "$ref": "#/$defs/flowSummary"
+        },
+        "stages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/flowStage"
+          }
         }
       }
     }

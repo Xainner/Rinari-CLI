@@ -2536,6 +2536,25 @@ Do not expose hidden chain-of-thought. Show structured state, model-visible prom
 
 ---
 
+# 49b. `flow`
+
+How a project (or one session) advanced, stage by stage: the same projection
+the desktop shows (`flow.get`, `project_flow_v1`). Every value comes from
+persisted turns, changesets, tasks and verification records; unknown values
+print as `—`, never as an estimate.
+
+```bash
+rinari flow                     # registered project in the current directory
+rinari flow --project ../api    # another registered project
+rinari flow --session ses_123   # a single session (chat or project)
+rinari --json flow --session ses_123
+```
+
+Stages are contiguous runs of turns in one mode (PLAN / BUILD / REVIEW) across
+the sessions of the scope; each finished PLAN opens a cycle.
+
+---
+
 # 50. `logs`
 
 ```text
