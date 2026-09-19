@@ -23,7 +23,7 @@ import contextlib
 import secrets
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 
 from rinari.browser.backend import UNSUPPORTED
@@ -118,6 +118,10 @@ class HostBackend:
         #: bajo el control anterior no se cuele después.
         self._control = "agent"
         self._control_revision = 1
+        #: Profundidad del `mutation_scope` abierto **en este hilo**. Cada
+        #: herramienta corre en su worker, así que el ámbito es del hilo y no
+        #: del backend: dos herramientas a la vez no se prestan el lease.
+        self._scope = threading.local()
         #: Estado de la transición, distinto del propietario. `agent` y `user`
         #: son estables; `taking-user-control` es el hueco entre pedirlo y
         #: confirmarlo, y `uncertain` es no haber podido garantizar exclusión.
@@ -282,6 +286,41 @@ class HostBackend:
         if changed and self._on_control_change is not None:
             self._on_control_change(state)
 
+    @contextlib.contextmanager
+    def mutation_scope(self, operation: str) -> Iterator[None]:
+        """Cubre una mutación **semántica** entera con un solo lease (§7).
+
+        Una herramienta que el usuario entiende como una acción —un click— no
+        es una operación de bajo nivel: son un `Runtime.evaluate` para las
+        coordenadas y tres `Input.dispatchMouseEvent`. Con un lease por
+        `send()`, entre `mousePressed` y `mouseReleased` había **cero** leases,
+        así que el traspaso veía el hueco, concedía el control, y el
+        `mouseReleased` se encontraba con `BROWSER_INTERVENED`: la página
+        quedaba con el botón lógicamente pulsado y nadie al mando de soltarlo.
+
+        El scope se admite una vez y se suelta al terminar la herramienta. Los
+        `send()` de dentro no vuelven a pedir permiso: ya lo tienen, y volver a
+        pedirlo es justo lo que abría el hueco.
+
+        Anidar es válido y no toma un segundo lease: manda el de fuera.
+        """
+        depth = getattr(self._scope, "depth", 0)
+        if depth:
+            self._scope.depth = depth + 1
+            try:
+                yield
+            finally:
+                self._scope.depth -= 1
+            return
+
+        lease = self._take_lease(operation)
+        self._scope.depth = 1
+        try:
+            yield
+        finally:
+            self._scope.depth = 0
+            self._release(lease)
+
     def _admit(self, operation: str) -> str | None:
         """Admite una mutación y devuelve su lease, o la rechaza.
 
@@ -290,17 +329,28 @@ class HostBackend:
         """
         if operation not in _MUTATING:
             return None
+        return self._take_lease(operation)
+
+    def _take_lease(self, what: str) -> str:
+        """Comprueba el control y acuña un lease, o rechaza.
+
+        Aparte de `_admit` porque un `mutation_scope` **es** una mutación por
+        definición y su nombre es el de la herramienta —`browser.click`—, no
+        el de una operación del host. Filtrarlo por `_MUTATING` hacía que el
+        scope no tomara lease ninguno, que es justo lo contrario de su razón
+        de existir.
+        """
         from rinari.browser.manager import BrowserError
 
         with self._control_lock:
             if self._control_state != "agent":
                 raise BrowserError(
                     "BROWSER_INTERVENED",
-                    f"the user is taking control of this browser; {operation} is not "
+                    f"the user is taking control of this browser; {what} is not "
                     "available until control returns to the agent",
                 )
             lease = secrets.token_hex(8)
-            self._leases[lease] = operation
+            self._leases[lease] = what
             return lease
 
     def _release(self, lease: str | None) -> None:
@@ -433,7 +483,10 @@ class HostBackend:
             # el hecho de existir. Aparece aquí o no viaja.
             raise _unsupported(f"{method} is not an allowed desktop browser operation")
         del domain  # El host mantiene sus propios dominios habilitados.
-        lease = self._admit(operation)
+        # Dentro de un `mutation_scope` no se vuelve a admitir: el lease de la
+        # herramienta ya cubre esta suboperación, y pedir otro por cada
+        # `send()` es lo que dejaba huecos donde colarse el traspaso.
+        lease = None if getattr(self._scope, "depth", 0) else self._admit(operation)
         try:
             return self._request(
                 operation,

@@ -30,12 +30,16 @@ class FakeBridge:
         self.available = available
         self.calls: list[tuple[str, dict]] = []
         self.answer: dict = {}
+        #: Qué levantar en vez de contestar, para probar el camino de fallo.
+        self.raises: BaseException | None = None
 
     def capabilities(self) -> set[str]:
         return {"browser_native_view_v1"}
 
     def request(self, operation, params, **kw):
         self.calls.append((operation, params))
+        if self.raises is not None:
+            raise self.raises
         return self.answer
 
 
@@ -777,3 +781,80 @@ class TestSubirYDescargarPorElHost:
         assert ref is not None
         assert ref.suggested_name == "informe.pdf"
         assert ref.bytes == len(b"completo")
+
+
+class TestMutacionSemanticaIndivisible:
+    """Documento 03 §7: una herramienta no queda a medias por un traspaso.
+
+    Un click no es una operación: son unas coordenadas y tres eventos de
+    ratón. Con un lease por `send()`, entre `mousePressed` y `mouseReleased`
+    había cero leases, el traspaso veía el hueco y concedía el control — y el
+    `mouseReleased` se encontraba con `BROWSER_INTERVENED`, dejando la página
+    con el botón lógicamente pulsado y al agente sin permiso para soltarlo.
+    """
+
+    def test_sin_scope_el_traspaso_se_cuela_entre_dos_suboperaciones(self) -> None:
+        # Es el bug, escrito para que se vea: sin scope, el hueco existe.
+        host, _ = backend()
+        host.send("t1", "Input.dispatchMouseEvent", {"type": "mousePressed"})
+        # Aquí no hay ningún lease vivo, así que el traspaso confirma.
+        host.set_control("user")
+        assert host.wait_for_control(5.0) == "user"
+        with pytest.raises(BrowserError) as raised:
+            host.send("t1", "Input.dispatchMouseEvent", {"type": "mouseReleased"})
+        assert raised.value.code == "BROWSER_INTERVENED"
+
+    def test_con_scope_el_traspaso_espera_a_que_la_herramienta_termine(self) -> None:
+        host, fake = backend()
+        with host.mutation_scope("browser.click"):
+            host.send("t1", "Runtime.evaluate", {"expression": "coords"})
+            host.send("t1", "Input.dispatchMouseEvent", {"type": "mousePressed"})
+
+            # El usuario pide el control **a mitad**.
+            pedido = host.set_control("user")
+            assert pedido["control_state"] == "taking-user-control"
+            assert pedido["outstanding_mutations"] == 1
+            # No se concede: la herramienta sigue.
+            assert host.wait_for_control(0.5) == "taking-user-control"
+            assert host.control == "agent"
+
+            # Y el resto de la herramienta entra, que es lo que importa: la
+            # página no se queda con el botón pulsado.
+            host.send("t1", "Input.dispatchMouseEvent", {"type": "mouseReleased"})
+
+        # Al cerrar el scope se confirma.
+        assert host.wait_for_control(5.0) == "user"
+        assert host.control == "user"
+        assert [operation for operation, _ in fake.calls] == [
+            "page.evaluate",
+            "page.mouse",
+            "page.mouse",
+        ]
+
+    def test_anidar_no_toma_un_segundo_lease(self) -> None:
+        # `select_option` llama a `evaluate`, que también abre scope. Manda el
+        # de fuera; si cada nivel tomara el suyo, el de dentro se soltaría
+        # antes de tiempo y reabriría el hueco.
+        host, _ = backend()
+        with host.mutation_scope("browser.select"):
+            with host.mutation_scope("browser.evaluate"):
+                assert len(host._leases) == 1
+            assert len(host._leases) == 1
+        assert host._leases == {}
+
+    def test_una_mutacion_que_falla_suelta_su_lease(self) -> None:
+        host, fake = backend()
+        from rinari.engine_protocol.browser_host import HostOperationError
+
+        fake.raises = HostOperationError("JS_ERROR", "reventó")
+        with pytest.raises(BrowserError), host.mutation_scope("browser.click"):
+            host.send("t1", "Runtime.evaluate", {"expression": "x"})
+        # Si se quedara colgado, tomar el control no se confirmaría nunca.
+        assert host._leases == {}
+
+    def test_observar_dentro_de_un_scope_no_lo_amplia(self) -> None:
+        host, _ = backend()
+        with host.mutation_scope("browser.click"):
+            host.send("t1", "Accessibility.getFullAXTree", {})
+            assert len(host._leases) == 1
+        assert host._leases == {}

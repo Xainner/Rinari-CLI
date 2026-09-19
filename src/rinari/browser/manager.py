@@ -34,7 +34,7 @@ import threading
 import time
 import urllib.request
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -486,6 +486,26 @@ class BrowserManager:
 
     # -- targets ---------------------------------------------------------------
 
+    @contextlib.contextmanager
+    def _mutation(self, operation: str) -> Iterator[None]:
+        """Una mutación semántica es indivisible frente al traspaso (§7).
+
+        Un click no es una operación: son unas coordenadas y tres eventos de
+        ratón. Sin esto, el traspaso de control podía colarse entre
+        `mousePressed` y `mouseReleased` y dejar la página con el botón
+        pulsado y el agente sin permiso para soltarlo.
+
+        Con el backend externo no hay arbitraje que sostener —no hay usuario
+        compartiendo esa página—, así que no hace nada.
+        """
+        backend = self._backend
+        scope = getattr(backend, "mutation_scope", None) if backend is not None else None
+        if scope is None:
+            yield
+            return
+        with scope(operation):
+            yield
+
     def _require_session(self) -> CdpSession:
         if self._backend is not None:
             # Con backend inyectado no hay CdpSession propia. Las operaciones
@@ -553,14 +573,15 @@ class BrowserManager:
         return {"target_id": result["targetId"], "url": url}
 
     def close_page(self, target_id: str) -> dict[str, Any]:
-        if self._backend is not None:
-            result = dict(self._backend.close_page(target_id))
+        with self._mutation("browser.tabs_close"):
+            if self._backend is not None:
+                result = dict(self._backend.close_page(target_id))
+                self._attached.pop(target_id, None)
+                return result
+            session = self._require_session()
+            session.send("Target.closeTarget", {"targetId": target_id})
             self._attached.pop(target_id, None)
-            return result
-        session = self._require_session()
-        session.send("Target.closeTarget", {"targetId": target_id})
-        self._attached.pop(target_id, None)
-        return {"closed": target_id}
+            return {"closed": target_id}
 
     # -- page operations ---------------------------------------------------------
 
@@ -599,32 +620,33 @@ class BrowserManager:
         max_chars: int = 8000,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        self._raise_if_cancelled(cancelled)
-        # Por `call` para que el backend inyectado también reciba esta ruta:
-        # `snapshot`, `click` y `fill` se apoyan en `evaluate`, así que dejarla
-        # atada a la CdpSession habría dejado fuera media interfaz.
-        result = self.call(
-            target_id,
-            "Runtime.evaluate",
-            {"expression": expression, "returnByValue": True, "awaitPromise": await_promise},
-            domain="Runtime",
-            timeout_s=10.0,
-            cancelled=cancelled,
-        )
-        if result.get("exceptionDetails"):
-            raise BrowserError(
-                "JS_ERROR", f"JavaScript error: {_exception_text(result['exceptionDetails'])}"
+        with self._mutation("browser.evaluate"):
+            self._raise_if_cancelled(cancelled)
+            # Por `call` para que el backend inyectado también reciba esta ruta:
+            # `snapshot`, `click` y `fill` se apoyan en `evaluate`, así que dejarla
+            # atada a la CdpSession habría dejado fuera media interfaz.
+            result = self.call(
+                target_id,
+                "Runtime.evaluate",
+                {"expression": expression, "returnByValue": True, "awaitPromise": await_promise},
+                domain="Runtime",
+                timeout_s=10.0,
+                cancelled=cancelled,
             )
-        value = result.get("result", {}).get("value")
-        out: dict[str, Any] = {"value": value}
-        text = (
-            value
-            if isinstance(value, str)
-            else ("" if value is None else json.dumps(value, ensure_ascii=False, default=str))
-        )
-        if isinstance(text, str) and len(text) > max_chars:
-            out["truncated"] = True
-        return out
+            if result.get("exceptionDetails"):
+                raise BrowserError(
+                    "JS_ERROR", f"JavaScript error: {_exception_text(result['exceptionDetails'])}"
+                )
+            value = result.get("result", {}).get("value")
+            out: dict[str, Any] = {"value": value}
+            text = (
+                value
+                if isinstance(value, str)
+                else ("" if value is None else json.dumps(value, ensure_ascii=False, default=str))
+            )
+            if isinstance(text, str) and len(text) > max_chars:
+                out["truncated"] = True
+            return out
 
     def navigate(
         self,
@@ -633,18 +655,23 @@ class BrowserManager:
         *,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        self._raise_if_cancelled(cancelled)
-        result = self.call(
-            target_id,
-            "Page.navigate",
-            {"url": url},
-            domain="Page",
-            timeout_s=30.0,
-            cancelled=cancelled,
-        )
-        if result.get("errorText"):
-            raise BrowserError("BROWSER_PROTOCOL", f"Navigation failed: {result['errorText']}")
-        return {"frame_id": result.get("frameId"), "loader_id": result.get("loaderId"), "url": url}
+        with self._mutation("browser.navigate"):
+            self._raise_if_cancelled(cancelled)
+            result = self.call(
+                target_id,
+                "Page.navigate",
+                {"url": url},
+                domain="Page",
+                timeout_s=30.0,
+                cancelled=cancelled,
+            )
+            if result.get("errorText"):
+                raise BrowserError("BROWSER_PROTOCOL", f"Navigation failed: {result['errorText']}")
+            return {
+                "frame_id": result.get("frameId"),
+                "loader_id": result.get("loaderId"),
+                "url": url,
+            }
 
     def snapshot(
         self,
@@ -782,14 +809,15 @@ class BrowserManager:
         y: float | None = None,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        px, py = self._point(target_id, selector, x, y, cancelled)
-        for event in (
-            {"type": "mouseMoved", "x": px, "y": py, "button": "none"},
-            {"type": "mousePressed", "x": px, "y": py, "button": "left", "clickCount": 1},
-            {"type": "mouseReleased", "x": px, "y": py, "button": "left", "clickCount": 1},
-        ):
-            self.call(target_id, "Input.dispatchMouseEvent", event, cancelled=cancelled)
-        return {"clicked": {"x": px, "y": py}}
+        with self._mutation("browser.click"):
+            px, py = self._point(target_id, selector, x, y, cancelled)
+            for event in (
+                {"type": "mouseMoved", "x": px, "y": py, "button": "none"},
+                {"type": "mousePressed", "x": px, "y": py, "button": "left", "clickCount": 1},
+                {"type": "mouseReleased", "x": px, "y": py, "button": "left", "clickCount": 1},
+            ):
+                self.call(target_id, "Input.dispatchMouseEvent", event, cancelled=cancelled)
+            return {"clicked": {"x": px, "y": py}}
 
     def fill(
         self,
@@ -799,12 +827,13 @@ class BrowserManager:
         *,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        self.evaluate(
-            target_id,
-            _JS_FILL % (json.dumps(selector), json.dumps(value), json.dumps(value)),
-            cancelled=cancelled,
-        )
-        return {"filled": selector, "chars": len(value)}
+        with self._mutation("browser.fill"):
+            self.evaluate(
+                target_id,
+                _JS_FILL % (json.dumps(selector), json.dumps(value), json.dumps(value)),
+                cancelled=cancelled,
+            )
+            return {"filled": selector, "chars": len(value)}
 
     def type_text(
         self,
@@ -815,29 +844,35 @@ class BrowserManager:
         press_enter: bool = False,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        if len(text) > MAX_TYPED_CHARS:
-            raise BrowserError(
-                "INVALID_ARGUMENT", f"text is limited to {MAX_TYPED_CHARS} characters"
-            )
-        self.evaluate(target_id, _JS_FOCUS % json.dumps(selector), cancelled=cancelled)
-        for char in text:
-            code = _virtual_key_code(char)
-            for event_type in ("keyDown", "keyUp"):
-                self.call(
-                    target_id,
-                    "Input.dispatchKeyEvent",
-                    {"type": event_type, "text": char, "key": char, "windowsVirtualKeyCode": code},
-                    cancelled=cancelled,
+        with self._mutation("browser.type"):
+            if len(text) > MAX_TYPED_CHARS:
+                raise BrowserError(
+                    "INVALID_ARGUMENT", f"text is limited to {MAX_TYPED_CHARS} characters"
                 )
-        if press_enter:
-            for event_type in ("keyDown", "keyUp"):
-                self.call(
-                    target_id,
-                    "Input.dispatchKeyEvent",
-                    {"type": event_type, "key": "Enter", "windowsVirtualKeyCode": 13},
-                    cancelled=cancelled,
-                )
-        return {"typed": len(text), "enter": press_enter}
+            self.evaluate(target_id, _JS_FOCUS % json.dumps(selector), cancelled=cancelled)
+            for char in text:
+                code = _virtual_key_code(char)
+                for event_type in ("keyDown", "keyUp"):
+                    self.call(
+                        target_id,
+                        "Input.dispatchKeyEvent",
+                        {
+                            "type": event_type,
+                            "text": char,
+                            "key": char,
+                            "windowsVirtualKeyCode": code,
+                        },
+                        cancelled=cancelled,
+                    )
+            if press_enter:
+                for event_type in ("keyDown", "keyUp"):
+                    self.call(
+                        target_id,
+                        "Input.dispatchKeyEvent",
+                        {"type": event_type, "key": "Enter", "windowsVirtualKeyCode": 13},
+                        cancelled=cancelled,
+                    )
+            return {"typed": len(text), "enter": press_enter}
 
     def select_option(
         self,
@@ -847,10 +882,13 @@ class BrowserManager:
         *,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        out = self.evaluate(
-            target_id, _JS_SELECT % (json.dumps(selector), json.dumps(value)), cancelled=cancelled
-        )
-        return {"selected": (out.get("value") or {}).get("selected", value)}
+        with self._mutation("browser.select"):
+            out = self.evaluate(
+                target_id,
+                _JS_SELECT % (json.dumps(selector), json.dumps(value)),
+                cancelled=cancelled,
+            )
+            return {"selected": (out.get("value") or {}).get("selected", value)}
 
     def set_checked(
         self,
@@ -860,12 +898,13 @@ class BrowserManager:
         *,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        out = self.evaluate(
-            target_id,
-            _JS_CHECK % (json.dumps(selector), "true" if checked else "false"),
-            cancelled=cancelled,
-        )
-        return {"checked": bool(out.get("value"))}
+        with self._mutation("browser.check"):
+            out = self.evaluate(
+                target_id,
+                _JS_CHECK % (json.dumps(selector), "true" if checked else "false"),
+                cancelled=cancelled,
+            )
+            return {"checked": bool(out.get("value"))}
 
     def scroll(
         self,
@@ -877,28 +916,29 @@ class BrowserManager:
         y: float | None = None,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        if x is None or y is None:
-            out = self.evaluate(target_id, _JS_VIEWPORT, cancelled=cancelled)
-            size = out.get("value") or {}
-            if isinstance(size, list):
-                x = x if x is not None else size[0] / 2
-                y = y if y is not None else size[1] / 2
-            else:
-                x = x if x is not None else float(size.get("w", 800)) / 2
-                y = y if y is not None else float(size.get("h", 600)) / 2
-        self.call(
-            target_id,
-            "Input.dispatchMouseEvent",
-            {
-                "type": "mouseWheel",
-                "x": float(x),
-                "y": float(y),
-                "deltaX": float(dx),
-                "deltaY": float(dy),
-            },
-            cancelled=cancelled,
-        )
-        return {"scrolled": {"dx": float(dx), "dy": float(dy)}}
+        with self._mutation("browser.scroll"):
+            if x is None or y is None:
+                out = self.evaluate(target_id, _JS_VIEWPORT, cancelled=cancelled)
+                size = out.get("value") or {}
+                if isinstance(size, list):
+                    x = x if x is not None else size[0] / 2
+                    y = y if y is not None else size[1] / 2
+                else:
+                    x = x if x is not None else float(size.get("w", 800)) / 2
+                    y = y if y is not None else float(size.get("h", 600)) / 2
+            self.call(
+                target_id,
+                "Input.dispatchMouseEvent",
+                {
+                    "type": "mouseWheel",
+                    "x": float(x),
+                    "y": float(y),
+                    "deltaX": float(dx),
+                    "deltaY": float(dy),
+                },
+                cancelled=cancelled,
+            )
+            return {"scrolled": {"dx": float(dx), "dy": float(dy)}}
 
     def drag(
         self,
@@ -912,35 +952,36 @@ class BrowserManager:
         steps: int = 5,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        if steps < 1:
-            raise BrowserError("INVALID_ARGUMENT", "steps must be >= 1")
-        sx, sy = self._point(target_id, from_selector, from_x, from_y, cancelled)
-        self.call(
-            target_id,
-            "Input.dispatchMouseEvent",
-            {"type": "mousePressed", "x": sx, "y": sy, "button": "left", "clickCount": 1},
-            cancelled=cancelled,
-        )
-        for i in range(1, steps + 1):
-            t = i / steps
+        with self._mutation("browser.drag"):
+            if steps < 1:
+                raise BrowserError("INVALID_ARGUMENT", "steps must be >= 1")
+            sx, sy = self._point(target_id, from_selector, from_x, from_y, cancelled)
             self.call(
                 target_id,
                 "Input.dispatchMouseEvent",
-                {
-                    "type": "mouseMoved",
-                    "x": sx + (to_x - sx) * t,
-                    "y": sy + (to_y - sy) * t,
-                    "button": "left",
-                },
+                {"type": "mousePressed", "x": sx, "y": sy, "button": "left", "clickCount": 1},
                 cancelled=cancelled,
             )
-        self.call(
-            target_id,
-            "Input.dispatchMouseEvent",
-            {"type": "mouseReleased", "x": to_x, "y": to_y, "button": "left", "clickCount": 1},
-            cancelled=cancelled,
-        )
-        return {"from": {"x": sx, "y": sy}, "to": {"x": to_x, "y": to_y}}
+            for i in range(1, steps + 1):
+                t = i / steps
+                self.call(
+                    target_id,
+                    "Input.dispatchMouseEvent",
+                    {
+                        "type": "mouseMoved",
+                        "x": sx + (to_x - sx) * t,
+                        "y": sy + (to_y - sy) * t,
+                        "button": "left",
+                    },
+                    cancelled=cancelled,
+                )
+            self.call(
+                target_id,
+                "Input.dispatchMouseEvent",
+                {"type": "mouseReleased", "x": to_x, "y": to_y, "button": "left", "clickCount": 1},
+                cancelled=cancelled,
+            )
+            return {"from": {"x": sx, "y": sy}, "to": {"x": to_x, "y": to_y}}
 
     # -- upload / download ---------------------------------------------------------
 
@@ -952,69 +993,73 @@ class BrowserManager:
         *,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        self._raise_if_cancelled(cancelled)
-        resolved = Path(file_path).resolve()
-        if self._backend is not None:
-            # El host resuelve el elemento y pone el fichero en una sola
-            # operación. No se le manda un `objectId`: el §4.2 pide interfaz
-            # semántica, y aquí además lo que viaja es una ruta del disco que
-            # la página va a poder leer.
-            self._backend.send(
-                target_id,
-                "DOM.setFileInputFiles",
-                {"selector": selector, "files": [str(resolved)]},
-                cancelled=cancelled,
-            )
+        with self._mutation("browser.upload"):
+            self._raise_if_cancelled(cancelled)
+            resolved = Path(file_path).resolve()
+            if self._backend is not None:
+                # El host resuelve el elemento y pone el fichero en una sola
+                # operación. No se le manda un `objectId`: el §4.2 pide interfaz
+                # semántica, y aquí además lo que viaja es una ruta del disco que
+                # la página va a poder leer.
+                self._backend.send(
+                    target_id,
+                    "DOM.setFileInputFiles",
+                    {"selector": selector, "files": [str(resolved)]},
+                    cancelled=cancelled,
+                )
+                return {"selector": selector, "file": str(file_path)}
+            session, session_id = self._session_for(target_id, "Runtime")
+            try:
+                result = session.send(
+                    "Runtime.evaluate",
+                    {"expression": f"document.querySelector({json.dumps(selector)})"},
+                    session_id=session_id,
+                    timeout_s=10.0,
+                )
+            except CdpError as exc:
+                raise _cdp_to_browser(exc) from exc
+            if result.get("exceptionDetails"):
+                raise BrowserError("JS_ERROR", "JavaScript error picking the input element")
+            object_id = (result.get("result") or {}).get("objectId")
+            if not object_id:
+                raise BrowserError("TARGET_NOT_FOUND", "file input not found for the selector")
+            try:
+                session.send("DOM.enable", {}, session_id=session_id)
+                session.send(
+                    "DOM.setFileInputFiles",
+                    {"files": [str(Path(file_path).resolve())], "objectId": object_id},
+                    session_id=session_id,
+                )
+            except CdpError as exc:
+                raise _cdp_to_browser(exc) from exc
             return {"selector": selector, "file": str(file_path)}
-        session, session_id = self._session_for(target_id, "Runtime")
-        try:
-            result = session.send(
-                "Runtime.evaluate",
-                {"expression": f"document.querySelector({json.dumps(selector)})"},
-                session_id=session_id,
-                timeout_s=10.0,
-            )
-        except CdpError as exc:
-            raise _cdp_to_browser(exc) from exc
-        if result.get("exceptionDetails"):
-            raise BrowserError("JS_ERROR", "JavaScript error picking the input element")
-        object_id = (result.get("result") or {}).get("objectId")
-        if not object_id:
-            raise BrowserError("TARGET_NOT_FOUND", "file input not found for the selector")
-        try:
-            session.send("DOM.enable", {}, session_id=session_id)
-            session.send(
-                "DOM.setFileInputFiles",
-                {"files": [str(Path(file_path).resolve())], "objectId": object_id},
-                session_id=session_id,
-            )
-        except CdpError as exc:
-            raise _cdp_to_browser(exc) from exc
-        return {"selector": selector, "file": str(file_path)}
 
     def begin_download(self, download_dir: Path) -> Path:
-        target = Path(download_dir)
-        target.mkdir(parents=True, exist_ok=True)
-        if self._backend is not None:
-            # El host no reenvía `Browser.setDownloadBehavior`: ese dominio
-            # cruza particiones. Lo traduce a una operación de **su** contexto,
-            # que engancha las descargas de esa partición y sólo de esa.
-            self._backend.send(None, "Browser.setDownloadBehavior", {"downloadPath": str(target)})
-        else:
-            session = self._require_session()
-            session.send(
-                "Browser.setDownloadBehavior",
-                {"behavior": "allow", "downloadPath": str(target), "eventsEnabled": True},
-            )
-        # La línea base se toma **una sola vez** por directorio. Volver a
-        # tomarla en cada llamada rompía justo el reintento que esta misma
-        # herramienta recomienda: se habilita, se pulsa el enlace, y la segunda
-        # llamada encontraba el fichero ya en la base y lo daba por
-        # preexistente, así que la descarga no aparecía nunca.
-        if self._download_dir != target:
-            self._download_base = {p.name for p in target.iterdir() if p.is_file()}
-        self._download_dir = target
-        return target
+        with self._mutation("browser.download"):
+            target = Path(download_dir)
+            target.mkdir(parents=True, exist_ok=True)
+            if self._backend is not None:
+                # El host no reenvía `Browser.setDownloadBehavior`: ese dominio
+                # cruza particiones. Lo traduce a una operación de **su** contexto,
+                # que engancha las descargas de esa partición y sólo de esa.
+                self._backend.send(
+                    None, "Browser.setDownloadBehavior", {"downloadPath": str(target)}
+                )
+            else:
+                session = self._require_session()
+                session.send(
+                    "Browser.setDownloadBehavior",
+                    {"behavior": "allow", "downloadPath": str(target), "eventsEnabled": True},
+                )
+            # La línea base se toma **una sola vez** por directorio. Volver a
+            # tomarla en cada llamada rompía justo el reintento que esta misma
+            # herramienta recomienda: se habilita, se pulsa el enlace, y la segunda
+            # llamada encontraba el fichero ya en la base y lo daba por
+            # preexistente, así que la descarga no aparecía nunca.
+            if self._download_dir != target:
+                self._download_base = {p.name for p in target.iterdir() if p.is_file()}
+            self._download_dir = target
+            return target
 
     def poll_download(
         self,
@@ -1180,19 +1225,20 @@ class BrowserManager:
         *,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        self._raise_if_cancelled(cancelled)
-        if self._backend is not None:
-            self._backend.set_cookie(target_id, name, value, url, cancelled=cancelled)
-            return {"set": name}
-        session, session_id = self._session_for(target_id, "Network")
-        params: dict[str, Any] = {"name": name, "value": value}
-        if url:
-            params["url"] = url
-        try:
-            session.send("Network.setCookie", params, session_id=session_id)
-        except CdpError as exc:
-            raise _cdp_to_browser(exc) from exc
-        return {"set": name}  # the value never comes back out
+        with self._mutation("browser.set_cookie"):
+            self._raise_if_cancelled(cancelled)
+            if self._backend is not None:
+                self._backend.set_cookie(target_id, name, value, url, cancelled=cancelled)
+                return {"set": name}
+            session, session_id = self._session_for(target_id, "Network")
+            params: dict[str, Any] = {"name": name, "value": value}
+            if url:
+                params["url"] = url
+            try:
+                session.send("Network.setCookie", params, session_id=session_id)
+            except CdpError as exc:
+                raise _cdp_to_browser(exc) from exc
+            return {"set": name}  # the value never comes back out
 
 
 # -- helpers --------------------------------------------------------------------
