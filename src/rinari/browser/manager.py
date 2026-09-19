@@ -953,6 +953,19 @@ class BrowserManager:
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         self._raise_if_cancelled(cancelled)
+        resolved = Path(file_path).resolve()
+        if self._backend is not None:
+            # El host resuelve el elemento y pone el fichero en una sola
+            # operación. No se le manda un `objectId`: el §4.2 pide interfaz
+            # semántica, y aquí además lo que viaja es una ruta del disco que
+            # la página va a poder leer.
+            self._backend.send(
+                target_id,
+                "DOM.setFileInputFiles",
+                {"selector": selector, "files": [str(resolved)]},
+                cancelled=cancelled,
+            )
+            return {"selector": selector, "file": str(file_path)}
         session, session_id = self._session_for(target_id, "Runtime")
         try:
             result = session.send(
@@ -980,15 +993,27 @@ class BrowserManager:
         return {"selector": selector, "file": str(file_path)}
 
     def begin_download(self, download_dir: Path) -> Path:
-        session = self._require_session()
         target = Path(download_dir)
         target.mkdir(parents=True, exist_ok=True)
-        session.send(
-            "Browser.setDownloadBehavior",
-            {"behavior": "allow", "downloadPath": str(target), "eventsEnabled": True},
-        )
+        if self._backend is not None:
+            # El host no reenvía `Browser.setDownloadBehavior`: ese dominio
+            # cruza particiones. Lo traduce a una operación de **su** contexto,
+            # que engancha las descargas de esa partición y sólo de esa.
+            self._backend.send(None, "Browser.setDownloadBehavior", {"downloadPath": str(target)})
+        else:
+            session = self._require_session()
+            session.send(
+                "Browser.setDownloadBehavior",
+                {"behavior": "allow", "downloadPath": str(target), "eventsEnabled": True},
+            )
+        # La línea base se toma **una sola vez** por directorio. Volver a
+        # tomarla en cada llamada rompía justo el reintento que esta misma
+        # herramienta recomienda: se habilita, se pulsa el enlace, y la segunda
+        # llamada encontraba el fichero ya en la base y lo daba por
+        # preexistente, así que la descarga no aparecía nunca.
+        if self._download_dir != target:
+            self._download_base = {p.name for p in target.iterdir() if p.is_file()}
         self._download_dir = target
-        self._download_base = {p.name for p in target.iterdir() if p.is_file()}
         return target
 
     def poll_download(
@@ -1010,10 +1035,16 @@ class BrowserManager:
             for path in entries:
                 if path.name in self._download_base or not path.is_file():
                     continue
-                if path.name.endswith(".crdownload") or path.name.endswith(".tmp"):
+                # `.part` lo escribe el host del escritorio, que renombra al
+                # terminar: sin esto se recogería un fichero a medio bajar y su
+                # sha256 describiría bytes incompletos.
+                if path.name.endswith((".crdownload", ".tmp", ".part")):
                     self._raise_if_cancelled(cancelled)
                     time.sleep(0.25)
                     break
+                # Se apunta como vista: la siguiente consulta busca la
+                # **siguiente** descarga, no vuelve a contar esta.
+                self._download_base.add(path.name)
                 return DownloadRef(
                     path=str(path), bytes=path.stat().st_size, suggested_name=path.name
                 )

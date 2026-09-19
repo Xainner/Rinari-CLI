@@ -46,17 +46,23 @@ _OPERATIONS: dict[str, str] = {
     "DOM.getBoxModel": "page.boxModel",
     "Input.dispatchMouseEvent": "page.mouse",
     "Input.dispatchKeyEvent": "page.key",
+    # Semánticas, no un reenvío del comando CDP homónimo. `DOM.setFileInputFiles`
+    # entrega al contenido de la página un fichero del disco, y
+    # `Browser.setDownloadBehavior` es del dominio `Browser`, que la sonda midió
+    # alcanzable desde una sesión page-level y **cruzando particiones**: ninguno
+    # de los dos puede viajar tal cual. El nombre CDP es sólo el vocabulario del
+    # manager; lo que ejecuta el host es una operación con nombre propio.
+    "DOM.setFileInputFiles": "page.setFileInput",
+    "Browser.setDownloadBehavior": "context.beginDownload",
 }
 
 #: Métodos que el manager emite pero que esta etapa **no** implementa.
 #:
-#: El §6.3 obliga a que una herramienta que antes funcionaba no desaparezca en
-#: silencio del escritorio: se devuelve incompatibilidad explícita, con el
-#: nombre de la operación, y la entrega F las completa.
-_NOT_YET: dict[str, str] = {
-    "DOM.setFileInputFiles": "subir archivos",
-    "Browser.setDownloadBehavior": "descargas",
-}
+#: Vacío ahora mismo: subir archivos y descargar ya están portados. Se conserva
+#: el mecanismo porque el §6.3 obliga a que una herramienta que antes
+#: funcionaba no desaparezca en silencio del escritorio, y este es el sitio
+#: donde se dice con su nombre en vez de caer en «operación no permitida».
+_NOT_YET: dict[str, str] = {}
 
 #: `DOM.enable` y compañía son preparación de sesión CDP. El host mantiene sus
 #: propios dominios habilitados, así que aquí no significan nada y se aceptan
@@ -82,6 +88,12 @@ _MUTATING = {
     "context.selectTarget",
     # Escribir una cookie cambia el estado del sitio para la sesión.
     "context.setCookie",
+    # Poner un fichero en un input es una edición del formulario, y además
+    # entrega ese fichero a la página: con el usuario al mando, no.
+    "page.setFileInput",
+    # Empezar a aceptar descargas cambia lo que la página puede provocar en el
+    # disco. No muta el DOM, pero no es observación.
+    "context.beginDownload",
 }
 
 

@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from rinari.browser import host_backend
 from rinari.browser.host_backend import HostBackend
 from rinari.browser.manager import BrowserError
 from rinari.engine_protocol.browser_host import BrowserHostBridge
@@ -54,6 +55,12 @@ class TestAllowlist:
             ("DOM.getBoxModel", "page.boxModel"),
             ("Input.dispatchMouseEvent", "page.mouse"),
             ("Input.dispatchKeyEvent", "page.key"),
+            # Semánticas: el nombre CDP es vocabulario del manager, no lo que
+            # se ejecuta. `DOM.setFileInputFiles` entrega un fichero del disco
+            # a la página y `Browser.*` cruza particiones, así que ninguno de
+            # los dos viaja tal cual.
+            ("DOM.setFileInputFiles", "page.setFileInput"),
+            ("Browser.setDownloadBehavior", "context.beginDownload"),
         ],
     )
     def test_los_metodos_traducidos_viajan_como_operacion(self, method, operation) -> None:
@@ -89,16 +96,34 @@ class TestAllowlist:
             host.send("t1", "Page.setInterceptFileChooserDialog", {"enabled": True})
         assert fake.calls == []
 
-    def test_las_operaciones_aun_no_portadas_lo_dicen_con_su_nombre(self) -> None:
+    def test_las_operaciones_aun_no_portadas_lo_dicen_con_su_nombre(self, monkeypatch) -> None:
         # El §6.3: una herramienta que antes funcionaba no desaparece en
         # silencio del escritorio.
+        #
+        # `_NOT_YET` está vacío ahora que subir y descargar ya están portadas,
+        # así que lo que se comprueba es el **mecanismo**: sin esto, la próxima
+        # operación sin portar caería en «operación no permitida», que no dice
+        # cuál es ni que vaya a llegar. Se usa un método inventado para no
+        # volver a atar la prueba a las dos que se acaban de portar.
+        monkeypatch.setitem(host_backend._NOT_YET, "Page.printToPDF", "imprimir a PDF")
         host, fake = backend()
-        for method in ("DOM.setFileInputFiles", "Browser.setDownloadBehavior"):
-            with pytest.raises(BrowserError) as raised:
-                host.send("t1", method, {})
-            assert raised.value.code == "BROWSER_UNSUPPORTED"
-            assert "backend" in raised.value.message
+        with pytest.raises(BrowserError) as raised:
+            host.send("t1", "Page.printToPDF", {})
+        assert raised.value.code == "BROWSER_UNSUPPORTED"
+        assert "imprimir a PDF" in raised.value.message
+        assert "backend" in raised.value.message
         assert fake.calls == []
+
+    def test_subir_y_descargar_ya_no_son_incompatibles(self) -> None:
+        # Eran las dos que quedaban en `_NOT_YET`. Ahora viajan, y esto lo fija
+        # para que nadie las devuelva ahí sin darse cuenta.
+        host, fake = backend()
+        host.send("t1", "DOM.setFileInputFiles", {"selector": "#f", "files": ["C:/tmp/a.txt"]})
+        host.send(None, "Browser.setDownloadBehavior", {"downloadPath": "C:/tmp/art"})
+        assert [operation for operation, _ in fake.calls] == [
+            "page.setFileInput",
+            "context.beginDownload",
+        ]
 
     def test_habilitar_dominios_no_viaja_pero_tampoco_falla(self) -> None:
         host, fake = backend()
@@ -143,7 +168,16 @@ class TestArbitraje:
         host, fake = backend()
         host.set_control("user")
         fake.calls.clear()
-        for method in ("Page.navigate", "Input.dispatchMouseEvent", "Input.dispatchKeyEvent"):
+        for method in (
+            "Page.navigate",
+            "Input.dispatchMouseEvent",
+            "Input.dispatchKeyEvent",
+            # Poner un fichero en un formulario es editarlo, y además se lo
+            # entrega a la página; aceptar descargas cambia lo que esa página
+            # puede provocar en el disco. Con el usuario al mando, ninguna.
+            "DOM.setFileInputFiles",
+            "Browser.setDownloadBehavior",
+        ):
             with pytest.raises(BrowserError) as raised:
                 host.send("t1", method, {})
             assert raised.value.code == "BROWSER_INTERVENED"
@@ -655,3 +689,62 @@ def test_sin_host_registrado_la_operacion_dice_desconectado() -> None:
     with pytest.raises(BrowserError) as raised:
         host.send("t1", "Page.navigate", {"url": "http://127.0.0.1/x"})
     assert raised.value.code == "BROWSER_DISCONNECTED"
+
+
+class TestSubirYDescargarPorElHost:
+    """Documento 03 §6.3: las dos que quedaban del grupo R10-13.
+
+    El trabajo difícil —resolver la ruta contra el sandbox de la sesión,
+    calcular la procedencia, elegir el directorio de artefactos— ya lo hace la
+    capa de herramientas y no cambia. Lo que se fija aquí es el despacho: que
+    el manager no caiga al camino CDP, y que lo que viaje sea semántico.
+    """
+
+    def manager(self, tmp_path, monkeypatch):
+        from rinari.browser import manager as manager_module
+
+        estalla = lambda *a, **k: pytest.fail("no se debe tocar el camino externo")  # noqa: E731
+        monkeypatch.setattr(manager_module.CdpSession, "__init__", estalla)
+        fake = FakeBridge(available=True)
+        backend_obj = HostBackend(fake, session_id="s1", context_id="c1")
+        return manager_module.BrowserManager(
+            session_id="s1", home_root=tmp_path, backend=backend_obj
+        ), fake
+
+    def test_subir_va_en_una_sola_operacion_semantica(self, tmp_path, monkeypatch) -> None:
+        # Sin `objectId` por el puente: sería un handle a un nodo de la página
+        # con vida propia al otro lado. El host resuelve el elemento él mismo.
+        mgr, fake = self.manager(tmp_path, monkeypatch)
+        archivo = tmp_path / "carta.txt"
+        archivo.write_text("hola", encoding="utf-8")
+        out = mgr.set_file_input("t1", "#adjunto", archivo)
+        assert [operation for operation, _ in fake.calls] == ["page.setFileInput"]
+        _, params = fake.calls[0]
+        assert params["selector"] == "#adjunto"
+        assert params["files"] == [str(archivo.resolve())]
+        assert "objectId" not in params
+        assert out["selector"] == "#adjunto"
+
+    def test_descargar_no_reenvia_el_dominio_browser(self, tmp_path, monkeypatch) -> None:
+        # `Browser.setDownloadBehavior` cruza particiones; lo que viaja es una
+        # operación del contexto, con su directorio y nada más.
+        mgr, fake = self.manager(tmp_path, monkeypatch)
+        destino = tmp_path / "artefactos"
+        assert mgr.begin_download(destino) == destino
+        assert fake.calls == [("context.beginDownload", {"downloadPath": str(destino)})]
+        assert destino.is_dir()
+
+    def test_un_fichero_a_medio_bajar_no_se_recoge(self, tmp_path, monkeypatch) -> None:
+        # El host escribe `.part` y renombra al terminar. Recogerlo antes daría
+        # un sha256 de bytes incompletos presentado como la descarga.
+        mgr, _ = self.manager(tmp_path, monkeypatch)
+        destino = tmp_path / "artefactos"
+        mgr.begin_download(destino)
+        (destino / "informe.pdf.part").write_bytes(b"a mitad")
+        assert mgr.poll_download(timeout_s=0.4) is None
+
+        (destino / "informe.pdf").write_bytes(b"completo")
+        ref = mgr.poll_download(timeout_s=2.0)
+        assert ref is not None
+        assert ref.suggested_name == "informe.pdf"
+        assert ref.bytes == len(b"completo")
