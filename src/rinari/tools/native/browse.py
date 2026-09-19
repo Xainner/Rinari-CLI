@@ -57,6 +57,20 @@ _CODE_MAP: dict[str, ToolErrorCode] = {
     "RESOURCE_EXHAUSTED": ToolErrorCode.RESOURCE_EXHAUSTED,
     "INVALID_ARGUMENT": ToolErrorCode.INVALID_ARGUMENT,
     "CANCELLED": ToolErrorCode.CANCELLED,
+    # Backend nativo del escritorio con una operación aún no portada. No entra
+    # en `_RETRYABLE`: reintentar no la hace aparecer.
+    "BROWSER_UNSUPPORTED": ToolErrorCode.UNSUPPORTED,
+    # La vista existe y la operación también, así que no es UNSUPPORTED: lo que
+    # no hay es imagen, porque esa página nunca se compuso. Tampoco es
+    # reintentable —otro intento devuelve otro PNG vacío—; hay que presentarla.
+    # El código crudo viaja en `browser_error`, que es lo que lo distingue de
+    # cualquier otro UNKNOWN.
+    "CAPTURE_EMPTY": ToolErrorCode.UNKNOWN,
+    # El usuario tomó el control del browser (documento 03 §7). La herramienta
+    # recibe un estado de intervención explícito en vez de ejecutarse a
+    # escondidas o quedarse reintentando.
+    "BROWSER_INTERVENED": ToolErrorCode.CONFLICT,
+    "BROWSER_CONTROL_CONFLICT": ToolErrorCode.CONFLICT,
 }
 _RETRYABLE = {ToolErrorCode.TIMEOUT, ToolErrorCode.DEPENDENCY_ERROR}
 
@@ -87,6 +101,19 @@ def _need_manager(ctx: ToolContext) -> tuple[BrowserManager | None, ToolResult |
     return manager, None
 
 
+def _retryable_for(exc: BrowserError, code: ToolErrorCode) -> bool:
+    """¿Debe el runtime reintentar esto?
+
+    La categoría del código es una heurística —TIMEOUT y DEPENDENCY_ERROR
+    suelen merecer otro intento—, pero **no puede ganarle a un error que ya
+    declaró que la operación pudo aplicarse**. Repetir un click que quizá
+    ocurrió lo ejecuta dos veces, y el §5.4 pide reobservar en vez de repetir.
+    """
+    if exc.uncertain:
+        return False
+    return exc.retryable or code in _RETRYABLE
+
+
 def _run(ctx: ToolContext, fn: Callable[[], Any]) -> ToolResult:
     _manager_instance, error = _need_manager(ctx)
     if error is not None:
@@ -99,10 +126,13 @@ def _run(ctx: ToolContext, fn: Callable[[], Any]) -> ToolResult:
             ok=False,
             data={
                 "browser_error": exc.code,
+                # Se dice en los datos, no sólo en el texto: el runtime y el
+                # modelo tienen que poder distinguir «no pasó» de «no se sabe».
+                "outcome": "unknown" if exc.uncertain else "failed",
                 "diagnostics": _manager_instance.diagnostics() if _manager_instance else {},
             },
             error=ToolErrorInfo(
-                code=code, message=exc.message, retryable=exc.retryable or code in _RETRYABLE
+                code=code, message=exc.message, retryable=_retryable_for(exc, code)
             ),
         )
     except SandboxViolationError as exc:
@@ -258,7 +288,9 @@ def browser_open(input: dict, ctx: ToolContext) -> ToolResult:
         code = _CODE_MAP.get(exc.code, ToolErrorCode.UNKNOWN)
         return ToolResult(
             ok=False,
-            error=ToolErrorInfo(code=code, message=exc.message, retryable=exc.retryable),
+            error=ToolErrorInfo(
+                code=code, message=exc.message, retryable=_retryable_for(exc, code)
+            ),
         )
 
 
@@ -300,7 +332,9 @@ def browser_snapshot(input: dict, ctx: ToolContext) -> ToolResult:
         code = _CODE_MAP.get(exc.code, ToolErrorCode.UNKNOWN)
         return ToolResult(
             ok=False,
-            error=ToolErrorInfo(code=code, message=exc.message, retryable=exc.retryable),
+            error=ToolErrorInfo(
+                code=code, message=exc.message, retryable=_retryable_for(exc, code)
+            ),
         )
     data: dict[str, Any] = {"bytes": snap["bytes"], "truncated": snap["truncated"]}
     artifacts: list[ArtifactRef] = []
@@ -338,7 +372,9 @@ def browser_screenshot(input: dict, ctx: ToolContext) -> ToolResult:
         code = _CODE_MAP.get(exc.code, ToolErrorCode.UNKNOWN)
         return ToolResult(
             ok=False,
-            error=ToolErrorInfo(code=code, message=exc.message, retryable=exc.retryable),
+            error=ToolErrorInfo(
+                code=code, message=exc.message, retryable=_retryable_for(exc, code)
+            ),
         )
     path = _artifact_dir(ctx) / f"screenshot-{int(time.time())}.png"
     path.write_bytes(png)
@@ -580,7 +616,9 @@ def browser_upload(input: dict, ctx: ToolContext) -> ToolResult:
         code = _CODE_MAP.get(exc.code, ToolErrorCode.UNKNOWN)
         return ToolResult(
             ok=False,
-            error=ToolErrorInfo(code=code, message=exc.message, retryable=exc.retryable),
+            error=ToolErrorInfo(
+                code=code, message=exc.message, retryable=_retryable_for(exc, code)
+            ),
         )
     out.update(
         {
@@ -607,7 +645,9 @@ def browser_download(input: dict, ctx: ToolContext) -> ToolResult:
         code = _CODE_MAP.get(exc.code, ToolErrorCode.UNKNOWN)
         return ToolResult(
             ok=False,
-            error=ToolErrorInfo(code=code, message=exc.message, retryable=exc.retryable),
+            error=ToolErrorInfo(
+                code=code, message=exc.message, retryable=_retryable_for(exc, code)
+            ),
         )
     if ref is None:
         return ToolResult(
