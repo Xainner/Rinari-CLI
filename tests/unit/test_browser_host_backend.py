@@ -615,6 +615,58 @@ class TestIncertidumbre:
         )
 
 
+def test_settle_05_una_mutacion_incierta_retiene_el_lease_hasta_la_reply() -> None:
+    """El usuario no recibe control mientras el host aún puede mutar la página."""
+    events: list[dict] = []
+    bridge = BrowserHostBridge(events.append, "engine-1")
+    registration = bridge.register(
+        {"host_instance_id": "host-1", "capabilities": ["browser_native_view_v1"]}
+    )
+    host = HostBackend(bridge, session_id="s1", context_id="c1")
+    outcome: dict = {}
+
+    def mutate() -> None:
+        try:
+            host.send(
+                "t1",
+                "Input.dispatchMouseEvent",
+                {"type": "mousePressed"},
+                timeout_s=0.2,
+            )
+        except BrowserError as exc:
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=mutate, daemon=True)
+    worker.start()
+    for _ in range(100):
+        requests = [event for event in events if event.get("event") == "host.browser.request"]
+        if requests:
+            break
+        threading.Event().wait(0.01)
+    else:
+        pytest.fail("no se emitió host.browser.request")
+
+    request = requests[0]["payload"]
+    worker.join(timeout=3)
+    assert outcome["error"].uncertain is True
+    assert len(host._leases) == 1
+
+    transition = host.set_control("user", drain_timeout_s=2)
+    assert transition["control_state"] == "taking-user-control"
+    assert transition["outstanding_mutations"] == 1
+
+    assert bridge.reply(
+        {
+            "request_id": request["request_id"],
+            "binding_id": registration["binding_id"],
+            "engine_instance_id": "engine-1",
+            "result": {},
+        }
+    ) == {"accepted": True}
+    assert host.wait_for_control(timeout=3) == "user"
+    assert host._leases == {}
+
+
 class TestNativeNoCaeAlCaminoExterno:
     """Documento 03 §1: un contexto no cambia de backend.
 

@@ -3,7 +3,7 @@
 Lo que fijan estas pruebas no es que el camino feliz funcione, sino los tres
 invariantes que son fáciles de romper sin notarlo: la correlación completa, que
 la espera de un worker no cierre el canal de control, y que una operación
-caducada no reviva.
+caducada conserve su settlement sin revivir al caller.
 """
 
 from __future__ import annotations
@@ -215,16 +215,18 @@ class TestCorrelacion:
 
 
 class TestCaducidadYReplay:
-    def test_una_respuesta_tardia_no_resucita_la_operacion(self) -> None:
+    def test_settle_01_una_respuesta_tardia_liquida_sin_resucitar_al_caller(self) -> None:
         br, events, reg = registered()
         out: dict = {}
-        thread = ask(br, out, timeout_s=0.3)
+        settled: list[str] = []
+        thread = ask(br, out, timeout_s=0.3, on_settled=lambda: settled.append("reply"))
         request = emitted(events)
         thread.join(timeout=3)
         assert out["error"].code == "BROWSER_TIMEOUT"
+        assert settled == []
 
-        # El host contesta cuando ya nadie espera: se descarta en vez de dar
-        # por buena una mutación cuyo resultado ya se declaró incierto.
+        # El host contesta cuando ya nadie espera: la respuesta no cambia el
+        # resultado del caller, pero sí liquida la mutación remota.
         answer = br.reply(
             {
                 "request_id": request["request_id"],
@@ -233,19 +235,97 @@ class TestCaducidadYReplay:
                 "result": {"clicked": True},
             }
         )
-        assert answer == {"accepted": False, "reason": "unknown_or_expired_request"}
+        assert answer == {"accepted": True}
+        assert settled == ["reply"]
+        assert out["error"].code == "BROWSER_TIMEOUT"
 
-    def test_la_cancelacion_libera_al_worker_sin_esperar_al_timeout(self) -> None:
-        br, events, _ = registered()
+        # SETTLE-02: la correlación se consume exactamente una vez.
+        assert br.reply(
+            {
+                "request_id": request["request_id"],
+                "binding_id": reg["binding_id"],
+                "engine_instance_id": "engine-1",
+                "result": {"clicked": True},
+            }
+        ) == {"accepted": False, "reason": "unknown_or_expired_request"}
+        assert settled == ["reply"]
+
+    def test_settle_03_cancelar_libera_al_worker_y_conserva_el_settlement(self) -> None:
+        br, events, reg = registered()
         out: dict = {}
+        settled = threading.Event()
         stop = threading.Event()
-        thread = ask(br, out, timeout_s=30, cancelled=stop.is_set)
-        emitted(events)
+        thread = ask(
+            br,
+            out,
+            timeout_s=30,
+            cancelled=stop.is_set,
+            on_settled=settled.set,
+        )
+        request = emitted(events)
         started = time.time()
         stop.set()
         thread.join(timeout=5)
         assert out["error"].code == "CANCELLED"
         assert time.time() - started < 5
+        assert settled.is_set() is False
+
+        assert br.reply(
+            {
+                "request_id": request["request_id"],
+                "binding_id": reg["binding_id"],
+                "engine_instance_id": "engine-1",
+                "result": {},
+            }
+        ) == {"accepted": True}
+        assert settled.wait(1)
+
+    def test_settle_04_una_respuesta_ajena_no_liquida_el_abandono(self) -> None:
+        br, events, reg = registered()
+        out: dict = {}
+        settled = threading.Event()
+        thread = ask(br, out, timeout_s=0.2, on_settled=settled.set)
+        request = emitted(events)
+        thread.join(timeout=3)
+
+        assert br.reply(
+            {
+                "request_id": request["request_id"],
+                "binding_id": "otro-binding",
+                "engine_instance_id": "engine-1",
+                "result": {},
+            }
+        ) == {"accepted": False, "reason": "binding_mismatch"}
+        assert settled.is_set() is False
+
+        assert br.reply(
+            {
+                "request_id": request["request_id"],
+                "binding_id": reg["binding_id"],
+                "engine_instance_id": "engine-1",
+                "result": {},
+            }
+        ) == {"accepted": True}
+        assert settled.wait(1)
+
+    def test_perder_el_contexto_liquida_un_abandono(self) -> None:
+        br, events, reg = registered()
+        out: dict = {}
+        settled = threading.Event()
+        thread = ask(br, out, timeout_s=0.2, on_settled=settled.set)
+        request = emitted(events)
+        thread.join(timeout=3)
+        assert settled.is_set() is False
+
+        answer = br.event(
+            {
+                "binding_id": reg["binding_id"],
+                "kind": "crashed",
+                "context_id": request["context_id"],
+            }
+        )
+        assert answer == {"accepted": True, "invalidated": 1}
+        assert settled.wait(1)
 
     def test_un_detach_del_host_termina_lo_que_estuviera_en_vuelo(self) -> None:
         br, events, reg = registered()

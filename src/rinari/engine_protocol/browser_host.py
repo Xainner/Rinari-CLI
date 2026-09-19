@@ -19,8 +19,10 @@ Tres reglas que este módulo hace cumplir y que son fáciles de perder:
    se valida entera, no sólo el `request_id`.
 2. La espera de un worker no bloquea el loop de stdio (§5.4). No se sostiene
    ningún lock mientras se espera, para que `reply` y Stop puedan entrar.
-3. Un timeout **elimina** el pending y una respuesta tardía se descarta. Una
-   mutación cuya entrega quedó incierta no se reintenta sola (§5.4).
+3. Un timeout o cancelación abandona la espera del worker, pero conserva el
+   pending hasta que el host lo liquide o se pierda el binding. Una mutación
+   cuya entrega quedó incierta no se reintenta ni libera su lease antes de ese
+   settlement (§5.4).
 """
 
 from __future__ import annotations
@@ -85,11 +87,13 @@ class _Pending:
     """
 
     __slots__ = (
+        "abandoned",
         "binding_id",
         "context_id",
         "created_at",
         "done",
         "error",
+        "on_settled",
         "operation",
         "result",
         "session_id",
@@ -104,10 +108,13 @@ class _Pending:
         context_id: str,
         target_id: str | None,
         operation: str,
+        on_settled: Callable[[], None] | None,
     ) -> None:
         self.done = threading.Event()
+        self.abandoned = False
         self.result: dict[str, Any] | None = None
         self.error: HostOperationError | None = None
+        self.on_settled = on_settled
         self.binding_id = binding_id
         self.session_id = session_id
         self.context_id = context_id
@@ -204,6 +211,7 @@ class BrowserHostBridge:
         target_id: str | None = None,
         timeout_s: float | None = None,
         cancelled: Callable[[], bool] | None = None,
+        on_settled: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         """Pide una operación al host y espera su respuesta.
 
@@ -228,6 +236,7 @@ class BrowserHostBridge:
                 context_id=context_id,
                 target_id=target_id,
                 operation=operation,
+                on_settled=on_settled,
             )
             self._pending[request_id] = pending
 
@@ -261,21 +270,23 @@ class BrowserHostBridge:
             if pending.done.wait(timeout=0.1):
                 break
             # Cancelar y expirar ocurren **después** de emitir, así que el host
-            # puede estar ejecutando la operación ahora mismo. Se retira el
-            # pendiente para no esperar más, pero el resultado queda declarado
-            # desconocido: cancelar no deshace lo remoto (§5.4).
+            # puede estar ejecutando la operación ahora mismo. El worker deja
+            # de esperar, pero la correlación se conserva hasta el settlement:
+            # cancelar no deshace lo remoto (§5.4).
             if cancelled is not None and cancelled():
-                self._drop(request_id)
-                raise HostOperationError(
-                    "CANCELLED", f"{operation} was cancelled", outcome="outcome_unknown"
-                )
+                if self._abandon(request_id, pending):
+                    raise HostOperationError(
+                        "CANCELLED", f"{operation} was cancelled", outcome="outcome_unknown"
+                    )
+                break
             if time.time() >= end:
-                self._drop(request_id)
-                raise HostOperationError(
-                    "BROWSER_TIMEOUT",
-                    f"the desktop host did not answer {operation} in {deadline:.0f}s",
-                    outcome="outcome_unknown",
-                )
+                if self._abandon(request_id, pending):
+                    raise HostOperationError(
+                        "BROWSER_TIMEOUT",
+                        f"the desktop host did not answer {operation} in {deadline:.0f}s",
+                        outcome="outcome_unknown",
+                    )
+                break
 
         self._drop(request_id)
         if pending.error is not None:
@@ -317,6 +328,7 @@ class BrowserHostBridge:
             else:
                 outcome = result
 
+        settled_callback: Callable[[], None] | None = None
         with self._lock:
             pending = self._pending.get(request_id)
             current = self._binding_id
@@ -336,6 +348,12 @@ class BrowserHostBridge:
             else:
                 pending.result = outcome
             pending.done.set()
+            settled_callback = pending.on_settled
+            if pending.abandoned:
+                # Ya no hay worker que haga `_drop`. Retirarlo aquí mantiene
+                # acotada la cola y hace que un replay tardío sea desconocido.
+                self._pending.pop(request_id, None)
+        _notify_settled(settled_callback)
         return {"accepted": True}
 
     def event(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -409,6 +427,18 @@ class BrowserHostBridge:
         with self._lock:
             self._pending.pop(request_id, None)
 
+    def _abandon(self, request_id: str, pending: _Pending) -> bool:
+        """Marca que el caller dejó de esperar sin perder la correlación.
+
+        Devuelve ``False`` si una respuesta ganó la carrera. En ese caso el
+        caller consume el resultado ya instalado en vez de declararlo incierto.
+        """
+        with self._lock:
+            if self._pending.get(request_id) is not pending or pending.done.is_set():
+                return False
+            pending.abandoned = True
+            return True
+
     def _fail_matching(
         self,
         binding_id: str,
@@ -438,10 +468,14 @@ class BrowserHostBridge:
             for request_id, pending in list(self._pending.items()):
                 if affected(pending):
                     self._pending.pop(request_id, None)
+        callbacks: list[Callable[[], None] | None] = []
         for pending in victims:
             if not pending.done.is_set():
                 pending.error = HostOperationError(code, message, outcome="outcome_unknown")
                 pending.done.set()
+                callbacks.append(pending.on_settled)
+        for callback in callbacks:
+            _notify_settled(callback)
         return len(victims)
 
     def _fail_all(self, binding_id: str, code: str, message: str) -> None:
@@ -453,12 +487,16 @@ class BrowserHostBridge:
             for request_id, pending in list(self._pending.items()):
                 if pending.binding_id == binding_id:
                     self._pending.pop(request_id, None)
+        callbacks: list[Callable[[], None] | None] = []
         for pending in victims:
             if not pending.done.is_set():
                 # Estaba emitida: el host pudo haberla ejecutado antes de
                 # caerse, así que su resultado es desconocido, no fallido.
                 pending.error = HostOperationError(code, message, outcome="outcome_unknown")
                 pending.done.set()
+                callbacks.append(pending.on_settled)
+        for callback in callbacks:
+            _notify_settled(callback)
 
     def shutdown(self) -> None:
         with self._lock:
@@ -466,6 +504,18 @@ class BrowserHostBridge:
             self._binding_id = None
         if binding_id is not None:
             self._fail_all(binding_id, "BROWSER_DISCONNECTED", "the engine is shutting down")
+
+
+def _notify_settled(callback: Callable[[], None] | None) -> None:
+    """Notifica settlement sin permitir que un consumidor rompa el stdio loop."""
+    if callback is None:
+        return
+    try:
+        callback()
+    except Exception:
+        # El callback sólo libera contabilidad local. Un fallo suyo no cambia
+        # el resultado del host ni puede convertir una reply válida en error.
+        return
 
 
 #: Profundidad máxima de una respuesta. Una estructura más honda que esto no

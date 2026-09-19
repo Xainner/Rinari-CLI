@@ -97,6 +97,74 @@ _MUTATING = {
 }
 
 
+class _SettlementHold:
+    """Carrera segura entre abandono del caller y settlement del host."""
+
+    def __init__(self, lease: _MutationLease) -> None:
+        self._lease = lease
+        self._settled = False
+        self._retained = False
+
+    def abandon(self) -> None:
+        self._lease._abandon(self)
+
+    def settled(self) -> None:
+        self._lease._settle_request(self)
+
+
+class _MutationLease:
+    """Retiene un lease hasta cerrar el scope y liquidar sus requests inciertos.
+
+    La reply corre en el loop de stdio y el scope en el worker de la herramienta,
+    por lo que cualquiera puede ganar la carrera. Este objeto comparte el estado
+    entre ambos hilos y garantiza una sola liberación.
+    """
+
+    def __init__(self, backend: HostBackend, lease: str) -> None:
+        self._backend = backend
+        self._lease = lease
+        self._lock = threading.Lock()
+        self._closed = False
+        self._released = False
+        self._unsettled = 0
+
+    def hold(self) -> _SettlementHold:
+        return _SettlementHold(self)
+
+    def close(self) -> None:
+        release = False
+        with self._lock:
+            self._closed = True
+            release = self._release_if_ready()
+        if release:
+            self._backend._release(self._lease)
+
+    def _abandon(self, hold: _SettlementHold) -> None:
+        with self._lock:
+            if hold._settled or hold._retained:
+                return
+            hold._retained = True
+            self._unsettled += 1
+
+    def _settle_request(self, hold: _SettlementHold) -> None:
+        release = False
+        with self._lock:
+            if hold._settled:
+                return
+            hold._settled = True
+            if hold._retained:
+                self._unsettled -= 1
+            release = self._release_if_ready()
+        if release:
+            self._backend._release(self._lease)
+
+    def _release_if_ready(self) -> bool:
+        if self._closed and self._unsettled == 0 and not self._released:
+            self._released = True
+            return True
+        return False
+
+
 class HostBackend:
     """Operaciones page-level ejecutadas por el host sobre la vista visible."""
 
@@ -313,13 +381,15 @@ class HostBackend:
                 self._scope.depth -= 1
             return
 
-        lease = self._take_lease(operation)
+        state = _MutationLease(self, self._take_lease(operation))
         self._scope.depth = 1
+        self._scope.lease_state = state
         try:
             yield
         finally:
             self._scope.depth = 0
-            self._release(lease)
+            self._scope.lease_state = None
+            state.close()
 
     def _admit(self, operation: str) -> str | None:
         """Admite una mutación y devuelve su lease, o la rechaza.
@@ -369,11 +439,7 @@ class HostBackend:
         return list(pages) if isinstance(pages, list) else []
 
     def new_page(self, url: str = "about:blank") -> dict[str, Any]:
-        lease = self._admit("context.newPage")
-        try:
-            return self._request("context.newPage", {"url": url})
-        finally:
-            self._release(lease)
+        return self._mutating_request("context.newPage", {"url": url})
 
     def select_target(self, target_id: str) -> dict[str, Any]:
         """Elige la pestaña visible del contexto.
@@ -381,11 +447,7 @@ class HostBackend:
         Una operación sin `target_id` va a la activa, así que esto decide sobre
         qué página se opera después.
         """
-        lease = self._admit("context.selectTarget")
-        try:
-            return self._request("context.selectTarget", {"target_id": target_id})
-        finally:
-            self._release(lease)
+        return self._mutating_request("context.selectTarget", {"target_id": target_id})
 
     def observed_events(
         self,
@@ -442,21 +504,13 @@ class HostBackend:
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         del target_id
-        lease = self._admit("context.setCookie")
-        try:
-            params: dict[str, Any] = {"name": name, "value": value}
-            if url:
-                params["url"] = url
-            return self._request("context.setCookie", params, cancelled=cancelled)
-        finally:
-            self._release(lease)
+        params: dict[str, Any] = {"name": name, "value": value}
+        if url:
+            params["url"] = url
+        return self._mutating_request("context.setCookie", params, cancelled=cancelled)
 
     def close_page(self, target_id: str) -> dict[str, Any]:
-        lease = self._admit("context.closePage")
-        try:
-            return self._request("context.closePage", {}, target_id=target_id)
-        finally:
-            self._release(lease)
+        return self._mutating_request("context.closePage", {}, target_id=target_id)
 
     # -- operaciones -------------------------------------------------------
 
@@ -483,22 +537,21 @@ class HostBackend:
             # el hecho de existir. Aparece aquí o no viaja.
             raise _unsupported(f"{method} is not an allowed desktop browser operation")
         del domain  # El host mantiene sus propios dominios habilitados.
-        # Dentro de un `mutation_scope` no se vuelve a admitir: el lease de la
-        # herramienta ya cubre esta suboperación, y pedir otro por cada
-        # `send()` es lo que dejaba huecos donde colarse el traspaso.
-        lease = None if getattr(self._scope, "depth", 0) else self._admit(operation)
-        try:
-            return self._request(
+        if operation in _MUTATING:
+            return self._mutating_request(
                 operation,
                 dict(params or {}),
                 target_id=target_id,
                 timeout_s=timeout_s,
                 cancelled=cancelled,
             )
-        finally:
-            # El lease se suelta pase lo que pase: si un fallo lo dejara
-            # colgado, tomar el control no se confirmaría nunca.
-            self._release(lease)
+        return self._request(
+            operation,
+            dict(params or {}),
+            target_id=target_id,
+            timeout_s=timeout_s,
+            cancelled=cancelled,
+        )
 
     def close(self) -> dict[str, Any]:
         """Suelta el contexto en el host. Idempotente y sin levantar errores.
@@ -525,6 +578,40 @@ class HostBackend:
 
     # -- internos ----------------------------------------------------------
 
+    def _mutating_request(
+        self,
+        operation: str,
+        params: dict[str, Any],
+        *,
+        target_id: str | None = None,
+        timeout_s: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
+        """Ejecuta una mutación y conserva su lease si la entrega es incierta."""
+        from rinari.browser.manager import BrowserError
+
+        state = getattr(self._scope, "lease_state", None)
+        owns_state = state is None
+        if owns_state:
+            state = _MutationLease(self, self._take_lease(operation))
+        hold = state.hold()
+        try:
+            return self._request(
+                operation,
+                params,
+                target_id=target_id,
+                timeout_s=timeout_s,
+                cancelled=cancelled,
+                on_settled=hold.settled,
+            )
+        except BrowserError as exc:
+            if exc.uncertain:
+                hold.abandon()
+            raise
+        finally:
+            if owns_state:
+                state.close()
+
     def _request(
         self,
         operation: str,
@@ -533,6 +620,7 @@ class HostBackend:
         target_id: str | None = None,
         timeout_s: float | None = None,
         cancelled: Callable[[], bool] | None = None,
+        on_settled: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         from rinari.browser.manager import BrowserError
 
@@ -554,6 +642,7 @@ class HostBackend:
                 target_id=target_id,
                 timeout_s=timeout_s,
                 cancelled=cancelled,
+                on_settled=on_settled,
             )
         except HostUnavailable as exc:
             # Nunca se emitió: repetirla es seguro.
