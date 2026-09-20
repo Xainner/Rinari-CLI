@@ -57,6 +57,23 @@ _CODE_MAP: dict[str, ToolErrorCode] = {
     "RESOURCE_EXHAUSTED": ToolErrorCode.RESOURCE_EXHAUSTED,
     "INVALID_ARGUMENT": ToolErrorCode.INVALID_ARGUMENT,
     "CANCELLED": ToolErrorCode.CANCELLED,
+    # Backend nativo del escritorio con una operación aún no portada. No entra
+    # en `_RETRYABLE`: reintentar no la hace aparecer.
+    "BROWSER_UNSUPPORTED": ToolErrorCode.UNSUPPORTED,
+    # La vista existe y la operación también, así que no es UNSUPPORTED: lo que
+    # no hay es imagen, porque esa página nunca se compuso. Tampoco es
+    # reintentable —otro intento devuelve otro PNG vacío—; hay que presentarla.
+    # El código crudo viaja en `browser_error`, que es lo que lo distingue de
+    # cualquier otro UNKNOWN.
+    "CAPTURE_EMPTY": ToolErrorCode.UNKNOWN,
+    # El usuario tomó el control del browser (documento 03 §7). La herramienta
+    # recibe un estado de intervención explícito en vez de ejecutarse a
+    # escondidas o quedarse reintentando.
+    "BROWSER_INTERVENED": ToolErrorCode.CONFLICT,
+    "BROWSER_CONTROL_CONFLICT": ToolErrorCode.CONFLICT,
+    # La identidad validada por el Engine ya no coincide cuando el host va a
+    # entregar el fichero a la página. No se reintenta con una ruta mutable.
+    "UPLOAD_CHANGED": ToolErrorCode.CONFLICT,
 }
 _RETRYABLE = {ToolErrorCode.TIMEOUT, ToolErrorCode.DEPENDENCY_ERROR}
 
@@ -87,6 +104,19 @@ def _need_manager(ctx: ToolContext) -> tuple[BrowserManager | None, ToolResult |
     return manager, None
 
 
+def _retryable_for(exc: BrowserError, code: ToolErrorCode) -> bool:
+    """¿Debe el runtime reintentar esto?
+
+    La categoría del código es una heurística —TIMEOUT y DEPENDENCY_ERROR
+    suelen merecer otro intento—, pero **no puede ganarle a un error que ya
+    declaró que la operación pudo aplicarse**. Repetir un click que quizá
+    ocurrió lo ejecuta dos veces, y el §5.4 pide reobservar en vez de repetir.
+    """
+    if exc.uncertain:
+        return False
+    return exc.retryable or code in _RETRYABLE
+
+
 def _run(ctx: ToolContext, fn: Callable[[], Any]) -> ToolResult:
     _manager_instance, error = _need_manager(ctx)
     if error is not None:
@@ -99,10 +129,13 @@ def _run(ctx: ToolContext, fn: Callable[[], Any]) -> ToolResult:
             ok=False,
             data={
                 "browser_error": exc.code,
+                # Se dice en los datos, no sólo en el texto: el runtime y el
+                # modelo tienen que poder distinguir «no pasó» de «no se sabe».
+                "outcome": "unknown" if exc.uncertain else "failed",
                 "diagnostics": _manager_instance.diagnostics() if _manager_instance else {},
             },
             error=ToolErrorInfo(
-                code=code, message=exc.message, retryable=exc.retryable or code in _RETRYABLE
+                code=code, message=exc.message, retryable=_retryable_for(exc, code)
             ),
         )
     except SandboxViolationError as exc:
@@ -155,6 +188,10 @@ def _upload_classify(input: dict[str, Any]) -> ClassifiedAction:
     return ClassifiedAction("fs.read", str(input.get("path") or ""))
 
 
+def _upload_classify_many(input: dict[str, Any]) -> list[ClassifiedAction]:
+    return [_upload_classify(input), ClassifiedAction("browser.mutate")]
+
+
 # -- artifacts / provenance ------------------------------------------------------
 
 
@@ -170,6 +207,16 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(65536), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _upload_provenance(path: Path) -> dict[str, Any]:
+    """Fija la identidad que el host debe volver a comprobar antes de exponerla."""
+    before = path.stat()
+    digest = _sha256(path)
+    after = path.stat()
+    if before.st_size != after.st_size or before.st_mtime_ns != after.st_mtime_ns:
+        raise BrowserError("UPLOAD_CHANGED", "the upload changed while its provenance was read")
+    return {"path": str(path), "bytes": after.st_size, "sha256": digest}
 
 
 def _with_artifacts(data: Any, artifacts: tuple[ArtifactRef, ...]) -> ToolResult:
@@ -258,7 +305,9 @@ def browser_open(input: dict, ctx: ToolContext) -> ToolResult:
         code = _CODE_MAP.get(exc.code, ToolErrorCode.UNKNOWN)
         return ToolResult(
             ok=False,
-            error=ToolErrorInfo(code=code, message=exc.message, retryable=exc.retryable),
+            error=ToolErrorInfo(
+                code=code, message=exc.message, retryable=_retryable_for(exc, code)
+            ),
         )
 
 
@@ -300,7 +349,9 @@ def browser_snapshot(input: dict, ctx: ToolContext) -> ToolResult:
         code = _CODE_MAP.get(exc.code, ToolErrorCode.UNKNOWN)
         return ToolResult(
             ok=False,
-            error=ToolErrorInfo(code=code, message=exc.message, retryable=exc.retryable),
+            error=ToolErrorInfo(
+                code=code, message=exc.message, retryable=_retryable_for(exc, code)
+            ),
         )
     data: dict[str, Any] = {"bytes": snap["bytes"], "truncated": snap["truncated"]}
     artifacts: list[ArtifactRef] = []
@@ -338,7 +389,9 @@ def browser_screenshot(input: dict, ctx: ToolContext) -> ToolResult:
         code = _CODE_MAP.get(exc.code, ToolErrorCode.UNKNOWN)
         return ToolResult(
             ok=False,
-            error=ToolErrorInfo(code=code, message=exc.message, retryable=exc.retryable),
+            error=ToolErrorInfo(
+                code=code, message=exc.message, retryable=_retryable_for(exc, code)
+            ),
         )
     path = _artifact_dir(ctx) / f"screenshot-{int(time.time())}.png"
     path.write_bytes(png)
@@ -575,22 +628,23 @@ def browser_upload(input: dict, ctx: ToolContext) -> ToolResult:
     if error is not None:
         return error
     try:
-        out = manager.set_file_input(target, selector, resolved, cancelled=_cancelled_fn(ctx))
+        provenance = _upload_provenance(resolved)
+        out = manager.set_file_input(
+            target,
+            selector,
+            resolved,
+            provenance=provenance,
+            cancelled=_cancelled_fn(ctx),
+        )
     except BrowserError as exc:
         code = _CODE_MAP.get(exc.code, ToolErrorCode.UNKNOWN)
         return ToolResult(
             ok=False,
-            error=ToolErrorInfo(code=code, message=exc.message, retryable=exc.retryable),
+            error=ToolErrorInfo(
+                code=code, message=exc.message, retryable=_retryable_for(exc, code)
+            ),
         )
-    out.update(
-        {
-            "provenance": {
-                "path": str(resolved),
-                "bytes": resolved.stat().st_size,
-                "sha256": _sha256(resolved),
-            }
-        }
-    )
+    out["provenance"] = provenance
     return _ok(out)
 
 
@@ -607,7 +661,9 @@ def browser_download(input: dict, ctx: ToolContext) -> ToolResult:
         code = _CODE_MAP.get(exc.code, ToolErrorCode.UNKNOWN)
         return ToolResult(
             ok=False,
-            error=ToolErrorInfo(code=code, message=exc.message, retryable=exc.retryable),
+            error=ToolErrorInfo(
+                code=code, message=exc.message, retryable=_retryable_for(exc, code)
+            ),
         )
     if ref is None:
         return ToolResult(
@@ -1070,6 +1126,7 @@ def browse_tools() -> list[ToolDefinition]:
             risk=RISK_MEDIUM,
             side_effects=SIDE_EFFECT_COMMUNICATION,
             classify=_upload_classify,
+            classify_many=_upload_classify_many,
             handler=browser_upload,
             namespace="browser",
             capabilities=("fs.read", "browser.mutate"),

@@ -194,6 +194,9 @@ class TurnManager:
         self._events: queue.Queue[dict[str, Any]] = queue.Queue()
         self._turns: dict[str, _ActiveTurn] = {}
         self._desktop_browsers: dict[str, Any] = {}
+        # Registry de contextos nativos (documento 03 §4.1). La pone el
+        # servidor al construirse; sin ella el comportamiento es el de siempre.
+        self._browser_registry: Any | None = None
         self._desktop_processes: dict[str, Any] = {}
         self._threads: dict[str, threading.Thread] = {}
         self._preparation_threads: set[threading.Thread] = set()
@@ -214,6 +217,10 @@ class TurnManager:
         self.peers = PeerBroker(self)
         # A new engine process never replays deliveries accepted by an older one.
         self.peers.on_engine_start()
+
+    def set_browser_registry(self, registry: Any) -> None:
+        """Registry de contextos de browser nativo, puesta por el servidor."""
+        self._browser_registry = registry
 
     # -- outbox ----------------------------------------------------------
 
@@ -534,11 +541,15 @@ class TurnManager:
         with self._lock:
             browsers = list(self._desktop_browsers.values())
             self._desktop_browsers.clear()
+            registry = self._browser_registry
         for session_id in list(self._desktop_processes):
             self.close_processes(session_id)
         for browser in browsers:
             with contextlib.suppress(Exception):
                 browser.close()
+        if registry is not None:
+            with contextlib.suppress(Exception):
+                registry.release_all()
 
     def close_processes(self, session_id: str) -> None:
         with self._lock:
@@ -552,8 +563,14 @@ class TurnManager:
     def close_browser(self, session_id: str) -> None:
         with self._lock:
             browser = self._desktop_browsers.pop(session_id, None)
+            registry = self._browser_registry
         if browser is not None:
             browser.close()
+        # La registry es la autoridad de ownership del contexto nativo. Sin
+        # esto, cerrar la sesión retiraba el manager de esta caché pero lo
+        # dejaba en la otra, y un `acquire` posterior devolvía uno ya cerrado.
+        if registry is not None:
+            registry.release(session_id)
 
     def browser_view(self, params: dict[str, Any]) -> dict[str, Any]:
         """Observe the exact CDP page used by the engine; never launch or navigate."""
@@ -563,6 +580,25 @@ class TurnManager:
             browser = self._desktop_browsers.get(session_id)
         if browser is None:
             return {"state": "disconnected", "session_id": session_id}
+
+        # Con browser nativo esto **no** consulta al host. Este handler corre
+        # en el loop de stdio, que despacha en serie, y la respuesta del host
+        # sólo puede entrar por ese mismo loop: pedirle algo aquí es un
+        # bloqueo permanente, no una espera lenta. El §5.4 lo dice al revés
+        # —lo que espera al host va en workers—, y esta es la cara del Engine
+        # de esa regla.
+        #
+        # Además no haría falta: el §10 conserva `browser.view.get` como
+        # visor de capturas del backend externo, y con vista nativa la UI
+        # muestra la superficie real, no una imagen de ella.
+        if getattr(browser, "_backend", None) is not None:
+            return {
+                "state": "connected" if browser.connected else "disconnected",
+                "session_id": session_id,
+                "backend": "electron-native",
+                "native_surface": True,
+            }
+
         try:
             status = browser.status()
             result = {**status, "session_id": session_id, "instance": str(browser.profile_dir)}
@@ -633,6 +669,14 @@ class TurnManager:
                 )
                 context.tool_ctx = replace(context.tool_ctx, processes=processes)
                 browser = self._desktop_browsers.get(turn.session_id)
+                if browser is None and self._browser_registry is not None:
+                    # El browser del escritorio tiene preferencia cuando existe:
+                    # es la página que el usuario está viendo. Una vez elegido
+                    # se queda cacheado, para que la sesión no cambie de
+                    # backend entre turnos (§1).
+                    browser = self._browser_registry.acquire(turn.session_id)
+                    if browser is not None:
+                        self._desktop_browsers[turn.session_id] = browser
                 if browser is None:
                     browser = getattr(context.tool_ctx, "browser", None)
                     if browser is not None:

@@ -943,6 +943,23 @@ def test_manager_fill_select_and_check(tmp_path, monkeypatch, fake_cdp) -> None:
     manager.close()
 
 
+def test_manager_rejects_an_empty_screenshot(tmp_path, monkeypatch) -> None:
+    """Un PNG vacío es un fallo, no una captura.
+
+    Reportado en uso real contra el backend nativo: la vista nunca se compuso,
+    `capturePage` devolvió cero bytes y la herramienta contestó `ok`. Quien lo
+    lee cree entonces que tiene la página y la describe sin haberla visto, que
+    es peor que no tenerla. Había tope por arriba y ninguno por abajo.
+    """
+    manager = _manager(tmp_path)
+    monkeypatch.setattr(BrowserManager, "call", lambda *args, **kwargs: {"data": ""})
+    with pytest.raises(BrowserError) as excinfo:
+        manager.screenshot("t1")
+    assert excinfo.value.code == "CAPTURE_EMPTY"
+    # Y no es reintentable: otro intento devuelve otro PNG vacío.
+    assert excinfo.value.retryable is False
+
+
 def test_manager_screenshot_and_a11y(tmp_path, monkeypatch, fake_cdp) -> None:
     monkeypatch.delenv("RINARI_BROWSER_CDP", raising=False)
     manager = _manager(tmp_path)
@@ -1000,6 +1017,36 @@ def test_manager_upload_set_file_input(tmp_path, monkeypatch, fake_cdp) -> None:
     assert dom[-1]["objectId"] == "oid-1"
     assert dom[-1]["files"] == [str(upload_file.resolve())]
     manager.close()
+
+
+def test_manager_upload_rechaza_un_fichero_cambiado(tmp_path, monkeypatch, fake_cdp) -> None:
+    monkeypatch.delenv("RINARI_BROWSER_CDP", raising=False)
+    manager = _manager(tmp_path)
+    manager.connect(fake_cdp.base_url)
+    upload_file = tmp_path / "upload.txt"
+    upload_file.write_text("antes", encoding="utf-8")
+    expected = {
+        "path": str(upload_file.resolve()),
+        "bytes": len(b"antes"),
+        "sha256": hashlib.sha256(b"antes").hexdigest(),
+    }
+    upload_file.write_text("despues", encoding="utf-8")
+
+    with pytest.raises(BrowserError) as raised:
+        manager.set_file_input("t1", "input[type=file]", upload_file, provenance=expected)
+
+    assert raised.value.code == "UPLOAD_CHANGED"
+    assert not [p for (m, p, _sid) in fake_cdp.commands if m == "DOM.setFileInputFiles"]
+    manager.close()
+
+
+def test_browser_upload_declara_lectura_y_mutacion() -> None:
+    upload = next(tool for tool in browse_tools() if tool.name == "browser.upload")
+    actions = upload.classify_actions({"path": "archivo.txt", "selector": "#f"})
+    assert [(action.capability, action.target) for action in actions] == [
+        ("fs.read", "archivo.txt"),
+        ("browser.mutate", None),
+    ]
 
 
 def test_manager_download_poll(tmp_path, monkeypatch, fake_cdp) -> None:
