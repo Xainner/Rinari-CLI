@@ -71,6 +71,9 @@ _CODE_MAP: dict[str, ToolErrorCode] = {
     # escondidas o quedarse reintentando.
     "BROWSER_INTERVENED": ToolErrorCode.CONFLICT,
     "BROWSER_CONTROL_CONFLICT": ToolErrorCode.CONFLICT,
+    # La identidad validada por el Engine ya no coincide cuando el host va a
+    # entregar el fichero a la página. No se reintenta con una ruta mutable.
+    "UPLOAD_CHANGED": ToolErrorCode.CONFLICT,
 }
 _RETRYABLE = {ToolErrorCode.TIMEOUT, ToolErrorCode.DEPENDENCY_ERROR}
 
@@ -185,6 +188,10 @@ def _upload_classify(input: dict[str, Any]) -> ClassifiedAction:
     return ClassifiedAction("fs.read", str(input.get("path") or ""))
 
 
+def _upload_classify_many(input: dict[str, Any]) -> list[ClassifiedAction]:
+    return [_upload_classify(input), ClassifiedAction("browser.mutate")]
+
+
 # -- artifacts / provenance ------------------------------------------------------
 
 
@@ -200,6 +207,16 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(65536), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _upload_provenance(path: Path) -> dict[str, Any]:
+    """Fija la identidad que el host debe volver a comprobar antes de exponerla."""
+    before = path.stat()
+    digest = _sha256(path)
+    after = path.stat()
+    if before.st_size != after.st_size or before.st_mtime_ns != after.st_mtime_ns:
+        raise BrowserError("UPLOAD_CHANGED", "the upload changed while its provenance was read")
+    return {"path": str(path), "bytes": after.st_size, "sha256": digest}
 
 
 def _with_artifacts(data: Any, artifacts: tuple[ArtifactRef, ...]) -> ToolResult:
@@ -611,7 +628,14 @@ def browser_upload(input: dict, ctx: ToolContext) -> ToolResult:
     if error is not None:
         return error
     try:
-        out = manager.set_file_input(target, selector, resolved, cancelled=_cancelled_fn(ctx))
+        provenance = _upload_provenance(resolved)
+        out = manager.set_file_input(
+            target,
+            selector,
+            resolved,
+            provenance=provenance,
+            cancelled=_cancelled_fn(ctx),
+        )
     except BrowserError as exc:
         code = _CODE_MAP.get(exc.code, ToolErrorCode.UNKNOWN)
         return ToolResult(
@@ -620,15 +644,7 @@ def browser_upload(input: dict, ctx: ToolContext) -> ToolResult:
                 code=code, message=exc.message, retryable=_retryable_for(exc, code)
             ),
         )
-    out.update(
-        {
-            "provenance": {
-                "path": str(resolved),
-                "bytes": resolved.stat().st_size,
-                "sha256": _sha256(resolved),
-            }
-        }
-    )
+    out["provenance"] = provenance
     return _ok(out)
 
 
@@ -1110,6 +1126,7 @@ def browse_tools() -> list[ToolDefinition]:
             risk=RISK_MEDIUM,
             side_effects=SIDE_EFFECT_COMMUNICATION,
             classify=_upload_classify,
+            classify_many=_upload_classify_many,
             handler=browser_upload,
             namespace="browser",
             capabilities=("fs.read", "browser.mutate"),

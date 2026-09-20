@@ -615,6 +615,85 @@ def test_peer_originated_turn_cannot_run_shell_or_write(server, tmp_path, models
     assert not _seen(server, "approval.requested")
 
 
+def test_peer_originated_turn_cannot_mutate_native_browser(server, tmp_path, models):
+    """BR-11: el host nativo sigue debajo del techo de procedencia de ToolRuntime."""
+    a = _create_chat(server, tmp_path, "a")
+    b = _create_chat(server, tmp_path, "b")
+    upload = tmp_path / "peer-upload.txt"
+    upload.write_text("un peer no puede exponer esto", encoding="utf-8")
+    _set_group(server, "board-1", [(a, "A", True, True), (b, "B", True, True)])
+    _ok(
+        server,
+        "host.browser.register",
+        {"host_instance_id": "host-br11", "capabilities": ["browser_native_view_v1"]},
+    )
+    prepared = _ok(server, "browser.context.prepare", {"session_id": b})
+    assert prepared["backend"] == "electron-native"
+
+    mutable = [
+        ("nav", "browser.navigate", {"url": "https://example.com"}),
+        ("click", "browser.click", {"selector": "#go"}),
+        ("eval", "browser.evaluate", {"expression": "document.body.dataset.peer='1'"}),
+        ("cookie", "browser.set_cookie", {"name": "peer", "value": "blocked"}),
+        ("upload", "browser.upload", {"selector": "#file", "path": str(upload)}),
+        ("download", "browser.download", {"wait_s": 1}),
+    ]
+    # La activación es una decisión del propietario y se hace en un turno
+    # normal previo. Así el turno peer sólo mide el techo de procedencia de las
+    # operaciones nativas, sin confundirlo con el permiso de exponer tools.
+    model_b = ScriptedModel(
+        [
+            _tool(
+                "activate",
+                "capability.activate",
+                {"names": [name for _call_id, name, _args in mutable], "scope": "session"},
+            ),
+            _answer("tools activadas"),
+        ]
+    )
+    models[b] = model_b
+    _start(server, b, "activa las herramientas del browser")
+    activation = _wait_event(server, "approval.requested", session_id=b)["payload"]
+    _ok(
+        server,
+        "approval.resolve",
+        {"approval_id": activation["approval_id"], "decision": "allow_once"},
+    )
+    _wait_terminal(server, b)
+    _buffered(server).clear()
+
+    model_a = ScriptedModel()
+    models[a] = model_a
+    # El presupuesto por turno limita el número de calls; dos mensajes peer
+    # mantienen la prueba dentro de ese gate sin relajar presupuestos reales.
+    for index, group in enumerate((mutable[:3], mutable[3:])):
+        model_a.scripted.extend(_send_script(b, f"muta el browser {index}"))
+        model_b.scripted.extend(
+            [*[_tool(call_id, name, arguments) for call_id, name, arguments in group], _answer()]
+        )
+        _start(server, a, f"pide a B el lote {index}")
+        _approve(server, a)
+        _wait_event(server, "turn.started", session_id=b)
+        try:
+            _wait_terminal(server, b)
+        except AssertionError as exc:
+            raise AssertionError(
+                f"{exc}; events={_buffered(server)!r}; outputs={_tool_results(model_b)!r}; "
+                f"requests={len(model_b.requests)}"
+            ) from exc
+        _wait_terminal(server, a)
+
+    observations = [json.loads(output) for output in _tool_results(models[b])]
+    denied = [
+        (output.get("tool"), (output.get("error") or {}).get("code"))
+        for output in observations
+        if (output.get("error") or {}).get("code") == "POLICY_DENIED"
+    ]
+    assert denied == [(name, "POLICY_DENIED") for _call_id, name, _args in mutable], observations
+    assert not _seen(server, "approval.requested", session_id=b)
+    assert not _seen(server, "host.browser.request")
+
+
 def test_peer_originated_turn_cannot_spawn_agents(server, tmp_path, models):
     a = _create_chat(server, tmp_path, "a")
     b = _create_chat(server, tmp_path, "b")

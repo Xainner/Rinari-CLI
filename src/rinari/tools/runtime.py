@@ -243,6 +243,27 @@ class ToolRuntime:
                 "a turn started by another agent's message cannot delegate work; "
                 "the owner must send this as their own task",
             )
+        if ctx.origin_kind == "peer":
+            # Se examina la acción completa antes de policy. Una herramienta
+            # multi-autoridad como browser.upload clasifica primero fs.read y
+            # después browser.mutate; decidir la primera podía abrir una
+            # aprobación que jamás debe convertir un mensaje peer en permiso
+            # para mutar o exfiltrar. El techo vence al orden de las acciones.
+            denied = next(
+                (
+                    action.capability
+                    for action in actions
+                    if action.capability in PEER_ORIGIN_DENIED_CAPABILITIES
+                ),
+                None,
+            )
+            if denied is not None:
+                return self._error(
+                    ctx,
+                    ToolErrorCode.POLICY_DENIED,
+                    f"{denied} is not available in a turn started by another "
+                    "agent's message; the owner must request it as their own task",
+                )
         if tool.precheck is not None:
             # Reject what no approval could make valid before asking for one.
             rejected = tool.precheck(arguments, ctx)
@@ -260,13 +281,6 @@ class ToolRuntime:
                 return self._error(ctx, ToolErrorCode.PERMISSION_DENIED, "No channel binding")
             if tool_name in ("session.peers", "session.send") and ctx.peer_host is None:
                 return self._error(ctx, ToolErrorCode.PERMISSION_DENIED, "No peer binding")
-            if ctx.origin_kind == "peer" and action.capability in PEER_ORIGIN_DENIED_CAPABILITIES:
-                return self._error(
-                    ctx,
-                    ToolErrorCode.POLICY_DENIED,
-                    f"{action.capability} is not available in a turn started by another "
-                    "agent's message; the owner must request it as their own task",
-                )
             self._event("PolicyChecked", {"tool": tool_name, "capability": action.capability})
             decision = self.policy.decide(
                 action.capability,

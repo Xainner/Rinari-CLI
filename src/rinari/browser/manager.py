@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import hashlib
 import json
 import os
 import socket
@@ -48,6 +49,28 @@ DEFAULT_COMMAND_CANDIDATES = CANDIDATES
 
 MAX_SNAPSHOT_CHARS = 256 * 1024
 MAX_SCREENSHOT_BYTES = 4 * 1024 * 1024
+
+
+def _verify_upload_identity(path: Path, expected: dict[str, Any] | None) -> None:
+    if expected is None:
+        return
+    try:
+        before = path.stat()
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(65536), b""):
+                digest.update(chunk)
+        after = path.stat()
+    except (OSError, ValueError) as exc:
+        raise BrowserError("UPLOAD_CHANGED", "the upload is no longer the validated file") from exc
+    stable = before.st_size == after.st_size and before.st_mtime_ns == after.st_mtime_ns
+    matches = (
+        str(path) == str(expected.get("path"))
+        and after.st_size == expected.get("bytes")
+        and digest.hexdigest() == expected.get("sha256")
+    )
+    if not stable or not matches:
+        raise BrowserError("UPLOAD_CHANGED", "the upload changed after sandbox validation")
 MAX_A11Y_NODES = 500
 MAX_TYPED_CHARS = 200
 
@@ -991,6 +1014,7 @@ class BrowserManager:
         selector: str,
         file_path: Path,
         *,
+        provenance: dict[str, Any] | None = None,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         with self._mutation("browser.upload"):
@@ -1004,10 +1028,15 @@ class BrowserManager:
                 self._backend.send(
                     target_id,
                     "DOM.setFileInputFiles",
-                    {"selector": selector, "files": [str(resolved)]},
+                    {
+                        "selector": selector,
+                        "files": [str(resolved)],
+                        **({"provenance": dict(provenance)} if provenance is not None else {}),
+                    },
                     cancelled=cancelled,
                 )
                 return {"selector": selector, "file": str(file_path)}
+            _verify_upload_identity(resolved, provenance)
             session, session_id = self._session_for(target_id, "Runtime")
             try:
                 result = session.send(

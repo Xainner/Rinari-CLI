@@ -12,6 +12,7 @@ passthrough le daría a una herramienta ámbito mayor que su propio target.
 
 from __future__ import annotations
 
+import hashlib
 import threading
 from pathlib import Path
 
@@ -809,6 +810,22 @@ class TestSubirYDescargarPorElHost:
         assert params["files"] == [str(archivo.resolve())]
         assert "objectId" not in params
         assert out["selector"] == "#adjunto"
+
+    def test_subir_transporta_la_identidad_validada(self, tmp_path, monkeypatch) -> None:
+        mgr, fake = self.manager(tmp_path, monkeypatch)
+        archivo = tmp_path / "猫 upload.txt"
+        payload = b"identidad fija"
+        archivo.write_bytes(payload)
+        provenance = {
+            "path": str(archivo.resolve()),
+            "bytes": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        }
+
+        mgr.set_file_input("t1", "#adjunto", archivo, provenance=provenance)
+
+        _, params = fake.calls[0]
+        assert params["provenance"] == provenance
 
     def test_descargar_no_reenvia_el_dominio_browser(self, tmp_path, monkeypatch) -> None:
         # `Browser.setDownloadBehavior` cruza particiones; lo que viaja es una
