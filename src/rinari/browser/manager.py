@@ -71,6 +71,8 @@ def _verify_upload_identity(path: Path, expected: dict[str, Any] | None) -> None
     )
     if not stable or not matches:
         raise BrowserError("UPLOAD_CHANGED", "the upload changed after sandbox validation")
+
+
 MAX_A11Y_NODES = 500
 MAX_TYPED_CHARS = 200
 

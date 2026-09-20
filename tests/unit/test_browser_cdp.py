@@ -1033,9 +1033,7 @@ def test_manager_upload_rechaza_un_fichero_cambiado(tmp_path, monkeypatch, fake_
     upload_file.write_text("despues", encoding="utf-8")
 
     with pytest.raises(BrowserError) as raised:
-        manager.set_file_input(
-            "t1", "input[type=file]", upload_file, provenance=expected
-        )
+        manager.set_file_input("t1", "input[type=file]", upload_file, provenance=expected)
 
     assert raised.value.code == "UPLOAD_CHANGED"
     assert not [p for (m, p, _sid) in fake_cdp.commands if m == "DOM.setFileInputFiles"]
