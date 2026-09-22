@@ -654,3 +654,62 @@ def test_a_new_session_without_turns_still_changes_the_revision() -> None:
     sola = flow_revision(["scope:project:p1", "session:s1:4:ACTIVE"])
     con_nueva = flow_revision(["scope:project:p1", "session:s1:4:ACTIVE", "session:s2:0:ACTIVE"])
     assert sola != con_nueva
+
+
+def _muchas_etapas(cuantas: int) -> list[TurnFacts]:
+    """Turnos que alternan de modo, así que cada uno abre su propia etapa."""
+    modos = ("build", "ask")
+    return [
+        _facts(f"t{i:04d}", modos[i % 2], f"2026-09-17T{i // 60:02d}:{i % 60:02d}:00+00:00",
+               f"2026-09-17T{i // 60:02d}:{i % 60:02d}:30+00:00")
+        for i in range(cuantas)
+    ]
+
+
+def test_a_long_history_is_bounded_and_says_so() -> None:
+    """F11-04: truncar en silencio era el problema, no truncar.
+
+    Una respuesta sin cota puede pasar de los 16 MiB de `NdjsonTransport`, y
+    una línea así no devuelve error: derriba el stream.
+    """
+    from rinari.engine_protocol.flow import MAX_STAGES
+
+    flow = build_flow(
+        scope={"kind": "project", "id": "p", "title": "P", "root": None},
+        turns=_muchas_etapas(MAX_STAGES + 25),
+        tasks=None,
+    )
+    assert len(flow["stages"]) == MAX_STAGES
+    assert flow["truncated"] is True
+    assert flow["stages_omitted"] == 25
+    # El resumen cuenta el flujo entero, no la página.
+    assert flow["summary"]["stages_total"] == MAX_STAGES + 25
+    # Y se entregan las **más recientes**, que es lo que se mira.
+    assert flow["stages"][-1]["id"] == "stg_t0224"
+    # El cursor es un id de etapa, no un índice: los índices se recalculan.
+    assert flow["next_cursor"] == flow["stages"][0]["id"]
+
+
+def test_the_cursor_walks_backwards_through_the_history() -> None:
+    from rinari.engine_protocol.flow import MAX_STAGES
+
+    turns = _muchas_etapas(MAX_STAGES + 25)
+    scope = {"kind": "project", "id": "p", "title": "P", "root": None}
+    primera = build_flow(scope=scope, turns=turns, tasks=None)
+    anterior = build_flow(scope=scope, turns=turns, tasks=None, before=primera["next_cursor"])
+    # El tramo anterior termina justo donde empezaba el primero.
+    assert anterior["stages"][-1]["id"] != primera["stages"][0]["id"]
+    assert len(anterior["stages"]) == 25
+    assert anterior["truncated"] is False
+    assert anterior["next_cursor"] is None
+    # Y el resumen sigue describiendo el flujo entero en las dos páginas.
+    assert anterior["summary"]["stages_total"] == primera["summary"]["stages_total"]
+
+
+def test_a_flow_with_no_stages_is_not_truncated() -> None:
+    flow = build_flow(
+        scope={"kind": "session", "id": "s", "title": "s", "root": None}, turns=[], tasks=None
+    )
+    assert flow["truncated"] is False
+    assert flow["stages_omitted"] == 0
+    assert flow["next_cursor"] is None

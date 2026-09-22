@@ -1178,7 +1178,14 @@ class EngineServer:
             raise EngineProtocolError(
                 INVALID_PARAMS, "Provide exactly one of 'project_id' or 'session_id'."
             )
-        return collect_flow(self._services, project_id=project_id, session_id=session_id)
+        # `before` es el id de una etapa: pide el tramo anterior a ella. La
+        # respuesta dice si truncó y por dónde seguir; el cliente no adivina.
+        return collect_flow(
+            self._services,
+            project_id=project_id,
+            session_id=session_id,
+            before=self._opt_str(params, "before"),
+        )
 
     # -- tasks / verification / checkpoints / working tree --------------------
 
@@ -1263,13 +1270,37 @@ class EngineServer:
         allow_mixed = params.get("allow_mixed", False)
         if not isinstance(allow_mixed, bool):
             raise EngineProtocolError(INVALID_PARAMS, "Param 'allow_mixed' must be a boolean.")
+        root = self._need_path(params)
         result = self._services.checkpoints.restore(
-            self._need_path(params),
+            root,
             checkpoint_id=checkpoint_id,
             preview=preview,
             allow_mixed=allow_mixed,
         )
+        # Restaurar cambia hechos que un flujo lee y ocurre **fuera** de un
+        # turno, así que no hay ningún evento de actividad que lo delate: sin
+        # esto, la vista se queda con el estado anterior hasta que el usuario
+        # refresque a mano. Una previsualización no cambia nada y no avisa.
+        if not preview:
+            self._emit_flow_invalidated(root=str(root), reason="checkpoint.restore")
         return {"result": result}
+
+    def _emit_flow_invalidated(
+        self, *, root: str, reason: str, project_id: str | None = None
+    ) -> None:
+        """Avisa de que el flujo de un alcance dejó de estar al día.
+
+        Lleva el alcance y el motivo, no el flujo: es una señal para volver a
+        consultar, y el que consulte comparará la `revision` que reciba con la
+        que ya tenga. Mandar la proyección aquí obligaría a calcularla aunque
+        nadie estuviera mirando esa vista.
+        """
+        self._turns.emit_external(
+            event(
+                "flow.invalidated",
+                {"root": root, "project_id": project_id, "reason": reason},
+            )
+        )
 
     def _project_changes(self, params: dict[str, Any]) -> dict[str, Any]:
         status = git_files(Path(self._need_path(params)))

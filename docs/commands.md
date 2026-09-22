@@ -2550,8 +2550,22 @@ rinari flow --session ses_123   # a single session (chat or project)
 rinari --json flow --session ses_123
 ```
 
-Stages are contiguous runs of turns in one mode (PLAN / BUILD / REVIEW) across
-the sessions of the scope; each finished PLAN opens a cycle.
+Stages are contiguous runs of turns **in one mode** across the sessions of
+the scope, ordered by instant. PLAN / BUILD / REVIEW is how they are drawn,
+not what separates them: `ask`, `agent` and `full-access` all draw as BUILD
+and are different modes, so contiguous turns of those three are three
+stages. A PLAN opens a cycle when it **starts**, so the cycle in progress is
+visible while planning.
+
+Progress is reported only where there is evidence. A build stage that
+finished without task data prints `—`, not 100 %: that a turn ended says
+nothing about how much of the work got done. The total prints `—` whenever
+any stage is unknown, and the coverage says how many are known — a mean over
+only the known stages used to report 100 % while a build was still running.
+REVIEW is the share of checks that passed, not elapsed time.
+
+Long histories are capped at 200 stages, most recent first, and the output
+says when older ones were left out.
 
 ---
 

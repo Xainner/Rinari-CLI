@@ -458,7 +458,8 @@
         "vision.cancelled",
         "session.peer.group.updated",
         "session.peer.message",
-        "session.peer.message.updated"
+        "session.peer.message.updated",
+        "flow.invalidated"
       ]
     },
     "attachment": {
@@ -2357,7 +2358,8 @@
         "anchor",
         "current_task_snapshot",
         "turns_failed",
-        "turns_stopped"
+        "turns_stopped",
+        "sessions_more"
       ],
       "properties": {
         "id": {
@@ -2506,6 +2508,10 @@
         "turns_stopped": {
           "type": "integer",
           "minimum": 0
+        },
+        "sessions_more": {
+          "type": "integer",
+          "minimum": 0
         }
       },
       "additionalProperties": false
@@ -2643,7 +2649,10 @@
         "scope",
         "summary",
         "stages",
-        "revision"
+        "revision",
+        "truncated",
+        "stages_omitted",
+        "next_cursor"
       ],
       "properties": {
         "scope": {
@@ -2657,13 +2666,29 @@
           "items": {
             "$ref": "#/$defs/flowStage"
           },
-          "maxItems": 500
+          "maxItems": 200
         },
         "revision": {
           "type": "string",
           "minLength": 1,
           "maxLength": 128,
           "description": "Revisión del alcance en el momento de proyectar. Una respuesta con una revisión anterior no debe reemplazar a otra más nueva."
+        },
+        "truncated": {
+          "type": "boolean",
+          "description": "Faltan etapas más antiguas que las devueltas."
+        },
+        "stages_omitted": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "next_cursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 128,
+          "description": "Id de etapa desde el que continuar hacia atrás. Es estable: los índices se recalculan en cada proyección y no sirven como cursor."
         }
       },
       "additionalProperties": false

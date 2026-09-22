@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections import Counter
+from collections import Counter, OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -24,6 +24,19 @@ from typing import Any
 
 MAX_STAGE_FILES = 8
 MAX_EXCERPT_CHARS = 160
+#: Cota contractual de etapas por respuesta.
+#:
+#: Un flujo no puede crecer sin límite: `NdjsonTransport` corta a 16 MiB y una
+#: línea que lo supere no devuelve un error, derriba el stream entero. Se
+#: entregan las más **recientes**, que es lo que se mira, y la respuesta dice
+#: cuántas quedaron fuera y por dónde seguir.
+MAX_STAGES = 200
+#: Topes de las listas que acompañan a cada etapa. El schema también los
+#: declara, pero el schema valida lo que ya se construyó: si la cota no está
+#: además en runtime, la respuesta grande se arma igual antes de rechazarse.
+MAX_STAGE_SESSIONS = 32
+MAX_STAGE_EXECUTORS = 16
+MAX_STAGE_AGENTS = 16
 TERMINAL = {"completed", "failed", "cancelled", "stopped"}
 STAGE_KIND_BY_MODE = {"plan": "planning", "review": "review"}
 DEFAULT_STAGE_KIND = "implementation"
@@ -436,9 +449,15 @@ def stage_payload(
         "turns_stopped": sum(
             1 for turn in stage.turns if turn.status in {"stopped", "cancelled"}
         ),
-        "executors": [{"model": model, "calls": calls} for model, calls in models.most_common()],
-        "agents": [{"agent": agent, "runs": runs} for agent, runs in agents.most_common()],
-        "sessions": list(sessions.values()),
+        "executors": [
+            {"model": model, "calls": calls}
+            for model, calls in models.most_common(MAX_STAGE_EXECUTORS)
+        ],
+        "agents": [
+            {"agent": agent, "runs": runs} for agent, runs in agents.most_common(MAX_STAGE_AGENTS)
+        ],
+        "sessions": list(sessions.values())[:MAX_STAGE_SESSIONS],
+        "sessions_more": max(0, len(sessions) - MAX_STAGE_SESSIONS),
         "files": ordered_files[:MAX_STAGE_FILES],
         "files_more": max(0, len(ordered_files) - MAX_STAGE_FILES),
         "verification": {"passed": passed, "failed": failed} if passed + failed else None,
@@ -471,9 +490,21 @@ def build_flow(
     tasks: list[dict[str, Any]] | None,
     checkpoints: list[dict[str, Any]] | None = None,
     revision: str | None = None,
+    before: str | None = None,
 ) -> dict[str, Any]:
     stages = group_stages(turns)
     payloads = [stage_payload(stage, tasks, checkpoints or []) for stage in stages]
+    # El resumen se calcula sobre el flujo **entero**, no sobre la página: los
+    # totales de una vista paginada tienen que seguir siendo los de verdad.
+    todas = payloads
+    # `before` es el id de una etapa, no un índice: los índices se recalculan
+    # en cada proyección y un cursor que se mueve no es un cursor.
+    if before:
+        corte = next((i for i, payload in enumerate(todas) if payload["id"] == before), None)
+        payloads = todas[:corte] if corte is not None else todas
+    # Se entregan las más recientes: es lo que se mira primero.
+    omitidas = max(0, len(payloads) - MAX_STAGES)
+    pagina = payloads[-MAX_STAGES:] if omitidas else payloads
     all_files = {item["path"] for stage in stages for turn in stage.turns for item in turn.files}
     # El resumen **no** puede esconder lo que no se sabe.
     #
@@ -485,14 +516,14 @@ def build_flow(
     # Ahora, si alguna etapa tiene progreso desconocido el total es `None`, y
     # se publica aparte cuántas etapas se conocen para que la interfaz pueda
     # decir «parcial» sin fingir un total.
-    known = [payload for payload in payloads if payload["progress"] is not None]
+    known = [payload for payload in todas if payload["progress"] is not None]
     total_weight = sum(payload["turns"] for payload in known)
     partial = (
         sum(payload["progress"] * payload["turns"] for payload in known) / total_weight
         if total_weight
         else None
     )
-    progress = partial if payloads and len(known) == len(payloads) else None
+    progress = partial if todas and len(known) == len(todas) else None
     ordered = sorted(turns, key=_order_key)
     last_activity = max((turn.completed_at or turn.started_at for turn in ordered), default=None)
     return {
@@ -505,10 +536,10 @@ def build_flow(
             f"turn:{turn.turn_id}:{turn.status}:{turn.completed_at}" for turn in turns
         ),
         "summary": {
-            "stages_total": len(payloads),
-            "stages_done": sum(1 for payload in payloads if payload["status"] == "done"),
+            "stages_total": len(todas),
+            "stages_done": sum(1 for payload in todas if payload["status"] == "done"),
             "stages_active": sum(
-                1 for payload in payloads if payload["status"] in {"active", "needs_you"}
+                1 for payload in todas if payload["status"] in {"active", "needs_you"}
             ),
             "turns_total": len(turns),
             "turns_failed": sum(1 for turn in turns if turn.status == "failed"),
@@ -528,7 +559,7 @@ def build_flow(
             # y esto dice cuántas faltan.
             "progress_coverage": {
                 "known_stages": len(known),
-                "total_stages": len(payloads),
+                "total_stages": len(todas),
                 # Promedio de lo conocido, **rotulado como parcial**. Nunca se
                 # presenta como progreso total.
                 "partial_progress": partial,
@@ -536,12 +567,36 @@ def build_flow(
             "started_at": ordered[0].started_at if ordered else None,
             "last_activity_at": last_activity,
         },
-        "stages": payloads,
+        "stages": pagina,
+        # Truncar en silencio es lo que hacía el tope de 500 sesiones. Si
+        # falta historial se dice, con cuánto falta y por dónde seguir.
+        "truncated": bool(omitidas),
+        "stages_omitted": omitidas,
+        "next_cursor": pagina[0]["id"] if omitidas and pagina else None,
     }
 
 
+#: Última proyección por alcance, para no recomputar en una ráfaga.
+#:
+#: La clave es el alcance y el valor lleva su revisión: si los hechos no se
+#: han movido, la respuesta es la misma y no hace falta volver a plegar todos
+#: los eventos. Acotada porque es estado de proceso, no una caché de verdad;
+#: se queda con los alcances usados hace poco.
+_CACHE: OrderedDict[tuple[str, str], tuple[str, dict[str, Any]]] = OrderedDict()
+MAX_CACHED_SCOPES = 8
+
+
+def reset_flow_cache() -> None:
+    """Olvida lo proyectado. La usan las pruebas y el reinicio del Engine."""
+    _CACHE.clear()
+
+
 def collect_flow(
-    services: Any, *, project_id: str | None = None, session_id: str | None = None
+    services: Any,
+    *,
+    project_id: str | None = None,
+    session_id: str | None = None,
+    before: str | None = None,
 ) -> dict[str, Any]:
     """Gather the persisted facts of a scope and project its flow.
 
@@ -619,13 +674,28 @@ def collect_flow(
         marcas.append(f"task:{task.get('id')}:{task.get('status')}:{task.get('updated_at')}")
     for row in checkpoints:
         marcas.append(f"checkpoint:{row.get('id')}:{row.get('created_at')}")
-    return build_flow(
+    revision = flow_revision(marcas)
+    # Misma revisión y misma página: los hechos no se han movido, así que
+    # volver a plegar los eventos daría exactamente esto.
+    clave = (str(scope["kind"]), str(scope["id"]))
+    recordado = _CACHE.get(clave)
+    if recordado is not None and recordado[0] == revision and recordado[1].get("_cursor") == before:
+        _CACHE.move_to_end(clave)
+        return {k: v for k, v in recordado[1].items() if k != "_cursor"}
+
+    flow = build_flow(
         scope=scope,
         turns=turns,
         tasks=tasks,
         checkpoints=checkpoints,
-        revision=flow_revision(marcas),
+        revision=revision,
+        before=before,
     )
+    _CACHE[clave] = (revision, {**flow, "_cursor": before})
+    _CACHE.move_to_end(clave)
+    while len(_CACHE) > MAX_CACHED_SCOPES:
+        _CACHE.popitem(last=False)
+    return flow
 
 
 __all__ = [
