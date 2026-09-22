@@ -326,9 +326,7 @@ def _order_key(turn: TurnFacts) -> tuple[datetime, str]:
     return (moment or datetime.max.replace(tzinfo=UTC), turn.turn_id)
 
 
-def stage_task_snapshot(
-    stage: Stage, tasks: list[dict[str, Any]] | None
-) -> dict[str, int] | None:
+def stage_task_snapshot(stage: Stage, tasks: list[dict[str, Any]] | None) -> dict[str, int] | None:
     """Tareas del grafo **de ahora** cuya ventana toca esta etapa.
 
     Es una foto del presente, no el estado que tenían cuando la etapa corría.
@@ -446,9 +444,7 @@ def stage_payload(
         # Una etapa puede terminar en `done` habiendo tenido fallos por el
         # camino. El estado final no lo cuenta, así que se cuenta aparte.
         "turns_failed": sum(1 for turn in stage.turns if turn.status == "failed"),
-        "turns_stopped": sum(
-            1 for turn in stage.turns if turn.status in {"stopped", "cancelled"}
-        ),
+        "turns_stopped": sum(1 for turn in stage.turns if turn.status in {"stopped", "cancelled"}),
         "executors": [
             {"model": model, "calls": calls}
             for model, calls in models.most_common(MAX_STAGE_EXECUTORS)

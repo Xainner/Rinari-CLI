@@ -238,9 +238,7 @@ def test_progress_never_invents_a_number() -> None:
         {"id": "3", "status": "done", "created_at": "10:13", "updated_at": "10:14"},
         {"id": "old", "status": "pending", "created_at": "09:00", "updated_at": "09:00"},
     ]
-    tasks = [
-        {k: _iso(v) if k.endswith("_at") else v for k, v in task.items()} for task in tasks
-    ]
+    tasks = [{k: _iso(v) if k.endswith("_at") else v for k, v in task.items()} for task in tasks]
     vivo = stage_task_snapshot(running_build, tasks)
     # Las tareas de fuera de la ventana no cuentan.
     assert vivo == {"total": 3, "done": 2, "open": 1}
@@ -594,13 +592,21 @@ def test_timestamps_compare_as_instants_not_as_strings() -> None:
     `2026-09-17T12:00:00+02:00` ordenan al revés de lo que son.
     """
     con_z = TurnFacts(
-        turn_id="t2", session_id="s", session_title="S", mode="build",
-        status="completed", started_at="2026-09-17T10:00:00Z",
+        turn_id="t2",
+        session_id="s",
+        session_title="S",
+        mode="build",
+        status="completed",
+        started_at="2026-09-17T10:00:00Z",
         completed_at="2026-09-17T10:30:00Z",
     )
     con_offset = TurnFacts(
-        turn_id="t1", session_id="s", session_title="S", mode="build",
-        status="completed", started_at="2026-09-17T11:00:00+02:00",  # 09:00Z, antes
+        turn_id="t1",
+        session_id="s",
+        session_title="S",
+        mode="build",
+        status="completed",
+        started_at="2026-09-17T11:00:00+02:00",  # 09:00Z, antes
         completed_at="2026-09-17T11:30:00+02:00",
     )
     stages = group_stages([con_z, con_offset])
@@ -609,8 +615,13 @@ def test_timestamps_compare_as_instants_not_as_strings() -> None:
     # Una fecha ilegible es hecho desconocido: va al final y no se cuela al
     # principio por comparación lexicográfica.
     rota = TurnFacts(
-        turn_id="t0", session_id="s", session_title="S", mode="build",
-        status="completed", started_at="ayer por la tarde", completed_at=None,
+        turn_id="t0",
+        session_id="s",
+        session_title="S",
+        mode="build",
+        status="completed",
+        started_at="ayer por la tarde",
+        completed_at=None,
     )
     orden = group_stages([rota, con_z, con_offset])[0].turns
     assert [turn.turn_id for turn in orden] == ["t1", "t2", "t0"]
@@ -660,8 +671,12 @@ def _muchas_etapas(cuantas: int) -> list[TurnFacts]:
     """Turnos que alternan de modo, así que cada uno abre su propia etapa."""
     modos = ("build", "ask")
     return [
-        _facts(f"t{i:04d}", modos[i % 2], f"2026-09-17T{i // 60:02d}:{i % 60:02d}:00+00:00",
-               f"2026-09-17T{i // 60:02d}:{i % 60:02d}:30+00:00")
+        _facts(
+            f"t{i:04d}",
+            modos[i % 2],
+            f"2026-09-17T{i // 60:02d}:{i % 60:02d}:00+00:00",
+            f"2026-09-17T{i // 60:02d}:{i % 60:02d}:30+00:00",
+        )
         for i in range(cuantas)
     ]
 
