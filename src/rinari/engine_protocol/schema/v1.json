@@ -2491,7 +2491,7 @@
           "$ref": "#/$defs/flowAnchor"
         },
         "current_task_snapshot": {
-          "oneOf": [
+          "anyOf": [
             {
               "$ref": "#/$defs/flowTasks"
             },
