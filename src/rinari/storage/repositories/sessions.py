@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 import json
+from collections.abc import Sequence
 
 from rinari.storage.db import Database
 from rinari.storage.records import (
@@ -119,6 +122,22 @@ class SessionRepository:
             params.append(limit)
         return [_session_to_record(r) for r in self._db.query(sql, params)]
 
+    def for_project(self, project_id: str, root: str | None = None) -> list[SessionRecord]:
+        """Todas las sesiones de un proyecto, sin tope.
+
+        Por id **o** por el root que la sesión fotografió antes de que el
+        proyecto estuviera registrado. Quien lo necesitaba lo resolvía pidiendo
+        las 500 más recientes y filtrando en Python, así que un proyecto con
+        sesiones más antiguas que ese corte quedaba truncado y nadie lo decía.
+        """
+        sql = "SELECT * FROM sessions WHERE project_id = ?"
+        params: list[object] = [project_id]
+        if root:
+            sql += " OR project_root_snapshot = ?"
+            params.append(root)
+        sql += " ORDER BY last_active_at DESC"
+        return [_session_to_record(r) for r in self._db.query(sql, params)]
+
 
 def _session_to_record(row: dict) -> SessionRecord:
     compact = row["compact_state_json"]
@@ -201,18 +220,41 @@ class SessionEventRepository:
         )
 
     def list(
-        self, session_id: str, after_seq: int | None = None, limit: int | None = None
+        self,
+        session_id: str,
+        after_seq: int | None = None,
+        limit: int | None = None,
+        types: Sequence[str] | None = None,
     ) -> list[SessionEventRecord]:
+        """Eventos de una sesión, opcionalmente sólo de ciertos tipos.
+
+        `types` existe para las proyecciones: cargar el historial entero para
+        quedarse con seis tipos de evento hace que el coste crezca con toda la
+        conversación, incluidos los deltas del modelo, que son los más
+        numerosos y los que menos importan aquí.
+        """
         sql = "SELECT * FROM session_events WHERE session_id = ?"
         params: list[object] = [session_id]
         if after_seq is not None:
             sql += " AND seq > ?"
             params.append(after_seq)
+        if types:
+            marcas = ", ".join("?" for _ in types)
+            sql += f" AND type IN ({marcas})"
+            params.extend(types)
         sql += " ORDER BY seq ASC"
         if limit is not None:
             sql += " LIMIT ?"
             params.append(limit)
         return [_event_to_record(r) for r in self._db.query(sql, params)]
+
+    def last_seq(self, session_id: str) -> int:
+        """Hasta dónde llegó esta sesión. Base barata de una revisión."""
+        row = self._db.query_one(
+            "SELECT COALESCE(MAX(seq), 0) AS n FROM session_events WHERE session_id = ?",
+            (session_id,),
+        )
+        return int(row["n"]) if row else 0
 
 
 def _event_to_record(row: dict) -> SessionEventRecord:

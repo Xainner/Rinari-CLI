@@ -14,9 +14,12 @@ BUILD/REVIEW stages that follow belong to it until the next PLAN.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 MAX_STAGE_FILES = 8
@@ -24,7 +27,40 @@ MAX_EXCERPT_CHARS = 160
 TERMINAL = {"completed", "failed", "cancelled", "stopped"}
 STAGE_KIND_BY_MODE = {"plan": "planning", "review": "review"}
 DEFAULT_STAGE_KIND = "implementation"
+#: Modo de un turno que no lo declara o lo declara vacío. Explícito a
+#: propósito: mezclarlo con el modo anterior fundiría en una sola etapa dos
+#: corridas que el usuario vivió por separado.
+UNKNOWN_MODE = "unknown"
 OPEN_TASK_STATES = {"pending", "in_progress", "blocked"}
+#: Los únicos eventos que esta proyección mira.
+#:
+#: Cargar el historial entero para quedarse con esto hacía que el coste
+#: creciera con toda la conversación —los deltas del modelo son la mayoría de
+#: las filas y no aportan nada aquí—.
+FLOW_EVENT_TYPES = (
+    "turn.started",
+    "turn.completed",
+    "turn.failed",
+    "turn.cancelled",
+    "turn.stopped",
+    "model.started",
+    "model.content.completed",
+    "agent.started",
+    "turn.changes.completed",
+    "verification.completed",
+    "approval.requested",
+    "approval.resolved",
+    "approval.expired",
+    "question.requested",
+    "question.resolved",
+    "question.expired",
+)
+
+
+def normalized_mode(mode: str | None) -> str:
+    """El modo con el que se compara. Nunca `None`, nunca vacío."""
+    value = (mode or "").strip().lower()
+    return value or UNKNOWN_MODE
 
 
 @dataclass(slots=True)
@@ -49,8 +85,17 @@ class TurnFacts:
     origin_peer: bool = False
 
     @property
+    def normalized_mode(self) -> str:
+        return normalized_mode(self.mode)
+
+    @property
     def stage_kind(self) -> str:
-        return STAGE_KIND_BY_MODE.get((self.mode or "").lower(), DEFAULT_STAGE_KIND)
+        """PLAN / BUILD / REVIEW, que es **presentación**.
+
+        No es lo que separa etapas: `ask`, `agent` y `full-access` comparten
+        `implementation` y son modos distintos. La frontera la pone el modo.
+        """
+        return STAGE_KIND_BY_MODE.get(self.normalized_mode, DEFAULT_STAGE_KIND)
 
 
 def turn_facts_from_events(record: Any, events: list[Any]) -> list[TurnFacts]:
@@ -169,6 +214,9 @@ class Stage:
     index: int
     cycle_index: int
     kind: str
+    #: El único modo de esta etapa. Todos sus turnos lo comparten, porque es
+    #: justo lo que la delimita.
+    mode: str
     turns: list[TurnFacts]
 
     @property
@@ -187,17 +235,30 @@ class Stage:
 
 
 def group_stages(turns: list[TurnFacts]) -> list[Stage]:
-    ordered = sorted(turns, key=lambda turn: (turn.started_at, turn.turn_id))
+    """Etapas: corridas contiguas de turnos **del mismo modo**.
+
+    Antes se agrupaba por `kind`, y como `ask`, `agent`, `full-access` y lo
+    desconocido comparten `implementation`, tres turnos de modos distintos
+    caían en la misma etapa — y el payload se quedaba con el modo del primero,
+    así que decía de esa etapa algo que sólo valía para un turno.
+
+    Un ciclo se abre al **empezar** un PLAN, no al terminarlo: así el ciclo en
+    curso se puede enseñar mientras se planifica.
+    """
+    ordered = sorted(turns, key=_order_key)
     stages: list[Stage] = []
     cycle = 0
     for turn in ordered:
-        kind = turn.stage_kind
-        if stages and stages[-1].kind == kind:
+        mode = turn.normalized_mode
+        if stages and stages[-1].mode == mode:
             stages[-1].turns.append(turn)
             continue
+        kind = turn.stage_kind
         if kind == "planning" or cycle == 0:
             cycle += 1
-        stages.append(Stage(index=len(stages) + 1, cycle_index=cycle, kind=kind, turns=[turn]))
+        stages.append(
+            Stage(index=len(stages) + 1, cycle_index=cycle, kind=kind, mode=mode, turns=[turn])
+        )
     return stages
 
 
@@ -213,45 +274,106 @@ def stage_status(stage: Stage) -> str:
     return "stopped"
 
 
-def _within(value: str | None, start: str, end: str | None) -> bool:
+def _instant(value: str | None) -> datetime | None:
+    """ISO-8601 a UTC, o ``None`` si no se puede leer.
+
+    Comparar estas marcas como cadenas es incorrecto: `Z` y `+00:00` son el
+    mismo instante y ordenan distinto, y dos offsets equivalentes con
+    fracciones distintas también. Una fecha ilegible es un hecho desconocido,
+    no una que sea "menor que" las demás.
+    """
     if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _within(value: str | None, start: str, end: str | None) -> bool:
+    """¿Cae ``value`` dentro de la ventana? Una fecha ilegible no cuenta."""
+    moment = _instant(value)
+    begin = _instant(start)
+    if moment is None or begin is None:
         return False
-    return value >= start and (end is None or value <= end)
+    if moment < begin:
+        return False
+    finish = _instant(end) if end else None
+    return finish is None or moment <= finish
 
 
-def stage_progress(stage: Stage, status: str, tasks: list[dict[str, Any]] | None) -> float | None:
-    """Honest progress: task graph for BUILD, plan completion for PLAN,
-    verification outcomes for REVIEW. Without evidence it is ``None``, never a
-    ratio of turns on an unfinished stage."""
+def _order_key(turn: TurnFacts) -> tuple[datetime, str]:
+    """Orden estable de turnos: instante y, a igualdad, `turn_id`.
+
+    Un turno sin fecha legible va al final en vez de colarse al principio por
+    comparación lexicográfica.
+    """
+    moment = _instant(turn.started_at)
+    return (moment or datetime.max.replace(tzinfo=UTC), turn.turn_id)
+
+
+def stage_task_snapshot(
+    stage: Stage, tasks: list[dict[str, Any]] | None
+) -> dict[str, int] | None:
+    """Tareas del grafo **de ahora** cuya ventana toca esta etapa.
+
+    Es una foto del presente, no el estado que tenían cuando la etapa corría.
+    La pertenencia se decide por `created_at`/`updated_at` pero el estado sale
+    del grafo actual, así que una tarea creada aquí y terminada mucho después
+    aparecería como progreso retroactivo de una etapa ya cerrada. Por eso se
+    llama snapshot y sólo alimenta el progreso de una etapa **viva**, donde
+    «ahora» y «entonces» son lo mismo.
+    """
+    if not tasks:
+        return None
+    end = stage.completed_at
+    touched = [
+        task
+        for task in tasks
+        if _within(task.get("created_at"), stage.started_at, end)
+        or _within(task.get("updated_at"), stage.started_at, end)
+    ]
+    if not touched:
+        return None
+    return {
+        "total": len(touched),
+        "done": sum(1 for task in touched if task.get("status") == "done"),
+        "open": sum(1 for task in touched if task.get("status") in OPEN_TASK_STATES),
+    }
+
+
+def stage_progress(
+    stage: Stage,
+    status: str,
+    snapshot: dict[str, int] | None,
+) -> float | None:
+    """Progreso honesto, o ``None``.
+
+    - **PLAN**: terminado es 1.0; mientras corre no se sabe.
+    - **REVIEW**: proporción de verificaciones **aprobadas** sobre las
+      ejecutadas. No es porcentaje temporal de avance: una etapa con una de
+      dos verificaciones aprobadas da 0.5 aunque haya terminado.
+    - **BUILD**: proporción de tareas hechas, y sólo mientras la etapa está
+      viva. Una etapa de build terminada **sin** evidencia de tareas devuelve
+      `None`, no 1.0: que un turno acabe no dice cuánto del trabajo se hizo, y
+      afirmarlo era comunicar una certeza que no existe.
+    """
     if stage.kind == "planning":
         return 1.0 if status == "done" else None
     if stage.kind == "review":
         passed = sum(turn.verification_passed for turn in stage.turns)
         failed = sum(turn.verification_failed for turn in stage.turns)
         return passed / (passed + failed) if passed + failed else None
-    if tasks:
-        end = stage.completed_at
-        touched = [
-            task
-            for task in tasks
-            if _within(task.get("created_at"), stage.started_at, end)
-            or _within(task.get("updated_at"), stage.started_at, end)
-        ]
-        if touched:
-            done = sum(1 for task in touched if task.get("status") == "done")
-            return done / len(touched)
-    return 1.0 if status == "done" else None
+    # Sólo la etapa viva puede usar el grafo actual como su propio estado.
+    if snapshot and status in {"active", "needs_you"}:
+        return snapshot["done"] / snapshot["total"]
+    return None
 
 
 def _timestamp_ms(value: str | None) -> float | None:
-    if not value:
-        return None
-    from datetime import datetime
-
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp() * 1000
-    except ValueError:
-        return None
+    moment = _instant(value)
+    return moment.timestamp() * 1000 if moment is not None else None
 
 
 def stage_payload(
@@ -287,20 +409,33 @@ def stage_payload(
         1 for row in checkpoints if _within(str(row.get("created_at") or ""), stage.started_at, end)
     )
     ordered_files = list(files.values())
+    snapshot = stage_task_snapshot(stage, tasks)
     return {
         "id": f"stg_{first.turn_id}",
         "index": stage.index,
         "cycle_index": stage.cycle_index,
         "kind": stage.kind,
-        "mode": first.mode,
+        # El modo de la etapa entera: es lo que la delimita, así que todos sus
+        # turnos lo comparten.
+        "mode": stage.mode,
         "title": title or "",
         "excerpt": excerpt(first.user_message),
         "status": status,
         "started_at": stage.started_at,
         "completed_at": stage.completed_at,
         "duration_ms": duration if duration is None or duration >= 0 else None,
-        "progress": stage_progress(stage, status, tasks),
+        "progress": stage_progress(stage, status, snapshot),
+        # Foto del grafo de tareas de **ahora**, no el estado histórico de la
+        # etapa. Se publica con su nombre para que nadie lo lea como avance
+        # pasado (ver `stage_task_snapshot`).
+        "current_task_snapshot": snapshot,
         "turns": len(stage.turns),
+        # Una etapa puede terminar en `done` habiendo tenido fallos por el
+        # camino. El estado final no lo cuenta, así que se cuenta aparte.
+        "turns_failed": sum(1 for turn in stage.turns if turn.status == "failed"),
+        "turns_stopped": sum(
+            1 for turn in stage.turns if turn.status in {"stopped", "cancelled"}
+        ),
         "executors": [{"model": model, "calls": calls} for model, calls in models.most_common()],
         "agents": [{"agent": agent, "runs": runs} for agent, runs in agents.most_common()],
         "sessions": list(sessions.values()),
@@ -313,29 +448,62 @@ def stage_payload(
     }
 
 
+def flow_revision(parts: Iterable[str]) -> str:
+    """Huella del alcance: cambia cuando cambia cualquier hecho que lo alimenta.
+
+    Es lo que permite invalidar sin adivinar. El escritorio no puede decidir
+    si refrescar mirando si una sesión aparece en las etapas —una sesión
+    recién creada todavía no tiene turnos y no aparecería—, así que la
+    pertenencia y el estado se resumen aquí: sesiones del alcance, hasta dónde
+    llegaron sus eventos, y la forma de tareas y checkpoints.
+
+    Una respuesta con una revisión anterior no debe reemplazar a otra más
+    nueva, y dos consultas de la misma revisión describen el mismo flujo.
+    """
+    payload = "\n".join(sorted(parts)).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:16]
+
+
 def build_flow(
     *,
     scope: dict[str, Any],
     turns: list[TurnFacts],
     tasks: list[dict[str, Any]] | None,
     checkpoints: list[dict[str, Any]] | None = None,
+    revision: str | None = None,
 ) -> dict[str, Any]:
     stages = group_stages(turns)
     payloads = [stage_payload(stage, tasks, checkpoints or []) for stage in stages]
     all_files = {item["path"] for stage in stages for turn in stage.turns for item in turn.files}
-    weighted = [
-        (payload["progress"], payload["turns"])
-        for payload in payloads
-        if payload["progress"] is not None
-    ]
-    total_weight = sum(weight for _, weight in weighted)
-    progress = (
-        sum(value * weight for value, weight in weighted) / total_weight if total_weight else None
+    # El resumen **no** puede esconder lo que no se sabe.
+    #
+    # Antes se promediaban sólo las etapas con progreso conocido, así que un
+    # PLAN terminado (100 %) junto a un BUILD activo sin evidencia daba un
+    # resumen de 100 % mientras el trabajo seguía. El número decía «terminado»
+    # de algo que estaba a medias.
+    #
+    # Ahora, si alguna etapa tiene progreso desconocido el total es `None`, y
+    # se publica aparte cuántas etapas se conocen para que la interfaz pueda
+    # decir «parcial» sin fingir un total.
+    known = [payload for payload in payloads if payload["progress"] is not None]
+    total_weight = sum(payload["turns"] for payload in known)
+    partial = (
+        sum(payload["progress"] * payload["turns"] for payload in known) / total_weight
+        if total_weight
+        else None
     )
-    ordered = sorted(turns, key=lambda turn: (turn.started_at, turn.turn_id))
+    progress = partial if payloads and len(known) == len(payloads) else None
+    ordered = sorted(turns, key=_order_key)
     last_activity = max((turn.completed_at or turn.started_at for turn in ordered), default=None)
     return {
         "scope": scope,
+        # Sin revisión explícita se deriva de los turnos, que es lo único que
+        # este nivel conoce. `collect_flow` pasa la de verdad, que incluye
+        # membresía, tareas y checkpoints.
+        "revision": revision
+        or flow_revision(
+            f"turn:{turn.turn_id}:{turn.status}:{turn.completed_at}" for turn in turns
+        ),
         "summary": {
             "stages_total": len(payloads),
             "stages_done": sum(1 for payload in payloads if payload["status"] == "done"),
@@ -355,6 +523,16 @@ def build_flow(
                 else None
             ),
             "progress": progress,
+            # Cobertura del número de arriba: con qué parte del flujo se ha
+            # podido calcular. `progress` es `None` en cuanto falta una etapa,
+            # y esto dice cuántas faltan.
+            "progress_coverage": {
+                "known_stages": len(known),
+                "total_stages": len(payloads),
+                # Promedio de lo conocido, **rotulado como parcial**. Nunca se
+                # presenta como progreso total.
+                "partial_progress": partial,
+            },
             "started_at": ordered[0].started_at if ordered else None,
             "last_activity_at": last_activity,
         },
@@ -375,7 +553,7 @@ def collect_flow(
     """
     from pathlib import Path
 
-    from rinari.shared.errors import InvalidUsageError, RinariError
+    from rinari.shared.errors import InvalidUsageError
 
     if bool(project_id) == bool(session_id):
         raise InvalidUsageError("Provide exactly one of project_id or session_id.")
@@ -393,11 +571,11 @@ def collect_flow(
     else:
         project = services.projects.get(str(project_id))
         root = project.canonical_root
-        sessions = [
-            row
-            for row in services.sessions.list(limit=500)
-            if row.project_id == project.id or row.project_root_snapshot == root
-        ]
+        # Por consulta y sin tope: antes se pedían las 500 sesiones más
+        # recientes de **todo** el Engine y se filtraba en Python, así que un
+        # proyecto con sesiones más antiguas que ese corte salía truncado sin
+        # que nada lo indicara.
+        sessions = services.ctx.session_repo.for_project(project.id, root)
         scope = {
             "kind": "project",
             "id": project.id,
@@ -405,20 +583,49 @@ def collect_flow(
             "root": root,
         }
     turns: list[TurnFacts] = []
+    # La revisión se compone mientras se leen los hechos: qué sesiones forman
+    # el alcance y hasta dónde llegó cada una. Incluye las sesiones **sin
+    # turnos**, que es lo que permite al escritorio enterarse de una sesión
+    # recién creada sin esperar a que produzca actividad.
+    marcas = [f"scope:{scope['kind']}:{scope['id']}"]
     for row in sessions:
-        turns.extend(turn_facts_from_events(row, services.ctx.event_repo.list(row.id)))
+        marcas.append(f"session:{row.id}:{services.ctx.event_repo.last_seq(row.id)}:{row.state}")
+        turns.extend(
+            turn_facts_from_events(
+                row, services.ctx.event_repo.list(row.id, types=FLOW_EVENT_TYPES)
+            )
+        )
     tasks: list[dict[str, Any]] | None = None
     checkpoints: list[dict[str, Any]] = []
-    if root:
-        try:
-            tasks = list(services.tasks.tree(root)["tasks"])
-        except RinariError:
-            tasks = None
-        try:
+    # La carpeta ausente se comprueba **antes** de preguntar, en vez de
+    # capturar la excepción que sale al preguntar. Antes se capturaba
+    # cualquier `RinariError` y se devolvía «sin datos», así que una base de
+    # datos corrupta, un permiso denegado o un fallo de esquema quedaban
+    # indistinguibles de un proyecto que nunca tuvo tareas: un error real
+    # disfrazado de hecho. Con la precondición explícita, lo que salga de
+    # estas llamadas es un problema de verdad y sube.
+    if root and Path(root).is_dir():
+        tasks = list(services.tasks.tree(root)["tasks"])
+        # Los checkpoints se apoyan en Git, así que un proyecto sin repositorio
+        # sencillamente no tiene. Es una función no disponible, no un fallo, y
+        # se comprueba igual que la carpeta: preguntando antes. `.git` puede
+        # ser un fichero en un worktree, así que basta con que exista.
+        if (Path(root) / ".git").exists():
             checkpoints = list(services.checkpoints.list(root))
-        except RinariError:
-            checkpoints = []
-    return build_flow(scope=scope, turns=turns, tasks=tasks, checkpoints=checkpoints)
+    # Tareas y checkpoints entran en la revisión: cambiar el estado de una
+    # tarea mueve el progreso de una etapa viva, así que tiene que invalidar
+    # aunque no haya ocurrido ningún turno.
+    for task in tasks or ():
+        marcas.append(f"task:{task.get('id')}:{task.get('status')}:{task.get('updated_at')}")
+    for row in checkpoints:
+        marcas.append(f"checkpoint:{row.get('id')}:{row.get('created_at')}")
+    return build_flow(
+        scope=scope,
+        turns=turns,
+        tasks=tasks,
+        checkpoints=checkpoints,
+        revision=flow_revision(marcas),
+    )
 
 
 __all__ = [

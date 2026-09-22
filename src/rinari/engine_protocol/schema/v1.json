@@ -2191,21 +2191,26 @@
           "enum": [
             "project",
             "session"
-          ]
+          ],
+          "maxLength": 128
         },
         "id": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 128
         },
         "title": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 300
         },
         "root": {
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "maxLength": 1024
         }
-      }
+      },
+      "additionalProperties": false
     },
     "flowExecutor": {
       "type": "object",
@@ -2215,13 +2220,15 @@
       ],
       "properties": {
         "model": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 128
         },
         "calls": {
           "type": "integer",
           "minimum": 1
         }
-      }
+      },
+      "additionalProperties": false
     },
     "flowAgent": {
       "type": "object",
@@ -2231,13 +2238,15 @@
       ],
       "properties": {
         "agent": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 128
         },
         "runs": {
           "type": "integer",
           "minimum": 1
         }
-      }
+      },
+      "additionalProperties": false
     },
     "flowSessionRef": {
       "type": "object",
@@ -2248,16 +2257,19 @@
       ],
       "properties": {
         "session_id": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 128
         },
         "title": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 300
         },
         "turns": {
           "type": "integer",
           "minimum": 1
         }
-      }
+      },
+      "additionalProperties": false
     },
     "flowFile": {
       "type": "object",
@@ -2268,15 +2280,19 @@
       ],
       "properties": {
         "path": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 1024
         },
         "kind": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 128
         },
         "turn_id": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 128
         }
-      }
+      },
+      "additionalProperties": false
     },
     "flowVerification": {
       "type": "object",
@@ -2293,7 +2309,8 @@
           "type": "integer",
           "minimum": 0
         }
-      }
+      },
+      "additionalProperties": false
     },
     "flowAnchor": {
       "type": "object",
@@ -2303,12 +2320,15 @@
       ],
       "properties": {
         "session_id": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 128
         },
         "turn_id": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 128
         }
-      }
+      },
+      "additionalProperties": false
     },
     "flowStage": {
       "type": "object",
@@ -2334,11 +2354,15 @@
         "verification",
         "checkpoints",
         "origin_peer_turns",
-        "anchor"
+        "anchor",
+        "current_task_snapshot",
+        "turns_failed",
+        "turns_stopped"
       ],
       "properties": {
         "id": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 128
         },
         "index": {
           "type": "integer",
@@ -2354,19 +2378,23 @@
             "planning",
             "implementation",
             "review"
-          ]
+          ],
+          "maxLength": 128
         },
         "mode": {
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "maxLength": 128
         },
         "title": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 300
         },
         "excerpt": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 400
         },
         "status": {
           "type": "string",
@@ -2379,13 +2407,15 @@
           ]
         },
         "started_at": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 64
         },
         "completed_at": {
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "maxLength": 64
         },
         "duration_ms": {
           "type": [
@@ -2409,25 +2439,29 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/flowExecutor"
-          }
+          },
+          "maxItems": 64
         },
         "agents": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/flowAgent"
-          }
+          },
+          "maxItems": 64
         },
         "sessions": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/flowSessionRef"
-          }
+          },
+          "maxItems": 64
         },
         "files": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/flowFile"
-          }
+          },
+          "maxItems": 64
         },
         "files_more": {
           "type": "integer",
@@ -2453,8 +2487,28 @@
         },
         "anchor": {
           "$ref": "#/$defs/flowAnchor"
+        },
+        "current_task_snapshot": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/flowTasks"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Foto del grafo de tareas actual cuya ventana toca esta etapa. No es el estado histórico de la etapa: sólo alimenta el progreso mientras la etapa está viva."
+        },
+        "turns_failed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "turns_stopped": {
+          "type": "integer",
+          "minimum": 0
         }
-      }
+      },
+      "additionalProperties": false
     },
     "flowTasks": {
       "type": "object",
@@ -2476,7 +2530,8 @@
           "type": "integer",
           "minimum": 0
         }
-      }
+      },
+      "additionalProperties": false
     },
     "flowSummary": {
       "type": "object",
@@ -2490,7 +2545,8 @@
         "tasks",
         "progress",
         "started_at",
-        "last_activity_at"
+        "last_activity_at",
+        "progress_coverage"
       ],
       "properties": {
         "stages_total": {
@@ -2539,22 +2595,55 @@
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "maxLength": 64
         },
         "last_activity_at": {
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "maxLength": 64
+        },
+        "progress_coverage": {
+          "type": "object",
+          "required": [
+            "known_stages",
+            "total_stages",
+            "partial_progress"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "known_stages": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "total_stages": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "partial_progress": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 1,
+              "description": "Promedio de las etapas conocidas. Es parcial por definición y no se presenta como progreso total."
+            }
+          },
+          "description": "Con qué parte del flujo se calculó `progress`. Si falta alguna etapa, `progress` es null y esto dice cuántas se conocen."
         }
-      }
+      },
+      "additionalProperties": false
     },
     "flowResult": {
       "type": "object",
       "required": [
         "scope",
         "summary",
-        "stages"
+        "stages",
+        "revision"
       ],
       "properties": {
         "scope": {
@@ -2567,9 +2656,17 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/flowStage"
-          }
+          },
+          "maxItems": 500
+        },
+        "revision": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Revisión del alcance en el momento de proyectar. Una respuesta con una revisión anterior no debe reemplazar a otra más nueva."
         }
-      }
+      },
+      "additionalProperties": false
     }
   }
 }

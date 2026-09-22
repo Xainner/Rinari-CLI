@@ -24,8 +24,10 @@ from rinari.engine_protocol.flow import (
     excerpt,
     group_stages,
     plan_heading,
+    stage_payload,
     stage_progress,
     stage_status,
+    stage_task_snapshot,
     turn_facts_from_events,
 )
 from rinari.engine_protocol.server import EngineServer
@@ -140,7 +142,21 @@ def test_excerpt_and_plan_heading_strip_markdown_and_clip() -> None:
     assert plan_heading("") is None
 
 
+def _iso(value: str | None) -> str | None:
+    """`"10:05"` a una marca ISO-8601 real del mismo día.
+
+    Las pruebas se leen mejor con horas cortas, pero el proyector compara
+    instantes, no cadenas: una hora suelta no es una fecha y se trata como
+    hecho desconocido. Se expande aquí para que los casos ejerciten el camino
+    real; los que quieran probar fechas ilegibles pasan el valor crudo.
+    """
+    if value is None or "T" in value or value == "":
+        return value
+    return f"2026-09-17T{value}:00+00:00"
+
+
 def _facts(turn_id, mode, started, completed=None, status="completed", session="ses_a", **kw):
+    started, completed = _iso(started), _iso(completed)
     return TurnFacts(
         turn_id=turn_id,
         session_id=session,
@@ -214,30 +230,92 @@ def test_progress_never_invents_a_number() -> None:
     done_plan = group_stages([_facts("p1", "plan", "10:00", "10:05")])[0]
     assert stage_progress(done_plan, "done", None) == 1.0
 
-    build = group_stages([_facts("b1", "build", "10:10", "10:20")])[0]
-    # Tasks touched during the stage drive the ratio; untouched ones do not count.
+    # BUILD viva: el grafo de tareas de ahora **es** su estado de ahora.
+    running_build = group_stages([_facts("b1", "build", "10:10", None)])[0]
     tasks = [
         {"id": "1", "status": "done", "created_at": "10:11", "updated_at": "10:12"},
         {"id": "2", "status": "pending", "created_at": "10:11", "updated_at": "10:11"},
         {"id": "3", "status": "done", "created_at": "10:13", "updated_at": "10:14"},
         {"id": "old", "status": "pending", "created_at": "09:00", "updated_at": "09:00"},
     ]
-    assert stage_progress(build, "done", tasks) == pytest.approx(2 / 3)
-    # Without tasks: 1.0 only when the stage is done, otherwise unknown.
-    assert stage_progress(build, "done", None) == 1.0
-    running_build = group_stages([_facts("b1", "build", "10:10", None)])[0]
-    assert stage_progress(running_build, "active", None) is None
-    assert (
-        stage_progress(
-            running_build, "active", [{"id": "old", "status": "done", "created_at": "09:00"}]
-        )
-        is None
-    )
+    tasks = [
+        {k: _iso(v) if k.endswith("_at") else v for k, v in task.items()} for task in tasks
+    ]
+    vivo = stage_task_snapshot(running_build, tasks)
+    # Las tareas de fuera de la ventana no cuentan.
+    assert vivo == {"total": 3, "done": 2, "open": 1}
+    assert stage_progress(running_build, "active", vivo) == pytest.approx(2 / 3)
 
+    # BUILD terminada: el grafo actual ya no describe lo que pasó entonces, así
+    # que no fabrica progreso histórico (F11-07).
+    done_build = group_stages([_facts("b1", "build", "10:10", "10:20")])[0]
+    assert stage_progress(done_build, "done", stage_task_snapshot(done_build, tasks)) is None
+
+    # Y sin evidencia ninguna tampoco es 1.0 por haber terminado (F11-02): que
+    # un turno acabe no dice cuánto del trabajo se hizo.
+    assert stage_progress(done_build, "done", None) is None
+    assert stage_progress(running_build, "active", None) is None
+
+    # REVIEW es proporción de verificaciones aprobadas, no avance temporal.
     review = group_stages([_facts("r1", "review", "10:30", "10:40", passed=3, failed=1)])[0]
     assert stage_progress(review, "done", None) == 0.75
     quiet_review = group_stages([_facts("r1", "review", "10:30", "10:40")])[0]
     assert stage_progress(quiet_review, "done", None) is None
+
+
+def test_summary_progress_never_claims_a_total_it_does_not_have() -> None:
+    """F11-02: el caso que enseñaba 100 % con el trabajo vivo.
+
+    PLAN terminado (100 %) + BUILD activo sin evidencia daba 100 % de total,
+    porque se promediaban sólo las etapas conocidas.
+    """
+    flow = build_flow(
+        scope={"kind": "project", "id": "p", "title": "P", "root": None},
+        turns=[
+            _facts("p1", "plan", "10:00", "10:05", heading="Diseño"),
+            _facts("b1", "build", "10:10", None),
+        ],
+        tasks=None,
+    )
+    assert flow["summary"]["progress"] is None
+    cobertura = flow["summary"]["progress_coverage"]
+    assert cobertura["known_stages"] == 1
+    assert cobertura["total_stages"] == 2
+    # El parcial existe, pero rotulado como tal y nunca como total.
+    assert cobertura["partial_progress"] == 1.0
+
+    # Con todas las etapas conocidas sí hay total.
+    completo = build_flow(
+        scope={"kind": "project", "id": "p", "title": "P", "root": None},
+        turns=[_facts("p1", "plan", "10:00", "10:05", heading="Diseño")],
+        tasks=None,
+    )
+    assert completo["summary"]["progress"] == 1.0
+    assert completo["summary"]["progress_coverage"]["known_stages"] == 1
+
+
+def test_stage_boundaries_follow_the_real_mode_not_the_presentation_kind() -> None:
+    """F11-03: `ask`, `agent` y `full-access` comparten `implementation`.
+
+    Agrupando por `kind` los tres turnos caían en una etapa y el payload se
+    quedaba con el modo del primero, describiendo la etapa con algo que sólo
+    valía para un turno.
+    """
+    stages = group_stages(
+        [
+            _facts("t1", "ask", "10:00", "10:01"),
+            _facts("t2", "agent", "10:02", "10:03"),
+            _facts("t3", "full-access", "10:04", "10:05"),
+        ]
+    )
+    assert [stage.kind for stage in stages] == ["implementation"] * 3
+    assert [stage.mode for stage in stages] == ["ask", "agent", "full-access"]
+
+    # Un modo ausente es explícito y no se funde con el anterior.
+    mezcla = group_stages(
+        [_facts("t1", "agent", "10:00", "10:01"), _facts("t2", None, "10:02", "10:03")]
+    )
+    assert [stage.mode for stage in mezcla] == ["agent", "unknown"]
 
 
 def test_build_flow_payload_summary_files_executors_and_anchor() -> None:
@@ -293,8 +371,12 @@ def test_build_flow_payload_summary_files_executors_and_anchor() -> None:
     assert summary["turns_total"] == 3 and summary["turns_failed"] == 0
     assert summary["files_changed"] == MAX_STAGE_FILES + 3
     assert summary["tasks"] == {"total": 3, "done": 1, "open": 1}
-    # Only the finished PLAN has a progress (1.0); the running BUILD has none.
-    assert summary["progress"] == 1.0
+    # El PLAN terminado vale 1.0 y el BUILD vivo no se sabe, así que **no hay
+    # total**: decir 100 % con el trabajo en marcha era el fallo F11-02.
+    assert summary["progress"] is None
+    assert summary["progress_coverage"]["known_stages"] == 1
+    assert summary["progress_coverage"]["total_stages"] == 2
+    assert summary["progress_coverage"]["partial_progress"] == 1.0
     assert summary["started_at"] == "2026-09-17T10:00:00.000Z"
     assert summary["last_activity_at"] == "2026-09-17T10:21:00.000Z"
 
@@ -330,6 +412,11 @@ def test_empty_scope_yields_an_empty_flow_not_an_error() -> None:
         "files_changed": 0,
         "tasks": None,
         "progress": None,
+        "progress_coverage": {
+            "known_stages": 0,
+            "total_stages": 0,
+            "partial_progress": None,
+        },
         "started_at": None,
         "last_activity_at": None,
     }
@@ -488,9 +575,82 @@ def test_flow_get_degrades_when_the_project_folder_is_gone(server, tmp_path, mod
     flow = _ok(server, "flow.get", {"project_id": project["id"]})
     assert flow["summary"]["tasks"] is None
     assert [stage["status"] for stage in flow["stages"]] == ["done"]
-    assert flow["stages"][0]["progress"] == 1.0
+    # Sin la carpeta no hay evidencia de tareas, así que el progreso de una
+    # etapa de build es desconocido — no 1.0 por haber terminado el turno.
+    assert flow["stages"][0]["progress"] is None
+    assert flow["stages"][0]["current_task_snapshot"] is None
+    assert flow["summary"]["progress"] is None
 
 
 def test_flow_get_announces_its_capability(server):
     info = _ok(server, "engine.info")
     assert info["capabilities"]["project_flow_v1"] is True
+
+
+def test_timestamps_compare_as_instants_not_as_strings() -> None:
+    """F11-11: `Z` y `+00:00` son el mismo instante.
+
+    Comparando cadenas, `2026-09-17T10:00:00Z` y
+    `2026-09-17T12:00:00+02:00` ordenan al revés de lo que son.
+    """
+    con_z = TurnFacts(
+        turn_id="t2", session_id="s", session_title="S", mode="build",
+        status="completed", started_at="2026-09-17T10:00:00Z",
+        completed_at="2026-09-17T10:30:00Z",
+    )
+    con_offset = TurnFacts(
+        turn_id="t1", session_id="s", session_title="S", mode="build",
+        status="completed", started_at="2026-09-17T11:00:00+02:00",  # 09:00Z, antes
+        completed_at="2026-09-17T11:30:00+02:00",
+    )
+    stages = group_stages([con_z, con_offset])
+    assert [turn.turn_id for turn in stages[0].turns] == ["t1", "t2"]
+
+    # Una fecha ilegible es hecho desconocido: va al final y no se cuela al
+    # principio por comparación lexicográfica.
+    rota = TurnFacts(
+        turn_id="t0", session_id="s", session_title="S", mode="build",
+        status="completed", started_at="ayer por la tarde", completed_at=None,
+    )
+    orden = group_stages([rota, con_z, con_offset])[0].turns
+    assert [turn.turn_id for turn in orden] == ["t1", "t2", "t0"]
+
+
+def test_a_recovered_stage_keeps_the_count_of_what_failed() -> None:
+    """F11-10: terminar bien no borra que hubo incidencias."""
+    stage = group_stages(
+        [
+            _facts("b1", "build", "10:00", "10:01", status="failed"),
+            _facts("b2", "build", "10:02", "10:03"),
+        ]
+    )[0]
+    assert stage_status(stage) == "done"
+    payload = stage_payload(stage, None, [])
+    assert payload["status"] == "done"
+    assert payload["turns_failed"] == 1
+    assert payload["turns_stopped"] == 0
+
+
+def test_the_revision_moves_when_a_task_moves() -> None:
+    """F11-06: cambiar una tarea sin abrir otro turno invalida el flujo."""
+    from rinari.engine_protocol.flow import flow_revision
+
+    antes = flow_revision(["session:s1:12:ACTIVE", "task:t1:pending:10:00"])
+    despues = flow_revision(["session:s1:12:ACTIVE", "task:t1:done:10:05"])
+    assert antes != despues
+    # Y es estable: los mismos hechos dan la misma revisión, en cualquier orden.
+    assert flow_revision(["b", "a"]) == flow_revision(["a", "b"])
+
+
+def test_a_new_session_without_turns_still_changes_the_revision() -> None:
+    """F11-05: la membresía no puede deducirse de las etapas.
+
+    Una sesión recién creada no tiene turnos, así que no aparece en ninguna
+    etapa. Si la revisión se calculara sólo con lo proyectado, el escritorio
+    no se enteraría de que el alcance cambió.
+    """
+    from rinari.engine_protocol.flow import flow_revision
+
+    sola = flow_revision(["scope:project:p1", "session:s1:4:ACTIVE"])
+    con_nueva = flow_revision(["scope:project:p1", "session:s1:4:ACTIVE", "session:s2:0:ACTIVE"])
+    assert sola != con_nueva
