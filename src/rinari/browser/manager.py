@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import hashlib
 import json
 import os
 import socket
@@ -34,7 +35,7 @@ import threading
 import time
 import urllib.request
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -48,6 +49,30 @@ DEFAULT_COMMAND_CANDIDATES = CANDIDATES
 
 MAX_SNAPSHOT_CHARS = 256 * 1024
 MAX_SCREENSHOT_BYTES = 4 * 1024 * 1024
+
+
+def _verify_upload_identity(path: Path, expected: dict[str, Any] | None) -> None:
+    if expected is None:
+        return
+    try:
+        before = path.stat()
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(65536), b""):
+                digest.update(chunk)
+        after = path.stat()
+    except (OSError, ValueError) as exc:
+        raise BrowserError("UPLOAD_CHANGED", "the upload is no longer the validated file") from exc
+    stable = before.st_size == after.st_size and before.st_mtime_ns == after.st_mtime_ns
+    matches = (
+        str(path) == str(expected.get("path"))
+        and after.st_size == expected.get("bytes")
+        and digest.hexdigest() == expected.get("sha256")
+    )
+    if not stable or not matches:
+        raise BrowserError("UPLOAD_CHANGED", "the upload changed after sandbox validation")
+
+
 MAX_A11Y_NODES = 500
 MAX_TYPED_CHARS = 200
 
@@ -62,11 +87,18 @@ _CDP_TO_BROWSER = {
 class BrowserError(Exception):
     """Structured browser failure (maps to tool error codes)."""
 
-    def __init__(self, code: str, message: str, *, retryable: bool = False) -> None:
+    def __init__(
+        self, code: str, message: str, *, retryable: bool = False, uncertain: bool = False
+    ) -> None:
         super().__init__(message)
+        # ¿Pudo la operación haberse aplicado pese al error? Un timeout o una
+        # desconexión **después** de emitir una mutación dejan ese estado: la
+        # acción quizá ocurrió. El §5.4 obliga entonces a reobservar antes de
+        # actuar, no a repetir, así que esto vence a la categoría del código.
+        self.uncertain = uncertain
         # BROWSER_DISCONNECTED | BROWSER_DEPENDENCY | BROWSER_LAUNCH_FAILED |
         # BROWSER_TIMEOUT | BROWSER_PROTOCOL | JS_ERROR | TARGET_NOT_FOUND |
-        # RESOURCE_EXHAUSTED | CANCELLED
+        # RESOURCE_EXHAUSTED | CANCELLED | BROWSER_UNSUPPORTED
         self.code = code
         self.message = message
         self.retryable = retryable
@@ -139,7 +171,14 @@ class BrowserManager:
         command: str | None = None,
         headless: bool = True,
         timeout_s: float = 15.0,
+        backend: Any | None = None,
     ) -> None:
+        # Backend inyectado (documento 03 §4.1): cuando lo hay, las operaciones
+        # page-level no se ejecutan sobre una CdpSession propia sino donde diga
+        # el backend —hoy, la WebContentsView que el usuario está viendo—. Los
+        # límites, los errores públicos y la interfaz que usan tools y policy
+        # no cambian, que es justo lo que pide el documento.
+        self._backend = backend
         self.session_id = session_id
         self._home_root = Path(home_root)
         self._endpoint_cfg = endpoint
@@ -168,7 +207,21 @@ class BrowserManager:
     # -- state ----------------------------------------------------------------
 
     @property
+    def is_disposed(self) -> bool:
+        """¿Se cerró este browser? Sólo aplica al backend inyectado.
+
+        Distinto de `connected`: un contexto vivo cuyo host se cayó está
+        desconectado pero no dispuesto, y puede recuperarse. Uno dispuesto no
+        vuelve, y entregarlo otra vez daría una sesión con browser aparente
+        donde cada operación falla.
+        """
+        backend = self._backend
+        return bool(backend is not None and getattr(backend, "closed", False))
+
+    @property
     def connected(self) -> bool:
+        if self._backend is not None:
+            return bool(self._backend.connected)
         session = self._session
         return session is not None and not session.closed and session.fatal is None
 
@@ -177,6 +230,16 @@ class BrowserManager:
         return self._home_root / "browser" / "profiles" / self.session_id / self._profile_instance
 
     def status(self) -> dict[str, Any]:
+        if self._backend is not None:
+            # El estado del backend nativo no tiene endpoint ni proceso que
+            # enseñar, y fingir uno sería mentir sobre lo que hay detrás
+            # (§6.3: «no fingir un proceso Chromium externo cuando no existe»).
+            #
+            # No se enumeran targets aquí: contarlos sería una ida y vuelta al
+            # host, y `status()` se llama desde handlers que corren en el loop
+            # de stdio. Quien necesite la lista llama a `targets()` desde un
+            # worker (§5.4).
+            return dict(self._backend.status())
         state = (
             "connected"
             if self.connected
@@ -233,6 +296,16 @@ class BrowserManager:
     # -- lifecycle ------------------------------------------------------------
 
     def connect(self, endpoint: str | None = None) -> str:
+        if self._backend is not None:
+            # Una sesión nativa no sale hacia un endpoint ajeno. El §4.1 no
+            # deja que un argumento de herramienta elija backend, y el §1 que
+            # un contexto lo cambie: serían dos autoridades sobre páginas
+            # distintas, con el usuario mirando la que ya no manda.
+            raise BrowserError(
+                "BROWSER_UNSUPPORTED",
+                "this session uses the desktop browser; connecting to an external CDP "
+                "endpoint would leave the visible page without an owner",
+            )
         target = endpoint or self._endpoint_cfg or os.environ.get(ENV_ENDPOINT) or self._endpoint
         if not target:
             raise BrowserError(
@@ -252,6 +325,19 @@ class BrowserManager:
         return self._endpoint or target
 
     def launch(self, command: str | None = None, port: int | None = None) -> str:
+        if self._backend is not None:
+            # El contexto nativo ya existe o no existe; no hay proceso que
+            # lanzar. La comprobación va **antes** que `self.connected`: con el
+            # host caído esa condición es falsa y el flujo seguía hasta
+            # `find_browser`/`Popen`, abriendo un Chromium externo para una
+            # sesión nativa (§6.3: «no fingir un proceso Chromium externo»).
+            if not self.connected:
+                raise BrowserError(
+                    "BROWSER_DISCONNECTED",
+                    "the desktop browser host is not available; its context cannot be "
+                    "relaunched from here",
+                )
+            return self._backend.kind
         if self.connected:
             return self._endpoint or ""
         external = self._endpoint_cfg or os.environ.get(ENV_ENDPOINT)
@@ -315,6 +401,9 @@ class BrowserManager:
 
     def close(self) -> dict[str, Any]:
         closed: list[str] = []
+        if self._backend is not None:
+            self._backend.close()
+            closed.append("host-context")
         if self._session is not None:
             try:
                 self._session.close()
@@ -422,7 +511,37 @@ class BrowserManager:
 
     # -- targets ---------------------------------------------------------------
 
+    @contextlib.contextmanager
+    def _mutation(self, operation: str) -> Iterator[None]:
+        """Una mutación semántica es indivisible frente al traspaso (§7).
+
+        Un click no es una operación: son unas coordenadas y tres eventos de
+        ratón. Sin esto, el traspaso de control podía colarse entre
+        `mousePressed` y `mouseReleased` y dejar la página con el botón
+        pulsado y el agente sin permiso para soltarlo.
+
+        Con el backend externo no hay arbitraje que sostener —no hay usuario
+        compartiendo esa página—, así que no hace nada.
+        """
+        backend = self._backend
+        scope = getattr(backend, "mutation_scope", None) if backend is not None else None
+        if scope is None:
+            yield
+            return
+        with scope(operation):
+            yield
+
     def _require_session(self) -> CdpSession:
+        if self._backend is not None:
+            # Con backend inyectado no hay CdpSession propia. Las operaciones
+            # que aún dependen de una (cookies, consola, red, descargas) tienen
+            # que decirlo con claridad: el §6.3 prohíbe que una herramienta
+            # desaparezca en silencio del escritorio.
+            raise BrowserError(
+                "BROWSER_UNSUPPORTED",
+                "this operation still requires the external browser backend; "
+                "it is not implemented for the desktop browser yet",
+            )
         session = self._session
         if session is None:
             raise BrowserError(
@@ -455,6 +574,8 @@ class BrowserManager:
         return session, self._attached[target_id]
 
     def targets(self) -> list[dict[str, Any]]:
+        if self._backend is not None:
+            return list(self._backend.targets())
         session = self._require_session()
         result = session.send("Target.getTargets")
         out: list[dict[str, Any]] = []
@@ -470,15 +591,22 @@ class BrowserManager:
         return out
 
     def new_page(self, url: str = "about:blank") -> dict[str, Any]:
+        if self._backend is not None:
+            return dict(self._backend.new_page(url))
         session = self._require_session()
         result = session.send("Target.createTarget", {"url": url})
         return {"target_id": result["targetId"], "url": url}
 
     def close_page(self, target_id: str) -> dict[str, Any]:
-        session = self._require_session()
-        session.send("Target.closeTarget", {"targetId": target_id})
-        self._attached.pop(target_id, None)
-        return {"closed": target_id}
+        with self._mutation("browser.tabs_close"):
+            if self._backend is not None:
+                result = dict(self._backend.close_page(target_id))
+                self._attached.pop(target_id, None)
+                return result
+            session = self._require_session()
+            session.send("Target.closeTarget", {"targetId": target_id})
+            self._attached.pop(target_id, None)
+            return {"closed": target_id}
 
     # -- page operations ---------------------------------------------------------
 
@@ -493,6 +621,15 @@ class BrowserManager:
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         self._raise_if_cancelled(cancelled)
+        if self._backend is not None:
+            return self._backend.send(
+                target_id,
+                method,
+                params,
+                domain=domain,
+                timeout_s=timeout_s,
+                cancelled=cancelled,
+            )
         session, session_id = self._session_for(target_id, domain)
         try:
             return session.send(method, params, session_id=session_id, timeout_s=timeout_s)
@@ -508,32 +645,33 @@ class BrowserManager:
         max_chars: int = 8000,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        self._raise_if_cancelled(cancelled)
-        session, session_id = self._session_for(target_id, "Runtime")
-        self._raise_if_cancelled(cancelled)
-        try:
-            result = session.send(
+        with self._mutation("browser.evaluate"):
+            self._raise_if_cancelled(cancelled)
+            # Por `call` para que el backend inyectado también reciba esta ruta:
+            # `snapshot`, `click` y `fill` se apoyan en `evaluate`, así que dejarla
+            # atada a la CdpSession habría dejado fuera media interfaz.
+            result = self.call(
+                target_id,
                 "Runtime.evaluate",
                 {"expression": expression, "returnByValue": True, "awaitPromise": await_promise},
-                session_id=session_id,
+                domain="Runtime",
                 timeout_s=10.0,
+                cancelled=cancelled,
             )
-        except CdpError as exc:
-            raise _cdp_to_browser(exc) from exc
-        if result.get("exceptionDetails"):
-            raise BrowserError(
-                "JS_ERROR", f"JavaScript error: {_exception_text(result['exceptionDetails'])}"
+            if result.get("exceptionDetails"):
+                raise BrowserError(
+                    "JS_ERROR", f"JavaScript error: {_exception_text(result['exceptionDetails'])}"
+                )
+            value = result.get("result", {}).get("value")
+            out: dict[str, Any] = {"value": value}
+            text = (
+                value
+                if isinstance(value, str)
+                else ("" if value is None else json.dumps(value, ensure_ascii=False, default=str))
             )
-        value = result.get("result", {}).get("value")
-        out: dict[str, Any] = {"value": value}
-        text = (
-            value
-            if isinstance(value, str)
-            else ("" if value is None else json.dumps(value, ensure_ascii=False, default=str))
-        )
-        if isinstance(text, str) and len(text) > max_chars:
-            out["truncated"] = True
-        return out
+            if isinstance(text, str) and len(text) > max_chars:
+                out["truncated"] = True
+            return out
 
     def navigate(
         self,
@@ -542,18 +680,23 @@ class BrowserManager:
         *,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        self._raise_if_cancelled(cancelled)
-        result = self.call(
-            target_id,
-            "Page.navigate",
-            {"url": url},
-            domain="Page",
-            timeout_s=30.0,
-            cancelled=cancelled,
-        )
-        if result.get("errorText"):
-            raise BrowserError("BROWSER_PROTOCOL", f"Navigation failed: {result['errorText']}")
-        return {"frame_id": result.get("frameId"), "loader_id": result.get("loaderId"), "url": url}
+        with self._mutation("browser.navigate"):
+            self._raise_if_cancelled(cancelled)
+            result = self.call(
+                target_id,
+                "Page.navigate",
+                {"url": url},
+                domain="Page",
+                timeout_s=30.0,
+                cancelled=cancelled,
+            )
+            if result.get("errorText"):
+                raise BrowserError("BROWSER_PROTOCOL", f"Navigation failed: {result['errorText']}")
+            return {
+                "frame_id": result.get("frameId"),
+                "loader_id": result.get("loaderId"),
+                "url": url,
+            }
 
     def snapshot(
         self,
@@ -627,6 +770,15 @@ class BrowserManager:
             cancelled=cancelled,
         )
         data = base64.b64decode(result.get("data", ""))
+        # Había tope por arriba y ninguno por abajo, así que una captura de cero
+        # bytes se devolvía como éxito. Quien la recibe cree entonces que tiene
+        # la página y la describe sin haberla visto. Un PNG vacío es un fallo,
+        # y se dice aquí para que valga en los dos backends.
+        if not data:
+            raise BrowserError(
+                "CAPTURE_EMPTY",
+                "The screenshot came back empty; the page was never rendered on screen",
+            )
         if len(data) > MAX_SCREENSHOT_BYTES:
             raise BrowserError(
                 "RESOURCE_EXHAUSTED", f"Screenshot exceeds budget: {len(data)} bytes"
@@ -682,14 +834,15 @@ class BrowserManager:
         y: float | None = None,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        px, py = self._point(target_id, selector, x, y, cancelled)
-        for event in (
-            {"type": "mouseMoved", "x": px, "y": py, "button": "none"},
-            {"type": "mousePressed", "x": px, "y": py, "button": "left", "clickCount": 1},
-            {"type": "mouseReleased", "x": px, "y": py, "button": "left", "clickCount": 1},
-        ):
-            self.call(target_id, "Input.dispatchMouseEvent", event, cancelled=cancelled)
-        return {"clicked": {"x": px, "y": py}}
+        with self._mutation("browser.click"):
+            px, py = self._point(target_id, selector, x, y, cancelled)
+            for event in (
+                {"type": "mouseMoved", "x": px, "y": py, "button": "none"},
+                {"type": "mousePressed", "x": px, "y": py, "button": "left", "clickCount": 1},
+                {"type": "mouseReleased", "x": px, "y": py, "button": "left", "clickCount": 1},
+            ):
+                self.call(target_id, "Input.dispatchMouseEvent", event, cancelled=cancelled)
+            return {"clicked": {"x": px, "y": py}}
 
     def fill(
         self,
@@ -699,12 +852,13 @@ class BrowserManager:
         *,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        self.evaluate(
-            target_id,
-            _JS_FILL % (json.dumps(selector), json.dumps(value), json.dumps(value)),
-            cancelled=cancelled,
-        )
-        return {"filled": selector, "chars": len(value)}
+        with self._mutation("browser.fill"):
+            self.evaluate(
+                target_id,
+                _JS_FILL % (json.dumps(selector), json.dumps(value), json.dumps(value)),
+                cancelled=cancelled,
+            )
+            return {"filled": selector, "chars": len(value)}
 
     def type_text(
         self,
@@ -715,29 +869,35 @@ class BrowserManager:
         press_enter: bool = False,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        if len(text) > MAX_TYPED_CHARS:
-            raise BrowserError(
-                "INVALID_ARGUMENT", f"text is limited to {MAX_TYPED_CHARS} characters"
-            )
-        self.evaluate(target_id, _JS_FOCUS % json.dumps(selector), cancelled=cancelled)
-        for char in text:
-            code = _virtual_key_code(char)
-            for event_type in ("keyDown", "keyUp"):
-                self.call(
-                    target_id,
-                    "Input.dispatchKeyEvent",
-                    {"type": event_type, "text": char, "key": char, "windowsVirtualKeyCode": code},
-                    cancelled=cancelled,
+        with self._mutation("browser.type"):
+            if len(text) > MAX_TYPED_CHARS:
+                raise BrowserError(
+                    "INVALID_ARGUMENT", f"text is limited to {MAX_TYPED_CHARS} characters"
                 )
-        if press_enter:
-            for event_type in ("keyDown", "keyUp"):
-                self.call(
-                    target_id,
-                    "Input.dispatchKeyEvent",
-                    {"type": event_type, "key": "Enter", "windowsVirtualKeyCode": 13},
-                    cancelled=cancelled,
-                )
-        return {"typed": len(text), "enter": press_enter}
+            self.evaluate(target_id, _JS_FOCUS % json.dumps(selector), cancelled=cancelled)
+            for char in text:
+                code = _virtual_key_code(char)
+                for event_type in ("keyDown", "keyUp"):
+                    self.call(
+                        target_id,
+                        "Input.dispatchKeyEvent",
+                        {
+                            "type": event_type,
+                            "text": char,
+                            "key": char,
+                            "windowsVirtualKeyCode": code,
+                        },
+                        cancelled=cancelled,
+                    )
+            if press_enter:
+                for event_type in ("keyDown", "keyUp"):
+                    self.call(
+                        target_id,
+                        "Input.dispatchKeyEvent",
+                        {"type": event_type, "key": "Enter", "windowsVirtualKeyCode": 13},
+                        cancelled=cancelled,
+                    )
+            return {"typed": len(text), "enter": press_enter}
 
     def select_option(
         self,
@@ -747,10 +907,13 @@ class BrowserManager:
         *,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        out = self.evaluate(
-            target_id, _JS_SELECT % (json.dumps(selector), json.dumps(value)), cancelled=cancelled
-        )
-        return {"selected": (out.get("value") or {}).get("selected", value)}
+        with self._mutation("browser.select"):
+            out = self.evaluate(
+                target_id,
+                _JS_SELECT % (json.dumps(selector), json.dumps(value)),
+                cancelled=cancelled,
+            )
+            return {"selected": (out.get("value") or {}).get("selected", value)}
 
     def set_checked(
         self,
@@ -760,12 +923,13 @@ class BrowserManager:
         *,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        out = self.evaluate(
-            target_id,
-            _JS_CHECK % (json.dumps(selector), "true" if checked else "false"),
-            cancelled=cancelled,
-        )
-        return {"checked": bool(out.get("value"))}
+        with self._mutation("browser.check"):
+            out = self.evaluate(
+                target_id,
+                _JS_CHECK % (json.dumps(selector), "true" if checked else "false"),
+                cancelled=cancelled,
+            )
+            return {"checked": bool(out.get("value"))}
 
     def scroll(
         self,
@@ -777,28 +941,29 @@ class BrowserManager:
         y: float | None = None,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        if x is None or y is None:
-            out = self.evaluate(target_id, _JS_VIEWPORT, cancelled=cancelled)
-            size = out.get("value") or {}
-            if isinstance(size, list):
-                x = x if x is not None else size[0] / 2
-                y = y if y is not None else size[1] / 2
-            else:
-                x = x if x is not None else float(size.get("w", 800)) / 2
-                y = y if y is not None else float(size.get("h", 600)) / 2
-        self.call(
-            target_id,
-            "Input.dispatchMouseEvent",
-            {
-                "type": "mouseWheel",
-                "x": float(x),
-                "y": float(y),
-                "deltaX": float(dx),
-                "deltaY": float(dy),
-            },
-            cancelled=cancelled,
-        )
-        return {"scrolled": {"dx": float(dx), "dy": float(dy)}}
+        with self._mutation("browser.scroll"):
+            if x is None or y is None:
+                out = self.evaluate(target_id, _JS_VIEWPORT, cancelled=cancelled)
+                size = out.get("value") or {}
+                if isinstance(size, list):
+                    x = x if x is not None else size[0] / 2
+                    y = y if y is not None else size[1] / 2
+                else:
+                    x = x if x is not None else float(size.get("w", 800)) / 2
+                    y = y if y is not None else float(size.get("h", 600)) / 2
+            self.call(
+                target_id,
+                "Input.dispatchMouseEvent",
+                {
+                    "type": "mouseWheel",
+                    "x": float(x),
+                    "y": float(y),
+                    "deltaX": float(dx),
+                    "deltaY": float(dy),
+                },
+                cancelled=cancelled,
+            )
+            return {"scrolled": {"dx": float(dx), "dy": float(dy)}}
 
     def drag(
         self,
@@ -812,35 +977,36 @@ class BrowserManager:
         steps: int = 5,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        if steps < 1:
-            raise BrowserError("INVALID_ARGUMENT", "steps must be >= 1")
-        sx, sy = self._point(target_id, from_selector, from_x, from_y, cancelled)
-        self.call(
-            target_id,
-            "Input.dispatchMouseEvent",
-            {"type": "mousePressed", "x": sx, "y": sy, "button": "left", "clickCount": 1},
-            cancelled=cancelled,
-        )
-        for i in range(1, steps + 1):
-            t = i / steps
+        with self._mutation("browser.drag"):
+            if steps < 1:
+                raise BrowserError("INVALID_ARGUMENT", "steps must be >= 1")
+            sx, sy = self._point(target_id, from_selector, from_x, from_y, cancelled)
             self.call(
                 target_id,
                 "Input.dispatchMouseEvent",
-                {
-                    "type": "mouseMoved",
-                    "x": sx + (to_x - sx) * t,
-                    "y": sy + (to_y - sy) * t,
-                    "button": "left",
-                },
+                {"type": "mousePressed", "x": sx, "y": sy, "button": "left", "clickCount": 1},
                 cancelled=cancelled,
             )
-        self.call(
-            target_id,
-            "Input.dispatchMouseEvent",
-            {"type": "mouseReleased", "x": to_x, "y": to_y, "button": "left", "clickCount": 1},
-            cancelled=cancelled,
-        )
-        return {"from": {"x": sx, "y": sy}, "to": {"x": to_x, "y": to_y}}
+            for i in range(1, steps + 1):
+                t = i / steps
+                self.call(
+                    target_id,
+                    "Input.dispatchMouseEvent",
+                    {
+                        "type": "mouseMoved",
+                        "x": sx + (to_x - sx) * t,
+                        "y": sy + (to_y - sy) * t,
+                        "button": "left",
+                    },
+                    cancelled=cancelled,
+                )
+            self.call(
+                target_id,
+                "Input.dispatchMouseEvent",
+                {"type": "mouseReleased", "x": to_x, "y": to_y, "button": "left", "clickCount": 1},
+                cancelled=cancelled,
+            )
+            return {"from": {"x": sx, "y": sy}, "to": {"x": to_x, "y": to_y}}
 
     # -- upload / download ---------------------------------------------------------
 
@@ -850,46 +1016,81 @@ class BrowserManager:
         selector: str,
         file_path: Path,
         *,
+        provenance: dict[str, Any] | None = None,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        self._raise_if_cancelled(cancelled)
-        session, session_id = self._session_for(target_id, "Runtime")
-        try:
-            result = session.send(
-                "Runtime.evaluate",
-                {"expression": f"document.querySelector({json.dumps(selector)})"},
-                session_id=session_id,
-                timeout_s=10.0,
-            )
-        except CdpError as exc:
-            raise _cdp_to_browser(exc) from exc
-        if result.get("exceptionDetails"):
-            raise BrowserError("JS_ERROR", "JavaScript error picking the input element")
-        object_id = (result.get("result") or {}).get("objectId")
-        if not object_id:
-            raise BrowserError("TARGET_NOT_FOUND", "file input not found for the selector")
-        try:
-            session.send("DOM.enable", {}, session_id=session_id)
-            session.send(
-                "DOM.setFileInputFiles",
-                {"files": [str(Path(file_path).resolve())], "objectId": object_id},
-                session_id=session_id,
-            )
-        except CdpError as exc:
-            raise _cdp_to_browser(exc) from exc
-        return {"selector": selector, "file": str(file_path)}
+        with self._mutation("browser.upload"):
+            self._raise_if_cancelled(cancelled)
+            resolved = Path(file_path).resolve()
+            if self._backend is not None:
+                # El host resuelve el elemento y pone el fichero en una sola
+                # operación. No se le manda un `objectId`: el §4.2 pide interfaz
+                # semántica, y aquí además lo que viaja es una ruta del disco que
+                # la página va a poder leer.
+                self._backend.send(
+                    target_id,
+                    "DOM.setFileInputFiles",
+                    {
+                        "selector": selector,
+                        "files": [str(resolved)],
+                        **({"provenance": dict(provenance)} if provenance is not None else {}),
+                    },
+                    cancelled=cancelled,
+                )
+                return {"selector": selector, "file": str(file_path)}
+            _verify_upload_identity(resolved, provenance)
+            session, session_id = self._session_for(target_id, "Runtime")
+            try:
+                result = session.send(
+                    "Runtime.evaluate",
+                    {"expression": f"document.querySelector({json.dumps(selector)})"},
+                    session_id=session_id,
+                    timeout_s=10.0,
+                )
+            except CdpError as exc:
+                raise _cdp_to_browser(exc) from exc
+            if result.get("exceptionDetails"):
+                raise BrowserError("JS_ERROR", "JavaScript error picking the input element")
+            object_id = (result.get("result") or {}).get("objectId")
+            if not object_id:
+                raise BrowserError("TARGET_NOT_FOUND", "file input not found for the selector")
+            try:
+                session.send("DOM.enable", {}, session_id=session_id)
+                session.send(
+                    "DOM.setFileInputFiles",
+                    {"files": [str(Path(file_path).resolve())], "objectId": object_id},
+                    session_id=session_id,
+                )
+            except CdpError as exc:
+                raise _cdp_to_browser(exc) from exc
+            return {"selector": selector, "file": str(file_path)}
 
     def begin_download(self, download_dir: Path) -> Path:
-        session = self._require_session()
-        target = Path(download_dir)
-        target.mkdir(parents=True, exist_ok=True)
-        session.send(
-            "Browser.setDownloadBehavior",
-            {"behavior": "allow", "downloadPath": str(target), "eventsEnabled": True},
-        )
-        self._download_dir = target
-        self._download_base = {p.name for p in target.iterdir() if p.is_file()}
-        return target
+        with self._mutation("browser.download"):
+            target = Path(download_dir)
+            target.mkdir(parents=True, exist_ok=True)
+            if self._backend is not None:
+                # El host no reenvía `Browser.setDownloadBehavior`: ese dominio
+                # cruza particiones. Lo traduce a una operación de **su** contexto,
+                # que engancha las descargas de esa partición y sólo de esa.
+                self._backend.send(
+                    None, "Browser.setDownloadBehavior", {"downloadPath": str(target)}
+                )
+            else:
+                session = self._require_session()
+                session.send(
+                    "Browser.setDownloadBehavior",
+                    {"behavior": "allow", "downloadPath": str(target), "eventsEnabled": True},
+                )
+            # La línea base se toma **una sola vez** por directorio. Volver a
+            # tomarla en cada llamada rompía justo el reintento que esta misma
+            # herramienta recomienda: se habilita, se pulsa el enlace, y la segunda
+            # llamada encontraba el fichero ya en la base y lo daba por
+            # preexistente, así que la descarga no aparecía nunca.
+            if self._download_dir != target:
+                self._download_base = {p.name for p in target.iterdir() if p.is_file()}
+            self._download_dir = target
+            return target
 
     def poll_download(
         self,
@@ -910,10 +1111,16 @@ class BrowserManager:
             for path in entries:
                 if path.name in self._download_base or not path.is_file():
                     continue
-                if path.name.endswith(".crdownload") or path.name.endswith(".tmp"):
+                # `.part` lo escribe el host del escritorio, que renombra al
+                # terminar: sin esto se recogería un fichero a medio bajar y su
+                # sha256 describiría bytes incompletos.
+                if path.name.endswith((".crdownload", ".tmp", ".part")):
                     self._raise_if_cancelled(cancelled)
                     time.sleep(0.25)
                     break
+                # Se apunta como vista: la siguiente consulta busca la
+                # **siguiente** descarga, no vuelve a contar esta.
+                self._download_base.add(path.name)
                 return DownloadRef(
                     path=str(path), bytes=path.stat().st_size, suggested_name=path.name
                 )
@@ -930,13 +1137,21 @@ class BrowserManager:
         cancelled: Callable[[], bool] | None = None,
     ) -> list[dict[str, Any]]:
         self._raise_if_cancelled(cancelled)
-        session, session_id = self._session_for(target_id, "Runtime")
-        events = session.events(
-            session_id=session_id,
-            methods={"Runtime.consoleAPICalled", "Runtime.exceptionThrown"},
-            limit=limit,
-            wait_s=0.5,
-        )
+        if self._backend is not None:
+            # El host bufferiza la observación: aquí no hay `CdpSession` de la
+            # que drenar. La forma la da el mismo código de abajo, para que la
+            # herramienta no note de qué backend vino.
+            events = self._backend.observed_events(
+                target_id, "console", limit=limit, cancelled=cancelled
+            )
+        else:
+            session, session_id = self._session_for(target_id, "Runtime")
+            events = session.events(
+                session_id=session_id,
+                methods={"Runtime.consoleAPICalled", "Runtime.exceptionThrown"},
+                limit=limit,
+                wait_s=0.5,
+            )
         out: list[dict[str, Any]] = []
         for event in events:
             params = event.get("params", {})
@@ -962,17 +1177,22 @@ class BrowserManager:
         cancelled: Callable[[], bool] | None = None,
     ) -> list[dict[str, Any]]:
         self._raise_if_cancelled(cancelled)
-        session, session_id = self._session_for(target_id, "Network")
-        events = session.events(
-            session_id=session_id,
-            methods={
-                "Network.requestWillBeSent",
-                "Network.responseReceived",
-                "Network.loadingFailed",
-            },
-            limit=limit * 3,
-            wait_s=0.5,
-        )
+        if self._backend is not None:
+            events = self._backend.observed_events(
+                target_id, "network", limit=limit * 3, cancelled=cancelled
+            )
+        else:
+            session, session_id = self._session_for(target_id, "Network")
+            events = session.events(
+                session_id=session_id,
+                methods={
+                    "Network.requestWillBeSent",
+                    "Network.responseReceived",
+                    "Network.loadingFailed",
+                },
+                limit=limit * 3,
+                wait_s=0.5,
+            )
         requests: dict[str, dict[str, Any]] = {}
         order: list[str] = []
         for event in events:
@@ -1004,11 +1224,15 @@ class BrowserManager:
         cancelled: Callable[[], bool] | None = None,
     ) -> list[dict[str, Any]]:
         self._raise_if_cancelled(cancelled)
-        session, session_id = self._session_for(target_id, "Network")
-        try:
-            result = session.send("Network.getCookies", {}, session_id=session_id)
-        except CdpError as exc:
-            raise _cdp_to_browser(exc) from exc
+        if self._backend is not None:
+            # Las cookies son de la partición del contexto, no de una página.
+            result = self._backend.cookies(target_id, cancelled=cancelled)
+        else:
+            session, session_id = self._session_for(target_id, "Network")
+            try:
+                result = session.send("Network.getCookies", {}, session_id=session_id)
+            except CdpError as exc:
+                raise _cdp_to_browser(exc) from exc
         out: list[dict[str, Any]] = []
         for cookie in result.get("cookies", []):
             out.append(
@@ -1032,16 +1256,20 @@ class BrowserManager:
         *,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        self._raise_if_cancelled(cancelled)
-        session, session_id = self._session_for(target_id, "Network")
-        params: dict[str, Any] = {"name": name, "value": value}
-        if url:
-            params["url"] = url
-        try:
-            session.send("Network.setCookie", params, session_id=session_id)
-        except CdpError as exc:
-            raise _cdp_to_browser(exc) from exc
-        return {"set": name}  # the value never comes back out
+        with self._mutation("browser.set_cookie"):
+            self._raise_if_cancelled(cancelled)
+            if self._backend is not None:
+                self._backend.set_cookie(target_id, name, value, url, cancelled=cancelled)
+                return {"set": name}
+            session, session_id = self._session_for(target_id, "Network")
+            params: dict[str, Any] = {"name": name, "value": value}
+            if url:
+                params["url"] = url
+            try:
+                session.send("Network.setCookie", params, session_id=session_id)
+            except CdpError as exc:
+                raise _cdp_to_browser(exc) from exc
+            return {"set": name}  # the value never comes back out
 
 
 # -- helpers --------------------------------------------------------------------

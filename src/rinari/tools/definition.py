@@ -54,6 +54,12 @@ class ToolErrorCode(StrEnum):
     PARTIAL_FAILURE = "PARTIAL_FAILURE"
     VALIDATION_FAILED = "VALIDATION_FAILED"
     TOOL_NOT_FOUND = "TOOL_NOT_FOUND"
+    # La operación existe pero este backend no la implementa. Se distingue de
+    # DEPENDENCY_ERROR a propósito: aquel es reintentable y este no lo es
+    # —volver a intentarlo dará lo mismo—. Lo pide el documento 03 §4.2, que
+    # exige correspondencia explícita para «operación no soportada» en vez de
+    # dejar que una herramienta desaparezca en silencio del escritorio.
+    UNSUPPORTED = "UNSUPPORTED"
     UNKNOWN = "UNKNOWN"
 
 
@@ -293,6 +299,10 @@ class ToolDefinition:
     max_output_bytes: int | None = None
     handler: Callable[[dict, ToolContext], ToolResult] | None = None
     classify: Callable[[dict], ClassifiedAction] | None = None
+    # Algunas herramientas cruzan más de una autoridad. `browser.upload`, por
+    # ejemplo, lee un fichero local **y** muta una página remota. Reducirla a
+    # una sola acción dejaba una de esas dos decisiones fuera de policy.
+    classify_many: Callable[[dict], list[ClassifiedAction]] | None = None
     # Cheap, side-effect-free validation that runs after schema validation and
     # before policy/approvals. Returning a failed ToolResult rejects the call
     # without asking the owner for consent the call could never use (e.g. a
@@ -335,6 +345,8 @@ class ToolDefinition:
         return ClassifiedAction(self.name)
 
     def classify_actions(self, arguments: dict) -> list[ClassifiedAction]:
+        if self.classify_many is not None:
+            return self.classify_many(arguments)
         if self.name in {"fs.read", "fs.stat"} and "paths" in arguments:
             return [ClassifiedAction("fs.read", path) for path in arguments["paths"]]
         if self.name == "fs.patch" and "files" in arguments:

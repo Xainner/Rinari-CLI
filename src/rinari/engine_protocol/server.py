@@ -154,8 +154,27 @@ class EngineServer:
         self._dispatcher = EngineDispatcher()
         self._model_jobs: dict[str, dict[str, Any]] = {}
         self._model_jobs_lock = threading.Lock()
+        # Broker del browser nativo (documento 03 §5). El bridge existe siempre;
+        # lo que decide si hay browser nativo es que un host se registre. Un
+        # Engine sin host de escritorio no cambia de comportamiento.
+        from rinari.browser.registry import BrowserRegistry
+        from rinari.engine_protocol.browser_host import BrowserHostBridge
+
+        self._browser_host = BrowserHostBridge(self._turns.emit_external, self._engine_instance_id)
+        self._browser_registry = BrowserRegistry(self._browser_host, self._services.ctx.home)
+        self._turns.set_browser_registry(self._browser_registry)
+
         self._dispatcher.register("engine.info", self._engine_info)
         self._dispatcher.register("browser.view.get", self._turns.browser_view)
+        # `host.browser.*` no está en la allowlist del preload: sólo el
+        # supervisor de main puede emitirlos (§5.2).
+        self._dispatcher.register("host.browser.register", self._browser_host.register)
+        self._dispatcher.register("host.browser.unregister", self._browser_host.unregister)
+        self._dispatcher.register("host.browser.reply", self._browser_host.reply)
+        self._dispatcher.register("host.browser.event", self._browser_host.event)
+        self._dispatcher.register("browser.context.get", self._browser_context_get)
+        self._dispatcher.register("browser.control.set", self._browser_control_set)
+        self._dispatcher.register("browser.context.prepare", self._browser_context_prepare)
         self._dispatcher.register("target.list", self._target_list)
         self._dispatcher.register("target.add", self._target_add)
         self._dispatcher.register("session.list", self._session_list)
@@ -360,6 +379,63 @@ class EngineServer:
             "home_id": self._home_id,
             "capabilities": dict(protocol.CAPABILITIES),
         }
+
+    def _browser_context_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        """`browser.context.get` (documento 03 §5.2): disponibilidad y metadata.
+
+        Lo que **no** devuelve: endpoints, cookies, ids del host ni
+        `webContentsId`. La UI necesita saber si hay browser nativo y en qué
+        estado, y nada de eso requiere un identificador con el que se pueda
+        operar desde fuera.
+        """
+        session_id = params.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            raise EngineProtocolError(INVALID_PARAMS, "session_id is required")
+        # Que la sesión exista se comprueba contra el store, no contra la
+        # registry: preguntar por una sesión ajena no debe revelar si tiene
+        # contexto.
+        record = self._services.sessions.show(session_id)
+        return {
+            "session_id": record.id,
+            "supported": True,
+            **self._browser_registry.describe(record.id),
+        }
+
+    def _browser_context_prepare(self, params: dict[str, Any]) -> dict[str, Any]:
+        """`browser.context.prepare` (documento 03 §6.2): crea el contexto.
+
+        Existe aparte de `browser.context.get` porque abrir el panel antes de
+        un turno necesita **crear** algo, y una consulta no puede tener
+        efectos: si `get` creara contextos, mirar el estado desde la UI
+        abriría un navegador.
+
+        No abre una página: la vista nace en blanco y la primera navegación la
+        pide el usuario o una herramienta. Crear el contexto aquí es lo que
+        permite que la UI enseñe el browser sin esperar a un turno.
+        """
+        record = self._services.sessions.show(self._need_str(params, "session_id"))
+        self._browser_registry.acquire(record.id)
+        return {
+            "session_id": record.id,
+            "supported": True,
+            **self._browser_registry.describe(record.id),
+        }
+
+    def _browser_control_set(self, params: dict[str, Any]) -> dict[str, Any]:
+        """`browser.control.set` (documento 03 §7): tomar o devolver el control.
+
+        Lleva `expected_revision` a propósito: si el control se movió entre que
+        la UI lo leyó y lo pidió, la transición se rechaza en vez de conceder
+        dos controladores sobre la misma página.
+        """
+        record = self._services.sessions.show(self._need_str(params, "session_id"))
+        owner = self._need_str(params, "owner")
+        expected = params.get("expected_revision")
+        if expected is not None and not isinstance(expected, int):
+            raise EngineProtocolError(
+                INVALID_PARAMS, "Param 'expected_revision' must be an integer."
+            )
+        return self._browser_registry.set_control(record.id, owner, expected)
 
     # -- sessions --------------------------------------------------------
 

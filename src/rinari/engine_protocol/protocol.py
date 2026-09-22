@@ -32,6 +32,11 @@ CAPABILITIES: dict[str, bool] = {
     "agent_inheritance_v1": True,
     "agent_activity_v1": True,
     "browser_view_v1": True,
+    # El Engine conoce la extensión del broker del browser nativo y valida sus
+    # mensajes (documento 03 §5.2). Anunciarla señala soporte del protocolo,
+    # **no** que exista una vista: para eso hace falta además que un host se
+    # registre y que el contexto esté listo.
+    "browser_host_bridge_v1": True,
     "tool_contracts_v1": True,
     "durable_operations_v1": True,
     "channel_tools_v1": True,
