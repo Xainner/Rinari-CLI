@@ -89,9 +89,14 @@ def test_generation_inherits_model_and_explicit_request_wins(tmp_path):
     router = ModelRouter.__new__(ModelRouter)
     router.adapter = lambda p: SimpleNamespace(default_max_tokens=None)
     router._providers = SimpleNamespace(_ctx=SimpleNamespace(home=tmp_path))
-    provider = SimpleNamespace(settings={"generation": {"max_tokens": 10000}})
+    provider = SimpleNamespace(
+        type="custom", endpoint=None, settings={"generation": {"max_tokens": 10000}}
+    )
     model = SimpleNamespace(
-        id="m", provider_model_id="remote", settings={"generation": {"max_tokens": 18000}}
+        id="m",
+        provider_model_id="remote",
+        capabilities=None,
+        settings={"generation": {"max_tokens": 18000}},
     )
     request = ModelRequest(model="m", messages=(ChatMessage.user("hi"),))
     assert router.generation_request(provider, model, request).max_tokens == 18000
@@ -107,8 +112,8 @@ def test_unconfigured_generation_omits_vision_cap(tmp_path):
     router.adapter = lambda p: SimpleNamespace(default_max_tokens=None)
     router._providers = SimpleNamespace(_ctx=SimpleNamespace(home=tmp_path))
     result = router.generation_request(
-        SimpleNamespace(settings={}),
-        SimpleNamespace(id="m", provider_model_id="remote", settings={}),
+        SimpleNamespace(type="custom", endpoint=None, settings={}),
+        SimpleNamespace(id="m", provider_model_id="remote", settings={}, capabilities=None),
         ModelRequest(model="m", messages=(ChatMessage.user("image"),)),
     )
     assert result.max_tokens is None

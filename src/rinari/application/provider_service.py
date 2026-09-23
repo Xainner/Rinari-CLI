@@ -115,7 +115,11 @@ class ProviderService:
                 f"Provider alias already exists: {input.alias}",
                 hint="Use another alias or `rinari providers rename`.",
             )
-        if input.secret is None and input.secret_env is None and input.auth_method != "none":
+        if (
+            input.secret is None
+            and input.secret_env is None
+            and input.auth_method not in ("none", "oauth")
+        ):
             raise InvalidUsageError(
                 "A credential is required",
                 hint="Pass --api-key <value> or --api-key-env <VAR>, or use --no-auth.",
@@ -152,7 +156,18 @@ class ProviderService:
         )
         with self._ctx.db.transaction():
             self._ctx.provider_repo.insert(record)
-            if record.auth_method != "none":
+            if record.auth_method == "oauth":
+                from rinari.providers.catalog import product_for
+
+                if (
+                    product_for(record) not in ("chatgpt", "github-copilot")
+                    or input.secret
+                    or input.secret_env
+                ):
+                    raise InvalidUsageError(
+                        "Use interactive login with a supported subscription endpoint."
+                    )
+            if record.auth_method not in ("none", "oauth"):
                 if input.secret is not None:
                     secret_ref = self._credentials.store_provider_secret(record.id, input.secret)
                 else:
@@ -496,6 +511,7 @@ class ProviderService:
         secret: str | None,
         secret_env: str | None,
         now: str,
+        auth_method: str = "api-key",
     ) -> ProviderRecord:
         existing = self._ctx.provider_repo.get_credential(record.id)
         previous_ref = existing.secret_ref if existing is not None else None
@@ -512,11 +528,11 @@ class ProviderService:
                         ProviderCredentialRef(
                             provider_id=record.id,
                             secret_ref=secret_ref,
-                            method="api-key",
+                            method=auth_method,
                             updated_at=now,
                         )
                     )
-                    record.auth_method = "api-key"
+                    record.auth_method = auth_method
                     record.status_connected = None
                     record.status_checked_at = None
                     record.updated_at = now
@@ -643,10 +659,25 @@ class ProviderService:
         return credential.secret_ref if credential else None
 
     def resolve_secret(self, record: ProviderRecord) -> str | None:
+        if record.auth_method == "oauth":
+            from rinari.providers.auth import token_for
+
+            return token_for(self, record)
         ref = self.credential_ref(record)
         if ref is None:
             return None
         return self._credentials.resolve(ref)
+
+    def set_oauth(self, ref, bundle):
+        import json
+
+        record = self.get(ref)
+        if record.auth_method != "oauth":
+            raise InvalidUsageError("Provider is not configured for subscription login.")
+        with self._credential_lock():
+            return self._set_auth_locked(
+                record, json.dumps(bundle), None, self._now(), auth_method="oauth"
+            )
 
     def test(self, ref: str) -> ProviderHealth:
         record = self.get(ref)

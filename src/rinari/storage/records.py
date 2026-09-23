@@ -127,6 +127,7 @@ class SessionMessageRecord:
     attachments: list[dict[str, Any]] | None = None
     display_content: str | None = None
     origin: dict[str, Any] | None = None
+    continuation: dict[str, Any] | None = field(default=None, repr=False)
 
 
 @dataclass(slots=True)

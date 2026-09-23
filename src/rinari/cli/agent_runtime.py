@@ -1118,6 +1118,7 @@ def _record_to_message(rec: SessionMessageRecord) -> ChatMessage:
         attachments=tuple(rec.attachments or ()),
         display_content=rec.display_content,
         origin=rec.origin,
+        continuation=rec.continuation,
     )
 
 
@@ -1147,6 +1148,7 @@ def _message_to_record(
         attachments=list(msg.attachments) or None,
         display_content=msg.display_content,
         origin=dict(msg.origin) if msg.origin else None,
+        continuation=msg.continuation,
     )
 
 

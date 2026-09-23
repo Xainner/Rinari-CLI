@@ -17,6 +17,7 @@ from rinari.cli.commands import context as context_cmd
 from rinari.cli.commands import engine as engine_cmd
 from rinari.cli.commands import evals_cmd
 from rinari.cli.commands import export_import as export_import_cmd
+from rinari.cli.commands import flow as flow_cmd
 from rinari.cli.commands import hooks as hooks_cmd
 from rinari.cli.commands import index as index_cmd
 from rinari.cli.commands import logs as logs_cmd
@@ -88,6 +89,7 @@ app.command("engine", help="Machine transport for desktop clients.")(engine_cmd.
 app.command("desktop", help="Open this project in Rinari Agent (desktop).")(code_cmd.code)
 app.command("code", help="Compatibility alias for 'rinari desktop'.")(code_cmd.code)
 app.command("trace", help="Inspect a session's event trace.")(trace_cmd.trace)
+app.command("flow", help="Stages of a project or session (how the work advanced).")(flow_cmd.flow)
 app.add_typer(logs_cmd.app, name="logs")
 app.add_typer(metrics_cmd.app, name="metrics")
 app.add_typer(cache_cmd.app, name="cache")

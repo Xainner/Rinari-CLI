@@ -2644,6 +2644,12 @@ Todos los gates críticos anteriores pasan en plataformas soportadas.
 
 ## Implementation notes (Fase 9 - release prep)
 
+Provider/subscription extension (2026-09-22): catalog, shared capability resolver,
+continuation persistence, quota service and experimental ChatGPT/Copilot auth
+are implemented locally. See [provider-subscriptions.md](docs/provider-subscriptions.md).
+Real subscription login/inference and the published Engine/Desktop pin remain
+release acceptance items; automated fixtures do not mark those gates complete.
+
 Entregado en esta pasada:
 
 1. **`rinari config migrate`** (release blocker resuelto). La config `~/.rinari` del
@@ -2987,6 +2993,7 @@ Registrar aquí decisiones de producto/roadmap que cambien el contrato.
 | 2026-08-16 | Licencia MIT confirmada por Xainner; `LICENSE` agregado. Fase 0 completa; se abre Fase 1 (fundaciones, bootstrap y persistencia). |
 | 2026-08-16 | Fase 1 completa: packaging, estructura base, config, estado SQLite, credential store, provider/model/session registries + CLI, Soul/Constitution (assets + loader + overrides), Build Manifest, doctor/status/version. 4 items quedan abiertos por depender del agent loop de Fase 2. Se abre Fase 2 (Agent Runtime, Tool Runtime y seguridad base). |
 | 2026-09-15 | Mensajería entre sesiones de agente (Boards, `session_peer_messaging_v1`): un mensaje de otro agente es **dato no confiable**, nunca instrucción del propietario. El receptor corre su propio turno con techo de procedencia aplicado en código (sin escritura, shell, browser mutable, red saliente, MCP, git ni subagentes); el consentimiento para enviar es por destino exacto y vive solo en el proceso del engine; grupos atómicos con `revision`/`authorization_epoch`; inbox durable con pausa en Stop y sin replay tras reinicio. Límites: 5 envíos/turno, 3 hops y 20 entregas por cadena. Ver `docs/desktop/09-peer-messaging.md`. |
+| 2026-09-17 | Flujo de proyecto (`flow.get`, `project_flow_v1`, `rinari flow`): etapas = rachas contiguas de turnos por modo a través de las sesiones del alcance, ciclos por PLAN, estado/progreso derivados solo de hechos persistidos (turnos, changesets, task graph, verificaciones); lo desconocido es `null`, nunca una estimación ni texto generado. Ver `docs/desktop/10-project-flow.md`. |
 | 2026-08-17 | Browser engine: **CDP (Chrome DevTools Protocol) directo**, con un client WebSocket RFC6455 mínimo en repo y **cero dependencias nuevas**; Rinari se conecta a cualquier browser Chromium-family expuesto con `--remote-debugging-port` (conectar a endpoint existente o lanzar un Chromium gestionado headless con profile aislado por sesión). **Alternativa documentada: Playwright** (`playwright.chromium` / `connect_over_cdp`), descartada como engine inicial por ser dependencia pesada que requiere descarga binaria del browser en el setup (conflicta con la estrategia de dependencias y con tests aislados de red); el `BrowserManager` aísla el driver tras una interfaz, de modo que Playwright puede adoptarse después sin reescribir tools/policy si se necesitan sus helpers de alto nivel (a11y snapshots, auto-wait, BiDi). |
 
 ---

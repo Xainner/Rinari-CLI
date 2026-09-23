@@ -80,9 +80,9 @@ def window(ctx, caller):
         "window_source": "manual"
         if manual
         else "model_metadata"
-        if reported or limits
+        if reported or limits.get("max_input_tokens")
         else "fallback",
-        "window_estimated": not bool(manual or reported or limits),
+        "window_estimated": not bool(manual or reported or limits.get("max_input_tokens")),
     }
 
 

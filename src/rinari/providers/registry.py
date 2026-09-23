@@ -43,12 +43,25 @@ PROVIDER_TYPES: dict[str, ProviderTypeSpec] = {
     "custom": ProviderTypeSpec(
         name="custom",
         adapter=OpenAICompatibleAdapter,
-        auth_methods=("api-key", "none"),
+        auth_methods=("api-key", "none", "oauth"),
     ),
 }
 
 
 def adapter_for(record: ProviderRecord, client: httpx.Client | None = None) -> ProviderAdapter:
+    from rinari.providers.catalog import product_for
+
+    if record.auth_method == "oauth":
+        from rinari.providers.adapters.subscriptions import ChatGPTAdapter, CopilotAdapter
+
+        product = product_for(record)
+        if product == "chatgpt":
+            return ChatGPTAdapter(client=client)
+        if product == "github-copilot":
+            return CopilotAdapter(client=client)
+        raise InvalidUsageError(
+            "Unsupported subscription endpoint. Reconnect the original provider."
+        )
     settings: dict[str, Any] = record.settings or {}
     protocol = settings.get("protocol", "openai-compatible")
     if protocol == "anthropic-compatible" or record.type == "anthropic":
