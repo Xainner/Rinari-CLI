@@ -399,6 +399,7 @@ class VisionCaller:
                     reasoning_effort=generation.reasoning_effort,
                     cancellation=self.token,
                     on_dispatched=dispatched,
+                    usage_observer=request.usage_observer,
                 )
             )
             if self.event_sink:

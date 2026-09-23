@@ -174,3 +174,7 @@ class ModelRequest:
     # it is never serialized into a provider payload.
     stream_timeouts: dict[str, float] | None = None
     stream_read_timeout_s: float | None = None
+    # Runtime-only telemetry: never serialize either field to a provider.
+    # Last, so a positional ModelRequest(...) keeps meaning what it meant.
+    usage_call_id: str = field(default_factory=lambda: uuid4().hex, compare=False, repr=False)
+    usage_observer: Any = field(default=None, compare=False, repr=False)

@@ -453,8 +453,13 @@ class ModelRouter:
         request = prepare_visual_payload(request, constraints)
         real_by_alias = _alias_map_for_request(provider.endpoint, request)
         transport = _resolve_transport(provider, model)
-        return _unalias_response(
-            self._adapter_invoke(provider, request, transport, real_by_alias), real_by_alias
+        from rinari.models.usage_tracking import observe_call
+
+        return observe_call(
+            request,
+            lambda _: _unalias_response(
+                self._adapter_invoke(provider, request, transport, real_by_alias), real_by_alias
+            ),
         )
 
     @scheduled
@@ -498,24 +503,29 @@ class ModelRouter:
         transport = _resolve_transport(provider, model)
         adapter, transport = self._transport_adapter(provider, transport)
         emitted = False
+        from rinari.models.usage_tracking import observe_call
 
-        def deliver(delta):
-            nonlocal emitted
-            emitted = True
-            on_delta(delta)
+        def invoke(on_visible):
+            def deliver(delta):
+                nonlocal emitted
+                emitted = True
+                if on_visible is not None:
+                    on_visible(delta)
 
-        response = self._authenticated_call(
-            provider,
-            lambda secret: adapter.invoke_stream(
-                request,
-                secret,
-                provider.endpoint,
-                deliver,
-                transport=transport,
-                tool_aliases=real_by_alias,
-            ),
-            output_started=lambda: emitted,
-        )
+            return self._authenticated_call(
+                provider,
+                lambda secret: adapter.invoke_stream(
+                    request,
+                    secret,
+                    provider.endpoint,
+                    deliver,
+                    transport=transport,
+                    tool_aliases=real_by_alias,
+                ),
+                output_started=lambda: emitted,
+            )
+
+        response = observe_call(request, invoke, on_delta)
         return self._scope_response(
             _unalias_response(response, real_by_alias), provider, request.model
         )

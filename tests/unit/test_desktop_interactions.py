@@ -36,6 +36,41 @@ def create(desktop):
     return desktop._session_create({"chat": True})["session"]
 
 
+def test_usage_estimates_snapshot_only_and_terminal_checkpoint_persists(desktop):
+    session = create(desktop)
+    turn = _ActiveTurn("usage-turn", session["id"], None, threading.Event())
+    emit = desktop._turns._activity_cb(turn)
+    emit("turn.started", {})
+    emit("usage.call.started", {"call_id": "main", "input_tokens": 12})
+    emit("usage.call.delta", {"call_id": "main", "output_chars": 24})
+    assert turn.activities["usage:turn"]["total_tokens"] == 18
+    rows = desktop._services.ctx.event_repo.list(session["id"])
+    assert not any(row.type == "usage.updated" for row in rows)
+    emit(
+        "agent.activity",
+        {
+            "child_event": "usage.call.started",
+            "agent_id": "private-name",
+            "objective": "private prompt",
+            "call_id": "child",
+            "input_tokens": 3,
+        },
+    )
+    emit("turn.cancelled", {})
+    updates = [
+        row
+        for row in desktop._services.ctx.event_repo.list(session["id"])
+        if row.type == "usage.updated"
+    ]
+    assert len(updates) == 1
+    assert updates[0].payload["total_tokens"] == 21
+    assert updates[0].payload["phase"] == "settled"
+    assert "private" not in json.dumps(updates[0].payload)
+    assert "workspace_root" not in updates[0].payload
+    timeline = desktop._session_timeline({"ref": session["id"]})
+    assert any(item["event"] == "usage.updated" for item in timeline["turns"][0]["items"])
+
+
 def test_general_chats_have_independent_workspaces(desktop):
     a, b = create(desktop), create(desktop)
     assert a["kind"] == b["kind"] == "CHAT"
@@ -246,14 +281,22 @@ def test_question_cancellation_and_invalid_answers(desktop):
 
 def test_plan_tool_asks_and_resumes_real_agent_loop(desktop, monkeypatch):
     from rinari.cli import agent_runtime
-    from rinari.models.types import ModelResponse, ProviderCapabilities, StopReason, ToolCall
+    from rinari.models.types import ModelResponse, ProviderCapabilities, StopReason, ToolCall, Usage
 
     class Model:
         def __init__(self):
             self.requests = []
 
         def capabilities(self):
-            return ProviderCapabilities(streaming=False, tool_calls=True)
+            return ProviderCapabilities(streaming=True, tool_calls=True)
+
+        def invoke_stream(self, request, on_delta):
+            response = self.invoke(request)
+            # Deterministic fake provider. Call boundaries are never throttled,
+            # so the estimate -> mixed -> reported sequence needs no sleeps.
+            for chunk in ("Local fixture. ", "Verified. "):
+                on_delta(chunk)
+            return response
 
         def invoke(self, request):
             self.requests.append(request)
@@ -270,9 +313,12 @@ def test_plan_tool_asks_and_resumes_real_agent_loop(desktop, monkeypatch):
                         ),
                     ),
                     stop_reason=StopReason.TOOL_CALLS,
+                    usage=Usage(input_tokens=11000, output_tokens=500),
                 )
             return ModelResponse(
-                content="Plan based on your answer", stop_reason=StopReason.END_TURN
+                content="Plan based on your answer",
+                stop_reason=StopReason.END_TURN,
+                usage=Usage(input_tokens=2500, output_tokens=200),
             )
 
     model = Model()
@@ -312,6 +358,42 @@ def test_plan_tool_asks_and_resumes_real_agent_loop(desktop, monkeypatch):
         assert next(e for e in seen if e["event"] == "turn.started")["payload"]["mode"] == "plan"
         history = desktop._session_timeline({"ref": session["id"]})
         assert history["turns"][-1]["mode"] == "plan"
+        updates = [e["payload"] for e in seen if e["event"] == "usage.updated"]
+        assert updates[0]["source"] == "estimated"
+        assert any(u["source"] == "mixed" for u in updates)
+        assert updates[-1]["source"] == "reported"
+        assert updates[-1]["total_tokens"] == 14200
+        assert updates[-1]["model_calls"] == 2
+        assert updates[-1]["phase"] == "settled"
+        assert all("content" not in u and "delta" not in u for u in updates)
+        import os
+
+        if evidence := os.environ.get("M04_USAGE_TRACE"):
+            Path(evidence).write_text(
+                json.dumps(
+                    [
+                        {
+                            k: v
+                            for k, v in u.items()
+                            if k
+                            in {
+                                "input_tokens",
+                                "output_tokens",
+                                "total_tokens",
+                                "cached_input_tokens",
+                                "reasoning_tokens",
+                                "revision",
+                                "model_calls",
+                                "source",
+                                "phase",
+                            }
+                        }
+                        for u in updates
+                    ],
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
     finally:
         if desktop._turns.has_active_turn(session["id"]):
             desktop._turns.cancel_turn(session["id"])
