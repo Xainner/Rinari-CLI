@@ -59,6 +59,13 @@ def discover(ctx, main):
         limits = normalize(model.capabilities)
     if not limits:
         limits = normalize(model.capabilities)
+    from rinari.providers.metadata import effective_metadata
+
+    limits = {
+        **normalize(effective_metadata(provider, model)),
+        **limits,
+        **normalize(model.capabilities),
+    }
     with contextlib.suppress(OSError):
         path.write_text(
             json.dumps({"limits": limits, "expires": time.time() + (3600 if limits else 60)}),

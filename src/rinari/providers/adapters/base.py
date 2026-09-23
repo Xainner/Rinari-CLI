@@ -78,10 +78,12 @@ class ProviderAdapter:
         raise NotImplementedError
 
     def health(self, secret: str | None, endpoint: str | None = None) -> ProviderHealth:
-        auth = self.validate_credential(secret, endpoint)
-        if not auth.connected:
-            return ProviderHealth(connected=False, detail=auth.detail)
-        models = self.list_models(secret, endpoint)
+        from rinari.providers.errors import ProviderError
+
+        try:
+            models = self.list_models(secret, endpoint)
+        except ProviderError as exc:
+            return ProviderHealth(connected=False, detail=str(exc))
         return ProviderHealth(
             connected=True,
             detail=f"{len(models)} model(s) discovered",
@@ -93,6 +95,9 @@ class ProviderAdapter:
 
     def capabilities(self) -> ProviderCapabilities:
         return ProviderCapabilities()
+
+    def request_headers(self, secret, request):
+        return self._headers(secret)
 
     def invoke(
         self,

@@ -104,14 +104,20 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         if response.status_code >= 400:
             raise provider_error(response, url)
         data = decode_json(response, url) or {}
-        entries = data.get("data", data if isinstance(data, list) else [])
+        entries = data if isinstance(data, list) else data.get("data", [])
         models: list[DiscoveredModel] = []
         for entry in entries:
             model_id = entry.get("id") if isinstance(entry, dict) else str(entry)
             if not model_id:
                 continue
+            from rinari.context.windows import normalize
+
             models.append(
-                DiscoveredModel(provider_model_id=str(model_id), availability="available")
+                DiscoveredModel(
+                    provider_model_id=str(model_id),
+                    availability="available",
+                    capabilities=normalize(entry) or None,
+                )
             )
         return models
 
@@ -137,7 +143,10 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         tool_aliases: dict[str, str] | None = None,
     ) -> ModelResponse:
         url = self._responses_url(endpoint)
-        headers = {**self._headers(secret), **session_affinity_headers(url, request.session_id)}
+        headers = {
+            **self.request_headers(secret, request),
+            **session_affinity_headers(url, request.session_id),
+        }
         response = send_request(
             self.client(),
             "POST",
@@ -162,7 +171,10 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         tool_aliases: dict[str, str] | None = None,
     ) -> ModelResponse:
         url = self._responses_url(endpoint)
-        headers = {**self._headers(secret), **session_affinity_headers(url, request.session_id)}
+        headers = {
+            **self.request_headers(secret, request),
+            **session_affinity_headers(url, request.session_id),
+        }
         acc = _ResponsesStreamAccumulator()
         headers_received = False
         saw_payload = False
@@ -294,6 +306,12 @@ def _message_to_responses(
     message: ChatMessage, tool_aliases: dict[str, str] | None
 ) -> list[dict[str, Any]]:
     """Chat history -> Responses input items (tool calls keep wire names)."""
+    if (
+        message.role == "assistant"
+        and message.continuation
+        and message.continuation.get("protocol") == "responses"
+    ):
+        return message.continuation["items"]
     if message.role == ROLE_TOOL:
         return [
             {
@@ -451,6 +469,7 @@ def _response_from_responses(data: Any, url: str) -> ModelResponse:
         raw=data,
         items=tuple(items),
         provider_state=provider_state,
+        continuation={"protocol": "responses", "items": output} if status != "incomplete" else None,
     )
 
 
