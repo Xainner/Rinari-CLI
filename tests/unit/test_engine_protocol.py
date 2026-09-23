@@ -57,6 +57,7 @@ def test_hello_shape() -> None:
     assert payload["engine_version"]
     assert payload["capabilities"]["chat"] is True
     assert payload["capabilities"]["persistent_context_compaction_v1"] is True
+    assert payload["capabilities"]["workspace_file_watch_v1"] is True
 
 
 def test_context_settings_protocol_round_trip(server):

@@ -111,7 +111,13 @@ class WebPreviews:
     def start(self, params):
         # Serialize with workspace moves; the original resolved root is retained.
         with self.desktop.server._turns._lock, self._lock:
-            path, workspace = self.desktop.resolve_file(params)
+            resolved = self.desktop.resolve_file(params)
+            if resolved.provenance != "workspace":
+                raise EngineProtocolError(
+                    "PERMISSION_DENIED",
+                    "External provenance permits text preview only, not serving its directory.",
+                )
+            path, workspace = resolved.path, resolved.workspace
             if path.suffix.lower() not in {".html", ".htm"}:
                 raise EngineProtocolError("UNSUPPORTED_FILE", "Web preview requires an HTML file.")
             if len(self._items) >= 8:
