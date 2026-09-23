@@ -64,25 +64,54 @@ def destination(caller):
     return caller
 
 
+# Used only when nothing states a window. It is an estimate and is reported
+# as one (`window_source: fallback`, `window_estimated: true`).
+FALLBACK_WINDOW = 128_000
+
+
 def window(ctx, caller):
-    from rinari.context.windows import discover
+    """Effective input window for the caller's destination, and its provenance.
+
+    `window_source` names the source of the limit that decides the effective
+    window: `manual` (context settings), `override` (saved on the model),
+    `provider` (announced by the endpoint), `catalog` (bundled metadata, with
+    `metadata_updated_at`) or `fallback`. Output limits are reported, never
+    reserved here; the reservation is `input_budget`'s, from the request.
+    """
+    from rinari.context.windows import capacity
 
     main = destination(caller)
     manual = load(ctx)["model_windows"].get(getattr(main, "model_id", None))
-    limits = {} if manual else discover(ctx, main)
-    reported = limits.get("max_context_tokens") or caller.capabilities().max_context_tokens
-    effective = manual or reported or limits.get("max_input_tokens") or 128_000
-    if limits.get("max_input_tokens"):
-        effective = min(effective, limits["max_input_tokens"])
+    known = capacity(ctx, main, discover=not manual)
+    limits, sources = known["limits"], dict(known["sources"])
+    context = limits.get("max_context_tokens")
+    if context is None and not manual:
+        # A caller without a saved destination still declares its window.
+        declared = caller.capabilities().max_context_tokens
+        if declared:
+            context, sources["context"] = declared, "provider"
+    incoming = limits.get("max_input_tokens")
+    if manual:
+        effective, total, source = manual, manual, "manual"
+        context, sources["context"] = manual, "manual"
+    elif incoming and (context is None or incoming < context):
+        total = context or max(incoming, FALLBACK_WINDOW)
+        effective, source = incoming, sources["input"]
+    elif context:
+        effective, total, source = context, context, sources["context"]
+    else:
+        effective, total, source = FALLBACK_WINDOW, FALLBACK_WINDOW, "fallback"
     return {
         "window_tokens": effective,
-        "total_window_tokens": manual or reported or 128_000,
-        "window_source": "manual"
-        if manual
-        else "model_metadata"
-        if reported or limits.get("max_input_tokens")
-        else "fallback",
-        "window_estimated": not bool(manual or reported or limits.get("max_input_tokens")),
+        "total_window_tokens": total,
+        "window_source": source,
+        "window_estimated": source == "fallback",
+        "max_context_tokens": context,
+        "max_input_tokens": incoming,
+        "max_output_tokens": limits.get("max_output_tokens"),
+        "limit_sources": {name: sources.get(name) for name in ("context", "input", "output")},
+        "discovered_at": known["observed_at"],
+        "metadata_updated_at": known["catalog_updated_at"],
     }
 
 
