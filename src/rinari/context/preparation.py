@@ -184,6 +184,7 @@ def prepare(service, ctx, request, caller, rebuild, emit, cancel):
                     ),
                     cancellation=cancel,
                     session_id=ctx.session_id,
+                    usage_observer=emit,
                 )
                 if request_size(summary_request) <= int(summary_window * 0.60):
                     break

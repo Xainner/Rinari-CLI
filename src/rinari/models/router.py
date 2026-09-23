@@ -343,8 +343,13 @@ class ModelRouter:
         request = prepare_visual_payload(request, constraints)
         real_by_alias = _alias_map_for_request(provider.endpoint, request)
         transport = _resolve_transport(provider, model)
-        return _unalias_response(
-            self._adapter_invoke(provider, request, transport, real_by_alias), real_by_alias
+        from rinari.models.usage_tracking import observe_call
+
+        return observe_call(
+            request,
+            lambda _: _unalias_response(
+                self._adapter_invoke(provider, request, transport, real_by_alias), real_by_alias
+            ),
         )
 
     @scheduled
@@ -387,13 +392,19 @@ class ModelRouter:
         real_by_alias = _alias_map_for_request(provider.endpoint, request)
         transport = _resolve_transport(provider, model)
         adapter = self.adapter(provider)
-        response = adapter.invoke_stream(
+        from rinari.models.usage_tracking import observe_call
+
+        response = observe_call(
             request,
-            self._providers.resolve_secret(provider),
-            provider.endpoint,
+            lambda delta: adapter.invoke_stream(
+                request,
+                self._providers.resolve_secret(provider),
+                provider.endpoint,
+                delta,
+                transport=transport,
+                tool_aliases=real_by_alias,
+            ),
             on_delta,
-            transport=transport,
-            tool_aliases=real_by_alias,
         )
         return _unalias_response(response, real_by_alias)
 

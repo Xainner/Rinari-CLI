@@ -153,6 +153,9 @@ class ModelRequest:
     model: str
     messages: tuple[ChatMessage, ...]
     tools: tuple[ToolSchema, ...] = ()
+    # Runtime-only telemetry: never serialize either field to a provider.
+    usage_call_id: str = field(default_factory=lambda: uuid4().hex, compare=False, repr=False)
+    usage_observer: Any = field(default=None, compare=False, repr=False)
     temperature: float | None = None
     cancellation: Any = None  # Runtime-only; never serialized to providers.
     on_dispatched: Any = None

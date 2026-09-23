@@ -254,6 +254,8 @@ class AgentLoop:
                     )
                 budget.reserve_model_call(model_only=True)
             request = self._build_request(ctx)
+            request = replace(request, usage_observer=self._emit_activity)
+            usage_call_id = request.usage_call_id
             if self._prepare_context is not None:
                 request = self._prepare_context(
                     ctx,
@@ -263,6 +265,9 @@ class AgentLoop:
                     self._emit_activity,
                     cancel,
                 )
+            request = replace(
+                request, usage_observer=self._emit_activity, usage_call_id=usage_call_id
+            )
             before_model_payload: dict = {
                 "model": ctx.model_ref,
                 "messages": len(request.messages),
@@ -318,6 +323,9 @@ class AgentLoop:
                         )
                     finally:
                         ctx.force_compaction = False
+                    request = replace(
+                        request, usage_observer=self._emit_activity, usage_call_id=usage_call_id
+                    )
                     if budget is not None:
                         budget.reserve_model_call(model_only=True)
                     response = self._invoke(
@@ -926,10 +934,16 @@ class AgentLoop:
 
         def invoke_provider() -> None:
             try:
-                value = (
-                    self._provider.invoke_stream(request, deliver_delta)
-                    if streaming
-                    else self._provider.invoke(request)
+                from rinari.models.usage_tracking import observe_call
+
+                value = observe_call(
+                    request,
+                    lambda delta: (
+                        self._provider.invoke_stream(request, delta)
+                        if streaming
+                        else self._provider.invoke(request)
+                    ),
+                    deliver_delta if streaming else None,
                 )
                 completed.put((True, value))
             except BaseException as exc:  # re-raised on the turn worker
@@ -1184,6 +1198,9 @@ def _usage_dict(usage: Usage | None) -> dict | None:
         "input_tokens": usage.input_tokens,
         "output_tokens": usage.output_tokens,
         "total_tokens": usage.total_tokens,
+        "cached_input_tokens": usage.cached_input_tokens,
+        "reasoning_tokens": usage.reasoning_tokens,
+        "source": usage.source,
     }
 
 

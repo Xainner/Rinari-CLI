@@ -34,6 +34,7 @@ from rinari.engine_protocol.errors import EngineProtocolError
 from rinari.engine_protocol.messages import event
 from rinari.engine_protocol.operations import OperationStore
 from rinari.engine_protocol.peers import PeerBroker
+from rinari.engine_protocol.token_usage import TurnTokenTracker
 from rinari.policy.approvals import ApprovalRequest
 from rinari.shared.clock import now_iso
 from rinari.shared.errors import CancelledError, RinariError
@@ -92,6 +93,7 @@ class _ActiveTurn:
     activities: dict[str, dict[str, Any]] = field(default_factory=dict)
     activity_keys: dict[str, int] = field(default_factory=dict)
     next_activity_seq: int = 1
+    token_usage: TurnTokenTracker = field(default_factory=TurnTokenTracker)
     governor: dict[str, Any] = field(
         default_factory=lambda: {
             "execution": "automatic",
@@ -1130,7 +1132,31 @@ class TurnManager:
         def _on_activity(event_name: str, payload: dict[str, Any]) -> None:
             if turn.done.is_set():
                 return
+            effective = (
+                payload.get("child_event", event_name)
+                if event_name == "agent.activity"
+                else event_name
+            )
+            if effective.startswith("usage.call."):
+                update = turn.token_usage.observe(effective, payload)
+                if update is not None:
+                    _on_activity(
+                        "usage.updated",
+                        {
+                            **update,
+                            "_checkpoint": effective == "usage.call.completed"
+                            and update["source"] != "estimated",
+                        },
+                    )
+                elif turn.token_usage.last and "usage:turn" in turn.activities:
+                    turn.activities["usage:turn"].update(turn.token_usage.last)
+                return
+            persist_usage = payload.get("_checkpoint", False)
+            payload = {key: value for key, value in payload.items() if key != "_checkpoint"}
             if event_name in {"turn.completed", "turn.failed", "turn.cancelled", "turn.stopped"}:
+                update = turn.token_usage.finish()
+                if update is not None:
+                    _on_activity("usage.updated", {**update, "_checkpoint": True})
                 with self._lock:
                     pending_visual = [
                         dict(item)
@@ -1149,7 +1175,8 @@ class TurnManager:
                 else event_name
             )
             safe = {**payload, "turn_id": turn.turn_id, "session_id": turn.session_id}
-            safe["workspace_root"] = self._services.sessions.show(turn.session_id).current_cwd
+            if event_name != "usage.updated":
+                safe["workspace_root"] = self._services.sessions.show(turn.session_id).current_cwd
             arguments = safe.get("arguments")
             if (
                 safe.get("tool") in {"fs.write", "fs.patch"}
@@ -1216,7 +1243,9 @@ class TurnManager:
                 self.operations.finish(turn.turn_id, event_name.removeprefix("turn."))
                 if turn.peer_message_id:
                     self._finish_peer_delivery(turn, event_name.removeprefix("turn."))
-            if effective_event != "model.content.delta":
+            if effective_event != "model.content.delta" and (
+                event_name != "usage.updated" or persist_usage
+            ):
                 self._persist_activity(event_name, safe)
             self._emit(event(event_name, safe))
 
@@ -1238,6 +1267,8 @@ class TurnManager:
         return _serialized
 
     def _activity_key(self, turn: _ActiveTurn, event_name: str, payload: dict[str, Any]) -> str:
+        if event_name == "usage.updated":
+            return "usage:turn"
         if event_name == "agent.activity":
             child = dict(payload)
             child.pop("agent_id", None)
