@@ -15,6 +15,7 @@ aborts before a call would exceed `max_calls`.
 from __future__ import annotations
 
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -80,7 +81,7 @@ def _seed_open_work(ctx, root: str) -> None:
     now = "2026-09-23T00:00:00Z"
     ctx.task_repo.create(
         {
-            "id": "task_exporter",
+            "id": f"task_{uuid.uuid4().hex[:12]}",
             "project_root": root,
             "session_ref": "",
             "title": TASK,
@@ -100,7 +101,7 @@ def _seed_open_work(ctx, root: str) -> None:
     )
     ctx.validation_repo.insert(
         {
-            "id": "val_failed",
+            "id": f"val_{uuid.uuid4().hex[:12]}",
             "project_root": root,
             "session_ref": "",
             "kind": "test",
@@ -204,14 +205,18 @@ class Variant:
 class ScenarioResult:
     scenario: str
     run: int
-    full: Variant
+    full: Variant | None = None
     compacted: Variant | None = None
     compaction: dict = field(default_factory=dict)
     error: str | None = None
 
     @property
     def regression(self) -> bool:
-        return self.full.passed and not (self.compacted and self.compacted.passed)
+        """Full history answered correctly and compacted history did not.
+
+        A run that could not ask one of the two is an error, not a regression.
+        """
+        return bool(self.full and self.full.passed and self.compacted and not self.compacted.passed)
 
 
 def _ask(caller, request) -> Variant:
@@ -237,59 +242,68 @@ def _judge(variant: Variant, rules) -> Variant:
 def run(
     services, session_factory, caller, model_id: str, *, scenarios=SCENARIOS, runs: int = 1
 ) -> dict:
-    """Run every scenario `runs` times; `session_factory(scenario)` returns (record, root)."""
+    """Run every scenario `runs` times; `session_factory(scenario)` returns (record, root).
+
+    A provider or compaction error is recorded on its scenario and the run
+    goes on. Hitting the call budget stops the run, and the report keeps what
+    was already paid for.
+    """
     results: list[ScenarioResult] = []
-    for index in range(runs):
-        for scenario in scenarios:
-            record, root = session_factory(scenario)
-            if scenario.seed is not None:
-                scenario.seed(services.ctx, root)
-            history = [*scenario.history(), ChatMessage.user(scenario.question)]
-            context = AgentContext(
-                record.id, model_id, None, AssemblerContext(), history=list(history)
-            )
-            request = lambda state, record=record: _request(model_id, record.id, state)  # noqa: E731
-            result = ScenarioResult(
-                scenario.key, index, _judge(_ask(caller, request(context)), scenario.rules)
-            )
-            events: list[dict] = []
-            context.force_compaction = True
-            try:
-                reduced = services.context.prepare(
-                    context,
-                    request(context),
-                    caller,
-                    request,
-                    lambda _name, payload, sink=events: sink.append(payload),
-                    CancellationToken(),
-                )
-                result.compacted = _judge(_ask(caller, reduced), scenario.rules)
-            except BudgetExceededError:
-                raise
-            except Exception as exc:
-                result.error = f"{type(exc).__name__}: {exc}"
-            finally:
-                context.force_compaction = False
-            done = [e for e in events if e.get("status") in ("completed", "failed")]
-            if done:
-                last = done[-1]
-                result.compaction = {
-                    k: last.get(k)
-                    for k in (
-                        "status",
-                        "used_tokens",
-                        "after_tokens",
-                        "duration_ms",
-                        "checks",
-                        "error",
-                    )
-                    if k in last
-                }
-            results.append(result)
-    return report(results)
+    stopped = None
+    try:
+        for index in range(runs):
+            for scenario in scenarios:
+                result = ScenarioResult(scenario.key, index)
+                results.append(result)
+                _play(services, session_factory, caller, model_id, scenario, result)
+    except BudgetExceededError as exc:
+        stopped = str(exc)
+        results[-1].error = f"stopped: {exc}"
+    return report(results, stopped=stopped)
 
 
-def report(results: list[ScenarioResult]) -> dict:
+def _play(services, session_factory, caller, model_id, scenario, result) -> None:
+    record, root = session_factory(scenario)
+    if scenario.seed is not None:
+        scenario.seed(services.ctx, root)
+    history = [*scenario.history(), ChatMessage.user(scenario.question)]
+    context = AgentContext(record.id, model_id, None, AssemblerContext(), history=list(history))
+
+    def request(state):
+        return _request(model_id, record.id, state)
+
+    try:
+        result.full = _judge(_ask(caller, request(context)), scenario.rules)
+    except BudgetExceededError:
+        raise
+    except Exception as exc:
+        result.error = f"full: {type(exc).__name__}: {exc}"
+        return
+    events: list[dict] = []
+    context.force_compaction = True
+    try:
+        reduced = services.context.prepare(
+            context,
+            request(context),
+            caller,
+            request,
+            lambda _name, payload: events.append(payload),
+            CancellationToken(),
+        )
+        result.compacted = _judge(_ask(caller, reduced), scenario.rules)
+    except BudgetExceededError:
+        raise
+    except Exception as exc:
+        result.error = f"compacted: {type(exc).__name__}: {exc}"
+    finally:
+        context.force_compaction = False
+        done = [e for e in events if e.get("status") in ("completed", "failed")]
+        if done:
+            keys = ("status", "used_tokens", "after_tokens", "duration_ms", "checks", "error")
+            result.compaction = {k: done[-1][k] for k in keys if k in done[-1]}
+
+
+def report(results: list[ScenarioResult], *, stopped: str | None = None) -> dict:
     def variant(v: Variant | None):
         return (
             None
@@ -321,8 +335,10 @@ def report(results: list[ScenarioResult]) -> dict:
     ]
     return {
         "runs": rows,
-        "full_passed": sum(r.full.passed for r in results),
+        "full_passed": sum(bool(r.full and r.full.passed) for r in results),
         "compacted_passed": sum(bool(r.compacted and r.compacted.passed) for r in results),
         "regressions": sum(r.regression for r in results),
+        "errors": sum(r.error is not None for r in results),
         "total": len(results),
+        "stopped": stopped,
     }

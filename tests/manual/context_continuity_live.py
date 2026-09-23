@@ -98,7 +98,7 @@ def main():
                 )
 
                 def session_for(scenario):
-                    root = str(Path(directory) / f"project-{scenario.key}")
+                    root = str(Path(directory) / f"project-{scenario.key}-{caller.calls}")
                     Path(root).mkdir(exist_ok=True)
                     record = SessionRecord(
                         id=f"live-{scenario.key}-{caller.calls}",
@@ -128,12 +128,12 @@ def main():
                 prices = model.settings or {}
                 if "input_price_per_mtok" in prices and "output_price_per_mtok" in prices:
                     tokens_in = sum(
-                        (r["full"]["input_tokens"] or 0)
+                        ((r["full"] or {}).get("input_tokens") or 0)
                         + ((r["compacted"] or {}).get("input_tokens") or 0)
                         for r in result["runs"]
                     )
                     tokens_out = sum(
-                        (r["full"]["output_tokens"] or 0)
+                        ((r["full"] or {}).get("output_tokens") or 0)
                         + ((r["compacted"] or {}).get("output_tokens") or 0)
                         for r in result["runs"]
                     )

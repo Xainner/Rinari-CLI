@@ -98,9 +98,40 @@ def test_both_variants_are_asked_and_judged(world):
 def test_the_call_budget_stops_before_overspending(world):
     services, session_for = world
     budget = continuity_live.CallBudget(FactBound(), 2)
-    with pytest.raises(continuity_live.BudgetExceededError):
-        continuity_live.run(services, session_for, budget, "fake")
+    result = continuity_live.run(services, session_for, budget, "fake")
     assert budget.calls == 2
+    # The paid full answer is kept; the scenario it stopped in is marked.
+    assert result["stopped"] and result["total"] == 1
+    assert result["runs"][0]["full"]["passed"]
+    assert result["runs"][0]["error"].startswith("stopped:")
+    assert result["regressions"] == 0
+
+
+def test_repeated_runs_seed_their_own_records(world):
+    services, session_for = world
+    result = continuity_live.run(
+        services, session_for, continuity_live.CallBudget(FactBound(), 50), "fake", runs=2
+    )
+    assert result["total"] == 6 and result["errors"] == 0, result["runs"]
+    assert result["compacted_passed"] == 6
+
+
+def test_a_provider_error_is_recorded_and_the_run_goes_on(world):
+    services, session_for = world
+
+    class Flaky(FactBound):
+        def invoke(self, request):
+            if not self.requests:
+                self.requests.append(request)
+                raise ConnectionError("provider unreachable")
+            return super().invoke(request)
+
+    result = continuity_live.run(
+        services, session_for, continuity_live.CallBudget(Flaky(), 50), "fake"
+    )
+    assert result["errors"] == 1 and result["total"] == 3
+    assert result["runs"][0]["error"].startswith("full: ConnectionError")
+    assert result["regressions"] == 0 and result["compacted_passed"] == 2
 
 
 def test_the_plan_needs_no_provider():

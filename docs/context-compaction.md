@@ -151,10 +151,24 @@ Each scenario asks the same question twice of the same model, once with the full
 synthetic history and once after a forced compaction, and a rule judge checks both
 answers. A scenario where the full answer passes and the compacted one fails is reported
 as a regression. `--dry-run` prints the call count and an input-token ceiling without
-reading credentials; a real run refuses a `--max-calls` below the minimum and aborts
-before any call would exceed it. The report records tokens, latency and the checks the
-compaction ran. `tests/unit/test_continuity_live.py` exercises the same pipeline with a
-scripted model, including a compaction that loses the state.
+reading credentials; a real run refuses a `--max-calls` below the minimum and stops
+before any call would exceed it, keeping the report of what was already asked. A provider
+or compaction error is recorded on its scenario and the run goes on. The report records
+tokens, latency and the checks the compaction ran. `tests/unit/test_continuity_live.py`
+exercises the same pipeline with a scripted model, including a compaction that loses the
+state.
+
+Baseline on 2026-09-23, OpenCode Go, 3 runs × 3 scenarios, 27 calls per model with no
+repair needed. The token counts are estimates.
+
+| Model | Full history | Compacted | Regressions | Compaction (tokens) | Compaction time |
+| --- | --- | --- | --- | --- | --- |
+| muse-spark-1.3-contributor | 9/9 | 9/9 | 0 | ~7.05k → 3.43k–3.55k | 5.0–9.9 s |
+| deepseek-v4.1-flash | 9/9 | 9/9 | 0 | ~7.05k → 3.52k–3.80k | 6.4–16.4 s |
+
+Every compaction passed its structure, records and reduction checks. The scenarios are
+short and deliberately easy. They catch a compaction that drops the goal, a correction
+or open work, but not subtler losses, and they do not establish latency guarantees.
 
 Validation on 2026-09-13: broad Engine suite 1,713 passed / 8 skipped; final context
 regressions 15 passed; Agent frontend 92 passed; Rust 18 passed plus one opt-in packaged
