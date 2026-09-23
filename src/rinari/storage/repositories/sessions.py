@@ -290,8 +290,8 @@ class SessionMessageRepository:
                 INSERT INTO session_messages (
                     id, session_id, seq, role, content,
                     tool_calls_json, tool_call_id, name, created_at, turn_id, images_json,
-                    attachments_json, display_content, origin_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    attachments_json, display_content, origin_json, continuation_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     rec.id,
@@ -310,6 +310,7 @@ class SessionMessageRepository:
                     json.dumps(rec.origin, ensure_ascii=False, sort_keys=True)
                     if rec.origin
                     else None,
+                    json.dumps(rec.continuation) if rec.continuation else None,
                 ),
             )
 
@@ -379,4 +380,5 @@ def _message_to_record(row: dict) -> SessionMessageRecord:
         attachments=json.loads(row["attachments_json"]) if row.get("attachments_json") else None,
         display_content=row.get("display_content"),
         origin=json.loads(row["origin_json"]) if row.get("origin_json") else None,
+        continuation=json.loads(row["continuation_json"]) if row.get("continuation_json") else None,
     )

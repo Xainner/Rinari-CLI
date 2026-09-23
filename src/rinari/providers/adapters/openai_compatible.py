@@ -90,7 +90,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         if response.status_code >= 400:
             raise provider_error(response, url)
         data = decode_json(response, url) or {}
-        entries = data.get("data", data if isinstance(data, list) else [])
+        entries = data if isinstance(data, list) else data.get("data", [])
         models: list[DiscoveredModel] = []
         for entry in entries:
             model_id = entry.get("id") if isinstance(entry, dict) else str(entry)
@@ -162,7 +162,10 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         if request.max_tokens is not None:
             payload["max_tokens"] = request.max_tokens
         if request.reasoning_effort:
-            payload["reasoning_effort"] = request.reasoning_effort
+            if request.reasoning_dialect == "openrouter":
+                payload["reasoning"] = {"effort": request.reasoning_effort}
+            else:
+                payload["reasoning_effort"] = request.reasoning_effort
         if request.json_response:
             payload["response_format"] = {"type": "json_object"}
         if stream:
@@ -186,7 +189,10 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                 request, secret, endpoint, tool_aliases=tool_aliases
             )
         url = self._chat_url(endpoint)
-        headers = {**self._headers(secret), **session_affinity_headers(url, request.session_id)}
+        headers = {
+            **self.request_headers(secret, request),
+            **session_affinity_headers(url, request.session_id),
+        }
         response = send_request(
             self.client(),
             "POST",
@@ -218,6 +224,8 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             )
         url = self._chat_url(endpoint)
         content_parts: list[str] = []
+        continuation_message: dict[str, Any] = {"role": "assistant"}
+        continuation_tools: dict[int, dict[str, Any]] = {}
         calls = _ToolCallAccumulator()
         stop_reason = StopReason.END_TURN
         terminal_seen = False
@@ -231,7 +239,10 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             if request.stream_read_timeout_s is not None
             else DEFAULT_MODEL_STREAM_READ_TIMEOUT_S
         )
-        headers = {**self._headers(secret), **session_affinity_headers(url, request.session_id)}
+        headers = {
+            **self.request_headers(secret, request),
+            **session_affinity_headers(url, request.session_id),
+        }
         try:
             with open_model_stream(
                 self.client(),
@@ -265,6 +276,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                         stream_usage = chunk["usage"]
                     choice = (chunk.get("choices") or [{}])[0]
                     delta = choice.get("delta") or {}
+                    _continuation_delta(continuation_message, continuation_tools, delta)
                     if delta.get("content"):
                         content_parts.append(delta["content"])
                         on_delta(delta["content"])
@@ -319,11 +331,18 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         # §6.2: captured chunk usage is authoritative; silence is marked,
         # never zero-filled.
         usage = _usage_from_openai(stream_usage) if stream_usage else Usage(source="unavailable")
+        if continuation_tools:
+            continuation_message["tool_calls"] = [
+                continuation_tools[k] for k in sorted(continuation_tools)
+            ]
         return ModelResponse(
             content="".join(content_parts),
             tool_calls=tool_calls,
             usage=usage,
             stop_reason=stop_reason,
+            continuation={"protocol": "chat", "message": continuation_message}
+            if stop_reason is not StopReason.MAX_TOKENS
+            else None,
         )
 
     def _responses_adapter(self):  # OpenAIResponsesAdapter (P0.7 split)
@@ -337,6 +356,32 @@ class OpenAICompatibleAdapter(ProviderAdapter):
 
 
 # -- helpers -----------------------------------------------------------------
+
+
+def _continuation_delta(message, tools, delta):
+    """Preserve signed extensions without publishing private reasoning deltas."""
+
+    def merge(target, fragment):
+        for key, value in fragment.items():
+            if isinstance(value, dict):
+                merge(target.setdefault(key, {}), value)
+            elif isinstance(value, str):
+                target[key] = target.get(key, "") + value
+
+    merge(
+        message,
+        {
+            k: v
+            for k, v in delta.items()
+            if k in ("content", "reasoning_content", "reasoning", "extra_content")
+        },
+    )
+    for fragment in delta.get("tool_calls") or []:
+        index = fragment.get("index", 0)
+        slot = tools.setdefault(index, {"type": "function"})
+        if fragment.get("id"):
+            slot["id"] = fragment["id"]
+        merge(slot, {k: v for k, v in fragment.items() if k in ("function", "extra_content")})
 
 
 def _wire_tool_name(name: str, tool_aliases: dict[str, str] | None) -> str:
@@ -355,6 +400,12 @@ def _wire_tool_name(name: str, tool_aliases: dict[str, str] | None) -> str:
 def _message_to_openai(
     message: ChatMessage, tool_aliases: dict[str, str] | None = None
 ) -> dict[str, Any]:
+    if (
+        message.role == "assistant"
+        and message.continuation
+        and message.continuation.get("protocol") == "chat"
+    ):
+        return message.continuation["message"]
     msg: dict[str, Any] = {"role": message.role}
     if message.content is not None:
         msg["content"] = message.content
@@ -430,6 +481,24 @@ def _response_from_openai(data: Any, url: str) -> ModelResponse:
         ),
         raw=data if isinstance(data, dict) else None,
         items=tuple(items),
+        continuation={
+            "protocol": "chat",
+            "message": {
+                k: v
+                for k, v in message.items()
+                if k
+                in (
+                    "role",
+                    "content",
+                    "tool_calls",
+                    "reasoning_content",
+                    "reasoning",
+                    "extra_content",
+                )
+            },
+        }
+        if choice.get("finish_reason") != "length"
+        else None,
     )
 
 

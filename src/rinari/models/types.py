@@ -61,6 +61,7 @@ class ChatMessage:
     # confiable, nunca el modelo ni un cliente. Un mensaje `peer` es evidencia
     # de otro agente, no una instrucción del propietario.
     origin: dict[str, Any] | None = None
+    continuation: dict[str, Any] | None = field(default=None, repr=False)
 
     @classmethod
     def system(cls, content: str) -> ChatMessage:
@@ -71,8 +72,12 @@ class ChatMessage:
         return cls(role=ROLE_USER, content=content)
 
     @classmethod
-    def assistant(cls, content: str, tool_calls: tuple[ToolCall, ...] = ()) -> ChatMessage:
-        return cls(role=ROLE_ASSISTANT, content=content, tool_calls=tool_calls)
+    def assistant(
+        cls, content: str, tool_calls: tuple[ToolCall, ...] = (), *, continuation=None
+    ) -> ChatMessage:
+        return cls(
+            role=ROLE_ASSISTANT, content=content, tool_calls=tool_calls, continuation=continuation
+        )
 
     @classmethod
     def tool_result(cls, tool_call_id: str, name: str, content: str) -> ChatMessage:
@@ -121,6 +126,7 @@ class ModelResponse:
     raw: dict[str, Any] | None = None
     items: tuple[ModelItem, ...] = ()
     provider_state: dict[str, Any] | None = None
+    continuation: dict[str, Any] | None = field(default=None, repr=False)
     """Transport metadata (e.g. response id for chained calls). Never the
     source of truth: Rinari session history stays canonical."""
 
@@ -158,6 +164,7 @@ class ModelRequest:
     on_dispatched: Any = None
     max_tokens: int | None = None
     reasoning_effort: str | None = None
+    reasoning_dialect: str | None = None
     json_response: bool = False
     session_id: str | None = None
     """Opaque conversation id, forwarded only to vendors that require

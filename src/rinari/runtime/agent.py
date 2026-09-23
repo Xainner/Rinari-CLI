@@ -382,6 +382,7 @@ class AgentLoop:
                 ctx.session_id,
                 EVENT_MODEL_INVOKED,
                 {
+                    "provider_id": (response.provider_state or {}).get("provider_id"),
                     "stop_reason": response.stop_reason.value,
                     "tool_calls": [{"id": tc.id, "name": tc.name} for tc in response.tool_calls],
                     "usage": _usage_dict(response.usage),
@@ -405,7 +406,11 @@ class AgentLoop:
                 self._check_pressure(ctx, response, governor)
 
             if not response.has_tool_calls:
-                ctx.history.append(ChatMessage.assistant(response.content or ""))
+                ctx.history.append(
+                    ChatMessage.assistant(
+                        response.content or "", continuation=response.continuation
+                    )
+                )
                 if subagent_results:
                     ctx.history.append(
                         ChatMessage.user(
@@ -442,7 +447,11 @@ class AgentLoop:
                 )
 
             # EXECUTE: run every requested tool, feed results back as tool msgs.
-            ctx.history.append(ChatMessage.assistant(response.content or "", response.tool_calls))
+            ctx.history.append(
+                ChatMessage.assistant(
+                    response.content or "", response.tool_calls, continuation=response.continuation
+                )
+            )
             looping_detected = False
             round_tool_seq = tool_seq
 

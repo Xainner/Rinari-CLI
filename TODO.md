@@ -2644,6 +2644,12 @@ Todos los gates críticos anteriores pasan en plataformas soportadas.
 
 ## Implementation notes (Fase 9 - release prep)
 
+Provider/subscription extension (2026-09-22): catalog, shared capability resolver,
+continuation persistence, quota service and experimental ChatGPT/Copilot auth
+are implemented locally. See [provider-subscriptions.md](docs/provider-subscriptions.md).
+Real subscription login/inference and the published Engine/Desktop pin remain
+release acceptance items; automated fixtures do not mark those gates complete.
+
 Entregado en esta pasada:
 
 1. **`rinari config migrate`** (release blocker resuelto). La config `~/.rinari` del

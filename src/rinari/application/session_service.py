@@ -363,6 +363,7 @@ class SessionService:
                 # Provenance survives the fork: a peer delivery stays marked
                 # as untrusted data in the copy.
                 origin=message.origin,
+                continuation=message.continuation,
             )
             for message in self._ctx.message_repo.list(source.id)
         ]

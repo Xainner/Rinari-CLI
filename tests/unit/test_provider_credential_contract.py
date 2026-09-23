@@ -321,13 +321,28 @@ def test_grok46_defaults_to_responses_transport_on_opencode(app_ctx) -> None:
     assert _resolve_transport(record, model) == "responses"
 
 
-def test_grok45_defaults_to_chat_transport_on_opencode(app_ctx) -> None:
-    # Documented move: grok-4.5 now lives on /chat/completions.
+def test_grok45_uses_responses_transport_on_opencode_zen(app_ctx) -> None:
+    # Tabla de endpoints de https://opencode.ai/docs/zen/ (actualizada el
+    # 2026-09-22): todos los grok, grok-4.5 incluido, van por /responses. La
+    # prueba anterior daba grok-4.5 por /chat/completions en Go según la tabla
+    # del 2026-09-13; en la actual, Go ya no ofrece grok-4.5.
     record, model = _provider_with_model(
         app_ctx,
-        alias="go45",
-        endpoint="https://opencode.ai/zen/go/v1",
+        alias="zen45",
+        endpoint="https://opencode.ai/zen/v1",
         model_id="grok-4.5",
+    )
+    assert _resolve_transport(record, model) == "responses"
+
+
+def test_chat_documented_model_stays_on_chat_on_opencode_go(app_ctx) -> None:
+    # No todo lo de OpenCode va por /responses: la misma tabla de Go pone
+    # kimi-k3 en /chat/completions.
+    record, model = _provider_with_model(
+        app_ctx,
+        alias="go-kimi",
+        endpoint="https://opencode.ai/zen/go/v1",
+        model_id="kimi-k3",
     )
     assert _resolve_transport(record, model) == "chat"
 

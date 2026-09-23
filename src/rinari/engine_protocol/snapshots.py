@@ -38,8 +38,13 @@ def message_to_dict(record: SessionMessageRecord) -> dict[str, Any]:
 
 
 def provider_to_dict(record: ProviderRecord, has_credential: bool) -> dict[str, Any]:
+    from rinari.providers.catalog import PROVIDER_CATALOG, product_for
+
     view = provider_dict(record, active=False, credential_ref=None)
     view["has_credential"] = bool(has_credential)
+    product = product_for(record)
+    preset = next(p for p in PROVIDER_CATALOG if p.key == product)
+    view.update(product_id=product, product_name=preset.name, experimental=preset.experimental)
     return view
 
 
@@ -49,7 +54,9 @@ def build_snapshot(services: ServiceContainer) -> dict[str, Any]:
     providers = []
     for provider in services.providers.list():
         credential = services.ctx.provider_repo.get_credential(provider.id)
-        providers.append(provider_to_dict(provider, credential is not None))
+        view = provider_to_dict(provider, credential is not None)
+        view["model_count"] = len(services.models.list(provider.id))
+        providers.append(view)
     return {
         "protocol_version": protocol.PROTOCOL_VERSION,
         "engine_version": protocol.engine_version(),

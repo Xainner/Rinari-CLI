@@ -26,6 +26,7 @@ from rinari.providers.adapters.http import (
 )
 from rinari.providers.catalog import OPENCODE_RESPONSES_MODELS
 from rinari.providers.errors import invoke_with_retry
+from rinari.providers.metadata import effective_metadata
 from rinari.providers.registry import adapter_for
 from rinari.shared.errors import InvalidUsageError
 
@@ -44,16 +45,19 @@ def _resolve_transport(provider, model) -> str:
     """
     transport = (model.settings or {}).get("transport")
     if transport is None:
+        detected = effective_metadata(provider, model).get("transport", "chat")
+        if detected != "chat":
+            return detected
         if (
             is_opencode_endpoint(provider.endpoint)
             and model.provider_model_id in OPENCODE_RESPONSES_MODELS
         ):
             return "responses"
         return "chat"
-    if transport not in ("chat", "responses"):
+    if transport not in ("chat", "responses", "anthropic"):
         raise InvalidUsageError(
             f"unknown transport {transport!r} on model {model.alias!r}",
-            hint="Expected one of: chat, responses.",
+            hint="Expected one of: chat, responses, anthropic.",
         )
     return transport
 
@@ -241,13 +245,22 @@ class ModelRouter:
             "vision": merged.vision,
             "max_context_window": merged.max_context_tokens,
         }
-        levels = self.reasoning_levels(self._models.resolve(model_id))
+        model = self._models.resolve(model_id)
+        metadata = effective_metadata(provider, model)
+        levels = metadata.get("reasoning_levels") or self.reasoning_levels(model)
         if levels is not None:
             matrix["reasoning_levels"] = levels
         return {
             "capabilities": matrix,
             "supports_tools": bool(matrix["tools"]),
             "unknown": sorted(key for key, value in matrix.items() if value is None),
+            "metadata": metadata,
+            "provenance": {
+                "catalog_source": metadata.get("source"),
+                "catalog_updated_at": metadata.get("updated_at"),
+                "explicit_overrides": sorted((model.capabilities or {}).keys()),
+                "endpoint_metadata": bool((model.settings or {}).get("discovered_capabilities")),
+            },
         }
 
     def capabilities(
@@ -262,7 +275,20 @@ class ModelRouter:
             return base
         if model.provider_id != provider.id:
             return base
-        return _merge_capabilities(base, model.capabilities)
+        if _resolve_transport(provider, model) not in ("chat", "responses", "anthropic"):
+            return replace(
+                base,
+                streaming=False,
+                tool_calls=False,
+                structured_output=False,
+                reasoning_effort=False,
+                vision=False,
+            )
+        if _resolve_transport(provider, model) == "anthropic":
+            from rinari.providers.adapters.anthropic import AnthropicAdapter
+
+            base = AnthropicAdapter().capabilities()
+        return _merge_capabilities(base, effective_metadata(provider, model))
 
     @staticmethod
     def reasoning_levels(model):
@@ -276,7 +302,9 @@ class ModelRouter:
         effort = request.reasoning_effort
         if effort is None:
             return
-        levels = self.reasoning_levels(model)
+        levels = effective_metadata(provider, model).get(
+            "reasoning_levels"
+        ) or self.reasoning_levels(model)
         if not self.capabilities(provider, model.id).reasoning_effort:
             raise InvalidUsageError("This model does not support configurable reasoning.")
         if levels is not None and effort not in levels:
@@ -322,7 +350,89 @@ class ModelRouter:
             reasoning_effort=request.reasoning_effort
             if request.reasoning_effort is not None
             else generation.get("reasoning_effort"),
+            reasoning_dialect=effective_metadata(provider, model).get("reasoning_dialect"),
+            messages=tuple(
+                replace(
+                    m,
+                    continuation=m.continuation
+                    if m.continuation
+                    and m.continuation.get("destination")
+                    == self._destination(provider, model.provider_model_id)
+                    else None,
+                )
+                for m in request.messages
+            ),
         )
+
+    @staticmethod
+    def _destination(provider, model):
+        return [provider.id, provider.endpoint, model]
+
+    def _scope_response(self, response, provider, model):
+        response = replace(
+            response,
+            provider_state={
+                **(response.provider_state or {}),
+                "provider_id": provider.id,
+            },
+        )
+        if response.continuation:
+            return replace(
+                response,
+                continuation={
+                    **response.continuation,
+                    "destination": self._destination(provider, model),
+                },
+            )
+        return response
+
+    def _transport_adapter(self, provider, transport):
+        if transport == "anthropic":
+            from rinari.providers.adapters.anthropic import AnthropicAdapter
+
+            adapter = self.adapter(provider)
+            if hasattr(adapter, "_anthropic_adapter"):
+                return adapter._anthropic_adapter(), "chat"
+            return AnthropicAdapter(client=self._client), "chat"
+        if transport not in ("chat", "responses"):
+            raise InvalidUsageError(
+                "This model requires a transport not yet implemented by Rinari."
+            )
+        return self.adapter(provider), transport
+
+    def _authenticated_call(self, provider, call, *, output_started=lambda: False):
+        from rinari.providers.errors import ProviderError, ProviderErrorCode
+
+        secret = self._providers.resolve_secret(provider)
+        try:
+            return call(secret)
+        except ProviderError as exc:
+            if exc.error_code == ProviderErrorCode.RATE_LIMIT:
+                import contextlib
+                import time
+
+                from rinari.shared.clock import now_iso
+
+                with contextlib.suppress(Exception):
+                    self._providers._ctx.config_repo.set_json(
+                        f"provider.usage.invalidated.{provider.id}",
+                        time.time(),
+                        updated_at=now_iso(self._providers._ctx.clock),
+                    )
+            if (
+                provider.auth_method != "oauth"
+                or exc.error_code != ProviderErrorCode.AUTH
+                or exc.details.get("partial")
+                or output_started()
+            ):
+                raise
+            from rinari.providers.auth import token_for
+
+            renewed = token_for(self._providers, provider, rejected_token=secret)
+            if renewed == secret:
+                raise
+            # Only an authentication rejection before output is safe to retry.
+            return call(renewed)
 
     @scheduled
     def invoke(
@@ -386,16 +496,29 @@ class ModelRouter:
         request = prepare_visual_payload(request, constraints)
         real_by_alias = _alias_map_for_request(provider.endpoint, request)
         transport = _resolve_transport(provider, model)
-        adapter = self.adapter(provider)
-        response = adapter.invoke_stream(
-            request,
-            self._providers.resolve_secret(provider),
-            provider.endpoint,
-            on_delta,
-            transport=transport,
-            tool_aliases=real_by_alias,
+        adapter, transport = self._transport_adapter(provider, transport)
+        emitted = False
+
+        def deliver(delta):
+            nonlocal emitted
+            emitted = True
+            on_delta(delta)
+
+        response = self._authenticated_call(
+            provider,
+            lambda secret: adapter.invoke_stream(
+                request,
+                secret,
+                provider.endpoint,
+                deliver,
+                transport=transport,
+                tool_aliases=real_by_alias,
+            ),
+            output_started=lambda: emitted,
         )
-        return _unalias_response(response, real_by_alias)
+        return self._scope_response(
+            _unalias_response(response, real_by_alias), provider, request.model
+        )
 
     def _adapter_invoke(
         self,
@@ -404,18 +527,21 @@ class ModelRouter:
         transport: str = "chat",
         tool_aliases: dict[str, str] | None = None,
     ) -> ModelResponse:
-        adapter = self.adapter(provider)
-        secret = self._providers.resolve_secret(provider)
+        adapter, transport = self._transport_adapter(provider, transport)
         # §6.4: transient model-call failures retry with backoff. Streaming
         # deliberately does NOT retry: partial deltas already delivered make
         # the response ambiguous.
-        return invoke_with_retry(
-            lambda: adapter.invoke(
-                request,
-                secret,
-                provider.endpoint,
-                transport=transport,
-                tool_aliases=tool_aliases,
+        response = self._authenticated_call(
+            provider,
+            lambda secret: invoke_with_retry(
+                lambda: adapter.invoke(
+                    request,
+                    secret,
+                    provider.endpoint,
+                    transport=transport,
+                    tool_aliases=tool_aliases,
+                ),
+                attempts=1 if any(message.images for message in request.messages) else 3,
             ),
-            attempts=1 if any(message.images for message in request.messages) else 3,
         )
+        return self._scope_response(response, provider, request.model)
