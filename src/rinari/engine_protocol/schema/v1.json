@@ -1536,10 +1536,98 @@
           "type": "integer"
         },
         "window_source": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "manual",
+            "override",
+            "provider",
+            "catalog",
+            "fallback"
+          ]
         },
         "window_estimated": {
           "type": "boolean"
+        },
+        "total_window_tokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_context_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "max_input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "max_output_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "limit_sources": {
+          "type": "object",
+          "properties": {
+            "context": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "manual",
+                "override",
+                "provider",
+                "catalog",
+                null
+              ]
+            },
+            "input": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "manual",
+                "override",
+                "provider",
+                "catalog",
+                null
+              ]
+            },
+            "output": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "manual",
+                "override",
+                "provider",
+                "catalog",
+                null
+              ]
+            }
+          }
+        },
+        "discovered_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "metadata_updated_at": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     },

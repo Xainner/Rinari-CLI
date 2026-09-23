@@ -185,6 +185,7 @@ class ModelService:
             settings["discovered_capabilities"] = capabilities.get(
                 "endpoint_capabilities", capabilities
             )
+            settings["discovered_at"] = now
             capabilities = None
         record = ModelRecord(
             id=self._ctx.ids.new("mdl"),
@@ -319,6 +320,11 @@ class ModelService:
                     error=f"{exc.__class__.__name__}: {getattr(exc, 'message', exc)}",
                 )
                 continue
+            from rinari.context import windows
+
+            # The context resolver shares this discovery instead of repeating it,
+            # and an explicit refresh never waits for its cache to expire.
+            windows.remember(self._ctx, rec, discovered)
             now = self._now()
             still = 0
             gone = 0
@@ -332,6 +338,7 @@ class ModelService:
                             "discovered_capabilities": {
                                 **(discovered[model.provider_model_id] or {}),
                             },
+                            "discovered_at": now,
                         }
                     model.updated_at = now
                     self._ctx.model_repo.update(model)
