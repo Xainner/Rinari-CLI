@@ -48,6 +48,20 @@ additively with `projection_version`, cumulative `summary`, `revision`,
 active projection. Reload excludes exactly those covered IDs, retaining newer messages
 and the latest owner message. Tool calls and their results remain complete blocks.
 
+Each compaction carries the previous structured state forward instead of re-deriving it
+from the active tail: the goal persists until the user sets a new one explicitly (a
+message starting with `Nuevo objetivo:`/`New goal:`), and constraints accumulate in order,
+so a later instruction can correct an earlier one without the earlier one being lost.
+Tasks, validations, approvals and blockers come from their records, not from the summary.
+
+Before publishing, the summary is checked against those records. It cannot say that no
+work is pending, or that the work is complete, when tasks or blockers are open or no
+completed task is recorded; nor that tests passed without a recorded passing test run. A
+contradiction gets one bounded repair request with the reason; a second one keeps the
+previous projection. `governor.compact` reports what was checked in `checks`
+(`structure`, `records`, `reduction`: `passed`, `repaired` or `failed`). These are
+deterministic checks, not a proof of semantic fidelity.
+
 Legacy rule-based states remain readable but do not imply a cut that was never saved.
 The next necessary compaction creates a verifiable projection. Cancellation, an invalid
 summary or a failed database write does not replace the previous projection. Summaries
