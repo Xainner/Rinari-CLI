@@ -13,12 +13,27 @@ by the existing router. A summarization request exposes no executable tools.
 
 ## Window and accounting
 
-Manual windows override automatic discovery. Automatic resolution uses normalized
-endpoint metadata, saved model capability metadata and a destination-scoped cache.
-The cache key includes provider ID, endpoint and provider model ID. Unknown windows use
-128,000 tokens and are explicitly marked as estimates. Input and output contracts are
-distinct; configured or protocol-required output budgets reduce usable input capacity.
-No output cap is introduced by compaction.
+Manual windows override automatic discovery and skip it. Otherwise each limit (total
+window, maximum input, maximum output) is resolved on its own, from the first source
+that states it: an explicit override saved on the model, then the endpoint's discovery,
+then the bundled catalog (`providers/model_metadata.json`, a models.dev snapshot). When
+none states a window, 128,000 tokens is used and marked as an estimate.
+
+`context.status` (and the preflight that decides compaction, which uses the same
+resolver) reports `window_source` — `manual`, `override`, `provider`, `catalog` or
+`fallback` — for the limit that decides the effective window, plus each limit in
+`max_context_tokens`/`max_input_tokens`/`max_output_tokens`, their sources in
+`limit_sources`, and `discovered_at`/`metadata_updated_at` when an endpoint or the
+catalog supplied them. A catalog value is never labelled as reported by the endpoint.
+
+Discovery runs once per endpoint and is shared by every saved model on it; the cache
+lives in `context-discovery-*.json` for one hour. `rinari models refresh` seeds it and
+never waits for it to expire. A failed discovery is remembered for one minute as a
+failure, never as data; offline, the last discovery saved for that model is used.
+
+Input and output contracts are distinct. A maximum output is a limit, not a reservation:
+only the request's or configuration's output budget reduces usable input capacity. No
+output cap is introduced by compaction.
 
 Text accounting is an estimate, including system instructions, schemas and tool
 descriptions. Subsequent requests can anchor that estimate to provider-reported usage.
