@@ -1149,7 +1149,14 @@ class TurnManager:
                         },
                     )
                 elif turn.token_usage.last and "usage:turn" in turn.activities:
-                    turn.activities["usage:turn"].update(turn.token_usage.last)
+                    # Throttled: nothing is emitted, but a UI reload reads the
+                    # latest estimate. Same lock and replacement as every other
+                    # write to `turn.activities`, which runtime_state() copies.
+                    with self._lock:
+                        turn.activities["usage:turn"] = {
+                            **turn.activities["usage:turn"],
+                            **turn.token_usage.last,
+                        }
                 return
             persist_usage = payload.get("_checkpoint", False)
             payload = {key: value for key, value in payload.items() if key != "_checkpoint"}

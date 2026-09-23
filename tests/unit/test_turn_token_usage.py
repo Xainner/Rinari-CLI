@@ -95,8 +95,39 @@ def test_legacy_response_without_usage_retains_estimate():
     assert tracker.finish()["source"] == "estimated"
 
 
-def test_unreported_completions_do_not_bypass_estimate_throttle():
-    tracker = TurnTokenTracker(clock=lambda: 0)
-    tracker.observe("usage.call.started", {"call_id": "a", "input_tokens": 10})
-    assert tracker.observe("usage.call.completed", {"call_id": "a", "output_chars": 40}) is None
-    assert tracker.last["total_tokens"] == 20
+def test_call_boundaries_bypass_the_delta_throttle():
+    # A tool that takes 30 ms: the next call starts inside the throttle window
+    # of the previous completion. Its input estimate has to reach the UI now,
+    # not at its first delta (or its end, if it does not stream).
+    now = [0.0]
+    tracker = TurnTokenTracker(clock=lambda: now[0])
+    tracker.observe("usage.call.started", {"call_id": "a", "input_tokens": 11000})
+    now[0] = 2.0
+    usage = {"input_tokens": 11000, "output_tokens": 500, "source": "complete"}
+    tracker.observe("usage.call.completed", {"call_id": "a", "usage": usage})
+    now[0] = 2.03
+    started = tracker.observe("usage.call.started", {"call_id": "b", "input_tokens": 12000})
+    assert started["total_tokens"] == 23500
+    assert started["model_calls"] == 2
+    assert started["source"] == "mixed"
+    # A completion without reported usage still carries the output estimate.
+    now[0] = 2.04
+    completed = tracker.observe("usage.call.completed", {"call_id": "b", "output_chars": 40})
+    assert completed["total_tokens"] == 23510
+    # Deltas stay throttled.
+    now[0] = 2.05
+    tracker.observe("usage.call.started", {"call_id": "c", "input_tokens": 1})
+    now[0] = 2.06
+    assert tracker.observe("usage.call.delta", {"call_id": "c", "output_chars": 400}) is None
+    assert tracker.last["total_tokens"] == 23611
+
+
+def test_every_request_gets_its_own_call_key():
+    # Agents reuse model_call_id values such as "model_1"; the tracker keys
+    # calls by an opaque id minted per request, which replace() preserves.
+    from dataclasses import replace
+
+    first = ModelRequest(model="m", messages=(ChatMessage.user("x"),))
+    second = ModelRequest(model="m", messages=(ChatMessage.user("x"),))
+    assert first.usage_call_id != second.usage_call_id
+    assert replace(first, model="n").usage_call_id == first.usage_call_id

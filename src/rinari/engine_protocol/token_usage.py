@@ -56,7 +56,11 @@ class TurnTokenTracker:
             if not complete
             else "thinking"
         )
-        return self.snapshot(phase, force=complete and call["source"] != "estimated")
+        # Only visible deltas are throttled. A call boundary is at most two
+        # updates per call, and throttling it lost the new call's input estimate:
+        # a call starting right after the previous one completed stayed hidden
+        # until its first delta, or until it finished if it did not stream.
+        return self.snapshot(phase, force=event != "usage.call.delta")
 
     def snapshot(self, phase, *, force=False):
         if not self.calls:

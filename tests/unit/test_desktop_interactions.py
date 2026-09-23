@@ -292,10 +292,9 @@ def test_plan_tool_asks_and_resumes_real_agent_loop(desktop, monkeypatch):
 
         def invoke_stream(self, request, on_delta):
             response = self.invoke(request)
-            # Deterministic fake provider, with enough time between chunks to
-            # exercise the production estimate throttle and reconciliation.
+            # Deterministic fake provider. Call boundaries are never throttled,
+            # so the estimate -> mixed -> reported sequence needs no sleeps.
             for chunk in ("Local fixture. ", "Verified. "):
-                time.sleep(0.11)
                 on_delta(chunk)
             return response
 
