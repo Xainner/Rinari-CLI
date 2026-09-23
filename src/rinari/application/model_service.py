@@ -9,7 +9,7 @@ them.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import httpx
@@ -137,6 +137,20 @@ class ModelService:
             )
         except RinariError:
             raise
+        from rinari.providers.metadata import model_metadata
+
+        discovered = [
+            replace(
+                m,
+                capabilities={
+                    "source": "provider-discovery",
+                    **model_metadata(provider, m.provider_model_id),
+                    **(m.capabilities or {}),
+                    "endpoint_capabilities": m.capabilities or {},
+                },
+            )
+            for m in discovered
+        ]
         data = {provider.alias: discovered}
         return data
 
@@ -152,7 +166,7 @@ class ModelService:
     ) -> ModelRecord:
         provider = self._providers.get(provider_ref)
         transport = (settings or {}).get("transport")
-        if transport is not None and transport not in ("chat", "responses"):
+        if transport is not None and transport not in ("chat", "responses", "anthropic"):
             raise InvalidUsageError(
                 f"unknown transport {transport!r}",
                 hint="Expected one of: chat, responses.",
@@ -166,6 +180,12 @@ class ModelService:
                 f"--provider {provider.alias}` to rename it.",
             )
         now = self._now()
+        settings = dict(settings or {})
+        if capabilities and capabilities.get("source"):
+            settings["discovered_capabilities"] = capabilities.get(
+                "endpoint_capabilities", capabilities
+            )
+            capabilities = None
         record = ModelRecord(
             id=self._ctx.ids.new("mdl"),
             alias=alias,
@@ -287,7 +307,7 @@ class ModelService:
             adapter = adapter_for(rec, self._client)
             try:
                 discovered = {
-                    m.provider_model_id
+                    m.provider_model_id: m.capabilities
                     for m in adapter.list_models(self._providers.resolve_secret(rec), rec.endpoint)
                 }
             except Exception as exc:
@@ -306,6 +326,13 @@ class ModelService:
                 for model in models:
                     available = model.provider_model_id in discovered
                     model.availability = "available" if available else "unavailable"
+                    if available:
+                        model.settings = {
+                            **(model.settings or {}),
+                            "discovered_capabilities": {
+                                **(discovered[model.provider_model_id] or {}),
+                            },
+                        }
                     model.updated_at = now
                     self._ctx.model_repo.update(model)
                     if available:

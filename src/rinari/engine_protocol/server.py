@@ -323,6 +323,13 @@ class EngineServer:
         self._dispatcher.register("profile_bundle.remove", self._bundle_remove)
         self._dispatcher.register("profile_bundle.apply", self._bundle_apply)
         self._dispatcher.register("provider.list", self._provider_list)
+        self._dispatcher.register("provider.catalog.get", self._provider_catalog)
+        self._dispatcher.register("provider.auth.start", self._provider_auth_start)
+        self._dispatcher.register("provider.auth.get", self._provider_auth_get)
+        self._dispatcher.register("provider.auth.cancel", self._provider_auth_cancel)
+        self._dispatcher.register("provider.auth.logout", self._provider_auth_logout)
+        self._dispatcher.register("provider.usage.get", self._provider_usage)
+        self._dispatcher.register("provider.diagnostics.get", self._provider_diagnostics)
         self._dispatcher.register("provider.create", self._provider_create)
         self._dispatcher.register("provider.get", self._provider_get)
         self._dispatcher.register("provider.update", self._provider_update)
@@ -362,6 +369,8 @@ class EngineServer:
         self._turns.cancel_all_turns()
 
     def close(self) -> None:
+        if hasattr(self, "_provider_auth_service"):
+            self._provider_auth_service.close()
         self._attachment_jobs.close()
         self._previews.close()
         self._pty.shutdown()
@@ -2562,14 +2571,85 @@ class EngineServer:
 
     # -- providers / models -------------------------------------------------
 
+    def _provider_catalog(self, params):
+        from rinari.providers.catalog import catalog_view
+
+        return {"presets": catalog_view(), "version": "2026-09-22"}
+
+    def _auth_service(self):
+        from rinari.providers.auth import ProviderAuthService
+
+        if not hasattr(self, "_provider_auth_service"):
+            self._provider_auth_service = ProviderAuthService(self._services.providers)
+        return self._provider_auth_service
+
+    def _auth_event(self, result):
+        self._turns.emit_external(event("provider.auth.updated", result))
+        return result
+
+    def _provider_auth_start(self, params):
+        return self._auth_event(
+            self._auth_service().start(
+                self._need_str(params, "ref"), params.get("method", "browser")
+            )
+        )
+
+    def _provider_auth_get(self, params):
+        return self._auth_event(
+            self._auth_service().get(
+                self._need_str(params, "ref"), self._opt_str(params, "operation_id")
+            )
+        )
+
+    def _provider_auth_cancel(self, params):
+        return self._auth_event(self._auth_service().cancel(self._need_str(params, "ref")))
+
+    def _provider_auth_logout(self, params):
+        return self._auth_event(self._auth_service().logout(self._need_str(params, "ref")))
+
+    def _provider_usage(self, params):
+        from rinari.providers.usage import ProviderUsageService
+
+        refresh = params.get("refresh", False)
+        if not isinstance(refresh, bool):
+            raise EngineProtocolError(INVALID_PARAMS, "refresh must be boolean")
+        if not hasattr(self, "_provider_usage_service"):
+            self._provider_usage_service = ProviderUsageService(self._services.providers)
+        snapshot = self._provider_usage_service.get(self._need_str(params, "ref"), refresh=refresh)
+        self._turns.emit_external(event("provider.usage.updated", snapshot))
+        return snapshot
+
+    def _provider_diagnostics(self, params):
+        from rinari.models.router import _resolve_transport
+        from rinari.providers.catalog import product_for
+
+        provider = self._services.providers.get(self._need_str(params, "ref"))
+        return {
+            "provider_id": provider.id,
+            "product_id": product_for(provider),
+            "endpoint": provider.endpoint,
+            "auth_method": provider.auth_method,
+            "has_credential": bool(self._services.providers.credential_ref(provider)),
+            "discovery_connected": provider.status_connected,
+            "checked_at": provider.status_checked_at,
+            "inference_verified": False,
+            "models": [
+                {
+                    "id": m.id,
+                    "model": m.provider_model_id,
+                    "transport": _resolve_transport(provider, m),
+                }
+                for m in self._services.models.list(provider.id)
+            ],
+        }
+
     def _provider_list(self, params: dict[str, Any]) -> dict[str, Any]:
         _ = params
         current = self._services.providers.current()
         active_alias = current.provider.alias if current is not None else None
         items = []
         for record in self._services.providers.list():
-            credential = self._services.ctx.provider_repo.get_credential(record.id)
-            items.append(provider_to_dict(record, credential is not None))
+            items.append(self._provider_view(record))
         return {"providers": items, "active_alias": active_alias}
 
     def _model_list(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -2618,6 +2698,7 @@ class EngineServer:
         view = provider_to_dict(record, ref is not None)
         current = providers.current()
         view["active"] = current is not None and current.provider.id == record.id
+        view["model_count"] = len(self._services.models.list(record.id))
         return view
 
     def _model_view(self, model: Any) -> dict[str, Any]:
@@ -2631,9 +2712,15 @@ class EngineServer:
         router = ModelRouter(self._services.providers, self._services.models)
         provider = self._services.providers.get(model.provider_id)
         effective = router.capabilities(provider, model.id)
+        from rinari.providers.metadata import effective_metadata
+
         view["capabilities"] = {
+            **effective_metadata(provider, model),
             **(view.get("capabilities") or {}),
             "reasoning_effort": effective.reasoning_effort,
+            "vision": effective.vision,
+            "tool_calls": effective.tool_calls,
+            "max_context_tokens": effective.max_context_tokens,
         }
         return view
 

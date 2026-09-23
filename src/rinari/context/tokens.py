@@ -35,6 +35,10 @@ def _text_length(value: str | None) -> int:
 
 def estimate_message_tokens(message: ChatMessage) -> int:
     text = _text_length(message.content)
+    if message.continuation:
+        # Signed/private blocks also occupy the model input. Count the complete
+        # wire representation once, without exposing its contents to telemetry.
+        text = max(text, len(json.dumps(message.continuation, ensure_ascii=False)))
     if message.tool_calls:
         text += 16 + len(json.dumps([tc.name for tc in message.tool_calls]))
         text += sum(8 + len(json.dumps(tc.arguments, default=str)) for tc in message.tool_calls)

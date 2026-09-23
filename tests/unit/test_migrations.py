@@ -108,6 +108,8 @@ def test_migrate_fresh_database_applies_all(db):
         30,
         31,
         32,
+        33,
+        34,
     ]
     assert _table_names(db) == TABLES_AFTER_MIGRATIONS
 
@@ -116,7 +118,7 @@ def test_migrate_is_idempotent(db):
     runner = MigrationRunner(db, FakeClock())
     runner.migrate()
     assert runner.migrate() == []
-    assert runner.current_version() == 32
+    assert runner.current_version() == 34
 
 
 def _previous_home_migrations(tmp_path: Path, upto: int) -> Path:
@@ -153,7 +155,16 @@ def test_peer_origin_migration_keeps_previous_messages(db, tmp_path):
     )
 
     applied = MigrationRunner(db, FakeClock()).migrate()
-    assert applied == [32]
+    # 0032 es la primera que le falta a ese home; las posteriores se aplican
+    # detrás. Se calcula desde las migraciones incluidas para que añadir una
+    # nueva no rompa una prueba cuyo objeto es 0032.
+    after_31 = sorted(
+        int(source.name[:4])
+        for source in BUNDLED_0001.parent.glob("*.sql")
+        if int(source.name[:4]) > 31
+    )
+    assert applied == after_31
+    assert applied[0] == 32
     columns = {row["name"] for row in db.query("PRAGMA table_info(session_messages)")}
     assert "origin_json" in columns
 

@@ -18,6 +18,9 @@ def engine_version() -> str:
 
 
 CAPABILITIES: dict[str, bool] = {
+    "provider_catalog_v1": True,
+    "provider_usage_v1": True,
+    "provider_subscription_auth_v1": True,
     "persistent_context_compaction_v1": True,
     "local_image_view_v1": True,
     "vision_routing_v1": True,

@@ -35,6 +35,7 @@ from rinari.providers.adapters.http import (
     session_affinity_headers,
     stream_timeout_error,
 )
+from rinari.providers.urls import api_url
 from rinari.shared.errors import InvalidUsageError, NetworkError, ProviderModelError
 
 DEFAULT_BASE_URL = "https://api.anthropic.com"
@@ -63,7 +64,7 @@ class AnthropicAdapter(ProviderAdapter):
         return headers
 
     def validate_credential(self, secret: str | None, endpoint: str | None = None) -> AuthStatus:
-        url = f"{self.base_url(endpoint, None)}/v1/models?limit=1"
+        url = api_url(self.base_url(endpoint), "models", version="v1") + "?limit=1"
         response = send_request(self.client(), "GET", url, headers=self._headers(secret))
         if response.status_code in (401, 403):
             return AuthStatus(
@@ -76,7 +77,7 @@ class AnthropicAdapter(ProviderAdapter):
         return AuthStatus(connected=True, detail="ok")
 
     def list_models(self, secret: str | None, endpoint: str | None = None) -> list[DiscoveredModel]:
-        url = f"{self.base_url(endpoint, None)}/v1/models?limit=100"
+        url = api_url(self.base_url(endpoint), "models", version="v1") + "?limit=100"
         response = send_request(self.client(), "GET", url, headers=self._headers(secret))
         if response.status_code in (401, 403):
             raise auth_failure(response, url)
@@ -108,7 +109,7 @@ class AnthropicAdapter(ProviderAdapter):
         )
 
     def _messages_url(self, endpoint: str | None) -> str:
-        return f"{self.base_url(endpoint, None)}/v1/messages"
+        return api_url(self.base_url(endpoint), "messages", version="v1")
 
     def invoke(
         self,
@@ -125,7 +126,10 @@ class AnthropicAdapter(ProviderAdapter):
                 hint="Use an OpenAI-compatible provider for the responses transport.",
             )
         url = self._messages_url(endpoint)
-        headers = {**self._headers(secret), **session_affinity_headers(url, request.session_id)}
+        headers = {
+            **self.request_headers(secret, request),
+            **session_affinity_headers(url, request.session_id),
+        }
         response = send_request(
             self.client(),
             "POST",
@@ -157,6 +161,7 @@ class AnthropicAdapter(ProviderAdapter):
             )
         url = self._messages_url(endpoint)
         content_parts: list[str] = []
+        blocks: dict[int, dict[str, Any]] = {}
         calls = _ToolCallBlockAccumulator()
         usage = Usage()
         stop_reason = StopReason.END_TURN
@@ -170,7 +175,10 @@ class AnthropicAdapter(ProviderAdapter):
             if request.stream_read_timeout_s is not None
             else DEFAULT_MODEL_STREAM_READ_TIMEOUT_S
         )
-        headers = {**self._headers(secret), **session_affinity_headers(url, request.session_id)}
+        headers = {
+            **self.request_headers(secret, request),
+            **session_affinity_headers(url, request.session_id),
+        }
         try:
             with open_model_stream(
                 self.client(),
@@ -204,9 +212,24 @@ class AnthropicAdapter(ProviderAdapter):
                     elif event_type == "message_start":
                         usage = _usage_from_anthropic(_event_message(event).get("usage"))
                     elif event_type == "content_block_start":
+                        block = event.get("content_block")
+                        if isinstance(block, dict) and type(event.get("index")) is int:
+                            blocks[event["index"]] = dict(block)
                         calls.begin(_optional_int(event.get("index")), event.get("content_block"))
                     elif event_type == "content_block_delta":
                         delta = event.get("delta") or {}
+                        block = blocks.get(event.get("index"))
+                        if block is not None:
+                            field = {
+                                "text_delta": "text",
+                                "thinking_delta": "thinking",
+                                "signature_delta": "signature",
+                                "input_json_delta": "_json",
+                            }.get(delta.get("type"))
+                            if field:
+                                block[field] = block.get(field, "") + delta.get(
+                                    "partial_json" if field == "_json" else field, ""
+                                )
                         if delta.get("type") == "text_delta" and delta.get("text"):
                             content_parts.append(delta["text"])
                             on_delta(delta["text"])
@@ -269,11 +292,27 @@ class AnthropicAdapter(ProviderAdapter):
         tool_calls = () if stop_reason is StopReason.MAX_TOKENS else calls.finalize()
         if tool_calls and stop_reason is not StopReason.MAX_TOKENS:
             stop_reason = StopReason.TOOL_CALLS
+        preserved = []
+        for block in blocks.values():
+            raw = block.pop("_json", None)
+            if raw is not None:
+                try:
+                    block["input"] = json.loads(raw)
+                except ValueError:
+                    continue
+            if stop_reason is StopReason.MAX_TOKENS and block.get("type") == "tool_use":
+                continue
+            preserved.append(block)
         return ModelResponse(
             content="".join(content_parts),
             tool_calls=tool_calls,
             usage=usage,
             stop_reason=stop_reason,
+            continuation={"protocol": "anthropic", "blocks": preserved} if preserved else None,
+            items=tuple(
+                ModelItem(type=b["type"], data={k: v for k, v in b.items() if k != "type"})
+                for b in preserved
+            ),
         )
 
     def _payload(
@@ -303,6 +342,27 @@ class AnthropicAdapter(ProviderAdapter):
             ]
         if request.temperature is not None:
             payload["temperature"] = request.temperature
+        if request.reasoning_effort is not None:
+            from rinari.providers.metadata import claude_reasoning
+
+            mode, levels = claude_reasoning(request.model)
+            if request.reasoning_effort not in levels:
+                raise InvalidUsageError(
+                    f"Unsupported reasoning level for {request.model}: {request.reasoning_effort}"
+                )
+            if request.temperature is not None and request.temperature != 1:
+                raise InvalidUsageError("Claude thinking requires default temperature.")
+            payload.pop("temperature", None)
+            if mode == "adaptive":
+                payload["thinking"] = {"type": "adaptive"}
+                payload["output_config"] = {"effort": request.reasoning_effort}
+            else:
+                budget = {"low": 1024, "medium": 2048, "high": 4096}[request.reasoning_effort]
+                if payload["max_tokens"] <= budget:
+                    raise InvalidUsageError(
+                        f"max_tokens must exceed the thinking budget ({budget})."
+                    )
+                payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
         # json_response: Anthropic has no native JSON mode; the runtime checks
         # capabilities.structured_output before requesting it.
         return payload
@@ -401,6 +461,9 @@ def _convert_to_anthropic(
             )
             continue
         if message.role == "assistant":
+            if message.continuation and message.continuation.get("protocol") == "anthropic":
+                converted.append({"role": "assistant", "content": message.continuation["blocks"]})
+                continue
             if message.tool_calls:
                 blocks: list[dict[str, Any]] = []
                 if message.content:
@@ -515,6 +578,15 @@ def _response_from_anthropic(data: Any, url: str) -> ModelResponse:
         stop_reason=_stop_reason_from_anthropic(data.get("stop_reason")),
         raw=data,
         items=items,
+        continuation={
+            "protocol": "anthropic",
+            "blocks": [
+                b
+                for b in blocks
+                if isinstance(b, dict)
+                and not (data.get("stop_reason") == "max_tokens" and b.get("type") == "tool_use")
+            ],
+        },
     )
 
 
