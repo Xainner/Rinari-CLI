@@ -12,6 +12,7 @@ store state. Missing evidence stays empty; the harness never invents state.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from dataclasses import asdict, dataclass, fields
 from typing import Any
@@ -21,7 +22,20 @@ from rinari.models.types import ROLE_ASSISTANT, ROLE_USER, ChatMessage
 GOAL_MAX_CHARS = 300
 CONSTRAINT_MAX_CHARS = 200
 MAX_CONSTRAINTS = 10
+# Constraints carried across compactions. Beyond this, the oldest go first.
+MAX_MERGED_CONSTRAINTS = 20
 MAX_LIST_ITEMS = 50
+
+# A user message that starts with one of these sets the goal explicitly and
+# replaces the one carried from earlier compactions.
+_GOAL_MARKERS: tuple[str, ...] = (
+    "new goal:",
+    "change of goal:",
+    "goal:",
+    "nuevo objetivo:",
+    "cambio de objetivo:",
+    "objetivo:",
+)
 
 # A user message counts as a standing constraint when it uses imperative
 # preference language (bilingual; conservative on purpose).
@@ -128,7 +142,7 @@ class CompactState:
         if self.goal:
             lines.append(f"Goal: {self.goal}")
         if self.constraints:
-            lines.append("Constraints:")
+            lines.append("Constraints (later entries prevail when they conflict):")
             lines.extend(f"- {c}" for c in self.constraints)
         if self.decisions:
             lines.append("Decisions:")
@@ -203,6 +217,47 @@ def extract_from_history(
     )
 
 
+def explicit_goal(history: tuple[ChatMessage, ...] | list[ChatMessage]) -> str:
+    """The latest goal the user set explicitly ("Nuevo objetivo: ..."), if any."""
+    goal = ""
+    for message in history:
+        if message.role != ROLE_USER:
+            continue
+        text = (message.content or "").strip()
+        lowered = text.lower()
+        for marker in _GOAL_MARKERS:
+            if lowered.startswith(marker):
+                goal = text[len(marker) :].strip()[:GOAL_MAX_CHARS] or goal
+                break
+    return goal
+
+
+def carry_forward(
+    previous: CompactState,
+    current: CompactState,
+    history: tuple[ChatMessage, ...] | list[ChatMessage],
+) -> CompactState:
+    """Extend the previous structured state instead of re-deriving it.
+
+    After a compaction the active history is only the tail, so extracting from
+    it alone made the first tail message the goal and dropped every earlier
+    constraint. The goal carries over until the user sets a new one
+    explicitly. Constraints accumulate in order, so a later instruction can
+    correct an earlier one (see `render_prompt`) without the earlier one being
+    silently lost.
+    """
+    return dataclasses.replace(
+        current,
+        goal=explicit_goal(history) or previous.goal or current.goal,
+        constraints=tuple(dict.fromkeys((*previous.constraints, *current.constraints)))[
+            -MAX_MERGED_CONSTRAINTS:
+        ],
+        changed_files=tuple(dict.fromkeys((*previous.changed_files, *current.changed_files)))[
+            :MAX_LIST_ITEMS
+        ],
+    )
+
+
 def merge_evidence(state: CompactState, evidence: dict[str, Any]) -> CompactState:
     """Overlay persisted store evidence (storage-aware layer) on the
     conversation-derived state. Evidence lists replace conversation-derived
@@ -240,6 +295,8 @@ def state_from_json(raw: str | None) -> CompactState:
 
 __all__ = [
     "CompactState",
+    "carry_forward",
+    "explicit_goal",
     "extract_from_history",
     "merge_evidence",
     "state_from_json",
