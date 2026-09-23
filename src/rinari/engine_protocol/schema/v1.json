@@ -38,7 +38,18 @@
     "queuedPromptEntry",
     "browserTarget",
     "browserContext",
-    "browserControl"
+    "browserControl",
+    "flowScope",
+    "flowExecutor",
+    "flowAgent",
+    "flowSessionRef",
+    "flowFile",
+    "flowVerification",
+    "flowAnchor",
+    "flowStage",
+    "flowTasks",
+    "flowSummary",
+    "flowResult"
   ],
   "$defs": {
     "webPreview": {
@@ -388,7 +399,8 @@
         "context.settings.get",
         "context.settings.set",
         "context.compact",
-        "context.status"
+        "context.status",
+        "flow.get"
       ]
     },
     "event": {
@@ -446,7 +458,8 @@
         "vision.cancelled",
         "session.peer.group.updated",
         "session.peer.message",
-        "session.peer.message.updated"
+        "session.peer.message.updated",
+        "flow.invalidated"
       ]
     },
     "attachment": {
@@ -2164,6 +2177,521 @@
           ]
         }
       }
+    },
+    "flowScope": {
+      "type": "object",
+      "required": [
+        "kind",
+        "id",
+        "title",
+        "root"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "project",
+            "session"
+          ],
+          "maxLength": 128
+        },
+        "id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "root": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 1024
+        }
+      },
+      "additionalProperties": false
+    },
+    "flowExecutor": {
+      "type": "object",
+      "required": [
+        "model",
+        "calls"
+      ],
+      "properties": {
+        "model": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "calls": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "flowAgent": {
+      "type": "object",
+      "required": [
+        "agent",
+        "runs"
+      ],
+      "properties": {
+        "agent": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "runs": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "flowSessionRef": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "title",
+        "turns"
+      ],
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "turns": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "flowFile": {
+      "type": "object",
+      "required": [
+        "path",
+        "kind",
+        "turn_id"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "kind": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "turn_id": {
+          "type": "string",
+          "maxLength": 128
+        }
+      },
+      "additionalProperties": false
+    },
+    "flowVerification": {
+      "type": "object",
+      "required": [
+        "passed",
+        "failed"
+      ],
+      "properties": {
+        "passed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "flowAnchor": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "turn_id"
+      ],
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "turn_id": {
+          "type": "string",
+          "maxLength": 128
+        }
+      },
+      "additionalProperties": false
+    },
+    "flowStage": {
+      "type": "object",
+      "required": [
+        "id",
+        "index",
+        "cycle_index",
+        "kind",
+        "mode",
+        "title",
+        "excerpt",
+        "status",
+        "started_at",
+        "completed_at",
+        "duration_ms",
+        "progress",
+        "turns",
+        "executors",
+        "agents",
+        "sessions",
+        "files",
+        "files_more",
+        "verification",
+        "checkpoints",
+        "origin_peer_turns",
+        "anchor",
+        "current_task_snapshot",
+        "turns_failed",
+        "turns_stopped",
+        "sessions_more"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "cycle_index": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "planning",
+            "implementation",
+            "review"
+          ],
+          "maxLength": 128
+        },
+        "mode": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 128
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "excerpt": {
+          "type": "string",
+          "maxLength": 400
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "active",
+            "needs_you",
+            "done",
+            "failed",
+            "stopped"
+          ]
+        },
+        "started_at": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "completed_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        },
+        "duration_ms": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "progress": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "turns": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "executors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/flowExecutor"
+          },
+          "maxItems": 64
+        },
+        "agents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/flowAgent"
+          },
+          "maxItems": 64
+        },
+        "sessions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/flowSessionRef"
+          },
+          "maxItems": 64
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/flowFile"
+          },
+          "maxItems": 64
+        },
+        "files_more": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "verification": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/flowVerification"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "checkpoints": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "origin_peer_turns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "anchor": {
+          "$ref": "#/$defs/flowAnchor"
+        },
+        "current_task_snapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/flowTasks"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Foto del grafo de tareas actual cuya ventana toca esta etapa. No es el estado histórico de la etapa: sólo alimenta el progreso mientras la etapa está viva."
+        },
+        "turns_failed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "turns_stopped": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sessions_more": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "flowTasks": {
+      "type": "object",
+      "required": [
+        "total",
+        "done",
+        "open"
+      ],
+      "properties": {
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "done": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "open": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "flowSummary": {
+      "type": "object",
+      "required": [
+        "stages_total",
+        "stages_done",
+        "stages_active",
+        "turns_total",
+        "turns_failed",
+        "files_changed",
+        "tasks",
+        "progress",
+        "started_at",
+        "last_activity_at",
+        "progress_coverage"
+      ],
+      "properties": {
+        "stages_total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "stages_done": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "stages_active": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "turns_total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "turns_failed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "files_changed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tasks": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/flowTasks"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "progress": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "started_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        },
+        "last_activity_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        },
+        "progress_coverage": {
+          "type": "object",
+          "required": [
+            "known_stages",
+            "total_stages",
+            "partial_progress"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "known_stages": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "total_stages": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "partial_progress": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 1,
+              "description": "Promedio de las etapas conocidas. Es parcial por definición y no se presenta como progreso total."
+            }
+          },
+          "description": "Con qué parte del flujo se calculó `progress`. Si falta alguna etapa, `progress` es null y esto dice cuántas se conocen."
+        }
+      },
+      "additionalProperties": false
+    },
+    "flowResult": {
+      "type": "object",
+      "required": [
+        "scope",
+        "summary",
+        "stages",
+        "revision",
+        "truncated",
+        "stages_omitted",
+        "next_cursor"
+      ],
+      "properties": {
+        "scope": {
+          "$ref": "#/$defs/flowScope"
+        },
+        "summary": {
+          "$ref": "#/$defs/flowSummary"
+        },
+        "stages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/flowStage"
+          },
+          "maxItems": 200
+        },
+        "revision": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Revisión del alcance en el momento de proyectar. Una respuesta con una revisión anterior no debe reemplazar a otra más nueva."
+        },
+        "truncated": {
+          "type": "boolean",
+          "description": "Faltan etapas más antiguas que las devueltas."
+        },
+        "stages_omitted": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "next_cursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 128,
+          "description": "Id de etapa desde el que continuar hacia atrás. Es estable: los índices se recalculan en cada proyección y no sirven como cursor."
+        }
+      },
+      "additionalProperties": false
     }
   }
 }

@@ -29,6 +29,7 @@ from rinari.engine_protocol.errors import (
     TURN_RUNNING,
     EngineProtocolError,
 )
+from rinari.engine_protocol.flow import collect_flow
 from rinari.engine_protocol.messages import event, hello
 from rinari.engine_protocol.observability import (
     clamp_read_bytes,
@@ -46,7 +47,11 @@ from rinari.engine_protocol.turns import TurnManager
 from rinari.engine_protocol.workspace import InvalidGitError, git_diff, git_files
 from rinari.models.router import ModelRouter
 from rinari.projects.detector import is_home_root
-from rinari.shared.errors import InvalidUsageError, NotFoundError, PermissionDeniedError
+from rinari.shared.errors import (
+    InvalidUsageError,
+    NotFoundError,
+    PermissionDeniedError,
+)
 from rinari.soul.store import SoulStore
 
 _TEXT_EXTENSIONS = {
@@ -220,6 +225,7 @@ class EngineServer:
         self._dispatcher.register("approval.resolve", self._approval_resolve)
         self._dispatcher.register("channel.resolve", self._turns.channels.resolve)
         self._dispatcher.register("channel.pending", lambda params: self._turns.channels.list())
+        self._dispatcher.register("flow.get", self._flow_get)
         self._dispatcher.register("task.tree", self._task_tree)
         self._dispatcher.register("task.get", self._task_get)
         self._dispatcher.register("verification.latest", self._verification_latest)
@@ -1162,6 +1168,25 @@ class EngineServer:
         )
         return {"session": view}
 
+    # -- flow (project_flow_v1) ----------------------------------------------------
+
+    def _flow_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Stages of a project or of a lone chat, derived from persisted facts."""
+        project_id = self._opt_str(params, "project_id")
+        session_id = self._opt_str(params, "session_id")
+        if bool(project_id) == bool(session_id):
+            raise EngineProtocolError(
+                INVALID_PARAMS, "Provide exactly one of 'project_id' or 'session_id'."
+            )
+        # `before` es el id de una etapa: pide el tramo anterior a ella. La
+        # respuesta dice si truncó y por dónde seguir; el cliente no adivina.
+        return collect_flow(
+            self._services,
+            project_id=project_id,
+            session_id=session_id,
+            before=self._opt_str(params, "before"),
+        )
+
     # -- tasks / verification / checkpoints / working tree --------------------
 
     @staticmethod
@@ -1245,13 +1270,37 @@ class EngineServer:
         allow_mixed = params.get("allow_mixed", False)
         if not isinstance(allow_mixed, bool):
             raise EngineProtocolError(INVALID_PARAMS, "Param 'allow_mixed' must be a boolean.")
+        root = self._need_path(params)
         result = self._services.checkpoints.restore(
-            self._need_path(params),
+            root,
             checkpoint_id=checkpoint_id,
             preview=preview,
             allow_mixed=allow_mixed,
         )
+        # Restaurar cambia hechos que un flujo lee y ocurre **fuera** de un
+        # turno, así que no hay ningún evento de actividad que lo delate: sin
+        # esto, la vista se queda con el estado anterior hasta que el usuario
+        # refresque a mano. Una previsualización no cambia nada y no avisa.
+        if not preview:
+            self._emit_flow_invalidated(root=str(root), reason="checkpoint.restore")
         return {"result": result}
+
+    def _emit_flow_invalidated(
+        self, *, root: str, reason: str, project_id: str | None = None
+    ) -> None:
+        """Avisa de que el flujo de un alcance dejó de estar al día.
+
+        Lleva el alcance y el motivo, no el flujo: es una señal para volver a
+        consultar, y el que consulte comparará la `revision` que reciba con la
+        que ya tenga. Mandar la proyección aquí obligaría a calcularla aunque
+        nadie estuviera mirando esa vista.
+        """
+        self._turns.emit_external(
+            event(
+                "flow.invalidated",
+                {"root": root, "project_id": project_id, "reason": reason},
+            )
+        )
 
     def _project_changes(self, params: dict[str, Any]) -> dict[str, Any]:
         status = git_files(Path(self._need_path(params)))
