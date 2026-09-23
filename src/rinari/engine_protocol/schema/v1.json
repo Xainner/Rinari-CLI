@@ -209,6 +209,19 @@
         },
         "size": {
           "type": "integer"
+        },
+        "provenance": {
+          "type": "string",
+          "enum": [
+            "workspace",
+            "turn_changeset"
+          ]
+        },
+        "changed_since_turn": {
+          "type": "boolean"
+        },
+        "sensitive": {
+          "type": "boolean"
         }
       }
     },
@@ -239,6 +252,8 @@
         "runtime.snapshot.get",
         "session.move",
         "workspace.file.read",
+        "workspace.file.watch",
+        "workspace.file.unwatch",
         "workspace.preview.start",
         "workspace.preview.status",
         "workspace.preview.stop",
@@ -464,6 +479,7 @@
         "turn.changes.undo.completed",
         "turn.changes.undo.conflict",
         "workspace.changed",
+        "workspace.file.changed",
         "channel.requested",
         "agent.activity",
         "vision.started",
