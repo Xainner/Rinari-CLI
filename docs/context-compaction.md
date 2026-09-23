@@ -37,6 +37,13 @@ output cap is introduced by compaction.
 
 Text accounting is an estimate, including system instructions, schemas and tool
 descriptions. Subsequent requests can anchor that estimate to provider-reported usage.
+The anchor is persisted with the call that measured it (`ModelInvoked.context_anchor`),
+because the desktop engine builds a new agent session every turn; it is restored only for
+the same model and the same projection revision, and dropped after a compaction.
+
+The compaction preflight, `context.status` and the CLI status line measure through the
+same functions (`context/accounting.py`): same effective window, same output reserve,
+same anchored estimate and the same compaction threshold and target.
 This is not an exact tokenizer or a universal visual-token estimator. Image counts are
 reported separately; existing media projection governs historical pixel retirement.
 
@@ -75,10 +82,19 @@ resumes the original task.
 ## Public interface
 
 - `context.settings.get/set`: shared preferences; existing threshold configuration remains effective.
-- `context.status`: effective window and source for a saved model.
+- `context.status {model_id}`: capacity of a saved model: effective window and its source,
+  each limit and its source, usable input, output reserve, compaction threshold and target.
+- `context.status {session_id}`: the same for the session's model, plus the last usage the
+  provider reported for this projection (`last_request`), the projection revision and the
+  last compaction (status, before/after, duration and `checks`). Rebuilt from persisted
+  state, so it answers after a reload or an engine restart.
+- `context.models {refresh?}`: every saved model's capacity in one call, sharing one
+  discovery per endpoint; `refresh: true` drops the discovery cache first. A model that
+  fails reports `error` without hiding the others.
 - `context.compact`: cancelable context-only operation on an existing session.
 - `governor.compact`: stable `compaction_id`, reason, actual lifecycle state and accounting.
-- Capability: `persistent_context_compaction_v1`.
+- Capabilities: `persistent_context_compaction_v1`; `context_status_v2` for the session
+  scope and `context.models`.
 
 CLI examples:
 

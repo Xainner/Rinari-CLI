@@ -423,6 +423,7 @@
         "context.settings.set",
         "context.compact",
         "context.status",
+        "context.models",
         "flow.get",
         "provider.catalog.get",
         "provider.usage.get",
@@ -1628,6 +1629,119 @@
             "string",
             "null"
           ]
+        },
+        "usable_input_tokens": {
+          "type": "integer"
+        },
+        "output_reserve_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "compact_at_percent": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "compact_at_tokens": {
+          "type": "integer"
+        },
+        "target_tokens": {
+          "type": "integer"
+        },
+        "model_id": {
+          "type": "string"
+        },
+        "model_alias": {
+          "type": "string"
+        },
+        "provider_model_id": {
+          "type": "string"
+        },
+        "provider_id": {
+          "type": "string"
+        },
+        "provider_alias": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "compaction_enabled": {
+          "type": "boolean"
+        },
+        "projection_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "last_request": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "input_tokens": {
+              "type": "integer"
+            },
+            "measurement": {
+              "type": "string",
+              "enum": [
+                "reported"
+              ]
+            },
+            "at": {
+              "type": "string"
+            }
+          }
+        },
+        "last_compaction": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "compaction_id": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "used_tokens": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "after_tokens": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "dropped_messages": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "duration_ms": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "checks": {
+              "type": "object"
+            },
+            "error": {
+              "type": "string"
+            },
+            "at": {
+              "type": "string"
+            }
+          }
         }
       }
     },
@@ -1712,6 +1826,10 @@
               ]
             }
           }
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0
         }
       }
     },

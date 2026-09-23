@@ -90,8 +90,13 @@ def test_snapshot_unknown_metrics_stay_none(env, monkeypatch) -> None:
         snap = build_snapshot(session)
         # No pricing configured on the model: cost must stay unknown.
         assert snap.usage.cost_usd is None
-        # Window known, nothing used yet: percent is the real 0 (not guessed).
-        assert snap.context_percent == 0.0
+        # Window known and no message yet: the meter still counts what the
+        # compaction preflight counts, i.e. instructions and tool schemas.
+        from rinari.context.accounting import measure
+
+        used, _ = measure(session.loop._build_request(session.context), {}, record.model_id)
+        assert snap.context_used_tokens == used > 0
+        assert snap.context_percent == min(1.0, used / snap.context_window_tokens)
         # CHAT without a detected project: project fields None (not guessed).
         assert snap.project_name is None
         assert record.kind == "CHAT"

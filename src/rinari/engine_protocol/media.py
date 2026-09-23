@@ -243,20 +243,110 @@ def register_media(dispatcher, services):
         "context.settings.set", lambda params: save_context_settings(services, params)
     )
 
-    def context_status(params):
-        from rinari.context.settings import window
+    def caller_for(model):
         from rinari.models.router import ModelRouter
         from rinari.runtime.model_caller import ModelCaller
 
-        model = services.models.resolve(params.get("model_id"))
-        caller = ModelCaller(
+        return ModelCaller(
             ModelRouter(services.providers, services.models),
             services.providers.get(model.provider_id),
             model.id,
         )
-        return window(services.ctx, caller)
+
+    def model_status(model):
+        from rinari.context.accounting import limits
+        from rinari.context.settings import window
+
+        caller = caller_for(model)
+        resolved = window(services.ctx, caller)
+        provider = services.providers.get(model.provider_id)
+        return {
+            **resolved,
+            **limits(services.ctx, caller, resolved),
+            "model_id": model.id,
+            "model_alias": model.alias,
+            "provider_model_id": model.provider_model_id,
+            "provider_id": provider.id,
+            "provider_alias": provider.alias,
+        }
+
+    def session_status(session_id):
+        """Capacity, last measured usage and last compaction of one session.
+
+        Built from what the engine persisted, so it answers after a reload or
+        an engine restart without having seen the events.
+        """
+        from rinari.context.settings import load as context_settings
+        from rinari.runtime.agent import EVENT_MODEL_INVOKED
+
+        record = services.ctx.session_repo.get(session_id)
+        if record is None:
+            raise EngineProtocolError(INVALID_PARAMS, "Unknown session")
+        status = model_status(services.models.resolve(record.model_id))
+        projection = record.compact_state or {}
+        revision = int(projection.get("revision") or 0)
+        events = services.ctx.event_repo
+        invoked = events.latest(session_id, [EVENT_MODEL_INVOKED])
+        anchor = (invoked.payload or {}).get("context_anchor") if invoked else None
+        compaction = events.latest(session_id, ["governor.compact"])
+        last = compaction.payload if compaction else None
+        return {
+            **status,
+            "session_id": session_id,
+            "compaction_enabled": context_settings(services.ctx)["enabled"],
+            "projection_revision": revision,
+            # The last call the provider measured, if it measured this projection.
+            "last_request": {
+                "input_tokens": anchor["actual"],
+                "measurement": "reported",
+                "at": invoked.created_at,
+            }
+            if isinstance(anchor, dict)
+            and anchor.get("model") == record.model_id
+            and anchor.get("compact_revision") == revision
+            else None,
+            "last_compaction": {
+                key: last.get(key)
+                for key in (
+                    "compaction_id",
+                    "reason",
+                    "status",
+                    "used_tokens",
+                    "after_tokens",
+                    "dropped_messages",
+                    "duration_ms",
+                    "checks",
+                    "error",
+                )
+                if key in last
+            }
+            | {"at": compaction.created_at}
+            if last
+            else None,
+        }
+
+    def context_status(params):
+        if params.get("session_id"):
+            return session_status(params["session_id"])
+        return model_status(services.models.resolve(params.get("model_id")))
+
+    def context_models(params):
+        """Every saved model's capacity in one call; one discovery per endpoint."""
+        from rinari.context import windows
+
+        if params.get("refresh") is True:
+            windows.forget(services.ctx)
+        rows = []
+        for model in services.models.list():
+            try:
+                rows.append(model_status(model))
+            except Exception as exc:
+                # One model failing does not hide the others.
+                rows.append({"model_id": model.id, "model_alias": model.alias, "error": str(exc)})
+        return {"models": rows}
 
     dispatcher.register("context.status", context_status)
+    dispatcher.register("context.models", context_models)
     dispatcher.register("vision.settings.set", save_vision)
     dispatcher.register("session.image_support", support)
     dispatcher.register("artifact.receive_image", receive)
