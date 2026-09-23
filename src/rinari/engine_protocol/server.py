@@ -192,6 +192,8 @@ class EngineServer:
         self._dispatcher.register("workspace.preview.stop", self._previews.stop)
         self._dispatcher.register("session.move", self._desktop.move)
         self._dispatcher.register("workspace.file.read", self._desktop.read)
+        self._dispatcher.register("workspace.file.watch", self._desktop.watch)
+        self._dispatcher.register("workspace.file.unwatch", self._desktop.unwatch)
         self._dispatcher.register("question.list", self._question_list)
         self._dispatcher.register("question.resolve", self._turns.questions.resolve)
         self._dispatcher.register("session.open", self._session_open)
@@ -358,6 +360,7 @@ class EngineServer:
     def close(self) -> None:
         self._attachment_jobs.close()
         self._previews.close()
+        self._desktop.close()
         self._pty.shutdown()
         self._turns.close()
 
@@ -499,6 +502,7 @@ class EngineServer:
             )
         result = self._services.sessions.close(ref)
         self._previews.stop_session(record.id)
+        self._desktop.close_session(record.id)
         self._turns.close_browser(record.id)
         self._turns.close_processes(record.id)
         self._turns.peers.on_session_gone(record.id)
@@ -536,6 +540,7 @@ class EngineServer:
         self._services.memory.invalidate_compact_state(record.id)
         sid = self._services.sessions.delete(record.id)
         self._previews.stop_session(record.id)
+        self._desktop.close_session(record.id)
         self._turns.close_browser(record.id)
         self._turns.close_processes(record.id)
         self._turns.peers.on_session_gone(record.id)
