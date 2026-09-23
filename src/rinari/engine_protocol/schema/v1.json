@@ -1594,6 +1594,36 @@
         },
         "error": {
           "type": "string"
+        },
+        "checks": {
+          "type": "object",
+          "description": "Checks actually run before publishing a compaction, and their outcome.",
+          "properties": {
+            "structure": {
+              "type": "string",
+              "enum": [
+                "passed",
+                "repaired",
+                "failed"
+              ]
+            },
+            "records": {
+              "type": "string",
+              "enum": [
+                "passed",
+                "repaired",
+                "failed"
+              ]
+            },
+            "reduction": {
+              "type": "string",
+              "enum": [
+                "passed",
+                "repaired",
+                "failed"
+              ]
+            }
+          }
         }
       }
     },
