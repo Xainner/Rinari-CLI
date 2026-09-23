@@ -149,9 +149,24 @@ class FileWatchRegistry:
             )
             return watch_id
 
-    def remove(self, watch_id: str) -> bool:
+    def remove(self, watch_id: str, session_id: str | None = None) -> bool:
+        """Remove a watch; with ``session_id``, only if that session owns it.
+
+        An unknown id is not an error: a tab can close after an Engine restart
+        dropped the registry. Another session's watch is refused, not removed.
+        In Boards one renderer holds watches of several sessions, and a wrong
+        id there would otherwise silently kill another pane's watch.
+        """
         with self._lock:
-            return self._items.pop(watch_id, None) is not None
+            item = self._items.get(watch_id)
+            if item is None:
+                return False
+            if session_id is not None and item.session_id != session_id:
+                raise EngineProtocolError(
+                    "PERMISSION_DENIED", "The file watch belongs to another session."
+                )
+            del self._items[watch_id]
+            return True
 
     def close_session(self, session_id: str) -> None:
         with self._lock:
@@ -377,10 +392,13 @@ class DesktopWorkspace:
         return {"watch_id": watch_id, "preview": preview}
 
     def unwatch(self, params):
+        session_id = params.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            raise EngineProtocolError(INVALID_PARAMS, "session_id is required.")
         watch_id = params.get("watch_id")
         if not isinstance(watch_id, str) or not watch_id or len(watch_id) > 128:
             raise EngineProtocolError(INVALID_PARAMS, "watch_id is required.")
-        self._watches.remove(watch_id)
+        self._watches.remove(watch_id, session_id)
         return {}
 
     @staticmethod

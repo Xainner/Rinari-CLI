@@ -482,6 +482,9 @@ class EngineServer:
                 details={"session_id": record.id},
             )
         result = self._services.sessions.archive(ref)
+        # Una sesión archivada no tiene pestañas abiertas: sus watches seguirían
+        # leyendo el disco cada 500 ms hasta apagar el Engine.
+        self._desktop.close_session(record.id)
         self._turns.peers.on_session_gone(record.id)
         return {"session": session_to_dict(result)}
 
