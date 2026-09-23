@@ -11,6 +11,7 @@ from __future__ import annotations
 import subprocess
 import sys
 
+from rinari.evals import context_cases
 from rinari.evals.judge import Rule, RuleJudge
 from rinari.evals.scripted import answer, calls
 from rinari.evals.spec import AssertionOutcome, AssertionResult, EvalCase
@@ -573,49 +574,37 @@ LH_MANY_CALLS = EvalCase(
 )
 
 
-def _lh_compaction_setup(fixture):
-    # Two sizeable docs so the tool results pushed into history exceed the
-    # post-compaction tail budget (window * POST_COMPACT_KEEP_RATIO) and the
-    # compactor actually drops messages.
-    block = "x" * 700 + "\n"
-    fixture.file("doc1.txt", (block * 2).replace("x", "lorem ipsum dolor "))
-    fixture.file("doc2.txt", (block * 2).replace("x", "sit amet consectetur "))
-
-
-def _lh_compaction_script(fixture):
-    from rinari.models.types import Usage
-
-    # Pressure is checked after every model call using the provider-reported
-    # input_tokens; report a near-window value so the threshold is crossed.
-    heavy = Usage(input_tokens=1100, output_tokens=10)
+def _lh_compaction_expect(run):
+    completed = [
+        p for p in run.event_payloads("governor.compact") if p.get("status") == "completed"
+    ]
     return [
-        calls(("fs.read", {"path": "doc1.txt"}), ("fs.read", {"path": "doc2.txt"}), usage=heavy),
-        answer("Documents read; context compacted under pressure.", usage=heavy),
+        _ok(
+            "compacted_flag", any(t.compacted for t in run.turns), [t.compacted for t in run.turns]
+        ),
+        _ok("compaction_event", bool(completed), f"governor.compact={len(completed)}"),
+        _ok(
+            "reduced",
+            all(p.get("after_tokens", 0) < p.get("used_tokens", 0) for p in completed),
+            [(p.get("used_tokens"), p.get("after_tokens")) for p in completed],
+        ),
     ]
 
 
+# Heavy turns in a 40k window force semantic compaction before a dispatch. The
+# harness's base request (instructions and tool schemas) is ~11k tokens, so a
+# smaller window leaves the compaction target below that fixed part and can
+# never be met; the earlier 1,200-token window failed for that reason.
 LH_COMPACTION = EvalCase(
     case_id="long_horizon.compaction",
     suite="long_horizon",
     name="compaction_under_pressure",
-    description="A small model window forces storage-aware compaction mid-turn.",
-    prompt="Read both documents.",
-    window=1200,
-    setup=_lh_compaction_setup,
-    script=_lh_compaction_script,
-    expectations=lambda run: [
-        _ok("two_reads", len(_tool(run, "fs.read")) == 2, f"{len(_tool(run, 'fs.read'))}"),
-        _ok(
-            "compacted_flag",
-            bool(run.turns) and run.turns[-1].compacted is True,
-            f"compacted={run.turns[-1].compacted if run.turns else None}",
-        ),
-        _ok(
-            "compaction_event",
-            "ContextCompacted" in run.event_types(),
-            f"events={run.event_types()}",
-        ),
-    ],
+    description="Heavy turns fill a 40k window and force compaction before a dispatch.",
+    prompts=context_cases._long(f"Objetivo: {context_cases.GOAL}.", 6),
+    window=context_cases.WINDOW,
+    script_lanes=context_cases._lanes(6),
+    script_route=context_cases.route,
+    expectations=_lh_compaction_expect,
 )
 
 
@@ -819,6 +808,7 @@ MA_PARALLEL_WORKTREES = EvalCase(
 
 def all_cases() -> tuple[EvalCase, ...]:
     return (
+        *context_cases.cases(),
         SEC_SANDBOX,
         SEC_FORCE_PUSH,
         SEC_REDACT,
