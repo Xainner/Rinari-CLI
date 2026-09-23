@@ -240,13 +240,15 @@ def catalog_view():
 
 # Model IDs on OpenCode endpoints that live on the OpenAI Responses API
 # (/responses) instead of /chat/completions. Vendor catalog snapshot from
-# https://opencode.ai/docs/go/ (per-model endpoint table, re-checked
-# 2026-09-13): grok-4.5 moved to /chat/completions and grok-4.6 was added on
-# /responses since the previous snapshot; chat calls to responses-only IDs
-# fail with a bare HTTP 500. Default transport for matching saved models; an
-# explicit per-model setting always wins.
+# https://opencode.ai/docs/go/ (per-model endpoint table, page updated
+# 2026-09-22, re-checked 2026-09-23): grok-4.7 was added on /responses, and
+# grok-4.5 is no longer offered on Go (on Zen every grok model, grok-4.5
+# included, is on /responses). Chat calls to responses-only IDs fail with a
+# bare HTTP 500. Default transport for matching saved models; an explicit
+# per-model setting always wins.
 OPENCODE_RESPONSES_MODELS: frozenset[str] = frozenset(
     {
+        "grok-4.7",
         "grok-4.6",
         "gpt-5.6-luna",
         "muse-spark-1.3-contributor",

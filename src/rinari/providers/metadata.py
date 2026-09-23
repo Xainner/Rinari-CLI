@@ -68,11 +68,14 @@ def model_metadata(provider, model_id):
     transport = "chat"
     if product in ("opencode-go", "opencode-zen"):
         npm = entry.get("provider", {}).get("npm")
+        # IDs on /messages per the OpenCode Go endpoint table (updated
+        # 2026-09-22); the list backs up the catalog's npm hint.
         if npm == "@ai-sdk/anthropic" or model_id in {
             "minimax-m3",
             "minimax-m2.7",
             "minimax-m2.5",
             "qwen3.8-max",
+            "qwen3.8-flash",
             "qwen3.7-max",
             "qwen3.7-plus",
             "qwen3.6-plus",
