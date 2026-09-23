@@ -158,11 +158,39 @@ class ContextService:
     def restore_compact_state(self, agent_ctx: AgentContext) -> None:
         """Resume/reconcile: reapply a persisted compact state, if any."""
         record = self._ctx.session_repo.get(agent_ctx.session_id)
-        if record is None or not record.compact_state:
+        if record is None:
+            return
+        state = record.compact_state or {}
+        agent_ctx.compact_revision = int(state.get("revision") or 0)
+        self._restore_usage_anchor(agent_ctx)
+        if not state:
             return
         from rinari.context.projection import render
 
-        agent_ctx.compact_state_text = render(record.compact_state)
+        agent_ctx.compact_state_text = render(state)
+
+    def _restore_usage_anchor(self, agent_ctx: AgentContext) -> None:
+        """Reuse the last provider-reported usage if it measured this context.
+
+        It calibrates the estimate only for the same model and the same
+        projection; after a compaction or a model change it is dropped.
+        """
+        from rinari.runtime.agent import EVENT_MODEL_INVOKED
+
+        event = self._ctx.event_repo.latest(agent_ctx.session_id, [EVENT_MODEL_INVOKED])
+        anchor = (event.payload or {}).get("context_anchor") if event else None
+        if (
+            isinstance(anchor, dict)
+            and anchor.get("model") == agent_ctx.model_ref
+            and anchor.get("compact_revision") == agent_ctx.compact_revision
+            and type(anchor.get("actual")) is int
+            and type(anchor.get("estimated")) is int
+        ):
+            agent_ctx.context_usage = {
+                "model": anchor["model"],
+                "estimated": anchor["estimated"],
+                "actual": anchor["actual"],
+            }
 
     # -- internals -----------------------------------------------------------
 

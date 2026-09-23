@@ -5,8 +5,10 @@ import hashlib
 import json
 import queue
 import threading
+import time
 from uuid import uuid4
 
+from rinari.context.accounting import measure, request_size, thresholds
 from rinari.context.compact_state import (
     CompactState,
     carry_forward,
@@ -20,10 +22,6 @@ from rinari.context.settings import window as resolve_window
 from rinari.context.tokens import estimate_tokens
 from rinari.models.types import ChatMessage, ModelRequest, StopReason
 from rinari.shared.errors import CancelledError
-
-
-def request_size(request):
-    return estimate_tokens(history=request.messages, tools=request.tools)
 
 
 def history_revision(service, ctx):
@@ -70,11 +68,8 @@ def prepare(service, ctx, request, caller, rebuild, emit, cancel):
         raise ContextPreparationError(
             "The configured output budget leaves no space for model input."
         )
-    used = request_size(request)
-    anchor = ctx.context_usage
-    anchored = anchor.get("model") == ctx.model_ref and type(anchor.get("actual")) is int
-    if anchored:
-        used = max(used, anchor["actual"] + used - anchor["estimated"])
+    used, usage_source = measure(request, ctx.context_usage, ctx.model_ref)
+    points = thresholds(window, config.context.compact_at_percent)
     threshold = config.context.compact_at_percent / 100
     force = getattr(ctx, "force_compaction", False)
     if used < window * threshold and not force:
@@ -91,7 +86,7 @@ def prepare(service, ctx, request, caller, rebuild, emit, cancel):
         "reason": ctx.compaction_reason,
         **resolved,
         "used_tokens": used,
-        "usage_source": "provider_anchored_estimate" if anchored else "estimated",
+        "usage_source": usage_source,
         "images": sum(len(m.images) for m in request.messages),
         "pressure": used / window,
     }
@@ -102,6 +97,7 @@ def prepare(service, ctx, request, caller, rebuild, emit, cancel):
         emit("governor.compact", event)
 
     status("started")
+    started = time.monotonic()
     # What was actually checked before publishing, reported with the outcome.
     checks = {}
     try:
@@ -110,7 +106,7 @@ def prepare(service, ctx, request, caller, rebuild, emit, cancel):
         previous = record.compact_state or {}
         source_revision = history_revision(service, ctx)
         history = list(ctx.history)
-        target = int(window * min(0.60, threshold * 0.75))
+        target = points["target_tokens"]
         if force and ctx.compaction_reason == "automatic":
             target = min(target, int(used * 0.60))
         overhead = request_size(
@@ -299,10 +295,19 @@ def prepare(service, ctx, request, caller, rebuild, emit, cancel):
         ctx.compacted = True
         ctx.dropped_total = 0
         ctx.context_usage = {}
-        status("completed", after_tokens=after, dropped_messages=cut, checks=checks)
+        ctx.compact_revision = state["revision"]
+        status(
+            "completed",
+            after_tokens=after,
+            dropped_messages=cut,
+            checks=checks,
+            duration_ms=int((time.monotonic() - started) * 1000),
+        )
         return replacement
     except Exception as exc:
-        extra = {"checks": checks} if checks else {}
+        extra = {"duration_ms": int((time.monotonic() - started) * 1000)}
+        if checks:
+            extra["checks"] = checks
         status(
             "cancelled" if isinstance(exc, CancelledError) else "failed", error=str(exc), **extra
         )

@@ -109,6 +109,9 @@ class AgentContext:
     force_compaction: bool = False
     compaction_reason: str = "automatic"
     context_usage: dict = field(default_factory=dict)
+    # Revision of the persisted projection this context runs on. A usage
+    # anchor measured against another projection no longer calibrates it.
+    compact_revision: int = 0
     pending_images: tuple[Any, ...] = ()
     pending_attachments: tuple[dict[str, Any], ...] = ()
     pending_display_content: str | None = None
@@ -386,10 +389,25 @@ class AgentLoop:
             )
             if budget is not None:
                 budget.note_usage(response.usage)
+            from rinari.context.preparation import request_size
+
+            ctx.context_usage = {
+                "model": ctx.model_ref,
+                "estimated": request_size(request),
+                "actual": getattr(response.usage, "input_tokens", None),
+            }
+            anchor = (
+                {**ctx.context_usage, "compact_revision": ctx.compact_revision}
+                if type(ctx.context_usage["actual"]) is int
+                else None
+            )
             self._emit(
                 ctx.session_id,
                 EVENT_MODEL_INVOKED,
                 {
+                    # Survives the session: the desktop engine rebuilds it
+                    # every turn, and the estimate needs this calibration.
+                    **({"context_anchor": anchor} if anchor else {}),
                     "provider_id": (response.provider_state or {}).get("provider_id"),
                     "stop_reason": response.stop_reason.value,
                     "tool_calls": [{"id": tc.id, "name": tc.name} for tc in response.tool_calls],
@@ -403,13 +421,6 @@ class AgentLoop:
                     ),
                 },
             )
-            from rinari.context.preparation import request_size
-
-            ctx.context_usage = {
-                "model": ctx.model_ref,
-                "estimated": request_size(request),
-                "actual": getattr(response.usage, "input_tokens", None),
-            }
             if self._prepare_context is None:
                 self._check_pressure(ctx, response, governor)
 

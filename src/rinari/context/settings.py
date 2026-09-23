@@ -115,13 +115,19 @@ def window(ctx, caller):
     }
 
 
-def input_budget(ctx, caller, request, resolved):
+def output_reserve(ctx, caller, request):
+    """Output tokens the request reserves: its own, or the configured budget."""
     main = destination(caller)
     output = request.max_tokens
     if hasattr(main, "router"):
         model = ctx.model_repo.get(main.model_id)
         if model is not None:
             output = main.router.generation_request(main.provider, model, request).max_tokens
+    return output
+
+
+def input_budget(ctx, caller, request, resolved):
+    output = output_reserve(ctx, caller, request)
     return min(resolved["window_tokens"], resolved["total_window_tokens"] - (output or 0))
 
 

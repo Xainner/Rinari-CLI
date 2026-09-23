@@ -248,6 +248,16 @@ class SessionEventRepository:
             params.append(limit)
         return [_event_to_record(r) for r in self._db.query(sql, params)]
 
+    def latest(self, session_id: str, types: Sequence[str]) -> SessionEventRecord | None:
+        """The most recent event of these types, if any."""
+        marks = ", ".join("?" for _ in types)
+        row = self._db.query_one(
+            f"SELECT * FROM session_events WHERE session_id = ? AND type IN ({marks}) "
+            "ORDER BY seq DESC LIMIT 1",
+            [session_id, *types],
+        )
+        return _event_to_record(row) if row else None
+
     def last_seq(self, session_id: str) -> int:
         """Hasta dónde llegó esta sesión. Base barata de una revisión."""
         row = self._db.query_one(

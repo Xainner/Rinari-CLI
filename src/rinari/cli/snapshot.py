@@ -202,6 +202,26 @@ def estimate_context_used(context) -> int | None:
     return max(1, chars // 4)
 
 
+def _context_meter(session: AgentSession) -> tuple[int | None, int | None]:
+    """Usable input and its use, measured exactly as the compaction preflight does."""
+    from rinari.context.accounting import limits, measure
+    from rinari.context.settings import window as resolve_window
+
+    context = session.context
+    caller = session.loop._provider
+    try:
+        resolved = resolve_window(session.services.ctx, caller)
+        usable = limits(session.services.ctx, caller, resolved)["usable_input_tokens"]
+    except Exception:
+        return None, estimate_context_used(context)
+    try:
+        request = session.loop._build_request(context)
+        used, _source = measure(request, context.context_usage, context.model_ref)
+    except Exception:
+        used = estimate_context_used(context)
+    return usable, used
+
+
 def build_snapshot(session: AgentSession) -> RuntimeSnapshot:
     from rinari import __version__
 
@@ -212,13 +232,7 @@ def build_snapshot(session: AgentSession) -> RuntimeSnapshot:
         provider = None
     model = _model_record(session)
 
-    context = session.context
-    window: int | None = None
-    try:
-        window = session.loop._provider.capabilities().max_context_tokens
-    except Exception:
-        window = None
-    used = estimate_context_used(context)
+    window, used = _context_meter(session)
     percent = min(1.0, used / window) if (used is not None and window) else None
 
     project_name = None

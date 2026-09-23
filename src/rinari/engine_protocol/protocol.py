@@ -71,6 +71,8 @@ CAPABILITIES: dict[str, bool] = {
     # Correlated, persisted, replayable narrative activity for Rinari Code.
     "activity_timeline_v1": True,
     "turn_token_usage_v1": True,
+    # context.status accepts session_id; context.models lists every saved model.
+    "context_status_v2": True,
     "permission_profiles_v2": True,
     "turn_changeset_v1": True,
     "personal_memory_v1": True,
