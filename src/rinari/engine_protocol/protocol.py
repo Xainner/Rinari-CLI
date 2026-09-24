@@ -91,6 +91,8 @@ CAPABILITIES: dict[str, bool] = {
     "slash_commands_v1": True,
     # /learn + skills.propose, pending approvals, revert, auto_learn setting.
     "skill_learning_v1": True,
+    # Desktop terminal: ConPTY on Windows, raw keystrokes, pty.shells, tail stream.
+    "desktop_terminal_v1": True,
 }
 
 

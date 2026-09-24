@@ -376,6 +376,7 @@
         "pty.read",
         "pty.list",
         "pty.terminate",
+        "pty.shells",
         "profile_bundle.list",
         "profile_bundle.get",
         "profile_bundle.create",

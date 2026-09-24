@@ -2,10 +2,11 @@
 
 A pty handle pairs a real pseudo-terminal with a coprocess: TTY-aware
 applications (shells, editors, prompts) behave as if on a real terminal.
-Implementations must use a POSIX pty pair; on platforms without one the
-tools fail with a structured DEPENDENCY_ERROR pointing at `process.*`
-(same pattern as the LSP fallback: availability is runtime data, not a
-silent behavior change).
+Two backends behind one handle: a POSIX pty pair, and Windows ConPTY through
+pywinpty (the desktop's terminal). The model-facing `pty.*` tools stay
+POSIX-only and fail with a structured DEPENDENCY_ERROR pointing at
+`process.*` elsewhere (availability is runtime data, not a silent behavior
+change); the Engine's user terminal (engine_protocol/pty.py) uses both.
 """
 
 from __future__ import annotations
@@ -35,6 +36,8 @@ from rinari.tools.definition import (
 from .shell import _BoundedBuffer
 
 MAX_PTY_OUTPUT_BYTES = 128 * 1024
+# What a terminal keeps for a reader that reconnects (scrollback on reattach).
+TAIL_BYTES = 256 * 1024
 DEFAULT_READ_TIMEOUT_S = 1.0
 MAX_READ_TIMEOUT_S = 60.0
 POSIX_ONLY_ERROR = (
@@ -53,8 +56,72 @@ def _fail(code: ToolErrorCode, message: str, *, retryable: bool = False) -> Tool
     )
 
 
+def _winpty():
+    """pywinpty's module on Windows, None elsewhere or when missing."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import winpty
+    except ImportError:
+        return None
+    return winpty
+
+
+def split_windows_command(command: str) -> list[str]:
+    r"""A command line split the way Windows programs parse it.
+
+    pywinpty splits a string with shlex(posix=False), which keeps the quotes:
+    `"C:\Program Files\...\pwsh.exe" -NoLogo` then fails to resolve, and
+    quoted arguments get escaped twice. A list avoids both.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    count = ctypes.c_int()
+    to_argv = ctypes.windll.shell32.CommandLineToArgvW
+    to_argv.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_int)]
+    to_argv.restype = ctypes.POINTER(wintypes.LPWSTR)
+    argv = to_argv(command, ctypes.byref(count))
+    if not argv:
+        raise ValueError("invalid command line")
+    try:
+        return [argv[index] for index in range(count.value)]
+    finally:
+        ctypes.windll.kernel32.LocalFree(argv)
+
+
+class TailBuffer:
+    """The last `limit` bytes of a stream, addressed by absolute offsets.
+
+    A reader that keeps its offset never misses output nor rereads it; one
+    that fell behind resumes at the oldest byte kept. Unlike the head-only
+    buffer the tools read, a long-lived terminal never stops showing output.
+    """
+
+    def __init__(self, limit: int = TAIL_BYTES) -> None:
+        self._limit = limit
+        self._data = bytearray()
+        self._start = 0
+
+    def write(self, data: bytes) -> None:
+        self._data.extend(data)
+        overflow = len(self._data) - self._limit
+        if overflow > 0:
+            del self._data[:overflow]
+            self._start += overflow
+
+    @property
+    def end(self) -> int:
+        return self._start + len(self._data)
+
+    def read_from(self, offset: int) -> tuple[bytes, int]:
+        offset = max(offset, self._start)
+        return bytes(self._data[offset - self._start :]), self.end
+
+
 class PtyHandle:
     __slots__ = (
+        "backend",
         "buffer",
         "command",
         "cwd",
@@ -69,10 +136,22 @@ class PtyHandle:
         "size",
         "started_at",
         "stop_requested",
+        "tail",
     )
 
-    def __init__(self, handle_id: str, command: str, cwd: str, master: int, process) -> None:
+    def __init__(
+        self,
+        handle_id: str,
+        command: str,
+        cwd: str,
+        master: int | None,
+        process,
+        backend: str = "posix",
+    ) -> None:
         self.id = handle_id
+        # "posix" (master fd + Popen) or "winpty" (a pywinpty PtyProcess).
+        self.backend = backend
+        self.tail = TailBuffer()
         self.command = command
         self.cwd = cwd
         self.master = master
@@ -89,7 +168,28 @@ class PtyHandle:
         self.started_at = time.time()
         self.stop_requested = False
 
+    def _record(self, chunk: bytes) -> None:
+        with self.lock:
+            self.buffer.write(chunk)
+            self.tail.write(chunk)
+
     def pump(self) -> None:
+        if self.backend == "winpty":
+            while True:
+                try:
+                    text = self.process.read(65536)
+                except EOFError:
+                    break
+                except Exception:
+                    if not self.process.isalive():
+                        break
+                    time.sleep(0.05)
+                    continue
+                if text:
+                    self._record(text.encode("utf-8", errors="replace"))
+                elif not self.process.isalive():
+                    break
+            return
         import select
 
         while True:
@@ -107,12 +207,42 @@ class PtyHandle:
                 break
             if not chunk:
                 break
-            with self.lock:
-                self.buffer.write(chunk)
+            self._record(chunk)
 
     @property
     def exited(self) -> bool:
         return self.exit_code is not None
+
+    # Backend-neutral operations (the Engine's terminal service uses these).
+
+    def write_bytes(self, payload: bytes) -> int:
+        if self.backend == "winpty":
+            self.process.write(payload.decode("utf-8", errors="replace"))
+            return len(payload)
+        return os.write(self.master, payload)
+
+    def set_size(self, rows: int, columns: int) -> None:
+        if self.backend == "winpty":
+            self.process.setwinsize(rows, columns)
+        else:
+            import fcntl
+            import struct
+            import termios
+
+            fcntl.ioctl(self.master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
+        self.size = (rows, columns)
+
+    def kill(self, *, force: bool) -> None:
+        if self.backend == "winpty":
+            with contextlib.suppress(Exception):
+                self.process.terminate(force=force)
+            return
+        try:
+            os.killpg(os.getpgid(self.process.pid), 9 if force else 15)
+        except OSError:
+            if not force:
+                with contextlib.suppress(OSError):
+                    os.killpg(os.getpgid(self.process.pid), 9)
 
 
 class PtyRegistry:
@@ -126,7 +256,7 @@ class PtyRegistry:
 
     @property
     def supported(self) -> bool:
-        return hasattr(os, "openpty")
+        return hasattr(os, "openpty") or _winpty() is not None
 
     def start(
         self,
@@ -136,6 +266,8 @@ class PtyRegistry:
         columns: int,
         rows: int,
     ) -> str:
+        if not hasattr(os, "openpty"):
+            return self._start_winpty(command, cwd, env, columns, rows)
         import fcntl
         import struct
         import termios
@@ -170,6 +302,32 @@ class PtyRegistry:
         threading.Thread(target=self._wait, args=(handle_id, handle), daemon=True).start()
         return handle_id
 
+    def _start_winpty(
+        self, command: str, cwd: str | None, env: dict | None, columns: int, rows: int
+    ) -> str:
+        winpty = _winpty()
+        if winpty is None:
+            raise RuntimeError(POSIX_ONLY_ERROR)
+        process_env = dict(self._base_env)
+        if env:
+            process_env.update({str(k): str(v) for k, v in env.items()})
+        process = winpty.PtyProcess.spawn(
+            split_windows_command(command),
+            cwd=cwd or None,
+            env=process_env,
+            dimensions=(rows, columns),
+        )
+        with self._lock:
+            self._counter += 1
+            handle_id = f"pty_{self._counter:03d}"
+            handle = PtyHandle(handle_id, command, cwd or "", None, process, backend="winpty")
+            handle.size = (rows, columns)
+            self._handles[handle_id] = handle
+        handle.reaper = threading.Thread(target=handle.pump, daemon=True)
+        handle.reaper.start()
+        threading.Thread(target=self._wait, args=(handle_id, handle), daemon=True).start()
+        return handle_id
+
     def get(self, handle_id: str) -> PtyHandle | None:
         with self._lock:
             return self._handles.get(handle_id)
@@ -179,6 +337,18 @@ class PtyRegistry:
             return list(self._handles.values())
 
     def _wait(self, handle_id: str, handle: PtyHandle) -> None:
+        if handle.backend == "winpty":
+            while handle.process.isalive():
+                time.sleep(0.2)
+            if handle.reaper is not None:
+                # ConPTY keeps delivering rendered output after the process
+                # exits; the reader stops at EOF once it has all of it.
+                handle.reaper.join(timeout=10)
+            if handle.ended_at is None:
+                handle.ended_at = time.time()
+            status = handle.process.exitstatus
+            handle.exit_code = int(status) if status is not None else -1
+            return
         code = handle.process.wait()
         handle.exit_code = code
         if handle.ended_at is None:

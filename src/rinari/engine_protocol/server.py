@@ -255,6 +255,7 @@ class EngineServer:
         self._dispatcher.register("pty.read", self._pty_read)
         self._dispatcher.register("pty.list", self._pty_list)
         self._dispatcher.register("pty.terminate", self._pty_terminate)
+        self._dispatcher.register("pty.shells", self._pty_shells)
         self._dispatcher.register("workspace.file.search", self._workspace_file_search)
         self._dispatcher.register("agent.list", self._agent_list)
         self._dispatcher.register("agent.config.get", self._agent_config_get)
@@ -1666,7 +1667,14 @@ class EngineServer:
         )
 
     def _pty_write(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self._pty.write(self._need_str(params, "pty_id"), params.get("data"))
+        raw = params.get("raw", False)
+        if not isinstance(raw, bool):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'raw' must be a boolean.")
+        return self._pty.write(self._need_str(params, "pty_id"), params.get("data"), raw=raw)
+
+    def _pty_shells(self, params: dict[str, Any]) -> dict[str, Any]:
+        _ = params
+        return {"shells": self._pty.shells(), "supported": self._pty.supported}
 
     def _pty_resize(self, params: dict[str, Any]) -> dict[str, Any]:
         return self._pty.resize(
