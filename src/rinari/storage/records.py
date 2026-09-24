@@ -92,6 +92,9 @@ class SessionRecord:
     # Session-scope Soul override. None inherits the global active Soul
     # (Soul 3.0 chain); never a free-form string, always a known soul id.
     soul_id: str | None = None
+    # When the owner pinned the conversation; None = not pinned. Read-only
+    # here: SessionRepository.update never writes it (see set_pinned_at).
+    pinned_at: str | None = None
 
 
 @dataclass(slots=True)

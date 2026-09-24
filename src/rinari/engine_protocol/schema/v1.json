@@ -267,6 +267,7 @@
         "session.rename",
         "session.archive",
         "session.restore",
+        "session.pin",
         "session.delete",
         "session.fork",
         "session.history",
@@ -748,6 +749,12 @@
             "read-only",
             "workspace",
             "full-access"
+          ]
+        },
+        "pinned_at": {
+          "type": [
+            "string",
+            "null"
           ]
         }
       },

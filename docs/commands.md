@@ -2011,6 +2011,8 @@ session show
 session new
 session resume
 session rename
+session pin
+session unpin
 session fork
 session stop
 session cancel
@@ -2027,6 +2029,10 @@ rinari session new --name auth-refactor
 rinari session resume ses_123
 rinari session fork ses_123 --name alternate-approach
 ```
+
+`session pin|unpin` marca una conversación como fijada (la sección «Fijados» del
+escritorio). Es estado del Engine: el CLI y el escritorio ven la misma lista, y
+`session list` antepone `[pin]` al título.
 
 Resume must reconcile:
 

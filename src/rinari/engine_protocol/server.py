@@ -205,6 +205,7 @@ class EngineServer:
         self._dispatcher.register("session.rename", self._session_rename)
         self._dispatcher.register("session.archive", self._session_archive)
         self._dispatcher.register("session.restore", self._session_restore)
+        self._dispatcher.register("session.pin", self._session_pin)
         self._dispatcher.register("session.close", self._session_close)
         self._dispatcher.register("session.delete", self._session_delete)
         self._dispatcher.register("session.branch", self._session_branch)
@@ -502,6 +503,13 @@ class EngineServer:
         self._desktop.close_session(record.id)
         self._turns.peers.on_session_gone(record.id)
         return {"session": session_to_dict(result)}
+
+    def _session_pin(self, params: dict[str, Any]) -> dict[str, Any]:
+        ref = self._need_str(params, "ref")
+        pinned = params.get("pinned")
+        if not isinstance(pinned, bool):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'pinned' must be boolean.")
+        return {"session": session_to_dict(self._services.sessions.set_pinned(ref, pinned))}
 
     def _session_restore(self, params: dict[str, Any]) -> dict[str, Any]:
         ref = self._need_str(params, "ref")

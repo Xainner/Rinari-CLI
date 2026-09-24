@@ -39,6 +39,8 @@ EVENT_SESSION_CLOSED = "SessionClosed"
 EVENT_SESSION_RENAMED = "SessionRenamed"
 EVENT_SESSION_ARCHIVED = "SessionArchived"
 EVENT_SESSION_RESTORED = "SessionRestored"
+EVENT_SESSION_PINNED = "SessionPinned"
+EVENT_SESSION_UNPINNED = "SessionUnpinned"
 EVENT_USER_PROMPT = "UserPrompt"
 
 SESSION_KIND_CHAT = "CHAT"
@@ -588,6 +590,22 @@ class SessionService:
         with self._ctx.db.transaction():
             self._ctx.session_repo.update(record)
             self._append_event(record.id, EVENT_SESSION_RENAMED, {"title": clean})
+        return record
+
+    def set_pinned(self, ref: str, pinned: bool) -> SessionRecord:
+        """Pin or unpin a conversation. Organizational only: it neither
+        reorders activity (`last_active_at`) nor touches the session state,
+        and archiving keeps the pin for when the session is restored."""
+        record = self._resolve(ref)
+        if (record.pinned_at is not None) == pinned:
+            return record
+        pinned_at = self._now() if pinned else None
+        with self._ctx.db.transaction():
+            self._ctx.session_repo.set_pinned_at(record.id, pinned_at)
+            self._append_event(
+                record.id, EVENT_SESSION_PINNED if pinned else EVENT_SESSION_UNPINNED, {}
+            )
+        record.pinned_at = pinned_at
         return record
 
     def archive(self, ref: str) -> SessionRecord:
