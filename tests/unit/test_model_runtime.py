@@ -922,6 +922,56 @@ def test_responses_stream() -> None:
     assert (response.usage.input_tokens, response.usage.output_tokens) == (5, 7)
 
 
+def test_responses_stream_items_are_kept_when_the_terminal_output_is_empty() -> None:
+    # The ChatGPT subscription backend (observed 2026-09-23): each item arrives
+    # only in `response.output_item.done` and `response.completed` carries
+    # `output: []`. Reading only the terminal output lost the answer and the
+    # tool call, and the turn ended empty.
+    def sse(payload: dict) -> str:
+        return "data: " + json.dumps(payload) + "\n"
+
+    reasoning = {"type": "reasoning", "id": "rs_1", "encrypted_content": "opaque", "summary": []}
+    call = {
+        "type": "function_call",
+        "id": "fc_1",
+        "call_id": "c1",
+        "name": "fs_read",
+        "arguments": '{"p": "x"}',
+    }
+    message = {"type": "message", "content": [{"type": "output_text", "text": "hola"}]}
+    body = (
+        sse({"type": "response.output_text.delta", "delta": "hola"})
+        + sse({"type": "response.output_item.done", "output_index": 2, "item": call})
+        + sse({"type": "response.output_item.done", "output_index": 0, "item": reasoning})
+        + sse({"type": "response.output_item.done", "output_index": 1, "item": message})
+        + sse(
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_1",
+                    "status": "completed",
+                    "output": [],
+                    "usage": {"input_tokens": 5, "output_tokens": 7},
+                },
+            }
+        )
+    )
+    adapter = OpenAICompatibleAdapter(
+        RESPONSES_GO,
+        client=_client(lambda request: httpx.Response(200, content=body.encode())),
+    )
+    response = adapter.invoke_stream(
+        _request(), "sk-test", None, lambda d: None, transport="responses"
+    )
+    assert response.content == "hola"
+    (tool,) = response.tool_calls
+    assert (tool.id, tool.name, tool.arguments) == ("c1", "fs_read", {"p": "x"})
+    assert response.stop_reason == StopReason.TOOL_CALLS
+    # The next request must replay the items, reasoning included, in order.
+    assert response.continuation == {"protocol": "responses", "items": [reasoning, message, call]}
+    assert (response.usage.input_tokens, response.usage.output_tokens) == (5, 7)
+
+
 def test_responses_rejects_unknown_transport() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={})
