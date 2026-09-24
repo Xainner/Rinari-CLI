@@ -105,9 +105,15 @@ def test_turn_outcomes_are_pregrooked_prompts(env, monkeypatch) -> None:
         out = slash.handle(session, console, "/test")
         assert out.action == "turn"
         assert "test suite" in out.prompt
+        # /review switches to REVIEW (read-only): the session is resumed rebuilt
+        # with the review prompt as its first message.
         out = slash.handle(session, console, "/review")
-        assert out.action == "turn"
+        assert out.action == "resume_session" and out.resume_ref == session.record.id
         assert "uncommitted changes" in out.prompt
+        assert session.services.sessions.show(session.record.id).mode == "review"
+        session.record.mode = "review"
+        out = slash.handle(session, console, "/review solo el parser")
+        assert out.action == "turn" and out.prompt == "solo el parser"
     finally:
         session.end()
 
@@ -291,8 +297,9 @@ def test_tasks_lists_project_tasks(env, monkeypatch) -> None:
         slash.handle(session, console, "/tasks")
         text = console.export_text()
         assert "Implement X" in text
-        slash.handle(session, console, "/plan")
-        assert "Implement X" in console.export_text()
+        # /plan is PLAN mode now; the tree lives in /tasks only.
+        out = slash.handle(session, console, "/plan")
+        assert out.action == "resume_session" and out.prompt is None
     finally:
         session.end()
 

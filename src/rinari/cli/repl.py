@@ -233,7 +233,9 @@ def run_repl(
                 if not outcome.resume_ref:
                     typer.echo("usage: /resume <session id>", err=True)
                     continue
-                return f"resume:{outcome.resume_ref}"
+                # A pending first message rides after a NUL (see session_flow).
+                pending = f"\0{outcome.prompt}" if outcome.prompt else ""
+                return f"resume:{outcome.resume_ref}{pending}"
             if outcome.action == "turn" and outcome.prompt:
                 prompt = outcome.prompt
                 continue

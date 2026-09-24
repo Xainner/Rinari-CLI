@@ -87,6 +87,8 @@ CAPABILITIES: dict[str, bool] = {
     "session_pins_v1": True,
     # skill.* library: standard skills, reviewed installs, on/off, edit, import.
     "skill_library_v1": True,
+    # command.list + session.turn.start `command` (slash commands, skills too).
+    "slash_commands_v1": True,
 }
 
 

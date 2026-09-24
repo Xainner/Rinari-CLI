@@ -1132,6 +1132,22 @@ def _apply_session(
     )
 
 
+def pin_skill(session: AgentSession, name: str):
+    """Pin a skill from a slash command: persisted on the session (the next
+    turn's prompt refresh injects its procedure), its tools exposed now."""
+    services = session.services
+    record = session.record
+    root = Path(record.project_root_snapshot) if record.project_root_snapshot else None
+    manifest = services.skills.activate(name, record.id, root)
+    session.record = records_get(services, record.id)
+    exposure = getattr(session.context.tool_ctx, "exposure", None)
+    if exposure is not None and manifest.required_tools:
+        exposure.activate(
+            list(manifest.required_tools), reason=f"skill {manifest.name}", scope="session"
+        )
+    return manifest
+
+
 def records_get(services: ServiceContainer, session_id: str) -> SessionRecord:
     record = services.ctx.session_repo.get(session_id)
     if record is None:
