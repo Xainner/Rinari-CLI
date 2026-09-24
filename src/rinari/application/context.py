@@ -31,6 +31,7 @@ from rinari.storage.repositories import (
     PluginRepository,
     ProjectRepository,
     ProviderRepository,
+    ScheduleRepository,
     SessionEventRepository,
     SessionMessageRepository,
     SessionRepository,
@@ -73,6 +74,7 @@ class AppContext:
     api_spec_repo: ApiSpecRepository = None
     hook_repo: HookRepository = None
     skill_repo: SkillRecordRepository = None
+    schedule_repo: ScheduleRepository = None
 
     def close(self) -> None:
         self.db.close()
@@ -127,6 +129,7 @@ def build_app_context(
         api_spec_repo=ApiSpecRepository(db),
         hook_repo=HookRepository(db),
         skill_repo=SkillRecordRepository(db),
+        schedule_repo=ScheduleRepository(db),
     )
 
 

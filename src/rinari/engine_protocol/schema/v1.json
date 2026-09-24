@@ -450,7 +450,15 @@
         "provider.auth.start",
         "provider.auth.get",
         "provider.auth.cancel",
-        "provider.auth.logout"
+        "provider.auth.logout",
+        "schedule.list",
+        "schedule.get",
+        "schedule.create",
+        "schedule.update",
+        "schedule.delete",
+        "schedule.runs",
+        "schedule.run_now",
+        "schedule.grant"
       ]
     },
     "event": {
@@ -515,7 +523,12 @@
         "provider.auth.updated",
         "skill.job.completed",
         "skill.job.failed",
-        "skill.learned"
+        "skill.learned",
+        "schedule.changed",
+        "schedule.run.started",
+        "schedule.run.needs_you",
+        "schedule.run.completed",
+        "schedule.proposed"
       ]
     },
     "attachment": {
@@ -1898,7 +1911,8 @@
           "enum": [
             "user",
             "peer",
-            "automation"
+            "automation",
+            "schedule"
           ]
         },
         "message_id": {
@@ -1947,6 +1961,18 @@
         "quoted_source": {
           "type": [
             "object",
+            "null"
+          ]
+        },
+        "task_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "run_id": {
+          "type": [
+            "string",
             "null"
           ]
         }

@@ -93,6 +93,7 @@ CAPABILITIES: dict[str, bool] = {
     "skill_learning_v1": True,
     # Desktop terminal: ConPTY on Windows, raw keystrokes, pty.shells, tail stream.
     "desktop_terminal_v1": True,
+    "scheduled_tasks_v1": True,
 }
 
 

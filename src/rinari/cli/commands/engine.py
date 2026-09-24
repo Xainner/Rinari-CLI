@@ -30,5 +30,7 @@ def engine(
             hint="Run: rinari engine --stdio",
         )
     with deps.services(ctx) as services:
-        code = run_stdio(EngineServer(services))
+        server = EngineServer(services)
+        server.start_background()
+        code = run_stdio(server)
     raise typer.Exit(code)

@@ -8,6 +8,7 @@ from dataclasses import replace
 
 from rinari.agents.tools import AgentToolHost, agent_tools
 from rinari.capability_search import capability_activation_tools, capability_search_tool
+from rinari.schedule.tools import ScheduleToolHost, schedule_tools
 from rinari.skills.tools import SkillToolHost, skill_tools
 from rinari.tools.definition import ToolErrorCode, ToolErrorInfo, ToolResult
 from rinari.tools.native import all_native_tools
@@ -32,6 +33,7 @@ def builtin_catalog() -> ToolRegistry:
     registry.register_all(all_native_tools())
     registry.register_all(ssh_tools(None))
     registry.register_all(skill_tools(SkillToolHost(service=None, project=None)))
+    registry.register_all(schedule_tools(ScheduleToolHost(service=None)))
     registry.register_all(rinari_state_tools(RinariStateHost(services=None)))
     registry.register_all(agent_tools(AgentToolHost(orchestrator=None)))
     registry.register(capability_search_tool(registry))

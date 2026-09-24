@@ -945,6 +945,24 @@ that reattaches repaints from `pty.read` and skips events it already has.
 A chat without a project whose cwd is the home root opens in `~/Documents`
 (an explicit home-root `cwd` is still refused). The model-facing `pty.*`
 tools are unchanged and stay POSIX-only.
+Scheduled tasks (`scheduled_tasks_v1`): `schedule.list/get/create/update/
+delete/runs/run_now/grant`, events `schedule.changed`,
+`schedule.run.started`, `schedule.run.needs_you` and
+`schedule.run.completed`. A task is a reminder or a prompt for an agent turn
+(project or chat, mode, model, skills) on a local-time schedule (`once`,
+`interval` of 5 min or more, `daily`, `weekly`). The serving Engine checks
+every 20 s; a run due while it was down still runs within 12 h and is
+recorded `skipped` after that, as is one whose previous run is still active.
+An agent run is a turn in its own session ("⏰ name · date") with
+`origin.kind = "schedule"`. The task's `grants` ({capability, target?}) are
+seeded as session grants of that session: creating the task approves them.
+Anything else asks as usual: the run turns `needs_you`, and if the approval
+expires the run ends `blocked` with what it needed as its reason.
+`schedule.grant` adds a capability to a task by task id or by the run's
+session ("allow for this task"). The model only drafts tasks with the lazy
+`schedule.propose` tool (validated, grants stripped, nothing stored), which
+the desktop receives whole as a `schedule.proposed` event; the owner creates
+them.
 The envelope contract is unchanged across slices.
 
 ---
@@ -2445,6 +2463,23 @@ proposes with `skills.propose` is saved active. Anything Rinari proposes on its
 own (setting `skills.auto_learn`, default `propose`) waits in
 `rinari skills pending` until `approve` or `reject`. `revert` undoes a learned
 skill: its previous version, or removed if it was new. Secrets are refused.
+
+---
+
+# 43b. `schedule`
+
+```bash
+rinari schedule list
+rinari schedule add NAME --prompt TEXT (--at YYYY-MM-DDTHH:MM | --every MIN | --daily HH:MM | --weekly DAYS@HH:MM)
+                    [--reminder] [--project ID] [--mode plan|build|review] [--model ALIAS] [--allow CAPABILITY]...
+rinari schedule enable|disable|remove ID
+rinari schedule runs ID [--limit N]
+```
+
+Tasks run in the desktop app's Engine (open or in the system tray), not in
+this command. `--allow` approves a capability in advance for every run;
+anything else a run needs asks in the app. Days of `--weekly` are 0 (Monday)
+to 6. Switching a task back on counts from now: missed runs are not caught up.
 
 ---
 

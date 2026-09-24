@@ -34,6 +34,7 @@ from rinari.cli.commands import project as project_cmd
 from rinari.cli.commands import provider as provider_cmd
 from rinari.cli.commands import providers as providers_cmd
 from rinari.cli.commands import sandbox as sandbox_cmd
+from rinari.cli.commands import schedule as schedule_cmd
 from rinari.cli.commands import secrets as secrets_cmd
 from rinari.cli.commands import sessions as sessions_cmd
 from rinari.cli.commands import skills as skills_cmd
@@ -76,6 +77,7 @@ app.add_typer(mcp_cmd.app, name="mcp")
 app.add_typer(api_cmd.app, name="api")
 app.add_typer(hooks_cmd.app, name="hooks")
 app.add_typer(skills_cmd.app, name="skills")
+app.add_typer(schedule_cmd.app, name="schedule")
 app.add_typer(agents_cmd.app, name="agents")
 app.add_typer(profiles_cmd.app, name="profiles")
 app.add_typer(project_cmd.app, name="project")
