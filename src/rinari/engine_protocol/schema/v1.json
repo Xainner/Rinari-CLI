@@ -1911,7 +1911,8 @@
           "enum": [
             "user",
             "peer",
-            "automation"
+            "automation",
+            "schedule"
           ]
         },
         "message_id": {
@@ -1960,6 +1961,18 @@
         "quoted_source": {
           "type": [
             "object",
+            "null"
+          ]
+        },
+        "task_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "run_id": {
+          "type": [
+            "string",
             "null"
           ]
         }
