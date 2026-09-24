@@ -885,8 +885,7 @@ existing `dest_dir` → real path; basename-contained, numeric suffix on
 collision, never overwrites), `context.get` (compaction state +
 counts from CompactState, no invented pressure %), `usage.get` (model calls
 + tokens + tool calls aggregated from persisted events; cost always null —
-pricing unknown). No `pty.*` in v1: PTY handles live inside tool calls, the
-desktop terminal reports the engine limitation instead (per DoD).
+pricing unknown). No `pty.*` in v1 (see the post-v1 runtime entry below).
 Slice 11 adds workflow: `session.queue.add/list/clear` (bounded FIFO,
 auto-runs after the live turn with normal turn boundaries + approvals,
 `session.queue.updated` events), `profile_bundle.list/get/create/apply/remove`
@@ -932,9 +931,20 @@ unknown until an adapter determines it, never an invented false).
 Post-v1 runtime: `pty.start` (`command`, `cwd?`, `env?`, `cols?`,
 `rows?`, `session_id?` → user-initiated terminal over the shared PTY
 backend) + `pty.write/resize/read/list/terminate` with `pty.output` /
-single `pty.exit` events; POSIX-only spawn (`PTY_UNSUPPORTED`
-elsewhere); cwd never the home root; dead-handle terminate is no-op
-success; restart reports no handles.
+single `pty.exit` events; cwd never the home root; dead-handle terminate is
+no-op success; restart reports no handles.
+Desktop terminal (`desktop_terminal_v1`): Windows spawns through ConPTY
+(pywinpty, a win32-only dependency), so `PTY_UNSUPPORTED` now means only a
+missing backend. `command` is optional: without it the default of
+`pty.shells` opens (PowerShell 7, then Windows PowerShell, cmd and Git Bash
+when found; the user's login shell on POSIX). `pty.write {raw: true}` sends
+keystrokes as typed (no newline appended). Output is kept in a 256 KB tail
+addressed by byte offset: `pty.output` carries the `offset` where its chunk
+ends and `pty.read` returns the tail plus its end `offset`, so a terminal
+that reattaches repaints from `pty.read` and skips events it already has.
+A chat without a project whose cwd is the home root opens in `~/Documents`
+(an explicit home-root `cwd` is still refused). The model-facing `pty.*`
+tools are unchanged and stay POSIX-only.
 The envelope contract is unchanged across slices.
 
 ---

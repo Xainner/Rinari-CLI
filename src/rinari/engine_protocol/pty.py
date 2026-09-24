@@ -9,8 +9,10 @@ xterm from these, never polls in a loop).
 Trust model: starting a PTY runs an arbitrary shell command, so start
 is user-initiated by construction (the command travels visibly in the
 call, like opening a local terminal) and is additionally contained:
-POSIX only (PTY_UNSUPPORTED elsewhere, never a fake shell), cwd must be
-a real directory and is never the home root, env overrides are capped.
+a real pty (POSIX pty pair or Windows ConPTY via pywinpty; PTY_UNSUPPORTED
+without one, never a fake shell), cwd must be a real directory and is never
+the home root, env overrides are capped. Without a command it opens the
+platform's default shell (`pty.shells` lists what exists).
 Handles die with their process; engine shutdown terminates stragglers
 and a restart reports none (desktop shows "terminal ended", never a
 frozen ghost).
@@ -18,6 +20,7 @@ frozen ghost).
 
 from __future__ import annotations
 
+import codecs
 import contextlib
 import itertools
 import os
@@ -62,11 +65,15 @@ class EnginePtyService:
         self._generation_counter = itertools.count(1)
         self._handle_generation: dict[str, int] = {}
 
+    @property
+    def supported(self) -> bool:
+        return self._registry.supported
+
     # -- lifecycle ------------------------------------------------------
 
     def start(
         self,
-        command: str,
+        command: str | None = None,
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
@@ -76,7 +83,12 @@ class EnginePtyService:
     ) -> dict[str, Any]:
         # Parameter validation is platform-independent (a bad request is
         # INVALID_PARAMS even where no real PTY exists); only the spawn
-        # itself requires POSIX.
+        # itself requires a real pty.
+        if command is None:
+            shells = available_shells()
+            if not shells:
+                raise EngineProtocolError(PTY_UNSUPPORTED, "No shell found for a terminal.")
+            command = shells[0]["command"]
         if not isinstance(command, str) or not command.strip():
             raise EngineProtocolError(
                 "INVALID_PARAMS", "Param 'command' must be a non-empty string."
@@ -99,7 +111,9 @@ class EnginePtyService:
             thread.start()
         return {"pty_id": pty_id, "session_id": session_id}
 
-    def write(self, pty_id: str, data: str) -> dict[str, Any]:
+    def write(self, pty_id: str, data: str, *, raw: bool = False) -> dict[str, Any]:
+        """`raw` sends keystrokes as typed (an interactive terminal: one key,
+        an arrow, Ctrl+C); otherwise a line is completed with a newline."""
         handle = self._need(pty_id)
         if handle.exited:
             raise EngineProtocolError("INVALID_PARAMS", f"PTY already exited: {pty_id}")
@@ -108,11 +122,11 @@ class EnginePtyService:
         if len(data) > _WRITE_LIMIT:
             raise EngineProtocolError("INVALID_PARAMS", "Param 'data' exceeds 16 KiB.")
         payload = data.encode("utf-8")
-        if not payload.endswith(b"\n") and not payload.endswith(b"\r"):
+        if not raw and not payload.endswith(b"\n") and not payload.endswith(b"\r"):
             payload += b"\n"  # a pty line only reaches the reader on a newline
         try:
-            written = os.write(handle.master, payload)
-        except OSError as exc:
+            written = handle.write_bytes(payload)
+        except (OSError, Exception) as exc:
             raise EngineProtocolError("ENGINE_ERROR", str(exc)) from None
         return {"pty_id": pty_id, "written": written}
 
@@ -122,28 +136,30 @@ class EnginePtyService:
         handle = self._need(pty_id)
         columns = self._clamp_dimension(columns, "columns", 2, 500, 80)
         rows = self._clamp_dimension(rows, "rows", 1, 200, 24)
-
-        import fcntl
-        import struct
-        import termios
-
         try:
-            fcntl.ioctl(handle.master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
-        except OSError as exc:
+            handle.set_size(rows, columns)
+        except Exception as exc:
             raise EngineProtocolError("ENGINE_ERROR", str(exc)) from None
         return {"pty_id": pty_id, "columns": columns, "rows": rows}
 
     def read(self, pty_id: str) -> dict[str, Any]:
+        """The recent output (what a reattaching terminal repaints).
+
+        `offset` is the byte offset where `data` ends; `pty.output` events
+        carry the offset where their chunk ends, so a reader that repaints
+        from here skips the events it already has."""
         handle = self._need(pty_id)
         with handle.lock:
-            text = handle.buffer.text()
-            truncated = handle.buffer.truncated
+            data, end = handle.tail.read_from(0)
+            truncated = end > len(data)
+        text = data.decode("utf-8", errors="replace")
         return {
             "pty_id": pty_id,
             "alive": not handle.exited,
             "exit_code": handle.exit_code,
             "truncated": truncated,
             "data": text,
+            "offset": end,
         }
 
     def list(self) -> list[dict[str, Any]]:
@@ -175,21 +191,24 @@ class EnginePtyService:
             # No-op success on a dead handle (desktop needs no tombstones).
             return {"pty_id": pty_id, "alive": False, "exit_code": handle.exit_code}
         handle.stop_requested = True
-        try:
-            os.killpg(os.getpgid(handle.process.pid), 15)
-        except OSError:
-            with contextlib.suppress(OSError):
-                os.killpg(os.getpgid(handle.process.pid), 9)
+        handle.kill(force=False)
         deadline = time.monotonic() + _TERMINATE_GRACE_S
+        forced = False
         while not handle.exited and time.monotonic() < deadline:
+            if not forced and time.monotonic() > deadline - _TERMINATE_GRACE_S / 2:
+                handle.kill(force=True)
+                forced = True
             time.sleep(0.1)
         return {"pty_id": pty_id, "alive": not handle.exited, "exit_code": handle.exit_code}
 
     def shutdown(self) -> None:
         for handle in self._registry.list():
             if not handle.exited:
-                with contextlib.suppress(OSError):
-                    os.killpg(os.getpgid(handle.process.pid), 9)
+                with contextlib.suppress(Exception):
+                    handle.kill(force=True)
+
+    def shells(self) -> list[dict[str, str]]:
+        return available_shells()
 
     # -- internals ------------------------------------------------------
 
@@ -202,13 +221,15 @@ class EnginePtyService:
     def _resolve_cwd(self, cwd: str | None, session_id: str | None) -> Path:
         # session_id alone resolves the cwd default; with an explicit cwd it
         # is only row attribution, so no resolver is required for it.
+        implicit = False
         if session_id is not None and cwd is None:
             if self._resolve_session is None:
                 raise EngineProtocolError(
                     "INVALID_PARAMS", "Param 'session_id' is not supported here."
                 )
             record = self._resolve_session(session_id)
-            cwd = record.current_cwd
+            cwd = record.project_root_snapshot or record.current_cwd
+            implicit = True
         if not isinstance(cwd, str) or not cwd:
             raise EngineProtocolError(
                 "INVALID_PARAMS", "Param 'cwd' (or a session default) is required."
@@ -216,7 +237,12 @@ class EnginePtyService:
         directory = Path(cwd).expanduser().resolve()
         if not directory.is_dir():
             raise EngineProtocolError("INVALID_PARAMS", f"Param 'cwd' is not a directory: {cwd}")
-        if self._home is not None and directory == self._home.expanduser().resolve():
+        home = self._home.expanduser().resolve() if self._home is not None else None
+        if implicit and home is not None and directory == home and (home / "Documents").is_dir():
+            # A chat without a project sits in the home root; its terminal opens
+            # in Documents instead of widening the rule below.
+            directory = home / "Documents"
+        if home is not None and directory == home:
             raise PermissionDeniedError(
                 "$HOME is never an implicit PTY workspace",
                 hint="Start the terminal in a project subdirectory instead.",
@@ -253,27 +279,37 @@ class EnginePtyService:
         return clean
 
     def _forward(self, pty_id: str) -> None:
-        """Push new output as pty.output events, then exactly one pty.exit."""
+        """Push new output as pty.output events, then exactly one pty.exit.
+
+        Reads the tail by byte offset with an incremental decoder: a long
+        session keeps streaming (the head buffer stops at its cap) and a
+        multi-byte character split across reads is never mangled."""
         handle = self._registry.get(pty_id)
         if handle is None:
             return
         offset = 0
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         while True:
+            # Finished only when the process exited AND its reader drained the
+            # pty: output can still arrive between the two.
+            reader = handle.reaper
+            done = handle.exited and (reader is None or not reader.is_alive())
             with handle.lock:
-                text = handle.buffer.text()
-            if len(text) > offset:
+                data, offset = handle.tail.read_from(offset)
+            text = decoder.decode(data, final=done)
+            if text:
                 self._emit(
                     event(
                         "pty.output",
                         {
                             "pty_id": pty_id,
                             "session_id": self._session_of.get(pty_id),
-                            "data": text[offset:],
+                            "data": text,
+                            "offset": offset,
                         },
                     )
                 )
-                offset = len(text)
-            if handle.exited:
+            if done:
                 with self._lock:
                     self._forwarders.discard(pty_id)
                 self._emit(
@@ -288,3 +324,44 @@ class EnginePtyService:
                 )
                 return
             time.sleep(_FORWARD_INTERVAL_S)
+
+
+def available_shells() -> list[dict[str, str]]:
+    """Shells a terminal can open here, the default first."""
+    import shutil
+    import sys
+
+    shells: list[dict[str, str]] = []
+    if sys.platform == "win32":
+        pwsh = shutil.which("pwsh")
+        if pwsh:
+            shells.append({"id": "pwsh", "label": "PowerShell 7", "command": f'"{pwsh}" -NoLogo'})
+        if shutil.which("powershell"):
+            shells.append(
+                {
+                    "id": "powershell",
+                    "label": "Windows PowerShell",
+                    "command": "powershell.exe -NoLogo",
+                }
+            )
+        shells.append({"id": "cmd", "label": "Command Prompt", "command": "cmd.exe"})
+        for candidate in (
+            Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "Git" / "bin" / "bash.exe",
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Git" / "bin" / "bash.exe",
+        ):
+            if candidate.is_file():
+                shells.append(
+                    {"id": "git-bash", "label": "Git Bash", "command": f'"{candidate}" --login -i'}
+                )
+                break
+        return shells
+    login = os.environ.get("SHELL")
+    if login and Path(login).is_file():
+        shells.append({"id": "login", "label": Path(login).name, "command": f"{login} -l"})
+    for name in ("bash", "zsh", "sh"):
+        path = shutil.which(name)
+        if path and all(shell["command"].split()[0] != path for shell in shells):
+            shells.append(
+                {"id": name, "label": name, "command": f"{path} -l" if name != "sh" else path}
+            )
+    return shells

@@ -19,6 +19,7 @@ dependencies = [
     "openpyxl>=3.1.5,<4",
     "defusedxml>=0.7.1,<1",
     "pyyaml>=6.0.2,<7",
+    "pywinpty>=2.0.14; sys_platform == 'win32'",
 ]
 
 [project.scripts]
