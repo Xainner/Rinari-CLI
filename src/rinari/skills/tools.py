@@ -10,6 +10,7 @@ policy: a skill requesting tools still needs the normal approvals
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from rinari.skills.manifest import SkillError
 
@@ -41,7 +42,8 @@ def skill_tools(host: SkillToolHost):
         return getattr(ctx, "session_id", "") or ""
 
     def list_(arguments, ctx):
-        rows = service.summaries(_project())
+        query = str((arguments or {}).get("query") or "").strip()
+        rows = service.search(query, _project()) if query else service.summaries(_project())
         return ToolResult(ok=True, data={"skills": rows}, origin="skills")
 
     def show(arguments, ctx):
@@ -71,7 +73,9 @@ def skill_tools(host: SkillToolHost):
                 "triggers": list(m.triggers),
                 "required_tools": list(m.required_tools),
                 "optional_tools": list(m.optional_tools),
-                "body": m.body,
+                "format": m.format,
+                "folder": str(Path(m.path).parent),
+                "body": service.prompt_body(name, _project()),
                 "references": service.references(name, _project()),
             },
             origin="skills",
@@ -179,10 +183,14 @@ def skill_tools(host: SkillToolHost):
         ToolDefinition(
             name="skills.list",
             description=(
-                "List skill summaries (name, description, source, risk, triggers). "
-                "Full bodies are large; use skills.show for one skill."
+                "List skill summaries (name, description, source, risk, triggers); with "
+                "`query`, only the matching ones, best first. Full bodies are large; use "
+                "skills.show for one skill."
             ),
-            input_schema={"type": "object"},
+            input_schema={
+                "type": "object",
+                "properties": {"query": {"type": "string", "maxLength": 200}},
+            },
             capabilities=read,
             classify=lambda _i: ClassifiedAction("state.read"),
             handler=list_,

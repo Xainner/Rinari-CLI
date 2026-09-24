@@ -56,7 +56,10 @@ FIELDS = {
     "context.unpin": "source:s ref:s unpinned:b",
     "context.list_pins": "count:i pins:a",
     "skills.list": "skills:a",
-    "skills.show": ("name:s version:s body:s required_tools:a optional_tools:a references:a?"),
+    "skills.show": (
+        "name:s version:s body:s required_tools:a optional_tools:a references:a? "
+        "format:s? folder:s?"
+    ),
     "skills.read": "name:s path:s text:s offset:i total_lines:i next_offset:i?",
     "skills.activate": "name:s version:s active:b tools_activated:a?",
     "rinari.status": (

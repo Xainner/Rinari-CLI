@@ -223,11 +223,12 @@ def test_lazy_load_returns_body(app_ctx):
 
 def test_install_update_remove(app_ctx, tmp_path):
     services = build_services(app_ctx)
+    # Installed under the skill's own name, not the folder it came from: the
+    # catalog finds a skill by folder, so they must match.
     src = _write_skill(tmp_path, "my-skill")
     services.skills.install(src)
-    assert (services.skills.user_skills_dir() / "my-skill" / "SKILL.md").is_file()
+    assert (services.skills.user_skills_dir() / "sample-skill" / "SKILL.md").is_file()
 
-    # Reinstall without --name collides on the discovered name.
     with pytest.raises(SkillError) as exc:
         services.skills.install(src)
     assert exc.value.code == "ALREADY_EXISTS"
@@ -237,11 +238,11 @@ def test_install_update_remove(app_ctx, tmp_path):
         "my-skill-v2",
         SAMPLE.replace("version: 1.2.3", "version: 2.0.0"),
     )
-    m2 = services.skills.update(src2, "my-skill")
+    m2 = services.skills.update("sample-skill", source=str(src2))
     assert m2.version == "2.0.0"
 
-    assert services.skills.remove("my-skill") is True
-    assert services.skills.remove("my-skill") is False
+    assert services.skills.remove("sample-skill") is True
+    assert services.skills.remove("sample-skill") is False
 
 
 def test_install_requires_skill_md(app_ctx, tmp_path):

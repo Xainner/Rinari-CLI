@@ -2315,8 +2315,35 @@ skills.read  {name, path, offset?, limit?} → one page (≤400 lines) + next_of
 ```
 
 `skills.read` resolves the path inside the skill directory and rejects absolute
-paths, `..`, `SKILL.md` itself and other suffixes. Keep `SKILL.md` an index:
+paths, `..`, `SKILL.md` itself, binaries and files over 512 KB. Besides docs it
+reads scripts and data (`.py .sh .ps1 .js .ts .yaml .csv`…), since standard
+skills ship them next to their instructions. Keep `SKILL.md` an index:
 it is paid for on every turn while active.
+
+## Standard skills and the library (implemented)
+
+The frontmatter is read as YAML, so skills written for the Agent Skills
+standard (Claude, Codex…) load as written: a folded `description: >`,
+`metadata.version`, `license`, `compatibility`, `allowed-tools`. A skill with
+any of Rinari's keys (`required_tools`, `risk`, `triggers`…) or a `# Procedure`
+section is Rinari-format; otherwise it is `standard` and its whole body is the
+procedure. When a standard skill is activated or shown, the model gets a short
+preamble first: the mapping from its tool names to Rinari's (Bash → shell.exec,
+Read → fs.read, Edit → fs.patch…) and its folder, so its scripts run through
+`shell.exec` under the usual policy. `allowed-tools` is never a grant.
+
+`skill_records` holds what a folder cannot say about itself: origin
+(`installed`, later `learned`), provenance and content hash, on/off and
+approval status. Disabled or pending skills are left out of the catalog,
+activation and reconciliation. The catalog clips descriptions to 160
+characters and, past 40 skills, lists names only and points to `skills.list`
+with a query.
+
+Installs are reviewed before anything is copied (`rinari.skills.review`); a
+review with findings needs the hash of the reviewed content, so a second
+download cannot change what the owner approved. Archives are extracted without
+leaving their folder, symlinks and `.git` are never copied, remote sources are
+HTTPS only and size-capped.
 
 `skills.activate` also exposes the skill's `required_tools` that load on demand,
 in session scope, and returns them as `tools_activated`: no extra

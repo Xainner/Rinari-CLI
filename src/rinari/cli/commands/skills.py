@@ -2,7 +2,8 @@
 
 Per docs/commands.md (section added in phase 6) and the TODO.md phase-6
 "Skill CLI" checklist: list, search, show, activate, deactivate, install,
-remove, update, validate, test, create.
+remove, update, validate, test, create; plus the library (import, enable,
+disable). Installs are reviewed first (rinari.skills.review).
 """
 
 from __future__ import annotations
@@ -179,19 +180,52 @@ def skills_deactivate_cmd(
             typer.echo(f"{name} is not active on session {target.id}")
 
 
+def _reviewed(ctx: typer.Context, action, *, yes: bool):
+    """Run an install/update; when the review found something, show it and ask
+    once. With --json (or --yes) nothing is asked: --json reports the review
+    in the error and --yes accepts exactly the reviewed content."""
+    try:
+        return action(None)
+    except SkillError as exc:
+        if exc.code != "REVIEW_REQUIRED":
+            _fail(exc)
+        review = exc.details.get("review") or {}
+        if is_json(ctx) and not yes:
+            _fail(exc)
+        if not yes:
+            typer.echo(f"Review of {exc.details.get('name')}: {review.get('verdict')}")
+            for finding in review.get("findings", []):
+                where = (
+                    f"{finding['file']}:{finding['line']}"
+                    if finding.get("line")
+                    else finding["file"]
+                )
+                typer.echo(
+                    f"  [{finding['severity']}] {finding['code']} {where}  {finding['excerpt']}"
+                )
+            if not typer.confirm("Install this exact content anyway?", default=False):
+                raise typer.Exit(1) from None
+        try:
+            return action(review.get("content_hash"))
+        except SkillError as again:
+            _fail(again)
+
+
 @app.command("install")
 @with_error_handling("skills.install")
 def skills_install_cmd(
     ctx: typer.Context,
-    source: str = typer.Argument(..., help="Directory containing SKILL.md."),
-    name: str = typer.Option(None, "--name", help="Install under a specific name."),
+    source: str = typer.Argument(
+        ..., help="Folder, .zip, GitHub URL (repo or subfolder) or https URL of a SKILL.md."
+    ),
+    name: str = typer.Option(None, "--name", help="Which skill, when the source has several."),
+    yes: bool = typer.Option(False, "--yes", help="Accept the review's findings without asking."),
 ) -> None:
-    """Install a skill from a local directory into ~/.rinari/skills/."""
+    """Install a skill into ~/.rinari/skills/ (reviewed before it is copied)."""
     with services(ctx) as s:
-        try:
-            m = s.skills.install(source, name)
-        except SkillError as exc:
-            _fail(exc)
+        m = _reviewed(
+            ctx, lambda expected: s.skills.install(source, name, expected_hash=expected), yes=yes
+        )
         if is_json(ctx):
             emit_json(success_envelope("skills.install", {"name": m.name, "path": m.path}))
             return
@@ -202,19 +236,93 @@ def skills_install_cmd(
 @with_error_handling("skills.update")
 def skills_update_cmd(
     ctx: typer.Context,
-    source: str = typer.Argument(..., help="Directory containing SKILL.md."),
-    name: str = typer.Option(None, "--name", help="Update a specific installed skill."),
+    name: str = typer.Argument(..., help="Installed skill to update from where it came from."),
+    source: str = typer.Option(None, "--source", help="Update from this source instead."),
+    force: bool = typer.Option(False, "--force", help="Discard local edits to the skill."),
+    yes: bool = typer.Option(False, "--yes", help="Accept the review's findings without asking."),
 ) -> None:
-    """Replace an installed user skill with the contents of a directory."""
+    """Reinstall an installed skill from its recorded source (or --source)."""
     with services(ctx) as s:
-        try:
-            m = s.skills.update(source, name)
-        except SkillError as exc:
-            _fail(exc)
+        m = _reviewed(
+            ctx,
+            lambda expected: s.skills.update(
+                name, source=source, expected_hash=expected, force=force
+            ),
+            yes=yes,
+        )
         if is_json(ctx):
             emit_json(success_envelope("skills.update", {"name": m.name, "version": m.version}))
             return
         typer.echo(f"updated {m.name} -> v{m.version}")
+
+
+@app.command("import")
+@with_error_handling("skills.import")
+def skills_import_cmd(
+    ctx: typer.Context,
+    names: list[str] = typer.Argument(None, help="Skills to import (default: list them)."),
+    yes: bool = typer.Option(False, "--yes", help="Accept the review's findings without asking."),
+) -> None:
+    """Copy skills from Claude (~/.claude/skills), Codex (~/.codex/skills) or
+    ~/.agents/skills. Without names, lists what can be imported."""
+    with services(ctx) as s:
+        found = s.skills.import_scan()
+        if not names:
+            if is_json(ctx):
+                emit_json(success_envelope("skills.import", {"candidates": found}))
+                return
+            if not found:
+                typer.echo("No skills found in Claude, Codex or ~/.agents folders.")
+                return
+            for row in found:
+                state = f"installed ({row['installed']['origin']})" if row["installed"] else ""
+                verdict = row["review"]["verdict"]
+                typer.echo(f"{row['kind']:<7} {row['name']:<28} {verdict:<8} {state}")
+            typer.echo("Import with: rinari skills import <name> [<name>...]")
+            return
+        by_name = {row["name"]: row for row in found}
+        imported = []
+        for wanted in names:
+            row = by_name.get(wanted)
+            if row is None:
+                raise InvalidUsageError(f"no importable skill named {wanted!r}")
+            m = _reviewed(
+                ctx,
+                lambda expected, path=row["path"]: s.skills.install(path, expected_hash=expected),
+                yes=yes,
+            )
+            imported.append(m.name)
+        if is_json(ctx):
+            emit_json(success_envelope("skills.import", {"imported": imported}))
+            return
+        typer.echo(f"imported {', '.join(imported)}")
+
+
+@app.command("enable")
+@with_error_handling("skills.enable")
+def skills_enable_cmd(ctx: typer.Context, name: str = typer.Argument(...)) -> None:
+    """Turn a skill back on (catalog, activation)."""
+    _toggle(ctx, name, True)
+
+
+@app.command("disable")
+@with_error_handling("skills.disable")
+def skills_disable_cmd(ctx: typer.Context, name: str = typer.Argument(...)) -> None:
+    """Turn a skill off without removing it (works for Rinari's own skills too)."""
+    _toggle(ctx, name, False)
+
+
+def _toggle(ctx: typer.Context, name: str, enabled: bool) -> None:
+    with services(ctx) as s:
+        try:
+            entry = s.skills.set_enabled(name, enabled, _project())
+        except SkillError as exc:
+            _fail(exc)
+        if is_json(ctx):
+            action = "skills.enable" if enabled else "skills.disable"
+            emit_json(success_envelope(action, {"name": name, "enabled": entry["enabled"]}))
+            return
+        typer.echo(f"{'enabled' if enabled else 'disabled'} {name}")
 
 
 @app.command("remove")

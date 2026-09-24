@@ -85,6 +85,8 @@ CAPABILITIES: dict[str, bool] = {
     "project_flow_v1": True,
     # session.pin + sessionSummary.pinned_at (desktop Fijados).
     "session_pins_v1": True,
+    # skill.* library: standard skills, reviewed installs, on/off, edit, import.
+    "skill_library_v1": True,
 }
 
 

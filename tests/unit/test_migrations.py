@@ -13,6 +13,7 @@ BUNDLED_0001 = REPO_ROOT / "src/rinari/storage/migrations/0001_initial.sql"
 
 TABLES_AFTER_MIGRATIONS = {
     "schema_migrations",
+    "skill_records",
     "providers",
     "provider_credentials_metadata",
     "retained_credentials",
@@ -111,6 +112,7 @@ def test_migrate_fresh_database_applies_all(db):
         33,
         34,
         35,
+        36,
     ]
     assert _table_names(db) == TABLES_AFTER_MIGRATIONS
 
@@ -119,7 +121,7 @@ def test_migrate_is_idempotent(db):
     runner = MigrationRunner(db, FakeClock())
     runner.migrate()
     assert runner.migrate() == []
-    assert runner.current_version() == 35
+    assert runner.current_version() == 36
 
 
 def _previous_home_migrations(tmp_path: Path, upto: int) -> Path:

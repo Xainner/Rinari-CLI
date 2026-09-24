@@ -287,6 +287,19 @@ class EngineServer:
         self._dispatcher.register("plugin.enable", self._plugin_enable)
         self._dispatcher.register("plugin.disable", self._plugin_disable)
         self._dispatcher.register("plugin.diagnostics", self._plugin_diagnostics)
+        from rinari.engine_protocol.skills import SkillMethods
+
+        self._skills = SkillMethods(self._services, self._turns.emit_external)
+        self._dispatcher.register("skill.list", self._skills.list)
+        self._dispatcher.register("skill.get", self._skills.get)
+        self._dispatcher.register("skill.read", self._skills.read)
+        self._dispatcher.register("skill.enable", self._skills.enable)
+        self._dispatcher.register("skill.disable", self._skills.disable)
+        self._dispatcher.register("skill.remove", self._skills.remove)
+        self._dispatcher.register("skill.write", self._skills.write)
+        self._dispatcher.register("skill.import.scan", self._skills.import_scan)
+        self._dispatcher.register("skill.job.start", self._skills.job_start)
+        self._dispatcher.register("skill.job.get", self._skills.job_get)
         self._dispatcher.register("tool.list", self._tool_list)
         self._dispatcher.register("policy.get", self._policy_get)
         from rinari.engine_protocol.media import register_media

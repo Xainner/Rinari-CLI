@@ -344,6 +344,16 @@
         "plugin.enable",
         "plugin.disable",
         "plugin.diagnostics",
+        "skill.list",
+        "skill.get",
+        "skill.read",
+        "skill.enable",
+        "skill.disable",
+        "skill.remove",
+        "skill.write",
+        "skill.import.scan",
+        "skill.job.start",
+        "skill.job.get",
         "tool.list",
         "policy.get",
         "task.tree",
@@ -494,7 +504,9 @@
         "session.peer.message.updated",
         "flow.invalidated",
         "provider.usage.updated",
-        "provider.auth.updated"
+        "provider.auth.updated",
+        "skill.job.completed",
+        "skill.job.failed"
       ]
     },
     "attachment": {
