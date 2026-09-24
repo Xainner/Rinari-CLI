@@ -2385,8 +2385,11 @@ skills show
 skills activate
 skills deactivate
 skills install
+skills import
 skills remove
 skills update
+skills enable
+skills disable
 skills validate
 skills test
 skills create
@@ -2398,14 +2401,29 @@ Important distinction:
 ```text
 install    persistent availability
 activate   current session/task
+disable    out of the catalog, kept on disk (Rinari's own skills too)
 remove     deletion
 ```
 
-Example:
+Examples:
 
 ```bash
 rinari skills activate fix-ci
+rinari skills install https://github.com/acme/skills/tree/main/skills/pdf
+rinari skills install ./pack.zip --name pdf-tools
+rinari skills import                 # lists skills in ~/.claude, ~/.codex, ~/.agents
+rinari skills import pdf-tools
+rinari skills update pdf-tools       # from where it was installed
+rinari skills disable debug
 ```
+
+`install` accepts a folder, a `.zip`, a GitHub URL (repo or subfolder) or the
+https URL of a single `SKILL.md`. It reads skills in the Agent Skills standard
+(Claude, Codex) as well as Rinari's own format. Before copying anything it
+reviews the content (prompt injection, `curl | sh`, exfiltration, destructive
+commands, hidden Unicode, executables); when the review finds something it
+shows it and asks once, and `--yes` accepts exactly the reviewed content.
+`update` keeps local edits unless `--force`.
 
 ---
 

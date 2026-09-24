@@ -239,6 +239,12 @@ def _exposure_for(services: ServiceContainer, record: SessionRecord, root: Path 
     return exposure
 
 
+# The skill catalog rides on every turn: full lines up to this many skills,
+# names only past it, and descriptions clipped to this many characters.
+_CATALOG_FULL_LIMIT = 40
+_CATALOG_DESCRIPTION_CHARS = 160
+
+
 def _skill_prompt_parts(services: ServiceContainer, root: Path | None, record: SessionRecord):
     """(active skill bodies, catalog) for the prompt (harness.md 49).
 
@@ -257,10 +263,24 @@ def _skill_prompt_parts(services: ServiceContainer, root: Path | None, record: S
         if row["active"]
     )
     if rows:
+        # Paid on every turn: descriptions are clipped, and a large library
+        # (imported from other agents) lists names only and points to search.
+        names_only = len(rows) > _CATALOG_FULL_LIMIT
         lines = ["Available skills (pin one with skills.activate for its full procedure):"]
+        if names_only:
+            lines[0] = (
+                f"Available skills ({len(rows)}; find the right one with skills.list and a "
+                "query, pin it with skills.activate):"
+            )
         for row in rows:
             flag = " [active]" if row["active"] else ""
-            lines.append(f"- {row['name']}{flag}: {row['description']}")
+            if names_only and not row["active"]:
+                lines.append(f"- {row['name']}")
+                continue
+            description = row["description"]
+            if len(description) > _CATALOG_DESCRIPTION_CHARS:
+                description = description[: _CATALOG_DESCRIPTION_CHARS - 1].rstrip() + "…"
+            lines.append(f"- {row['name']}{flag}: {description}")
         catalog = "\n".join(lines)
     else:
         catalog = None

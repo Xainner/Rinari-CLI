@@ -86,7 +86,7 @@ def build_services(
     mcp = McpService(ctx, trust)
     api = ApiService(ctx, trust)
     hooks = HookService(ctx, trust)
-    skills = SkillService(ctx, trust)
+    skills = SkillService(ctx, trust, user_home=user_home)
     agents = AgentRegistry(trust)
     agent_configs = AgentConfigStore(ctx.layout.root)
     return ServiceContainer(

@@ -32,10 +32,11 @@ tool call against the policy engine (harness.md 51).
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from rinari.skills.catalog import skill_version
+from rinari.skills.frontmatter import as_list, as_str_map, as_text, read_frontmatter
 
 SKILL_FILE = "SKILL.md"
 VALID_RISK = ("low", "medium", "high")
@@ -43,6 +44,14 @@ VALID_SOURCES = ("packaged", "user", "project")
 
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+# Standard skills put a free-form version in `metadata.version` ("1.0").
+_LOOSE_VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.+-]{0,31}$")
+# Frontmatter keys only Rinari's own format uses: any of them (or a
+# `# Procedure` section) marks a skill as Rinari-format.
+_RINARI_KEYS = frozenset({"required_tools", "optional_tools", "risk", "triggers", "can_delegate"})
+SKILL_FORMATS = ("rinari", "standard")
+# The standard caps the description; the catalog shows it on every turn.
+DESCRIPTION_MAX_CHARS = 1024
 
 # Body sections recognized by convention (harness.md 48). Order matters:
 # the first `# <title>` line after each marker starts that section.
@@ -59,13 +68,17 @@ _BODY_KEYS = {
 class SkillError(Exception):
     """Structured skill failure (code + message)."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, details: dict | None = None) -> None:
         super().__init__(message)
         # SKILL_INVALID | NAME_INVALID | VERSION_INVALID | RISK_INVALID
         # | SKILL_NOT_FOUND | ALREADY_EXISTS | REMOVE_FAILED
         # | TOOL_NOT_FOUND | TRUST_REQUIRED | LOAD_FAILED
+        # | SOURCE_INVALID | SOURCE_TOO_LARGE | DOWNLOAD_FAILED | SKILL_AMBIGUOUS
+        # | REVIEW_REQUIRED | NOT_UPDATABLE | LOCALLY_MODIFIED | NOT_EDITABLE
         self.code = code
         self.message = message
+        # Structured context for clients: review findings, candidate names…
+        self.details = details or {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +99,15 @@ class SkillManifest:
     # Full markdown body (lazy-load payload).
     body: str = ""
     path: str = ""
+    # "rinari" (required_tools/risk/# Procedure) or "standard" (Agent Skills:
+    # Claude, Codex…). A standard skill's whole body is its procedure.
+    format: str = "rinari"
+    license: str = ""
+    compatibility: str = ""
+    metadata: dict[str, str] = field(default_factory=dict)
+    # Standard `allowed-tools`: a hint of what the skill expects to use. Never
+    # a grant (harness.md 51); tool names are the original product's.
+    allowed_tools: tuple[str, ...] = ()
 
     def requests(self) -> tuple[str, ...]:
         return self.required_tools + self.optional_tools
@@ -165,49 +187,55 @@ def load_skill_manifest(path: str | Path, source: str) -> SkillManifest:
     except OSError as exc:
         raise SkillError("LOAD_FAILED", f"cannot read {skill_md}: {exc}") from exc
 
-    fields = parse_frontmatter_lists(text)
-    # Body = everything after the closing `---`.
-    idx = text.find("\n---", 3)
-    body = text[idx + 4 :].lstrip("\n") if idx != -1 else text
+    fields, body = read_frontmatter(text)
     sections = _split_sections(body)
+    skill_format = "rinari" if _RINARI_KEYS & set(fields) or sections["procedure"] else "standard"
+    metadata = as_str_map(fields.get("metadata"))
 
-    name = str(fields.get("name") or skill_md.parent.name)
+    name = as_text(fields.get("name")) or skill_md.parent.name
     if not _NAME_RE.match(name):
         raise SkillError("NAME_INVALID", f"skill name invalid: {name!r}")
-    version = str(fields.get("version") or "")
+    version = as_text(fields.get("version"))
+    if not version and skill_format == "standard":
+        declared = metadata.get("version", "")
+        version = declared if _LOOSE_VERSION_RE.match(declared) else ""
     if not version:
         version = skill_version(text)
-    elif not _VERSION_RE.match(version) and not version.startswith("sha:"):
+    elif (
+        skill_format == "rinari"
+        and not _VERSION_RE.match(version)
+        and not version.startswith("sha:")
+    ):
         raise SkillError("VERSION_INVALID", f"skill version invalid: {version!r}")
-    risk = str(fields.get("risk") or "low")
+    elif skill_format == "standard" and not _LOOSE_VERSION_RE.match(version):
+        version = skill_version(text)
+    risk = as_text(fields.get("risk")) or "low"
     if risk not in VALID_RISK:
         raise SkillError("RISK_INVALID", f"skill risk invalid: {risk!r}")
 
-    def _as_list(key: str) -> tuple[str, ...]:
-        value = fields.get(key)
-        if isinstance(value, list):
-            return tuple(str(v) for v in value if v)
-        if isinstance(value, str) and value:
-            return tuple(v.strip() for v in value.split(",") if v.strip())
-        return ()
-
-    can_delegate_raw = str(fields.get("can_delegate") or "false").lower()
+    can_delegate_raw = as_text(fields.get("can_delegate")).lower() or "false"
     return SkillManifest(
         name=name,
-        description=str(fields.get("description") or ""),
+        description=as_text(fields.get("description")),
         version=version,
         source=source,
-        triggers=_as_list("triggers"),
-        required_tools=_as_list("required_tools"),
-        optional_tools=_as_list("optional_tools"),
+        triggers=as_list(fields.get("triggers")),
+        required_tools=as_list(fields.get("required_tools")),
+        optional_tools=as_list(fields.get("optional_tools")),
         risk=risk,
         can_delegate=can_delegate_raw in ("true", "yes", "1"),
-        procedure=sections["procedure"],
+        # A standard skill has no sections: the whole body is the procedure.
+        procedure=sections["procedure"] or (body.strip() if skill_format == "standard" else ""),
         verification=sections["verification"],
         failure_policy=sections["failure_policy"],
         success_criteria=sections["success_criteria"],
         body=body.strip(),
         path=str(skill_md),
+        format=skill_format,
+        license=as_text(fields.get("license")),
+        compatibility=as_text(fields.get("compatibility")),
+        metadata=metadata,
+        allowed_tools=as_list(fields.get("allowed-tools")),
     )
 
 
@@ -216,9 +244,26 @@ def validate_skill(m: SkillManifest, known_tools: set[str]) -> list[dict]:
     issues: list[dict] = []
     if not m.description:
         issues.append({"code": "MISSING_DESCRIPTION", "message": f"{m.name} has no description"})
+    elif len(m.description) > DESCRIPTION_MAX_CHARS:
+        issues.append(
+            {
+                "code": "DESCRIPTION_TOO_LONG",
+                "message": f"{m.name} description exceeds {DESCRIPTION_MAX_CHARS} characters",
+            }
+        )
+    if m.path and Path(m.path).parent.name != m.name:
+        issues.append(
+            {
+                "code": "NAME_MISMATCH",
+                "message": f"{m.name} lives in folder {Path(m.path).parent.name!r}",
+            }
+        )
     if not m.procedure:
+        # Rinari format names the section; a standard skill just needs a body.
         issues.append(
             {"code": "MISSING_PROCEDURE", "message": f"{m.name} has no # Procedure section"}
+            if m.format == "rinari"
+            else {"code": "MISSING_BODY", "message": f"{m.name} has no instructions"}
         )
     for tool in m.required_tools:
         if known_tools and tool not in known_tools:
@@ -232,7 +277,9 @@ def validate_skill(m: SkillManifest, known_tools: set[str]) -> list[dict]:
 
 
 __all__ = [
+    "DESCRIPTION_MAX_CHARS",
     "SKILL_FILE",
+    "SKILL_FORMATS",
     "VALID_RISK",
     "VALID_SOURCES",
     "SkillError",
