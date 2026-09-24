@@ -9,7 +9,11 @@ from rinari.application.services import build_services
 from rinari.models.router import ModelRouter
 from rinari.models.types import ChatMessage, ModelRequest
 from rinari.providers.adapters.anthropic import AnthropicAdapter
-from rinari.providers.adapters.subscriptions import CodexResponsesAdapter
+from rinari.providers.adapters.subscriptions import (
+    CODEX_CLIENT_VERSION,
+    ChatGPTAdapter,
+    CodexResponsesAdapter,
+)
 from rinari.providers.auth import ProviderAuthService
 from rinari.providers.catalog import PROVIDER_CATALOG, product_for
 from rinari.providers.metadata import model_metadata
@@ -789,3 +793,36 @@ def test_copilot_discovery_selects_route_and_subscription_headers(app_ctx, endpo
     assert seen[-1].headers["x-initiator"] == "user"
     assert seen[-1].headers["x-interaction-id"] == "test-session"
     assert router.capabilities(p, m.id).max_context_tokens == 200000
+
+
+def test_chatgpt_catalog_asks_as_a_current_client_and_drops_hidden_models():
+    # With client_version=0.1.0 the catalog answered an empty list: every
+    # model required 0.144 or later (observed 2026-09-23).
+    seen = []
+
+    def handler(req):
+        seen.append(req)
+        return httpx.Response(
+            200,
+            json={
+                "models": [
+                    {
+                        "slug": "gpt-6-luna",
+                        "visibility": "list",
+                        "minimal_client_version": "0.155.0",
+                        "context_window": 400000,
+                        "input_modalities": ["text", "image"],
+                        "supported_reasoning_levels": [{"effort": "high"}],
+                    },
+                    {"slug": "gpt-reserve", "visibility": "hide"},
+                    {"slug": "legacy", "visibility": "hidden"},
+                ]
+            },
+        )
+
+    adapter = ChatGPTAdapter(client=httpx.Client(transport=httpx.MockTransport(handler)))
+    models = adapter.list_models("synthetic-token", "https://chatgpt.com/backend-api/codex")
+    assert [m.provider_model_id for m in models] == ["gpt-6-luna"]
+    assert models[0].capabilities["max_context_tokens"] == 400000
+    assert models[0].capabilities["vision"] is True
+    assert seen[0].url.params["client_version"] == CODEX_CLIENT_VERSION

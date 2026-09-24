@@ -7,6 +7,14 @@ from rinari.providers.adapters.responses import OpenAIResponsesAdapter
 from rinari.providers.auth import account_id
 from rinari.shared.errors import ProviderModelError
 
+#: The subscription catalog only lists models whose `minimal_client_version`
+#: the caller meets (0.144 to 0.155 on 2026-09-23), so an older value returns an
+#: empty list. Rinari sends its own requests, so this names the catalog it
+#: can read, not a client it imitates.
+CODEX_CLIENT_VERSION = "1.0.0"
+#: `visibility` values of models the catalog does not offer for selection.
+HIDDEN = {"hide", "hidden"}
+
 
 def chatgpt_headers(secret):
     headers = {
@@ -60,7 +68,7 @@ class ChatGPTAdapter(OpenAICompatibleAdapter):
         )
 
     def list_models(self, secret, endpoint=None):
-        url = self.base_url(endpoint) + "/models?client_version=0.1.0"
+        url = self.base_url(endpoint) + f"/models?client_version={CODEX_CLIENT_VERSION}"
         response = send_request(self.client(), "GET", url, headers=self._headers(secret))
         if response.status_code in (401, 403):
             raise auth_failure(response, url)
@@ -75,7 +83,7 @@ class ChatGPTAdapter(OpenAICompatibleAdapter):
             if (
                 not isinstance(model, dict)
                 or not model.get("slug")
-                or model.get("visibility") == "hidden"
+                or model.get("visibility") in HIDDEN
             ):
                 continue
             levels = model.get("supported_reasoning_levels", [])
