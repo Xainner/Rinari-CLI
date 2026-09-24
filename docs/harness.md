@@ -2303,6 +2303,28 @@ can_delegate: true
 
 ---
 
+## References and exposed tools (implemented)
+
+A skill directory may carry more text files next to `SKILL.md`, usually under
+`references/` (`.md`, `.txt`, `.json`). Only `SKILL.md` is injected while the
+skill is active; references are read on demand:
+
+```text
+skills.show  {name}                        → body + references: [paths]
+skills.read  {name, path, offset?, limit?} → one page (≤400 lines) + next_offset
+```
+
+`skills.read` resolves the path inside the skill directory and rejects absolute
+paths, `..`, `SKILL.md` itself and other suffixes. Keep `SKILL.md` an index:
+it is paid for on every turn while active.
+
+`skills.activate` also exposes the skill's `required_tools` that load on demand,
+in session scope, and returns them as `tools_activated`: no extra
+`capability.activate` call. The session pin is what persists, so each new
+runtime (the desktop builds one per turn) re-exposes the pinned skills' tools.
+
+---
+
 # 49. Skill Discovery
 
 At prompt start, do not inject all skill bodies.

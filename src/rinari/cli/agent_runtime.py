@@ -222,6 +222,23 @@ def build_assembler_context(
     )
 
 
+def _exposure_for(services: ServiceContainer, record: SessionRecord, root: Path | None):
+    """Tool exposure for one runtime, with the tools of the pinned skills visible.
+
+    The desktop builds a runtime per turn, so an activation made in one turn
+    would not outlive it; a pinned skill keeps the tools it requires instead.
+    """
+    exposure = ToolExposure()
+    for name, _version in record.active_skills or ():
+        try:
+            required = services.skills.get(name, root).required_tools
+        except Exception:
+            continue
+        if required:
+            exposure.activate(list(required), reason=f"skill {name}", scope="session")
+    return exposure
+
+
 def _skill_prompt_parts(services: ServiceContainer, root: Path | None, record: SessionRecord):
     """(active skill bodies, catalog) for the prompt (harness.md 49).
 
@@ -523,7 +540,7 @@ def build_agent_session(
         credentials=services.credentials,
         browser=_build_browser_manager(record.id, home),
         mcp=services.mcp,
-        exposure=ToolExposure(),
+        exposure=_exposure_for(services, record, root),
         channel_host=channel_host,
         peer_host=peer_host,
         origin_kind=origin_kind,
@@ -855,6 +872,10 @@ def _build_tools(
             from rinari.skills.tools import SkillToolHost, skill_tools
 
             registry.register_all(skill_tools(SkillToolHost(service=services.skills, project=root)))
+        with registry.loading("introspection"):
+            from rinari.tools.native.rinari_state import RinariStateHost, rinari_state_tools
+
+            registry.register_all(rinari_state_tools(RinariStateHost(services, root)))
         if orchestrator is not None:
             with registry.loading("agents"):
                 from rinari.agents.tools import AgentToolHost, agent_tools

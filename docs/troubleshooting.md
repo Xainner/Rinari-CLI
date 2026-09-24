@@ -14,6 +14,13 @@ rinari version
 `doctor` nunca muta credenciales ni estado; `status` muestra el contexto
 operativo (proveedor, modelo, contexto, perfil, proyecto, branch).
 
+Desde una conversación (CLI o escritorio) basta con pedirlo: «revisa la sesión
+`ses_…`» o «¿por qué el último turno no respondió?». La skill `rinari-handbook`
+usa `rinari.session` y `rinari.turn`, de solo lectura, y marca anomalías
+conocidas (salida cobrada sin texto ni herramientas, turno sin evento final,
+aprobación sin resolver). Sus recetas están en
+`src/rinari/assets/skills/rinari-handbook/references/recipes.md`.
+
 ## Config
 
 ### Error al arrancar: `Legacy inline profiles: ...`

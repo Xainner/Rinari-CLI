@@ -276,18 +276,25 @@ def test_builtin_catalog_covers_session_tools_without_executing_them():
     from rinari.tools.catalog import builtin_catalog
 
     registry = builtin_catalog()
-    assert len(registry.names()) == 106
+    assert len(registry.names()) == 111
     assert {
         "fs.read_image",
         "ssh.inspect",
         "skills.activate",
+        "skills.read",
         "agent.spawn",
         "capability.search",
+        "rinari.status",
+        "rinari.sessions",
+        "rinari.session",
+        "rinari.turn",
     } <= set(registry.names())
     result = registry.get("ssh.inspect").handler(
         {"target_id": "unconfigured", "section": "hardware"}, None
     )
     assert result.error.code == ToolErrorCode.DEPENDENCY_ERROR
+    view = registry.get("rinari.session").handler({"session_id": "ses_x"}, None)
+    assert view.error.code == ToolErrorCode.DEPENDENCY_ERROR
 
 
 @pytest.mark.parametrize(

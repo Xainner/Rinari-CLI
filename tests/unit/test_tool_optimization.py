@@ -10,7 +10,7 @@ from tests.unit.test_tool_runtime import _ctx, _runtime
 
 def test_all_builtins_have_data_contracts():
     registry = builtin_catalog()
-    assert len(registry.names()) == 106
+    assert len(registry.names()) == 111
     assert all(registry.get(name).output_schema for name in registry.names())
 
 

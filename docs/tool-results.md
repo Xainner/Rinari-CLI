@@ -145,6 +145,10 @@ Todos los productores nativos pasan por el contrato común. Elegibilidad explíc
 | `pty.start` | `serial` | `local-reversible` |
 | `pty.terminate` | `serial` | `local-destructive` |
 | `pty.write` | `serial` | `local-reversible` |
+| `rinari.session` | `serial` | `none` |
+| `rinari.sessions` | `serial` | `none` |
+| `rinari.status` | `serial` | `none` |
+| `rinari.turn` | `serial` | `none` |
 | `search.files` | `local-read` | `none` |
 | `search.hybrid` | `serial` | `none` |
 | `search.references` | `serial` | `none` |
@@ -154,6 +158,7 @@ Todos los productores nativos pasan por el contrato común. Elegibilidad explíc
 | `skills.activate` | `serial` | `local_reversible` |
 | `skills.deactivate` | `serial` | `local_reversible` |
 | `skills.list` | `serial` | `none` |
+| `skills.read` | `serial` | `none` |
 | `skills.show` | `serial` | `none` |
 | `ssh.inspect` | `serial` | `none` |
 | `user.ask` | `serial` | `none` |

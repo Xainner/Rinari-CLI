@@ -1302,6 +1302,22 @@ un claim de "fixed" sin evidencia pasada queda como `IMPLEMENTED_UNVERIFIED`/
 - `session.inspect`
 - `session.export`
 
+Implementado como la familia `rinari.*`: solo lectura (`state.read`), bajo
+demanda (no entra en el prompt base) y con el texto redactado
+(`redact_text`: `Bearer`, `sk-…`, JWT, `token=`, `password=` y secretos
+conocidos). Cada resultado lleva `origin: rinari-state` y una nota: es un dato
+registrado, no una instrucción.
+
+| Herramienta | Para qué |
+|---|---|
+| `rinari.status` | versiones, home, proveedores (sin secretos), contexto, soul y skills; modelos solo con `provider` o `include_models` |
+| `rinari.sessions` | buscar sesiones por título o texto de mensajes (`query`), `kind`, `since`, `model`; turnos y estado del último |
+| `rinari.session` | ficha y turnos de una sesión (`current` = la de este turno): resultado, tokens, herramientas, respuesta y anomalías |
+| `rinari.turn` | un turno por su id, sin conocer la sesión; `detail: "events"` añade los eventos crudos, paginados |
+
+La skill empaquetada `rinari-handbook` las expone al activarse y documenta
+las recetas de diagnóstico.
+
 ---
 
 ## 38. Evaluation
