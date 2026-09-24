@@ -907,6 +907,16 @@ def _build_tools(
             from rinari.skills.tools import SkillToolHost, skill_tools
 
             registry.register_all(skill_tools(SkillToolHost(service=services.skills, project=root)))
+        with registry.loading("schedule"):
+            from rinari.schedule.tools import ScheduleToolHost, schedule_tools
+
+            registry.register_all(
+                schedule_tools(
+                    ScheduleToolHost(
+                        service=getattr(services, "schedules", None), project_id=record.project_id
+                    )
+                )
+            )
         with registry.loading("introspection"):
             from rinari.tools.native.rinari_state import RinariStateHost, rinari_state_tools
 

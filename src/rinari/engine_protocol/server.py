@@ -189,6 +189,20 @@ class EngineServer:
         from rinari.engine_protocol.processes import DesktopProcesses
 
         self._process_tasks = DesktopProcesses(self)
+        from rinari.engine_protocol.schedule import ScheduleRunner
+
+        self._schedule = ScheduleRunner(self)
+        self._services.schedules.on_proposed = lambda payload: self._turns.emit_external(
+            event("schedule.proposed", payload)
+        )
+        self._dispatcher.register("schedule.list", self._schedule.list)
+        self._dispatcher.register("schedule.get", self._schedule.get)
+        self._dispatcher.register("schedule.create", self._schedule.create)
+        self._dispatcher.register("schedule.update", self._schedule.update)
+        self._dispatcher.register("schedule.delete", self._schedule.delete)
+        self._dispatcher.register("schedule.runs", self._schedule.runs)
+        self._dispatcher.register("schedule.run_now", self._schedule.run)
+        self._dispatcher.register("schedule.grant", self._schedule.grant)
         self._dispatcher.register("workspace.process.list", self._process_tasks.list)
         self._dispatcher.register("workspace.process.read", self._process_tasks.read)
         self._dispatcher.register("workspace.process.stop", self._process_tasks.stop)
@@ -395,7 +409,12 @@ class EngineServer:
     def cancel_all_turns(self) -> None:
         self._turns.cancel_all_turns()
 
+    def start_background(self) -> None:
+        """Background work of a serving Engine (not of one built for a test)."""
+        self._schedule.start()
+
     def close(self) -> None:
+        self._schedule.close()
         if hasattr(self, "_provider_auth_service"):
             self._provider_auth_service.close()
         self._attachment_jobs.close()

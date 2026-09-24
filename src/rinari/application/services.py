@@ -27,6 +27,7 @@ from rinari.memory import MemoryService
 from rinari.openapi import ApiService
 from rinari.plugins import PluginService
 from rinari.repo.index_service import IndexService
+from rinari.schedule.service import ScheduleService
 from rinari.skills.service import SkillService
 from rinari.tasks import TaskService
 from rinari.trust import TrustService
@@ -59,6 +60,7 @@ class ServiceContainer:
     skills: SkillService
     agents: AgentRegistry
     agent_configs: AgentConfigStore
+    schedules: ScheduleService = None
 
 
 def build_services(
@@ -89,6 +91,15 @@ def build_services(
     skills = SkillService(ctx, trust, user_home=user_home)
     agents = AgentRegistry(trust)
     agent_configs = AgentConfigStore(ctx.layout.root)
+    schedules = ScheduleService(
+        ctx.schedule_repo,
+        ctx.clock,
+        ctx.ids,
+        project_exists=lambda project_id: _exists(projects.get, project_id),
+        model_exists=lambda model: _exists(models.resolve, model),
+        # A task may name a project skill: its folder is only known at run time.
+        skill_exists=lambda name: True,
+    )
     return ServiceContainer(
         ctx=ctx,
         credentials=credentials,
@@ -114,4 +125,13 @@ def build_services(
         skills=skills,
         agents=agents,
         agent_configs=agent_configs,
+        schedules=schedules,
     )
+
+
+def _exists(lookup, ref: str) -> bool:
+    try:
+        lookup(ref)
+    except Exception:
+        return False
+    return True

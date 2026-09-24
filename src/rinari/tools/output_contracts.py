@@ -63,6 +63,7 @@ FIELDS = {
     "skills.read": "name:s path:s text:s offset:i total_lines:i next_offset:i?",
     "skills.propose": "name:s status:s version:s update:b review:s",
     "skills.activate": "name:s version:s active:b tools_activated:a?",
+    "schedule.propose": "status:s proposal:o description:s note:s",
     "rinari.status": (
         "engine:o providers:a models:a? models_total:i context:o soul:s? skills:a "
         "sessions_total:i note:s"

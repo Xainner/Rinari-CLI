@@ -12,6 +12,7 @@ from rinari.storage.repositories.pins import PIN_SOURCES, PinRepository
 from rinari.storage.repositories.plugins import PluginRepository
 from rinari.storage.repositories.projects import ProjectRepository
 from rinari.storage.repositories.providers import ProviderRepository
+from rinari.storage.repositories.schedules import ScheduleRepository
 from rinari.storage.repositories.sessions import (
     SessionEventRepository,
     SessionMessageRepository,
@@ -38,6 +39,7 @@ __all__ = [
     "PluginRepository",
     "ProjectRepository",
     "ProviderRepository",
+    "ScheduleRepository",
     "SessionEventRepository",
     "SessionMessageRepository",
     "SessionRepository",

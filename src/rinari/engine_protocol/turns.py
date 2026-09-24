@@ -15,6 +15,7 @@ from __future__ import annotations
 import collections
 import contextlib
 import json
+import logging
 import queue
 import threading
 import time
@@ -39,6 +40,8 @@ from rinari.policy.approvals import ApprovalRequest
 from rinari.shared.clock import now_iso
 from rinari.shared.errors import CancelledError, RinariError
 from rinari.storage.records import SessionEventRecord
+
+logger = logging.getLogger(__name__)
 
 APPROVAL_TIMEOUT_S = 600.0
 APPROVAL_POLL_S = 0.05
@@ -205,6 +208,7 @@ class TurnManager:
         self._threads: dict[str, threading.Thread] = {}
         self._preparation_threads: set[threading.Thread] = set()
         self._approvals: dict[str, _PendingApproval] = {}
+        self._observers: list[Any] = []
         self._closed_approvals: dict[str, str] = {}
         self._queue: dict[str, collections.deque[_QueuedPrompt]] = {}
         # Sessions whose peer inbox admission is paused by an explicit Stop;
@@ -238,10 +242,26 @@ class TurnManager:
 
     def _emit(self, payload: dict[str, Any]) -> None:
         self._events.put(payload)
+        self._notify(payload)
 
     def emit_external(self, payload: dict[str, Any]) -> None:
         """Server-side events (e.g. mode changes) on the same ordered queue."""
         self._events.put(payload)
+        self._notify(payload)
+
+    def add_observer(self, observer: Any) -> None:
+        """Engine-side listeners (the scheduler follows its runs this way).
+
+        Called on the emitting thread, after the event is queued; a failing
+        observer never breaks the turn."""
+        self._observers.append(observer)
+
+    def _notify(self, payload: dict[str, Any]) -> None:
+        for observer in list(self._observers):
+            try:
+                observer(payload)
+            except Exception:
+                logger.exception("turn event observer failed")
 
     # -- state ------------------------------------------------------------
 
