@@ -32,6 +32,10 @@ from rinari.skills.manifest import (
 from rinari.storage.records import SessionEventRecord
 
 _PACKAGE_SKILLS = Path(__file__).resolve().parent.parent / "assets" / "skills"
+# A skill's references are read on demand, a page at a time, so its SKILL.md
+# (injected every turn while active) can stay an index.
+_REFERENCE_SUFFIXES = (".md", ".txt", ".json")
+_REFERENCE_LINES = 400
 
 
 class SkillService:
@@ -121,6 +125,50 @@ class SkillService:
 
     def show(self, name: str, project: Path | None = None) -> SkillManifest:
         return self.get(name, project)
+
+    # -- reference files (progressive disclosure) --------------------------------
+
+    def references(self, name: str, project: Path | None = None) -> list[str]:
+        """Text files a skill ships besides SKILL.md, relative to its folder."""
+        root = Path(self.get(name, project).path).parent
+        return sorted(
+            p.relative_to(root).as_posix()
+            for p in root.rglob("*")
+            if p.is_file() and p.name != SKILL_FILE and p.suffix.lower() in _REFERENCE_SUFFIXES
+        )
+
+    def read_reference(
+        self,
+        name: str,
+        path: str,
+        project: Path | None = None,
+        offset: int = 0,
+        limit: int = _REFERENCE_LINES,
+    ) -> dict:
+        """One page of a skill reference; never a file outside the skill folder."""
+        manifest = self.get(name, project)
+        root = Path(manifest.path).parent.resolve()
+        relative = Path(str(path or "").strip().replace("\\", "/"))
+        if not relative.parts or relative.is_absolute() or ".." in relative.parts:
+            raise SkillError("SKILL_INVALID", "path must be relative to the skill folder")
+        target = (root / relative).resolve()
+        if not target.is_relative_to(root) or not target.is_file():
+            known = ", ".join(self.references(name, project)) or "none"
+            raise SkillError("SKILL_NOT_FOUND", f"no reference {path!r} in {name}; has: {known}")
+        if target.suffix.lower() not in _REFERENCE_SUFFIXES or target.name == SKILL_FILE:
+            raise SkillError("SKILL_INVALID", "only .md, .txt or .json references can be read")
+        lines = target.read_text(encoding="utf-8").splitlines()
+        start = max(0, int(offset or 0))
+        size = max(1, min(_REFERENCE_LINES, int(limit or _REFERENCE_LINES)))
+        end = start + size
+        return {
+            "name": manifest.name,
+            "path": relative.as_posix(),
+            "text": "\n".join(lines[start:end]),
+            "offset": start,
+            "total_lines": len(lines),
+            "next_offset": end if end < len(lines) else None,
+        }
 
     # -- session activation state ---------------------------------------------
 

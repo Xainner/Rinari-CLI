@@ -63,6 +63,12 @@ _INTENT_TERMS = {
     "proceso": "process",
     "terminal": "pty",
     "verificar": "verify",
+    "sesion": "session",
+    "sesiones": "session",
+    "turno": "turn",
+    "turnos": "turn",
+    "configuracion": "status",
+    "diagnostico": "turn",
 }
 
 

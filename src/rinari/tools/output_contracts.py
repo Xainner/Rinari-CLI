@@ -56,8 +56,16 @@ FIELDS = {
     "context.unpin": "source:s ref:s unpinned:b",
     "context.list_pins": "count:i pins:a",
     "skills.list": "skills:a",
-    "skills.show": "name:s version:s body:s required_tools:a optional_tools:a",
-    "skills.activate": "name:s version:s active:b",
+    "skills.show": ("name:s version:s body:s required_tools:a optional_tools:a references:a?"),
+    "skills.read": "name:s path:s text:s offset:i total_lines:i next_offset:i?",
+    "skills.activate": "name:s version:s active:b tools_activated:a?",
+    "rinari.status": (
+        "engine:o providers:a models:a? models_total:i context:o soul:s? skills:a "
+        "sessions_total:i note:s"
+    ),
+    "rinari.sessions": "sessions:a total:i truncated:b note:s",
+    "rinari.session": "session:o turns:a turns_total:i turns_shown:i note:s",
+    "rinari.turn": "id:s outcome:s session_id:s tools:a? events:a? note:s",
     "skills.deactivate": "name:s active:b removed:b",
     "capability.search": "query:s results:a matched:b loaded:a load_error:s? diagnostics:a",
     "capability.activate": "activated:a scope:s reason:s",

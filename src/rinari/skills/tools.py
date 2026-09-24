@@ -72,9 +72,36 @@ def skill_tools(host: SkillToolHost):
                 "required_tools": list(m.required_tools),
                 "optional_tools": list(m.optional_tools),
                 "body": m.body,
+                "references": service.references(name, _project()),
             },
             origin="skills",
         )
+
+    def read_reference(arguments, ctx):
+        args = arguments or {}
+        name = str(args.get("name") or "")
+        if not name or not args.get("path"):
+            return ToolResult(
+                ok=False,
+                error=ToolErrorInfo(ToolErrorCode.INVALID_ARGUMENT, "name and path required"),
+                origin="skills",
+            )
+        try:
+            data = service.read_reference(
+                name,
+                str(args["path"]),
+                _project(),
+                offset=args.get("offset") or 0,
+                limit=args.get("limit") or 400,
+            )
+        except SkillError as exc:
+            code = (
+                ToolErrorCode.NOT_FOUND
+                if exc.code == "SKILL_NOT_FOUND"
+                else ToolErrorCode.INVALID_ARGUMENT
+            )
+            return ToolResult(ok=False, error=ToolErrorInfo(code, exc.message), origin="skills")
+        return ToolResult(ok=True, data=data, origin="skills")
 
     def activate(arguments, ctx):
         name = str((arguments or {}).get("name") or "")
@@ -104,12 +131,21 @@ def skill_tools(host: SkillToolHost):
                 ),
                 origin="skills",
             )
+        # The tools the skill requests become visible now, in the same call; a
+        # policy decision still applies to each of them when it runs.
+        exposure = getattr(ctx, "exposure", None)
+        exposed = []
+        if exposure is not None and m.required_tools:
+            exposed = exposure.activate(
+                list(m.required_tools), reason=f"skill {m.name}", scope="session"
+            )
         return ToolResult(
             ok=True,
             data={
                 "name": m.name,
                 "version": m.version,
                 "active": True,
+                "tools_activated": exposed,
             },
             origin="skills",
         )
@@ -153,7 +189,10 @@ def skill_tools(host: SkillToolHost):
         ),
         ToolDefinition(
             name="skills.show",
-            description="Load one skill's full manifest and procedure body (lazy load).",
+            description=(
+                "Load one skill's full manifest and procedure body (lazy load), and the "
+                "reference files it ships (read them with skills.read)."
+            ),
             input_schema={
                 "type": "object",
                 "properties": {"name": {"type": "string"}},
@@ -164,10 +203,32 @@ def skill_tools(host: SkillToolHost):
             handler=show,
         ),
         ToolDefinition(
+            name="skills.read",
+            description=(
+                "Read a reference file of a skill (listed by skills.show), a page at a "
+                "time. Skills keep details there so they are read only when needed."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "path": {"type": "string", "description": "e.g. references/recipes.md"},
+                    "offset": {"type": "integer", "minimum": 0},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 400},
+                },
+                "required": ["name", "path"],
+                "additionalProperties": False,
+            },
+            capabilities=read,
+            classify=lambda _i: ClassifiedAction("state.read"),
+            handler=read_reference,
+        ),
+        ToolDefinition(
             name="skills.activate",
             description=(
                 "Pin a skill on this session so its procedure is injected into "
-                "active-skills context. Requests tools but grants none."
+                "active-skills context, and expose the tools it requires. Grants no "
+                "permission: each tool call still goes through policy."
             ),
             input_schema={
                 "type": "object",
