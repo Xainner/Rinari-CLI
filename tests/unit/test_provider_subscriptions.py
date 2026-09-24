@@ -457,6 +457,59 @@ def test_browser_pkce_invalid_state_then_success_and_port_busy(app_ctx, monkeypa
         auth.close()
 
 
+@pytest.mark.parametrize(
+    ("query", "response", "step"),
+    [
+        (
+            {"code": "test-code"},
+            httpx.Response(400, json={"error": "invalid_grant"}),
+            "token exchange",
+        ),
+        ({"error": "access_denied"}, None, "authorization"),
+    ],
+)
+def test_a_failed_browser_login_says_where_and_never_logs_tokens(
+    app_ctx, monkeypatch, capsys, query, response, step
+):
+    from http.server import HTTPServer
+    from urllib.parse import parse_qs, urlsplit
+
+    import rinari.providers.auth as module
+
+    s, p = setup(
+        app_ctx,
+        lambda req: response or httpx.Response(500),
+        product="chatgpt",
+        auth="oauth",
+    )
+    servers = []
+
+    def ephemeral(address, handler):
+        server = HTTPServer(("127.0.0.1", 0), handler)
+        servers.append(server)
+        return server
+
+    monkeypatch.setattr(module, "HTTPServer", ephemeral)
+    auth = ProviderAuthService(s.providers)
+    op = auth.start(p.id)
+    state = parse_qs(urlsplit(op["authorization_url"]).query)["state"][0]
+    callback = f"http://127.0.0.1:{servers[0].server_port}/auth/callback"
+    try:
+        page = httpx.get(callback, params={"state": state, **query})
+        assert page.status_code == 200
+        assert "could not be completed" in page.text
+        view = auth.get(p.id, op["operation_id"])
+        assert view["status"] == "error"
+        assert f"({step})" in view["detail"]
+        if "error" in query:
+            assert "access_denied" in view["detail"]
+        diagnostics = capsys.readouterr().err
+        assert f"subscription login failed at {step}" in diagnostics
+        assert "test-code" not in diagnostics and "test-code" not in view["detail"]
+    finally:
+        auth.close()
+
+
 def test_device_expiration_slowdown_and_account_isolation(app_ctx):
     calls = []
 

@@ -299,6 +299,14 @@ def test_model_test_and_refresh_with_mock(live_server) -> None:
     ]["ollama"]
     assert refreshed["still_available"] == 1
     assert refreshed["marked_unavailable"] == 1
+    assert refreshed["added"] == []
+
+    bad = _err(_call(live_server, "model.refresh", {"add_new": "yes"}, tag="bad"))
+    assert bad["code"] == "INVALID_PARAMS"
+    added = _ok(
+        _call(live_server, "model.refresh", {"provider": "ollama", "add_new": True}, tag="new")
+    )["providers"]["ollama"]
+    assert added["added"] == ["mx-2"]
 
 
 # -- keyring backend ----------------------------------------------------------

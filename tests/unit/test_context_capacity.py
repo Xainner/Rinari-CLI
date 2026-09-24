@@ -235,3 +235,43 @@ def test_models_on_the_same_endpoint_share_one_discovery(world):
     assert resolved(world, first)["window_tokens"] == 64000
     assert resolved(world, second)["window_tokens"] == 32000
     assert len(world.adapter.calls) == 1
+
+
+def test_refresh_saves_the_models_a_provider_started_offering_only_when_asked(world):
+    world.adapter.models = {"model-a": {"context_length": 64000}}
+    world.destination("model-a")
+    world.adapter.models = {
+        "model-a": {"context_length": 64000},
+        "model-b": {"context_length": 32000},
+    }
+    assert all(result.added == () for result in world.models.refresh().values())
+    assert [m.provider_model_id for m in world.models.list()] == ["model-a"]
+
+    (result,) = world.models.refresh(add_new=True).values()
+    assert result.added == ("model-b",)
+    saved = {m.provider_model_id: m for m in world.models.list()}
+    assert saved["model-b"].alias == "model-b"
+    assert saved["model-b"].availability == "available"
+    assert saved["model-b"].settings["discovered_capabilities"] == {"context_length": 32000}
+    # Nothing new the second time.
+    (again,) = world.models.refresh(add_new=True).values()
+    assert again.added == ()
+
+
+def test_an_added_model_never_takes_an_alias_already_in_use(world):
+    world.adapter.models = {"model-a": {}, "model-b": {}}
+    _, record = world.destination("model-a")
+    world.models.alias(record.id, "model-b")
+    (result,) = world.models.refresh(add_new=True).values()
+    assert result.added == ("model-b-2",)
+
+
+def test_adding_new_models_also_reads_providers_without_saved_models(world):
+    world.adapter.models = {"model-z": {}}
+    world.providers.add(
+        AddProviderInput(
+            alias="empty", provider_type="custom", endpoint="https://empty.example/v1", secret="sk"
+        )
+    )
+    assert world.models.refresh()["empty"].added == ()
+    assert world.models.refresh(add_new=True)["empty"].added == ("model-z",)
