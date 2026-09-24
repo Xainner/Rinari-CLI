@@ -263,6 +263,10 @@ class ToolContext:
     # browser, reach the network with side effects or spawn agents on the
     # strength of that text alone; the runtime enforces it in code.
     origin_kind: str = "user"
+    # Slash command that started this turn (`learn`…). Set by the Engine for
+    # this turn only; no tool argument reaches it, so the model cannot claim
+    # the owner asked for something.
+    turn_command: str = ""
     # Engine-private owner message provenance for a memory tool write.  The
     # model cannot set this through a tool schema; the session host may attach
     # it only after validating a persisted owner message.

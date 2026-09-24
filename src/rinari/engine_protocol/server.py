@@ -291,6 +291,9 @@ class EngineServer:
         from rinari.engine_protocol.skills import SkillMethods
 
         self._skills = SkillMethods(self._services, self._turns.emit_external)
+        self._services.skills.on_learned = lambda payload: self._turns.emit_external(
+            event("skill.learned", payload)
+        )
         self._dispatcher.register("skill.list", self._skills.list)
         self._dispatcher.register("skill.get", self._skills.get)
         self._dispatcher.register("skill.read", self._skills.read)
@@ -301,6 +304,12 @@ class EngineServer:
         self._dispatcher.register("skill.import.scan", self._skills.import_scan)
         self._dispatcher.register("skill.job.start", self._skills.job_start)
         self._dispatcher.register("skill.job.get", self._skills.job_get)
+        self._dispatcher.register("skill.pending.list", self._skills.pending_list)
+        self._dispatcher.register("skill.pending.approve", self._skills.pending_approve)
+        self._dispatcher.register("skill.pending.reject", self._skills.pending_reject)
+        self._dispatcher.register("skill.revert", self._skills.revert)
+        self._dispatcher.register("skill.settings.get", self._skills.settings_get)
+        self._dispatcher.register("skill.settings.set", self._skills.settings_set)
         self._dispatcher.register("tool.list", self._tool_list)
         self._dispatcher.register("policy.get", self._policy_get)
         from rinari.engine_protocol.media import register_media
@@ -2410,7 +2419,7 @@ class EngineServer:
             )
         except EngineProtocolError:
             raise
-        request = self._expand_command(session_id, params.get("command"), message)
+        request, command_name = self._expand_command(session_id, params.get("command"), message)
         enriched = (
             f"{attachment_context}\n\nUser request:\n{request}" if attachment_context else request
         )
@@ -2422,6 +2431,7 @@ class EngineServer:
             display_message=message,
             attachment_metadata=attachment_metadata,
             allow_unconfirmed_vision=params.get("allow_unconfirmed_vision") is True,
+            command=command_name,
         )
 
     def _command_list(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -2435,12 +2445,12 @@ class EngineServer:
                 project = Path(record.project_root_snapshot)
         return {"commands": command_list(self._services.skills, project, client="desktop")}
 
-    def _expand_command(self, session_id: str, command: Any, typed: str) -> str:
+    def _expand_command(self, session_id: str, command: Any, typed: str) -> tuple[str, str]:
         """`/review x`, `/test`, `/pdf-tools x`: the Engine turns the command the
         owner typed into the model's message, switching the mode or pinning
         the skill first. The typed text stays the message shown in the chat."""
         if command is None:
-            return typed
+            return typed, ""
         if not isinstance(command, dict) or not isinstance(command.get("name"), str):
             raise EngineProtocolError(INVALID_PARAMS, "Param 'command' must be {name, text?}.")
         text = command.get("text") or ""
@@ -2467,7 +2477,7 @@ class EngineServer:
                 self._services.skills.activate(expanded.skill, record.id, project)
             except SkillError as exc:
                 raise EngineProtocolError(INVALID_PARAMS, exc.message) from exc
-        return expanded.message
+        return expanded.message, command["name"]
 
     def _target_list(self, params: dict[str, Any]) -> dict[str, Any]:
         from rinari.application.ssh_targets import TargetStore

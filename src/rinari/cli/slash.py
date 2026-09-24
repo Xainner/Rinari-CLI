@@ -66,6 +66,22 @@ def _switch_mode(session: AgentSession, console: Console, name: str, text: str) 
     return _STAY
 
 
+def _learn(session: AgentSession, text: str) -> SlashOutcome:
+    """`/learn [focus]`: skill-author pinned, and the next turn marked as the
+    owner's request, so what it proposes is saved active (the Engine decides)."""
+    from rinari.cli import agent_runtime
+    from rinari.commands import expand_command
+    from rinari.skills.manifest import SkillError
+
+    expanded = expand_command("learn", text)
+    try:
+        agent_runtime.pin_skill(session, expanded.skill)
+    except SkillError as exc:
+        raise InvalidUsageError(exc.message) from None
+    session.next_turn_command = "learn"
+    return SlashOutcome("turn", prompt=expanded.message)
+
+
 def _skill_command(session: AgentSession, name: str, text: str) -> SlashOutcome:
     """`/skill <name> [text]` or `/<skill-name> [text]`: pin, then one turn."""
     from rinari.cli import agent_runtime
@@ -215,6 +231,8 @@ def handle(session: AgentSession, console: Console, message: str) -> SlashOutcom
     if command == "/diff":
         _print_diff(session, console)
         return _STAY
+    if command == "/learn":
+        return _learn(session, rest)
     if command == "/test":
         from rinari.commands import expand_command
 

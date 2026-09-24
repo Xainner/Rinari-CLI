@@ -355,6 +355,12 @@
         "skill.import.scan",
         "skill.job.start",
         "skill.job.get",
+        "skill.pending.list",
+        "skill.pending.approve",
+        "skill.pending.reject",
+        "skill.revert",
+        "skill.settings.get",
+        "skill.settings.set",
         "tool.list",
         "policy.get",
         "task.tree",
@@ -507,7 +513,8 @@
         "provider.usage.updated",
         "provider.auth.updated",
         "skill.job.completed",
-        "skill.job.failed"
+        "skill.job.failed",
+        "skill.learned"
       ]
     },
     "attachment": {

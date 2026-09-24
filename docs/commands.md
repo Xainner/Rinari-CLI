@@ -2390,6 +2390,10 @@ skills remove
 skills update
 skills enable
 skills disable
+skills pending
+skills approve
+skills reject
+skills revert
 skills validate
 skills test
 skills create
@@ -2424,6 +2428,13 @@ reviews the content (prompt injection, `curl | sh`, exfiltration, destructive
 commands, hidden Unicode, executables); when the review finds something it
 shows it and asks once, and `--yes` accepts exactly the reviewed content.
 `update` keeps local edits unless `--force`.
+
+Learned skills: `/learn [focus]` (terminal or desktop) pins the packaged
+`skill-author` skill and marks that turn as the owner's request; the skill it
+proposes with `skills.propose` is saved active. Anything Rinari proposes on its
+own (setting `skills.auto_learn`, default `propose`) waits in
+`rinari skills pending` until `approve` or `reject`. `revert` undoes a learned
+skill: its previous version, or removed if it was new. Secrets are refused.
 
 ---
 
@@ -2834,6 +2845,7 @@ composer (`command.list`); `/help` prints it. Kinds:
 /skill <name> [text]   pin a skill and send the text
 /<skill> [text]  every enabled skill is a command (a built-in keeps its name)
 /tasks           the task tree (it was /plan before modes were commands)
+/learn [focus]   save what was done here as a skill (saved active)
 ```
 
 The Engine expands `mode`, `turn` and `skill` commands itself

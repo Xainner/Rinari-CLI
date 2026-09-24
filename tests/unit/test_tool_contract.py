@@ -276,7 +276,7 @@ def test_builtin_catalog_covers_session_tools_without_executing_them():
     from rinari.tools.catalog import builtin_catalog
 
     registry = builtin_catalog()
-    assert len(registry.names()) == 111
+    assert len(registry.names()) == 112
     assert {
         "fs.read_image",
         "ssh.inspect",

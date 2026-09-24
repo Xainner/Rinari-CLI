@@ -99,6 +99,11 @@ class SkillService:
         self._trust = trust
         self._user_home = Path(user_home) if user_home is not None else Path.home()
         self._fetcher = fetcher or SkillFetcher()
+        # Set by the Engine server: a learned skill becomes a `skill.learned` event.
+        self.on_learned = None
+        from rinari.skills.learning import SkillLearning
+
+        self.learning = SkillLearning(self)
 
     # -- discovery -----------------------------------------------------------
 
@@ -606,10 +611,61 @@ class SkillService:
         if not dest.is_dir():
             return False
         shutil.rmtree(dest)
+        shutil.rmtree(self.user_skills_dir() / ".history" / name, ignore_errors=True)
         repo = getattr(self._ctx, "skill_repo", None)
         if repo is not None:
             repo.delete(name)
         return True
+
+    # -- learned skills (rinari.skills.learning) -------------------------------------
+
+    def propose(self, name: str, skill_md: str, references=None, **kwargs) -> dict:
+        return self.learning.propose(
+            name, skill_md, references, known=self._known_tools(), **kwargs
+        )
+
+    def auto_learn(self) -> str:
+        from rinari.skills.learning import AUTO_LEARN_KEY
+
+        return self._ctx.config_repo.get(AUTO_LEARN_KEY) or "propose"
+
+    def set_auto_learn(self, mode: str) -> str:
+        from rinari.skills.learning import AUTO_LEARN_KEY, AUTO_LEARN_MODES
+        from rinari.storage.records import ConfigValue
+
+        if mode not in AUTO_LEARN_MODES:
+            raise SkillError("SKILL_INVALID", f"auto_learn must be {' or '.join(AUTO_LEARN_MODES)}")
+        self._ctx.config_repo.set(
+            ConfigValue(key=AUTO_LEARN_KEY, value=mode, updated_at=self._now())
+        )
+        return mode
+
+    def notify_learned(self, payload: dict) -> None:
+        if self.on_learned is not None:
+            with contextlib.suppress(Exception):
+                self.on_learned(payload)
+
+    # Small seams the learning module uses; same rules as install/update.
+    @staticmethod
+    def packaged_dir() -> Path:
+        return _PACKAGE_SKILLS
+
+    def place(self, folder: Path, name: str, *, replace: bool) -> None:
+        self._place(folder, name, replace=replace)
+
+    def record(self, name: str) -> dict | None:
+        repo = getattr(self._ctx, "skill_repo", None)
+        return repo.get(name) if repo is not None else None
+
+    def upsert_record(self, name: str, **fields) -> dict:
+        return self._ctx.skill_repo.upsert(name, **fields)
+
+    def now(self) -> str:
+        return self._now()
+
+    def stamp(self) -> str:
+        # Sortable and valid as a Windows folder name (no colons).
+        return self._now().replace(":", "").replace(".", "")
 
     def write(self, name: str, content: str) -> dict:
         """Replace an installed or learned skill's SKILL.md after validating it."""
