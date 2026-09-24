@@ -89,6 +89,8 @@ CAPABILITIES: dict[str, bool] = {
     "skill_library_v1": True,
     # command.list + session.turn.start `command` (slash commands, skills too).
     "slash_commands_v1": True,
+    # /learn + skills.propose, pending approvals, revert, auto_learn setting.
+    "skill_learning_v1": True,
 }
 
 

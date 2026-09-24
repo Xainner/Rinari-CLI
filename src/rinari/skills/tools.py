@@ -177,6 +177,36 @@ def skill_tools(host: SkillToolHost):
             origin="skills",
         )
 
+    def propose(arguments, ctx):
+        args = arguments or {}
+        name = str(args.get("name") or "")
+        skill_md = args.get("skill_md")
+        if not name or not isinstance(skill_md, str) or not skill_md.strip():
+            return ToolResult(
+                ok=False,
+                error=ToolErrorInfo(ToolErrorCode.INVALID_ARGUMENT, "name and skill_md required"),
+                origin="skills",
+            )
+        # The Engine, not the model, decides: only a turn the owner started
+        # with /learn saves the skill active; anything else waits for approval.
+        owner_asked = getattr(ctx, "turn_command", "") == "learn"
+        try:
+            result = service.propose(
+                name,
+                skill_md,
+                args.get("references") or None,
+                session_id=_sid(ctx),
+                update_of=args.get("update_of") or None,
+                owner_asked=owner_asked,
+            )
+        except SkillError as exc:
+            return ToolResult(
+                ok=False,
+                error=ToolErrorInfo(ToolErrorCode.INVALID_ARGUMENT, f"{exc.code}: {exc.message}"),
+                origin="skills",
+            )
+        return ToolResult(ok=True, data=result, origin="skills")
+
     read = ("state.read",)
     write = ("state.write",)
     return [
@@ -247,6 +277,36 @@ def skill_tools(host: SkillToolHost):
             side_effects="local_reversible",
             classify=lambda _i: ClassifiedAction("state.write"),
             handler=activate,
+        ),
+        ToolDefinition(
+            name="skills.propose",
+            description=(
+                "Save a skill learned from this conversation: the full SKILL.md "
+                "(frontmatter with name and description, then the procedure) plus "
+                "optional text files under references/ or scripts/. It is saved active "
+                "only when the owner asked with /learn; otherwise it waits for the "
+                "owner's approval. Never include secrets: a token or password is refused. "
+                "To improve an existing skill pass update_of with its name."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"},
+                    "skill_md": {"type": "string", "minLength": 1, "maxLength": 60000},
+                    "references": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                    },
+                    "update_of": {"type": "string"},
+                },
+                "required": ["name", "skill_md"],
+                "additionalProperties": False,
+            },
+            capabilities=write,
+            side_effects="local_reversible",
+            always_loaded=False,
+            classify=lambda _i: ClassifiedAction("state.write"),
+            handler=propose,
         ),
         ToolDefinition(
             name="skills.deactivate",

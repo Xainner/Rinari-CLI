@@ -94,6 +94,30 @@ class SkillMethods:
     def import_scan(self, params: dict[str, Any]) -> dict[str, Any]:
         return {"candidates": self._call(self._skills.import_scan)}
 
+    # -- learned skills ------------------------------------------------------------
+
+    def pending_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        return {"pending": self._call(self._skills.learning.pending)}
+
+    def pending_approve(self, params: dict[str, Any]) -> dict[str, Any]:
+        result = self._call(self._skills.learning.approve, _name(params))
+        return {"skill": self._call(self._skills.detail, result["name"])}
+
+    def pending_reject(self, params: dict[str, Any]) -> dict[str, Any]:
+        return {"rejected": self._call(self._skills.learning.reject, _name(params))}
+
+    def revert(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._call(self._skills.learning.revert, _name(params))
+
+    def settings_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        return {"auto_learn": self._skills.auto_learn()}
+
+    def settings_set(self, params: dict[str, Any]) -> dict[str, Any]:
+        mode = params.get("auto_learn")
+        if not isinstance(mode, str):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'auto_learn' must be a string.")
+        return {"auto_learn": self._call(self._skills.set_auto_learn, mode)}
+
     # -- jobs --------------------------------------------------------------------
 
     def job_start(self, params: dict[str, Any]) -> dict[str, Any]:

@@ -29,6 +29,11 @@ REVIEW_PROMPT = (
     "security, then conventions. Reference file and line. Do not modify any code."
 )
 SKILL_PROMPT = "Use the {name} skill for this."
+LEARN_PROMPT = (
+    "Learn from this conversation: turn what worked here into a reusable skill "
+    "following the skill-author procedure, and save it with skills.propose."
+)
+LEARN_SKILL = "skill-author"
 
 CLIENTS = ("cli", "desktop")
 
@@ -36,7 +41,7 @@ CLIENTS = ("cli", "desktop")
 @dataclass(frozen=True, slots=True)
 class CommandSpec:
     name: str
-    kind: str  # ui | mode | turn | skill
+    kind: str  # ui | mode | turn | skill | learn
     description: str
     args: str = ""
     mode: str | None = None
@@ -70,6 +75,7 @@ COMMANDS: tuple[CommandSpec, ...] = (
     ),
     CommandSpec("test", "turn", "Run the project's test suite", "[text]", template=TEST_PROMPT),
     CommandSpec("skill", "skill", "Use a skill for this request", "<name> [text]"),
+    CommandSpec("learn", "learn", "Save what was done here as a skill", "[focus]"),
     CommandSpec("skills", "ui", "Open the skill library (terminal: list or search)", "[query]"),
     CommandSpec("compact", "ui", "Compact the context now"),
     CommandSpec("context", "ui", "Context usage and what fills it"),
@@ -158,6 +164,9 @@ def expand_command(name: str, text: str = "", skills=None, project: Path | None 
         if not message:
             raise CommandError("TEXT_REQUIRED", f"/{name} needs text to start a turn")
         return ExpandedCommand(message, mode=spec.mode)
+    if spec.kind == "learn":
+        message = f"{LEARN_PROMPT} Focus: {text}" if text else LEARN_PROMPT
+        return ExpandedCommand(message, skill=LEARN_SKILL)
     if spec.kind == "turn":
         assert spec.template is not None
         return ExpandedCommand(f"{spec.template}\n\n{text}" if text else spec.template)

@@ -87,6 +87,8 @@ class _ActiveTurn:
     attachment_metadata: list | None = None
     allow_unconfirmed_vision: bool = False
     compaction_only: bool = False
+    # Slash command that started the turn (`learn`…); becomes turn_command.
+    command: str = ""
     activity_lock: Any = field(default_factory=threading.RLock)
     terminal_emitted: bool = False
     preparation_stage: str | None = None
@@ -357,6 +359,7 @@ class TurnManager:
         compaction_only: bool = False,
         origin: dict[str, Any] | None = None,
         peer_message_id: str | None = None,
+        command: str = "",
     ) -> dict[str, Any]:
         record = self._services.sessions.show(session_id)
         if record.state in {SESSION_STATE_CLOSED, SESSION_STATE_ARCHIVED}:
@@ -388,6 +391,7 @@ class TurnManager:
             attachment_metadata=attachment_metadata,
             allow_unconfirmed_vision=allow_unconfirmed_vision,
             compaction_only=compaction_only,
+            command=command,
         )
         with self._lock:
             record = self._services.sessions.show(session_id)
@@ -869,6 +873,7 @@ class TurnManager:
                         else {}
                     ),
                 )
+                session.next_turn_command = turn.command
                 if abandoned.is_set():
                     session.end()
                     return

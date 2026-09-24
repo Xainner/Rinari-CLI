@@ -84,6 +84,8 @@ class AgentSession:
     usage: object = field(default_factory=lambda: _new_usage(), repr=False)
     last_completion: dict | None = None
     pending_attachments: list[str | dict] = field(default_factory=list)
+    # Slash command for the next turn only (`/learn`); consumed when it runs.
+    next_turn_command: str = ""
     activity_sink: object = field(default=None, repr=False)
     # Bound by build_agent_session; the host calls it exactly once when the
     # session ends (emits the SessionEnd lifecycle hook).
@@ -281,10 +283,23 @@ def _skill_prompt_parts(services: ServiceContainer, root: Path | None, record: S
             if len(description) > _CATALOG_DESCRIPTION_CHARS:
                 description = description[: _CATALOG_DESCRIPTION_CHARS - 1].rstrip() + "…"
             lines.append(f"- {row['name']}{flag}: {description}")
+        if _auto_learn(services) == "propose":
+            lines.append(
+                "After a complex task that ended verified, if the approach is reusable and "
+                "no skill covers it, you may propose one: activate skill-author, then "
+                "skills.propose (it waits for the owner's approval)."
+            )
         catalog = "\n".join(lines)
     else:
         catalog = None
     return active, catalog
+
+
+def _auto_learn(services: ServiceContainer) -> str:
+    try:
+        return services.skills.auto_learn()
+    except Exception:
+        return "never"
 
 
 def _memory_text(services: ServiceContainer, root: Path | None, query: str = "") -> str | None:
@@ -1732,6 +1747,10 @@ def _run_turn_unlocked(
     refreshed_history = _restore_history(services, session.record)
     session.context.history.clear()
     session.context.history.extend(refreshed_history)
+    session.context.tool_ctx = replace(
+        session.context.tool_ctx, turn_command=session.next_turn_command
+    )
+    session.next_turn_command = ""
     exposure = getattr(session.context.tool_ctx, "exposure", None)
     if exposure is not None:
         for past in refreshed_history:

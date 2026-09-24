@@ -337,6 +337,70 @@ def skills_remove_cmd(ctx: typer.Context, name: str = typer.Argument(...)) -> No
         typer.echo(f"removed {name}" if removed else f"no user skill installed: {name}")
 
 
+@app.command("pending")
+@with_error_handling("skills.pending")
+def skills_pending_cmd(ctx: typer.Context) -> None:
+    """Skills Rinari proposed on its own, waiting for your approval."""
+    with services(ctx) as s:
+        rows = s.skills.learning.pending()
+        if is_json(ctx):
+            emit_json(success_envelope("skills.pending", {"pending": rows}))
+            return
+        if not rows:
+            typer.echo("No proposals waiting.")
+            return
+        for row in rows:
+            kind = "update" if row["update"] else "new"
+            typer.echo(
+                f"{row['name']:<28} {kind:<7} {row['review']['verdict']:<8} {row['description']}"
+            )
+        typer.echo("Approve with: rinari skills approve <name>  (or reject)")
+
+
+@app.command("approve")
+@with_error_handling("skills.approve")
+def skills_approve_cmd(ctx: typer.Context, name: str = typer.Argument(...)) -> None:
+    """Approve a proposed skill: it becomes active."""
+    with services(ctx) as s:
+        try:
+            result = s.skills.learning.approve(name)
+        except SkillError as exc:
+            _fail(exc)
+        if is_json(ctx):
+            emit_json(success_envelope("skills.approve", result))
+            return
+        typer.echo(f"approved {name}")
+
+
+@app.command("reject")
+@with_error_handling("skills.reject")
+def skills_reject_cmd(ctx: typer.Context, name: str = typer.Argument(...)) -> None:
+    """Discard a proposed skill."""
+    with services(ctx) as s:
+        rejected = s.skills.learning.reject(name)
+        if is_json(ctx):
+            emit_json(success_envelope("skills.reject", {"rejected": rejected}))
+            return
+        typer.echo(f"rejected {name}" if rejected else f"no proposal named {name}")
+
+
+@app.command("revert")
+@with_error_handling("skills.revert")
+def skills_revert_cmd(ctx: typer.Context, name: str = typer.Argument(...)) -> None:
+    """Undo a learned skill: its previous version, or removed if it was new."""
+    with services(ctx) as s:
+        try:
+            result = s.skills.learning.revert(name)
+        except SkillError as exc:
+            _fail(exc)
+        if is_json(ctx):
+            emit_json(success_envelope("skills.revert", result))
+            return
+        typer.echo(
+            f"restored {name} v{result['restored']}" if result["restored"] else f"removed {name}"
+        )
+
+
 @app.command("validate")
 @with_error_handling("skills.validate")
 def skills_validate_cmd(
