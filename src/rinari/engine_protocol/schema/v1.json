@@ -276,6 +276,7 @@
         "session.permission.get",
         "session.permission.set",
         "session.turn.start",
+        "command.list",
         "target.list",
         "target.add",
         "operation.start",

@@ -223,14 +223,26 @@ def _run_session(
 
 def resume_flow(ctx: typer.Context, ref: str | None, command: str) -> None:
     """Resume a session; a /resume inside the REPL restarts the flow."""
+    ref, prompt = _split_resume(ref)
     while True:
-        target = _run_resume(ctx, ref, command)
+        target = _run_resume(ctx, ref, command, prompt)
         if target is None:
             return
-        ref = target
+        ref, prompt = _split_resume(target)
 
 
-def _run_resume(ctx: typer.Context, ref: str | None, command: str) -> str | None:
+def _split_resume(target: str | None) -> tuple[str | None, str | None]:
+    """ "<ref>" or "<ref>\0<first message>" (a mode switch resumes the same
+    session rebuilt and sends the pending text)."""
+    if target is None:
+        return None, None
+    ref, _, prompt = target.partition("\0")
+    return ref or None, prompt or None
+
+
+def _run_resume(
+    ctx: typer.Context, ref: str | None, command: str, prompt: str | None = None
+) -> str | None:
     params = get_params(ctx)
     with services(ctx) as s:
         try:
@@ -250,6 +262,7 @@ def _run_resume(ctx: typer.Context, ref: str | None, command: str) -> str | None
         try:
             outcome = repl.run_repl(
                 session,
+                initial_prompt=prompt,
                 no_banner=params.no_banner,
                 no_progress=params.no_progress,
                 json_flag=is_json(ctx),

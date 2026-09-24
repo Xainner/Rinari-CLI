@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -19,37 +20,20 @@ from rinari.cli.render import banner_fields
 from rinari.cli.snapshot import build_snapshot
 from rinari.shared.errors import InvalidUsageError
 
-_HELP = """\
-/exit | /quit          leave the session
-/help                  this help
-/status                full runtime snapshot (banner fields)
-/provider [alias]      list providers / switch (session only)
-/model [alias]         list models / switch (session only)
-/session               show this session
-/mode                  session kind and mode
-/usage                 model/tool calls, tokens, elapsed, cost
-/tokens                context usage (estimate + window)
-/plan                  task tree for this project
-/tasks                 task list for this project
-/diff                  uncommitted changes (project sessions)
-/test                  run the project's test suite (one agent turn)
-/review                review uncommitted changes (one agent turn)
-/skills [query]        list / search skills
-/tools                 loaded tools with risk classes
-/agents                subagent state
-/permissions           policy profile, network mode, approval scopes
-/checkpoint            latest checkpoints for this project
-/undo                  restore the latest checkpoint (asks to confirm)
-/compact               report compaction pressure (compacts when due)
-/context               prompt-stack segments and sizes
-/trace [n]             last n session events (default 15)
-/new                   start a new session (same context)
-/resume [id]           resume a session by id
-/attach <path>         attach a file to the next turn
-/attach --ocr <path>   use image OCR text instead of vision
-/attach --vision <path> explicitly try a model with unknown vision support
-Ctrl+C                 cancel turn (again: exit)
-"""
+
+def _help_text() -> str:
+    """Built from the shared catalog (rinari.commands), plus enabled skills."""
+    from rinari.commands import COMMANDS
+
+    lines = []
+    for spec in COMMANDS:
+        if "cli" not in spec.clients:
+            continue
+        usage = f"/{spec.name} {spec.args}".strip()
+        lines.append(f"{usage:<22} {spec.description}")
+    lines.append(f"{'/<skill> [text]':<22} Use an enabled skill for this request")
+    lines.append(f"{'Ctrl+C':<22} Cancel the turn (again: exit)")
+    return "\n".join(lines)
 
 
 @dataclass(frozen=True)
@@ -63,16 +47,43 @@ _STAY = SlashOutcome("stay")
 _EXIT = SlashOutcome("exit")
 
 
-_TEST_PROMPT = (
-    "Run this project's test suite: detect the standard command from the project "
-    "configuration (package.json, pyproject.toml, Makefile, ...), execute it, and "
-    "report the outcome with failures summarized. Do not modify any code."
-)
-_REVIEW_PROMPT = (
-    "Review the uncommitted changes in this repository (git diff plus untracked "
-    "files). Report concrete issues ordered by severity: bugs first, then "
-    "security, then conventions. Reference file and line. Do not modify any code."
-)
+def _switch_mode(session: AgentSession, console: Console, name: str, text: str) -> SlashOutcome:
+    """PLAN/BUILD/REVIEW. The mode shapes the prompt and the permissions the
+    session was built with, so a change resumes the same session rebuilt; the
+    text (or /review's own prompt) goes as its first message."""
+    from rinari.commands import find_command
+
+    spec = find_command(name)
+    assert spec is not None and spec.mode is not None
+    message = text or spec.template
+    if spec.mode != session.record.mode:
+        session.services.sessions.set_mode(session.record.id, spec.mode)
+        console.print(f"mode {spec.mode}")
+        return SlashOutcome("resume_session", prompt=message, resume_ref=session.record.id)
+    if message:
+        return SlashOutcome("turn", prompt=message)
+    console.print(f"already in {spec.mode} mode")
+    return _STAY
+
+
+def _skill_command(session: AgentSession, name: str, text: str) -> SlashOutcome:
+    """`/skill <name> [text]` or `/<skill-name> [text]`: pin, then one turn."""
+    from rinari.cli import agent_runtime
+    from rinari.commands import CommandError, expand_command
+    from rinari.skills.manifest import SkillError
+
+    root = session.record.project_root_snapshot
+    try:
+        expanded = expand_command(name, text, session.services.skills, Path(root) if root else None)
+    except CommandError as exc:
+        if exc.code == "UNKNOWN_COMMAND":
+            raise InvalidUsageError(f"Unknown command: /{name}", hint="Try /help") from None
+        raise InvalidUsageError(exc.message, hint="Try /help") from None
+    try:
+        agent_runtime.pin_skill(session, expanded.skill)
+    except SkillError as exc:
+        raise InvalidUsageError(exc.message) from None
+    return SlashOutcome("turn", prompt=expanded.message)
 
 
 def _project_root(session: AgentSession) -> str | None:
@@ -98,7 +109,7 @@ def handle(session: AgentSession, console: Console, message: str) -> SlashOutcom
     if command in ("/exit", "/quit"):
         return _EXIT
     if command == "/help":
-        console.print(_HELP)
+        console.print(_help_text(), markup=False)
         return _STAY
     if command == "/attach":
         if not rest:
@@ -196,16 +207,18 @@ def handle(session: AgentSession, console: Console, message: str) -> SlashOutcom
             console.print("context —  (no window known for this model)")
         console.print(f"history messages: {len(session.context.history)}")
         return _STAY
-    if command in ("/plan", "/tasks"):
-        _print_tasks(session, console, arg if command == "/tasks" else None)
+    if command in ("/plan", "/build", "/review"):
+        return _switch_mode(session, console, command[1:], rest)
+    if command == "/tasks":
+        _print_tasks(session, console, arg)
         return _STAY
     if command == "/diff":
         _print_diff(session, console)
         return _STAY
     if command == "/test":
-        return SlashOutcome("turn", prompt=_TEST_PROMPT)
-    if command == "/review":
-        return SlashOutcome("turn", prompt=_REVIEW_PROMPT)
+        from rinari.commands import expand_command
+
+        return SlashOutcome("turn", prompt=expand_command("test", rest).message)
     if command == "/skills":
         _print_skills(session, console, arg)
         return _STAY
@@ -251,7 +264,7 @@ def handle(session: AgentSession, console: Console, message: str) -> SlashOutcom
         return SlashOutcome("new_session")
     if command == "/resume":
         return SlashOutcome("resume_session", resume_ref=arg)
-    raise InvalidUsageError(f"Unknown command: {command}", hint="Try /help")
+    return _skill_command(session, command[1:], rest)
 
 
 def _print_tasks(session: AgentSession, console: Console, filter_arg: str | None) -> None:

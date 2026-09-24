@@ -2823,6 +2823,23 @@ Inside the interactive agent:
 
 Slash commands are a UI over the same application services, not a separate command implementation.
 
+The list lives in one catalog (`rinari.commands`) shared with the desktop
+composer (`command.list`); `/help` prints it. Kinds:
+
+```text
+/plan [text]     PLAN mode (read and plan). A mode change resumes the same
+/build [text]    session rebuilt; the text, if any, is its first message.
+/review [text]   REVIEW mode; alone, it reviews the uncommitted changes.
+/test [text]     prepared turn: run the test suite (+ your text)
+/skill <name> [text]   pin a skill and send the text
+/<skill> [text]  every enabled skill is a command (a built-in keeps its name)
+/tasks           the task tree (it was /plan before modes were commands)
+```
+
+The Engine expands `mode`, `turn` and `skill` commands itself
+(`session.turn.start` with `command: {name, text}`), so the terminal and the
+desktop behave the same.
+
 ---
 
 # 60. Interactive Provider Selection

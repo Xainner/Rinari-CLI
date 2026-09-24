@@ -217,6 +217,7 @@ class EngineServer:
         self._dispatcher.register("session.permission.get", self._session_permission_get)
         self._dispatcher.register("session.permission.set", self._session_permission_set)
         self._dispatcher.register("session.turn.start", self._turn_start)
+        self._dispatcher.register("command.list", self._command_list)
         self._dispatcher.register("operation.start", self._operation_start)
         self._dispatcher.register("operation.get", self._operation_get)
         self._dispatcher.register("operation.cancel", self._operation_cancel)
@@ -2409,8 +2410,9 @@ class EngineServer:
             )
         except EngineProtocolError:
             raise
+        request = self._expand_command(session_id, params.get("command"), message)
         enriched = (
-            f"{attachment_context}\n\nUser request:\n{message}" if attachment_context else message
+            f"{attachment_context}\n\nUser request:\n{request}" if attachment_context else request
         )
         return self._turns.start_turn(
             session_id,
@@ -2421,6 +2423,51 @@ class EngineServer:
             attachment_metadata=attachment_metadata,
             allow_unconfirmed_vision=params.get("allow_unconfirmed_vision") is True,
         )
+
+    def _command_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        from rinari.commands import command_list
+
+        project = None
+        session_id = params.get("session_id")
+        if isinstance(session_id, str) and session_id:
+            record = self._services.sessions.show(session_id)
+            if record.project_root_snapshot:
+                project = Path(record.project_root_snapshot)
+        return {"commands": command_list(self._services.skills, project, client="desktop")}
+
+    def _expand_command(self, session_id: str, command: Any, typed: str) -> str:
+        """`/review x`, `/test`, `/pdf-tools x`: the Engine turns the command the
+        owner typed into the model's message, switching the mode or pinning
+        the skill first. The typed text stays the message shown in the chat."""
+        if command is None:
+            return typed
+        if not isinstance(command, dict) or not isinstance(command.get("name"), str):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'command' must be {name, text?}.")
+        text = command.get("text") or ""
+        if not isinstance(text, str):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'command.text' must be a string.")
+        from rinari.commands import CommandError, expand_command
+        from rinari.skills.manifest import SkillError
+
+        record = self._services.sessions.show(session_id)
+        project = Path(record.project_root_snapshot) if record.project_root_snapshot else None
+        try:
+            expanded = expand_command(command["name"], text, self._services.skills, project)
+        except CommandError as exc:
+            raise EngineProtocolError(
+                INVALID_PARAMS, exc.message, details={"command_code": exc.code}
+            ) from exc
+        if expanded.mode and expanded.mode != record.mode:
+            record = self._services.sessions.set_mode(record.id, expanded.mode)
+            self._turns.emit_external(
+                event("session.mode.changed", {"session_id": record.id, "mode": record.mode})
+            )
+        if expanded.skill:
+            try:
+                self._services.skills.activate(expanded.skill, record.id, project)
+            except SkillError as exc:
+                raise EngineProtocolError(INVALID_PARAMS, exc.message) from exc
+        return expanded.message
 
     def _target_list(self, params: dict[str, Any]) -> dict[str, Any]:
         from rinari.application.ssh_targets import TargetStore
