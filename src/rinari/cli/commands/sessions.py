@@ -69,7 +69,10 @@ def session_list(
         table.add_column("LAST ACTIVE", no_wrap=True)
         for r in records:
             state = Text(r.state, style=state_style.get(r.state))
-            table.add_row(r.id, r.kind, state, r.title or "", r.last_active_at or "")
+            # ASCII on purpose: redirected output on Windows is cp1252. Text,
+            # not a str: Rich would eat "[pin]" (or a title's brackets) as markup.
+            title = Text(f"[pin] {r.title or ''}" if r.pinned_at else r.title or "")
+            table.add_row(r.id, r.kind, state, title, r.last_active_at or "")
         Console().print(table)
 
 
@@ -140,6 +143,30 @@ def session_rename(
             emit_json(success_envelope("session.rename", session_dict(record)))
             return
         typer.echo(f"renamed {record.id} -> {title}")
+
+
+@session_app.command("pin")
+@with_error_handling("session.pin")
+def session_pin(ctx: typer.Context, ref: str = typer.Argument(...)) -> None:
+    """Pin a session (desktop «Fijados»)."""
+    _set_pinned(ctx, ref, True)
+
+
+@session_app.command("unpin")
+@with_error_handling("session.unpin")
+def session_unpin(ctx: typer.Context, ref: str = typer.Argument(...)) -> None:
+    """Unpin a session."""
+    _set_pinned(ctx, ref, False)
+
+
+def _set_pinned(ctx: typer.Context, ref: str, pinned: bool) -> None:
+    with services(ctx) as s:
+        record = s.sessions.set_pinned(ref, pinned)
+        if is_json(ctx):
+            action = "session.pin" if pinned else "session.unpin"
+            emit_json(success_envelope(action, session_dict(record)))
+            return
+        typer.echo(f"{'pinned' if pinned else 'unpinned'} {record.id}")
 
 
 @session_app.command("stop")

@@ -110,6 +110,7 @@ def test_migrate_fresh_database_applies_all(db):
         32,
         33,
         34,
+        35,
     ]
     assert _table_names(db) == TABLES_AFTER_MIGRATIONS
 
@@ -118,7 +119,7 @@ def test_migrate_is_idempotent(db):
     runner = MigrationRunner(db, FakeClock())
     runner.migrate()
     assert runner.migrate() == []
-    assert runner.current_version() == 34
+    assert runner.current_version() == 35
 
 
 def _previous_home_migrations(tmp_path: Path, upto: int) -> Path:

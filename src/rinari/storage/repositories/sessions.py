@@ -98,6 +98,11 @@ class SessionRepository:
             ),
         )
 
+    def set_pinned_at(self, session_id: str, pinned_at: str | None) -> None:
+        """Only writer of `pinned_at`: `update` leaves it alone, so a turn that
+        saves an older copy of the record cannot undo a pin made meanwhile."""
+        self._db.execute("UPDATE sessions SET pinned_at = ? WHERE id = ?", (pinned_at, session_id))
+
     def list(
         self,
         kind: str | None = None,
@@ -167,6 +172,7 @@ def _session_to_record(row: dict) -> SessionRecord:
         active_skills=active_skills,
         permission_profile=row["permission_profile"] or "workspace",
         soul_id=row["soul_id"],
+        pinned_at=row["pinned_at"],
     )
 
 
