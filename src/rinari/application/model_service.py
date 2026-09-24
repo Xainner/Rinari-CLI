@@ -41,6 +41,8 @@ class RefreshResult:
     marked_unavailable: int
     discovered: int
     error: str | None = None
+    #: Aliases saved by `refresh(add_new=True)` for models the provider started offering.
+    added: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,13 +298,21 @@ class ModelService:
 
     # -- discovery / refresh / test --------------------------------------
 
-    def refresh(self, provider_ref: str | None = None) -> dict[str, RefreshResult]:
+    def refresh(
+        self, provider_ref: str | None = None, *, add_new: bool = False
+    ) -> dict[str, RefreshResult]:
+        """Re-read what each provider offers and update the saved models.
+
+        With ``add_new`` a model the provider now offers and is not saved yet
+        is saved under its provider ID, and providers without saved models are
+        read too.
+        """
         provider = self._providers.get(provider_ref) if provider_ref else None
         providers = [provider] if provider else self._providers.list()
         results: dict[str, RefreshResult] = {}
         for rec in providers:
             models = self._ctx.model_repo.list(rec.id)
-            if not models:
+            if not models and not add_new:
                 results[rec.alias] = RefreshResult(0, 0, 0, 0)
                 continue
             adapter = adapter_for(rec, self._client)
@@ -325,6 +335,15 @@ class ModelService:
             # The context resolver shares this discovery instead of repeating it,
             # and an explicit refresh never waits for its cache to expire.
             windows.remember(self._ctx, rec, discovered)
+            added: list[str] = []
+            if add_new:
+                saved = {model.provider_model_id for model in models}
+                for provider_model_id in discovered:
+                    if provider_model_id in saved:
+                        continue
+                    alias = self._free_alias(rec.id, provider_model_id)
+                    models.append(self.add(rec.id, provider_model_id, alias))
+                    added.append(alias)
             now = self._now()
             still = 0
             gone = 0
@@ -351,8 +370,15 @@ class ModelService:
                 still_available=still,
                 marked_unavailable=gone,
                 discovered=len(discovered),
+                added=tuple(added),
             )
         return results
+
+    def _free_alias(self, provider_id: str, wanted: str) -> str:
+        alias, n = wanted, 2
+        while self._ctx.model_repo.get_by_alias(provider_id, alias) is not None:
+            alias, n = f"{wanted}-{n}", n + 1
+        return alias
 
     def test(self, ref: str, provider_ref: str | None = None) -> ModelTestResult:
         record = self.resolve(ref, provider_ref)

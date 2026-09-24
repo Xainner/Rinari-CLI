@@ -477,12 +477,16 @@ class _ResponsesStreamAccumulator:
     """Reassembles a Responses API SSE stream.
 
     Text deltas go live to on_delta; the terminal response.completed event
-    is authoritative for content, tool calls, and usage.
+    is authoritative for content, tool calls, and usage. The ChatGPT
+    subscription backend ends with an empty `output` and delivers each item
+    only in `response.output_item.done`, so those are kept, in output order,
+    for a terminal event that carries none.
     """
 
     def __init__(self) -> None:
         self._text_parts: list[str] = []
         self._completed: dict[str, Any] | None = None
+        self._items: dict[int, dict[str, Any]] = {}
         self.last_event: str | None = None
         self.response_id: str | None = None
         self._sequences: set[int] = set()
@@ -515,6 +519,12 @@ class _ResponsesStreamAccumulator:
             if isinstance(delta, str) and delta:
                 self._text_parts.append(delta)
                 on_delta(delta)
+        elif event_type == "response.output_item.done":
+            item = event.get("item")
+            if isinstance(item, dict):
+                index = event.get("output_index")
+                position = index if isinstance(index, int) else len(self._items)
+                self._items[position] = item
         elif event_type in {
             "response.completed",
             "response.incomplete",
@@ -537,8 +547,11 @@ class _ResponsesStreamAccumulator:
                     "response_id": self.response_id,
                 },
             )
+        completed = self._completed
+        if not completed.get("output") and self._items:
+            completed = {**completed, "output": [self._items[i] for i in sorted(self._items)]}
         try:
-            result = _response_from_responses(self._completed, url)
+            result = _response_from_responses(completed, url)
             if result.stop_reason == StopReason.MAX_TOKENS and not result.content:
                 result = replace(result, content="".join(self._text_parts))
             return result

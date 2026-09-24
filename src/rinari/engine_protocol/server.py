@@ -2991,7 +2991,10 @@ class EngineServer:
         return {"job_id": job_id, "status": "running", "cached": False}
 
     def _model_refresh(self, params: dict[str, Any]) -> dict[str, Any]:
-        results = self._services.models.refresh(self._opt_str(params, "provider"))
+        add_new = params.get("add_new", False)
+        if not isinstance(add_new, bool):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'add_new' must be a boolean.")
+        results = self._services.models.refresh(self._opt_str(params, "provider"), add_new=add_new)
         providers: dict[str, Any] = {}
         for alias, result in results.items():
             providers[alias] = {
@@ -2999,6 +3002,7 @@ class EngineServer:
                 "still_available": result.still_available,
                 "marked_unavailable": result.marked_unavailable,
                 "discovered": result.discovered,
+                "added": list(result.added),
                 "error": result.error,
             }
         return {"providers": providers}

@@ -10,6 +10,7 @@ import base64
 import hashlib
 import json
 import secrets
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -18,7 +19,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 import httpx
 
 from rinari.providers.catalog import product_for
-from rinari.shared.errors import AuthenticationRequiredError, InvalidUsageError
+from rinari.shared.errors import AuthenticationRequiredError, InvalidUsageError, RinariError
 from rinari.shared.locking import file_lock
 
 OPENAI_CLIENT = "app_EMoamEEZ73f0CkXaXp7hrann"
@@ -35,6 +36,20 @@ def claims(token):
         return value if isinstance(value, dict) else {}
     except (ValueError, IndexError, TypeError):
         return {}
+
+
+def _safe_param(value):
+    """A provider error code for diagnostics: short and without free text."""
+    text = str(value)[:64]
+    return text if text.replace("_", "").replace("-", "").isalnum() else "unrecognized"
+
+
+def _failure_reason(exc):
+    """What went wrong, without tokens: Rinari's own messages never carry them,
+    and anything else is reported by its type only."""
+    if isinstance(exc, RinariError):
+        return exc.message.rstrip(".") + "."
+    return f"{type(exc).__name__}."
 
 
 def account_id(token):
@@ -229,10 +244,16 @@ class ProviderAuthService:
                     self.send_response(400)
                     self.end_headers()
                     return
+                step = "authorization"
                 try:
                     code = args.get("code", [None])[0]
                     if not code:
-                        raise ValueError()
+                        # The provider redirects with `error` instead of a code.
+                        raise InvalidUsageError(
+                            f"The provider returned no authorization code "
+                            f"({_safe_param(args.get('error', ['none'])[0])})."
+                        )
+                    step = "token exchange"
                     tokens = request_json(
                         owner.providers,
                         "POST",
@@ -245,13 +266,24 @@ class ProviderAuthService:
                             "code_verifier": verifier,
                         },
                     )
+                    step = "saving the credential"
                     owner._complete(op, tokens)
-                except Exception:
-                    op.update(status="error", detail="Login could not be completed. Start again.")
+                except Exception as exc:
+                    reason = _failure_reason(exc)
+                    print(f"[auth] subscription login failed at {step}: {reason}", file=sys.stderr)
+                    op.update(
+                        status="error",
+                        detail=f"Login could not be completed ({step}): {reason} Start again.",
+                    )
+                connected = op["status"] == "connected"
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain; charset=utf-8")
                 self.end_headers()
-                self.wfile.write(b"Return to Rinari to see your connection status.")
+                self.wfile.write(
+                    b"Rinari is connected. You can close this tab."
+                    if connected
+                    else b"Login could not be completed. Return to Rinari for details."
+                )
 
         server = HTTPServer(("127.0.0.1", 1455), Callback)
         server.timeout = 0.5

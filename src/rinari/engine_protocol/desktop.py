@@ -337,6 +337,10 @@ class DesktopWorkspace:
             if path.is_relative_to(private_root):
                 raise EngineProtocolError("PERMISSION_DENIED", "Engine-private file.")
             changed = self._external_change(changeset, path)
+            if changed is None and (turn_found or changeset is not None):
+                # A file this session created or edited stays reachable from any
+                # of its turns, not only from the one that last touched it.
+                changed = self._session_change(record.id, path)
             if changed is None:
                 message = (
                     "Unknown turn provenance."
@@ -370,6 +374,20 @@ class DesktopWorkspace:
             if _same_path(Path(row["absolute_path"]), path):
                 return row
         return None
+
+    def _session_change(self, session_id: str, path: Path) -> dict[str, Any] | None:
+        """The session's latest record of ``path``, if it left the file in place.
+
+        Only the latest record counts: a file the session deleted afterwards is
+        not authorized again by an earlier creation.
+        """
+        latest = None
+        for changeset in self.services.ctx.turn_change_repo.list_by_session(session_id):
+            for row in changeset.get("files", []):
+                absolute = row.get("absolute_path")
+                if isinstance(absolute, str) and _same_path(Path(absolute), path):
+                    latest = row
+        return self._external_change({"files": [latest]}, path) if latest else None
 
     def read(self, params):
         return self._preview(self.resolve_file(params))

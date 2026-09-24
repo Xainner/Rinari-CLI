@@ -9,7 +9,11 @@ from rinari.application.services import build_services
 from rinari.models.router import ModelRouter
 from rinari.models.types import ChatMessage, ModelRequest
 from rinari.providers.adapters.anthropic import AnthropicAdapter
-from rinari.providers.adapters.subscriptions import CodexResponsesAdapter
+from rinari.providers.adapters.subscriptions import (
+    CODEX_CLIENT_VERSION,
+    ChatGPTAdapter,
+    CodexResponsesAdapter,
+)
 from rinari.providers.auth import ProviderAuthService
 from rinari.providers.catalog import PROVIDER_CATALOG, product_for
 from rinari.providers.metadata import model_metadata
@@ -457,6 +461,59 @@ def test_browser_pkce_invalid_state_then_success_and_port_busy(app_ctx, monkeypa
         auth.close()
 
 
+@pytest.mark.parametrize(
+    ("query", "response", "step"),
+    [
+        (
+            {"code": "test-code"},
+            httpx.Response(400, json={"error": "invalid_grant"}),
+            "token exchange",
+        ),
+        ({"error": "access_denied"}, None, "authorization"),
+    ],
+)
+def test_a_failed_browser_login_says_where_and_never_logs_tokens(
+    app_ctx, monkeypatch, capsys, query, response, step
+):
+    from http.server import HTTPServer
+    from urllib.parse import parse_qs, urlsplit
+
+    import rinari.providers.auth as module
+
+    s, p = setup(
+        app_ctx,
+        lambda req: response or httpx.Response(500),
+        product="chatgpt",
+        auth="oauth",
+    )
+    servers = []
+
+    def ephemeral(address, handler):
+        server = HTTPServer(("127.0.0.1", 0), handler)
+        servers.append(server)
+        return server
+
+    monkeypatch.setattr(module, "HTTPServer", ephemeral)
+    auth = ProviderAuthService(s.providers)
+    op = auth.start(p.id)
+    state = parse_qs(urlsplit(op["authorization_url"]).query)["state"][0]
+    callback = f"http://127.0.0.1:{servers[0].server_port}/auth/callback"
+    try:
+        page = httpx.get(callback, params={"state": state, **query})
+        assert page.status_code == 200
+        assert "could not be completed" in page.text
+        view = auth.get(p.id, op["operation_id"])
+        assert view["status"] == "error"
+        assert f"({step})" in view["detail"]
+        if "error" in query:
+            assert "access_denied" in view["detail"]
+        diagnostics = capsys.readouterr().err
+        assert f"subscription login failed at {step}" in diagnostics
+        assert "test-code" not in diagnostics and "test-code" not in view["detail"]
+    finally:
+        auth.close()
+
+
 def test_device_expiration_slowdown_and_account_isolation(app_ctx):
     calls = []
 
@@ -736,3 +793,36 @@ def test_copilot_discovery_selects_route_and_subscription_headers(app_ctx, endpo
     assert seen[-1].headers["x-initiator"] == "user"
     assert seen[-1].headers["x-interaction-id"] == "test-session"
     assert router.capabilities(p, m.id).max_context_tokens == 200000
+
+
+def test_chatgpt_catalog_asks_as_a_current_client_and_drops_hidden_models():
+    # With client_version=0.1.0 the catalog answered an empty list: every
+    # model required 0.144 or later (observed 2026-09-23).
+    seen = []
+
+    def handler(req):
+        seen.append(req)
+        return httpx.Response(
+            200,
+            json={
+                "models": [
+                    {
+                        "slug": "gpt-6-luna",
+                        "visibility": "list",
+                        "minimal_client_version": "0.155.0",
+                        "context_window": 400000,
+                        "input_modalities": ["text", "image"],
+                        "supported_reasoning_levels": [{"effort": "high"}],
+                    },
+                    {"slug": "gpt-reserve", "visibility": "hide"},
+                    {"slug": "legacy", "visibility": "hidden"},
+                ]
+            },
+        )
+
+    adapter = ChatGPTAdapter(client=httpx.Client(transport=httpx.MockTransport(handler)))
+    models = adapter.list_models("synthetic-token", "https://chatgpt.com/backend-api/codex")
+    assert [m.provider_model_id for m in models] == ["gpt-6-luna"]
+    assert models[0].capabilities["max_context_tokens"] == 400000
+    assert models[0].capabilities["vision"] is True
+    assert seen[0].url.params["client_version"] == CODEX_CLIENT_VERSION

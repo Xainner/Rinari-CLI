@@ -181,18 +181,68 @@ def test_external_provenance_does_not_expand_authority(desktop_runtime) -> None:
     )
     assert wrong_session["error"]["code"] == "PERMISSION_DENIED"
 
-    no_turn = _request(
+    no_turn_other_path = _request(
         server,
         "workspace.file.read",
-        {"session_id": primary.id, "path": str(allowed)},
+        {"session_id": primary.id, "path": str(denied)},
     )
-    assert no_turn["error"]["code"] == "PERMISSION_DENIED"
+    assert no_turn_other_path["error"]["code"] == "PERMISSION_DENIED"
     unknown_turn = _request(
         server,
         "workspace.file.read",
         {"session_id": primary.id, "path": str(allowed), "turn_id": "turn_other"},
     )
     assert unknown_turn["error"]["code"] == "INVALID_PARAMS"
+
+
+def test_a_session_file_stays_reachable_from_its_other_turns(desktop_runtime) -> None:
+    # Created in one turn, edited in the next, opened from a third turn's link
+    # or with no turn at all: it is still this session's file.
+    services, server, primary, _other, _workspace, tmp_path = desktop_runtime
+    target = tmp_path / "external" / "notes.md"
+    unrelated = tmp_path / "external" / "other.md"
+    target.parent.mkdir()
+    target.write_text("first", encoding="utf-8")
+    unrelated.write_text("other", encoding="utf-8")
+    _changeset(services, primary.id, "turn_create", target)
+    target.write_text("edited", encoding="utf-8")
+    _changeset(services, primary.id, "turn_edit", target, kind="modified", before_exists=True)
+    _changeset(services, primary.id, "turn_later", unrelated)
+
+    for turn in ("turn_later", None):
+        params = {"session_id": primary.id, "path": str(target)}
+        if turn:
+            params["turn_id"] = turn
+        result = _request(server, "workspace.file.read", params)
+        assert result["ok"] is True, result
+        assert result["result"]["content"] == "edited"
+        assert result["result"]["provenance"] == "turn_changeset"
+        # The latest record is the reference, so the edit is not "changed since".
+        assert result["result"]["changed_since_turn"] is False
+
+
+def test_a_later_deletion_in_the_session_wins(desktop_runtime) -> None:
+    services, server, primary, other, _workspace, tmp_path = desktop_runtime
+    target = tmp_path / "external" / "gone.md"
+    target.parent.mkdir()
+    target.write_text("first", encoding="utf-8")
+    _changeset(services, primary.id, "turn_create", target)
+    _changeset(
+        services,
+        primary.id,
+        "turn_delete",
+        target,
+        kind="deleted",
+        after_exists=False,
+        after_hash=None,
+    )
+    target.write_text("recreated by someone else", encoding="utf-8")
+    denied = _request(
+        server, "workspace.file.read", {"session_id": primary.id, "path": str(target)}
+    )
+    assert denied["error"]["code"] == "PERMISSION_DENIED"
+    foreign = _request(server, "workspace.file.read", {"session_id": other.id, "path": str(target)})
+    assert foreign["error"]["code"] == "PERMISSION_DENIED"
 
 
 @pytest.mark.parametrize("kind", ["created", "modified", "renamed"])

@@ -842,7 +842,14 @@ Slice 3 adds provider/model management: `provider.create`, `provider.get`,
 Provider views are redacted by construction (`has_credential` only, never
 secret material); new secrets are stored via the credential backend
 (`env://`, `keyring://` when an OS store is functional, `file://`
-fallback) and request params are never logged.
+fallback) and request params are never logged. A secret longer than one
+OS entry allows (Windows: 1280 UTF-16 units, such as an OAuth bundle with a
+JWT) is stored as parts under `<service>#part-<n>` behind a header with the
+part count and digest; `secrets cleanup` treats each part like its entry.
+`model.refresh` accepts `add_new` (default false): models the provider now
+offers are saved under their provider ID (suffixed `-2`, `-3`… if the alias
+is taken), providers without saved models are read too, and each provider
+result lists them in `added`.
 Slice 4a adds `session.history` (`ref`, `limit` 1..500 default 200):
 persisted conversation rows (`seq`, `role`, `content`, `tool_calls`),
 tail window with `total`/`has_more`. Protocol turns persist through the
@@ -1472,6 +1479,8 @@ rinari models refresh --provider openai-personal
 Refresh discovery metadata.
 
 A model missing temporarily from discovery should be marked unavailable/unknown rather than deleting its saved alias.
+The desktop refresh also saves the models a provider started offering
+(`model.refresh` with `add_new`); the command keeps the saved list as is.
 
 ---
 

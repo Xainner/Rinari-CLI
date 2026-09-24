@@ -23,6 +23,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from rinari.application.credentials import split_part_service
 from rinari.application.credentials_vault import VaultCredential
 from rinari.shared.locking import file_lock
 
@@ -107,6 +108,9 @@ def parse_managed_target(target: str, username: str, scope: str) -> ManagedTarge
         if head != username.partition("@")[0]:
             return None
         service = tail
+    # A part of a long secret (`<service>#part-<n>`) is classified, kept or
+    # removed together with the entry it completes.
+    service = split_part_service(service)
 
     # Slots de rotación (keyring real): username == "gen/providers/<id>/gen-<n>".
     gen_marker_user = f"gen/{PROVIDER_PREFIX}"

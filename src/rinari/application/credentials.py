@@ -9,6 +9,7 @@ files and the database must never contain secret plaintext
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 import re
 from collections.abc import Mapping
@@ -32,6 +33,26 @@ KEYRING_SCHEME = "keyring://"
 KEYRING_ENV_DISABLE = "RINARI_KEYRING"
 
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+#: Windows Credential Manager rejects a blob over 2560 bytes (error 1783):
+#: 1280 UTF-16 code units. Longer secrets, such as an OAuth bundle with a JWT,
+#: are split into parts stored under ``<service>#part-<n>``, and the entry
+#: itself keeps a header with the part count and the digest of the whole.
+_ENTRY_UNITS = 1200
+#: At most two UTF-16 units per character, so a part always fits.
+_PART_CHARS = 600
+_MAX_PARTS = 64
+_CHUNK_PREFIX = "rinari-chunked:v1:"
+
+
+def part_service(service: str, index: int) -> str:
+    return f"{service}#part-{index}"
+
+
+def split_part_service(service: str) -> str:
+    """The entry a ``#part-<n>`` service belongs to (unchanged otherwise)."""
+    head, marker, index = service.rpartition("#part-")
+    return head if marker and index.isdigit() and head else service
 
 
 def validate_env_name(name: str) -> str:
@@ -243,16 +264,57 @@ class KeyringCredentialStore:
     def _read(self, service: str, key: str) -> str | None:
         try:
             value = self._backend.get_password(service, key)
+            if value and value.startswith(_CHUNK_PREFIX):
+                value = self._join(service, key, value)
         except Exception:
             return None
         return value or None
 
+    def _join(self, service: str, key: str, header: str) -> str | None:
+        count, _, digest = header[len(_CHUNK_PREFIX) :].partition(":")
+        if not count.isdigit() or not 1 <= int(count) <= _MAX_PARTS:
+            return None
+        parts = [
+            self._backend.get_password(part_service(service, i), key)
+            for i in range(1, int(count) + 1)
+        ]
+        if any(part is None for part in parts):
+            return None
+        value = "".join(parts)
+        return value if hashlib.sha256(value.encode()).hexdigest() == digest else None
+
+    def _write(self, service: str, key: str, secret: str) -> None:
+        """One entry, or parts and then their header when the secret is too long."""
+        if len(secret.encode("utf-16-le")) // 2 <= _ENTRY_UNITS:
+            self._backend.set_password(service, key, secret)
+            return
+        parts = [secret[i : i + _PART_CHARS] for i in range(0, len(secret), _PART_CHARS)]
+        if len(parts) > _MAX_PARTS:
+            raise CredentialWriteError(
+                "The secret is too long for the OS credential store.",
+                details={"service": service, "parts": len(parts)},
+            )
+        for index, part in enumerate(parts, 1):
+            self._backend.set_password(part_service(service, index), key, part)
+        digest = hashlib.sha256(secret.encode()).hexdigest()
+        self._backend.set_password(service, key, f"{_CHUNK_PREFIX}{len(parts)}:{digest}")
+
     def _drop(self, service: str, key: str) -> bool:
         try:
             self._backend.delete_password(service, key)
+            removed = True
         except Exception:
-            return False
-        return True
+            removed = False
+        # Parts are contiguous from 1, including those of an interrupted write
+        # whose header never landed.
+        for index in range(1, _MAX_PARTS + 1):
+            try:
+                if self._backend.get_password(part_service(service, index), key) is None:
+                    break
+                self._backend.delete_password(part_service(service, index), key)
+            except Exception:
+                break
+        return removed
 
     def _write_verified(self, service: str, key: str, secret: str, *, action: str) -> None:
         # Borrar primero deja el slot limpio: sin desplazamiento
@@ -260,7 +322,7 @@ class KeyringCredentialStore:
         # transitorias o justo antes del reemplazo definitivo.
         self._drop(service, key)
         try:
-            self._backend.set_password(service, key, secret)
+            self._write(service, key, secret)
         except Exception as exc:
             raise CredentialWriteError(
                 f"Could not {action} in the OS credential store: {exc}",
@@ -292,7 +354,7 @@ class KeyringCredentialStore:
             return
         with contextlib.suppress(Exception):
             self._drop(self._service(key), key)
-            self._backend.set_password(self._service(key), key, secret)
+            self._write(self._service(key), key, secret)
 
     def _effective_value(self, key: str) -> str | None:
         """Valor en vigor, con el mismo orden que `resolve`."""

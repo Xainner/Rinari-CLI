@@ -79,6 +79,14 @@ class TurnChangeRepository:
             return None
         return self._hydrate(dict(row))
 
+    def list_by_session(self, session_id: str) -> list[dict[str, Any]]:
+        """Every changeset of a session, oldest first."""
+        rows = self._db.query(
+            "SELECT * FROM turn_changesets WHERE session_id = ? ORDER BY created_at, rowid",
+            (session_id,),
+        )
+        return [self._hydrate(dict(row)) for row in rows]
+
     def get(self, changeset_id: str) -> dict[str, Any] | None:
         row = self._db.query_one("SELECT * FROM turn_changesets WHERE id = ?", (changeset_id,))
         return self._hydrate(dict(row)) if row is not None else None
