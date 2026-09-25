@@ -435,3 +435,21 @@ def test_the_library_over_the_protocol(services, home, tmp_path) -> None:
         assert report["candidates"][0]["installed"]["origin"] == "installed"
     finally:
         server.close()
+
+
+def test_section_headings_tolerate_spanish_levels_and_punctuation(tmp_path) -> None:
+    """A learned skill once failed for '## Procedimiento' instead of '# Procedure'."""
+    from rinari.skills.manifest import load_skill_manifest, validate_skill
+
+    folder = tmp_path / "deploy-saturno"
+    folder.mkdir()
+    (folder / "SKILL.md").write_text(
+        "---\nname: deploy-saturno\ndescription: Despliega saturno\nversion: 1.0.0\n"
+        "risk: medium\nrequired_tools: [shell.exec]\n---\n\n"
+        "## Procedimiento (pasos):\n1. Compilar\n2. Subir\n\n### Verificación\n- curl /health\n",
+        encoding="utf-8",
+    )
+    manifest = load_skill_manifest(folder / "SKILL.md", "user")
+    assert manifest.procedure.startswith("1. Compilar")
+    assert manifest.verification == "- curl /health"
+    assert not [i for i in validate_skill(manifest, set()) if i["code"] == "MISSING_PROCEDURE"]

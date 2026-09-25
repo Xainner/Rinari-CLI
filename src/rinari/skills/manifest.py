@@ -63,6 +63,34 @@ _BODY_KEYS = {
     "failure handling": "failure_policy",
     "success criteria": "success_criteria",
 }
+# Headings a model or a person writes for the same sections. A learned skill
+# failed validation for writing "## Procedimiento" instead of "# Procedure".
+_SECTION_ALIASES = {
+    "procedure": "procedure",
+    "procedimiento": "procedure",
+    "pasos": "procedure",
+    "steps": "procedure",
+    "instructions": "procedure",
+    "instrucciones": "procedure",
+    "verification": "verification",
+    "verificacion": "verification",
+    "verify": "verification",
+    "failure handling": "failure_policy",
+    "manejo de fallos": "failure_policy",
+    "manejo de errores": "failure_policy",
+    "troubleshooting": "failure_policy",
+    "success criteria": "success_criteria",
+    "criterios de exito": "success_criteria",
+}
+
+
+def _section_key(title: str) -> str | None:
+    """`## Procedimiento (pasos):` -> "procedure"; unknown headings -> None."""
+    import unicodedata
+
+    plain = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode()
+    plain = re.sub(r"\(.*?\)", "", plain).strip().rstrip(":.").strip().lower()
+    return _SECTION_ALIASES.get(plain)
 
 
 class SkillError(Exception):
@@ -159,10 +187,9 @@ def _split_sections(body: str) -> dict[str, str]:
     active: str | None = None
     preamble: list[str] = []
     for line in body.splitlines():
-        header = re.match(r"^#{1,2}\s+(.*)$", line.strip())
+        header = re.match(r"^#{1,3}\s+(.*)$", line.strip())
         if header:
-            title = header.group(1).strip().lower()
-            active = next((k for t, k in _BODY_KEYS.items() if title == t), None)
+            active = _section_key(header.group(1))
             continue
         if active is None:
             preamble.append(line)
@@ -261,7 +288,13 @@ def validate_skill(m: SkillManifest, known_tools: set[str]) -> list[dict]:
     if not m.procedure:
         # Rinari format names the section; a standard skill just needs a body.
         issues.append(
-            {"code": "MISSING_PROCEDURE", "message": f"{m.name} has no # Procedure section"}
+            {
+                "code": "MISSING_PROCEDURE",
+                "message": (
+                    f"{m.name} has no procedure: after the frontmatter, add a line "
+                    "'# Procedure' followed by the steps"
+                ),
+            }
             if m.format == "rinari"
             else {"code": "MISSING_BODY", "message": f"{m.name} has no instructions"}
         )

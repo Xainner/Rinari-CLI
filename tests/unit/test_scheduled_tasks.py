@@ -320,7 +320,7 @@ def test_methods_validate_and_run_now(server) -> None:
     assert _ok(_call(server, "schedule.list"))["tasks"] == []
 
 
-def test_the_model_only_proposes_and_never_grants(services) -> None:
+def test_the_owner_asking_creates_the_task_without_grants(services) -> None:
     from types import SimpleNamespace
 
     from rinari.schedule.tools import ScheduleToolHost, schedule_tools
@@ -328,16 +328,30 @@ def test_the_model_only_proposes_and_never_grants(services) -> None:
     announced: list[dict] = []
     services.schedules.on_proposed = announced.append
     [tool] = schedule_tools(ScheduleToolHost(service=services.schedules, project_id=None))
-    ctx = SimpleNamespace(session_id="ses_1")
+    owner = SimpleNamespace(session_id="ses_1", origin_kind="user")
     result = tool.handler(
-        {**_task(), "grants": [{"capability": "shell.exec"}], "in_this_project": True}, ctx
+        {**_task(), "grants": [{"capability": "shell.exec"}], "in_this_project": True}, owner
     )
-    assert result.ok is True
-    assert result.data["status"] == "proposed"
-    assert result.data["proposal"]["grants"] == []
-    assert services.schedules.list() == []
+    assert result.ok is True and result.data["status"] == "created"
+    [task] = services.schedules.list()
+    assert task["id"] == result.data["task_id"]
+    # Asking is not granting: a run asks for what it needs.
+    assert task["grants"] == []
     # The desktop learns of it by event, whole (tool results are clipped).
     [event] = announced
-    assert event["session_id"] == "ses_1" and event["proposal"]["name"] == "Resumen diario"
-    bad = tool.handler({**_task(), "schedule": {"kind": "daily", "time": "25:00"}}, ctx)
+    assert event["created"] is True and event["task"]["id"] == task["id"]
+    assert event["session_id"] == "ses_1"
+    bad = tool.handler({**_task(), "schedule": {"kind": "daily", "time": "25:00"}}, owner)
     assert bad.ok is False and "HH:MM" in bad.error.message
+
+
+@pytest.mark.parametrize("origin", ["peer", "schedule"])
+def test_a_request_from_elsewhere_is_only_proposed(services, origin) -> None:
+    from types import SimpleNamespace
+
+    from rinari.schedule.tools import ScheduleToolHost, schedule_tools
+
+    [tool] = schedule_tools(ScheduleToolHost(service=services.schedules, project_id=None))
+    result = tool.handler(_task(), SimpleNamespace(session_id="ses_2", origin_kind=origin))
+    assert result.ok is True and result.data["status"] == "proposed"
+    assert services.schedules.list() == []

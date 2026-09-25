@@ -42,8 +42,13 @@ def schedule_tools(host: ScheduleToolHost):
         # Grants are the owner's to give, in the confirmation card.
         args.pop("grants", None)
         args.pop("enabled", None)
+        # The owner asking in their own turn is the confirmation. A turn that
+        # came from another pane, another task or a channel only proposes.
+        owner_asked = (getattr(ctx, "origin_kind", "user") or "user") == "user"
         try:
-            proposed = host.service.propose(args, session_id=getattr(ctx, "session_id", "") or "")
+            proposed = host.service.propose(
+                args, session_id=getattr(ctx, "session_id", "") or "", create=owner_asked
+            )
         except ScheduledTaskError as exc:
             return ToolResult(
                 ok=False,
@@ -52,12 +57,25 @@ def schedule_tools(host: ScheduleToolHost):
             )
         return ToolResult(
             ok=True,
-            data={
-                "status": "proposed",
-                "proposal": proposed["proposal"],
-                "description": proposed["description"],
-                "note": "Nothing is scheduled until the owner confirms this proposal.",
-            },
+            data=(
+                {
+                    "status": "created",
+                    "task_id": proposed["task"]["id"],
+                    "description": proposed["description"],
+                    "next_run_at": proposed["task"]["next_run_at"],
+                    "note": (
+                        "Scheduled. It has no permissions granted in advance: a run asks "
+                        "for what it needs. The owner can undo it from the notice."
+                    ),
+                }
+                if proposed["created"]
+                else {
+                    "status": "proposed",
+                    "proposal": proposed["proposal"],
+                    "description": proposed["description"],
+                    "note": "Nothing is scheduled until the owner confirms this proposal.",
+                }
+            ),
             origin="schedule",
         )
 
@@ -65,9 +83,11 @@ def schedule_tools(host: ScheduleToolHost):
         ToolDefinition(
             name="schedule.propose",
             description=(
-                "Propose a scheduled task when the owner asks for something to happen later "
-                "or repeatedly (a reminder, or a prompt Rinari runs at that time). Returns a "
-                "proposal the owner confirms in the app; nothing is scheduled until then. "
+                "Schedule a task when the owner asks for something to happen later or "
+                "repeatedly (a reminder, or a prompt Rinari runs at that time). When the owner "
+                "asked in this conversation it is created at once; a request that came from "
+                "another pane or task is only proposed for the owner to confirm. It never "
+                "carries permissions: a run asks for what it needs. "
                 "schedule is local time: {kind: once, at: 'YYYY-MM-DDTHH:MM'} | "
                 "{kind: interval, minutes} | {kind: daily, time: 'HH:MM'} | "
                 "{kind: weekly, days: [0-6, 0=Monday], time: 'HH:MM'}. For kind 'agent' the "
@@ -87,9 +107,10 @@ def schedule_tools(host: ScheduleToolHost):
                 "required": ["name", "kind", "schedule", "prompt"],
                 "additionalProperties": False,
             },
-            capabilities=("state.read",),
+            capabilities=("state.write",),
+            side_effects="local_reversible",
             always_loaded=False,
-            classify=lambda _i: ClassifiedAction("state.read"),
+            classify=lambda _i: ClassifiedAction("state.write"),
             handler=propose,
         )
     ]
