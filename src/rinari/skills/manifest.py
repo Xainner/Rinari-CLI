@@ -299,7 +299,9 @@ def validate_skill(m: SkillManifest, known_tools: set[str]) -> list[dict]:
             else {"code": "MISSING_BODY", "message": f"{m.name} has no instructions"}
         )
     for tool in m.required_tools:
-        if known_tools and tool not in known_tools:
+        # MCP, plugin and OpenAPI tools exist only once their source connects.
+        dynamic = tool.startswith(("mcp.", "mcp_", "plugin.", "openapi."))
+        if known_tools and tool not in known_tools and not dynamic:
             issues.append(
                 {
                     "code": "TOOL_NOT_FOUND",

@@ -1986,6 +1986,18 @@
             "string",
             "null"
           ]
+        },
+        "command": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "command_kind": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     },

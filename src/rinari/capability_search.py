@@ -148,7 +148,35 @@ def search_capabilities(
     return results
 
 
-def capability_search_tool(registry: ToolRegistry) -> ToolDefinition:
+def search_skills(skills, query: str, limit: int = 5) -> list[dict]:
+    """Skills whose name or description match: a procedure beats a tool hunt."""
+    terms = _terms(query)
+    if not terms:
+        return []
+    scored = []
+    for row in skills:
+        name = str(row.get("name") or "")
+        haystack = f"{name} {row.get('description') or ''}".lower()
+        score = sum((3 if term in name.lower() else 1) for term in terms if term in haystack)
+        if score:
+            scored.append((score, name, row))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [
+        {
+            "name": name,
+            "source": "skill",
+            "description": str(row.get("description") or "")[:300],
+            "active": bool(row.get("active")),
+            "how_to_use": f"skills.activate with name={name!r}, then follow its procedure",
+            "score": score,
+        }
+        for score, name, row in scored[:limit]
+    ]
+
+
+def capability_search_tool(registry: ToolRegistry, skills=None) -> ToolDefinition:
+    """`skills`: zero-arg callable returning the session's skill summaries."""
+
     def handler(arguments: dict, ctx) -> object:
         from rinari.tools.definition import ToolErrorCode, ToolErrorInfo, ToolResult
 
@@ -190,21 +218,35 @@ def capability_search_tool(registry: ToolRegistry) -> ToolDefinition:
                 )
         elif arguments.get("load"):
             load_error = "Dynamic exposure is not enabled in this context."
+        skill_matches: list[dict] = []
+        if skills is not None:
+            try:
+                skill_matches = search_skills(skills(), query)
+            except Exception:
+                skill_matches = []
+        if skill_matches:
+            guidance = (
+                f"A skill covers this: activate {skill_matches[0]['name']!r} with skills.activate "
+                "and follow its procedure before improvising with tools."
+            )
+        elif results:
+            guidance = "Use an exact returned tool name."
+        else:
+            guidance = (
+                "No registered capability matched. Check the integration configuration; "
+                "do not repeat the same search without new information."
+            )
         return ToolResult(
             ok=True,
             data={
                 "query": query,
+                "skills": skill_matches,
                 "results": results,
-                "matched": bool(results),
+                "matched": bool(results or skill_matches),
                 "loaded": loaded,
                 "load_error": load_error,
                 "diagnostics": list(registry.diagnostics),
-                "guidance": (
-                    "Use an exact returned tool name."
-                    if results
-                    else "No registered capability matched. Check the integration configuration; "
-                    "do not repeat the same search without new information."
-                ),
+                "guidance": guidance,
             },
             origin="capability",
         )
@@ -213,7 +255,8 @@ def capability_search_tool(registry: ToolRegistry) -> ToolDefinition:
         name="capability.search",
         description=(
             "Search the capabilities available this session across all sources "
-            "(native, plugin, MCP, OpenAPI and browser). Prefer typed "
+            "(skills, native, plugin, MCP, OpenAPI and browser). A matching skill is a "
+            "ready procedure: activate it first. Prefer typed "
             "API/connector matches over browser automation. Set load=true to "
             "activate matching schemas in the same call, within the schema budget."
         ),

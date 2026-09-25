@@ -2485,6 +2485,16 @@ class EngineServer:
         except EngineProtocolError:
             raise
         request, command_name = self._expand_command(session_id, params.get("command"), message)
+        origin = None
+        if command_name:
+            from rinari.commands import find_command
+
+            # Shown as a chip in the chat instead of the raw "/name".
+            origin = {
+                "kind": "user",
+                "command": command_name,
+                "command_kind": "command" if find_command(command_name) else "skill",
+            }
         enriched = (
             f"{attachment_context}\n\nUser request:\n{request}" if attachment_context else request
         )
@@ -2497,6 +2507,7 @@ class EngineServer:
             attachment_metadata=attachment_metadata,
             allow_unconfirmed_vision=params.get("allow_unconfirmed_vision") is True,
             command=command_name,
+            origin=origin,
         )
 
     def _command_list(self, params: dict[str, Any]) -> dict[str, Any]:
