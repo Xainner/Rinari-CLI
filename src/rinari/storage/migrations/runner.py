@@ -3,6 +3,15 @@
 Migrations are numbered .sql files (NNNN_name.sql) applied in order.
 Each migration runs in a single transaction; a failure rolls back all
 of its statements and leaves the schema_migrations record untouched.
+
+A version is identified by its number *and* its name. Two branches once
+shipped different 0035-0037 migrations; a database migrated by one of them
+then skipped the other's by number and ran with a broken schema. Now a
+recorded version whose name differs from this build's file of the same
+number stops the Engine with a clear error instead of passing silently, and
+migrations that had to move keep their old name in `SUPERSEDED` so a
+database that already applied them under the old number is not migrated
+twice.
 """
 
 from __future__ import annotations
@@ -16,6 +25,14 @@ from rinari.shared.errors import ConfigurationError
 from rinari.storage.db import Database
 
 _MIGRATION_FILE = re.compile(r"^(\d{4})_[A-Za-z0-9_]+\.sql$")
+
+# New name -> the name it was applied under before being renumbered. They
+# collided with 0035_voice, 0036_turn_steering and 0037_voice_context.
+SUPERSEDED: dict[str, str] = {
+    "0038_session_pins": "0035_session_pins",
+    "0039_skill_records": "0036_skill_records",
+    "0040_scheduled_tasks": "0037_scheduled_tasks",
+}
 _DEFAULT_DIR = Path(__file__).parent
 
 
@@ -59,14 +76,49 @@ class MigrationRunner:
         row = self._db.query_one("SELECT COALESCE(MAX(version), 0) AS v FROM schema_migrations")
         return int(row["v"]) if row else 0
 
+    def _recorded(self) -> dict[int, str]:
+        rows = self._db.query("SELECT version, name FROM schema_migrations")
+        return {int(row["version"]): str(row["name"]) for row in rows}
+
+    def _adopt_superseded(self, migrations: list[Migration]) -> None:
+        """A renumbered migration applied under its old number counts as
+        applied under the new one; the old row is dropped so that number is
+        free for whatever migration really owns it."""
+        recorded = self._recorded()
+        by_name = {name: version for version, name in recorded.items()}
+        for migration in migrations:
+            old = SUPERSEDED.get(migration.name)
+            if old is None or old not in by_name or migration.version in recorded:
+                continue
+            with self._db.transaction():
+                self._db.execute(
+                    "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
+                    (migration.version, migration.name, _now_iso(self._clock)),
+                )
+                self._db.execute(
+                    "DELETE FROM schema_migrations WHERE version = ? AND name = ?",
+                    (by_name[old], old),
+                )
+
     def migrate(self) -> list[int]:
         """Apply pending migrations; returns the versions applied in this run."""
-        applied_versions = {
-            int(r["version"]) for r in self._db.query("SELECT version FROM schema_migrations")
-        }
+        migrations = discover_migrations(self._directory)
+        self._adopt_superseded(migrations)
+        recorded = self._recorded()
         applied_now: list[int] = []
-        for migration in discover_migrations(self._directory):
-            if migration.version in applied_versions:
+        for migration in migrations:
+            if migration.version in recorded:
+                if recorded[migration.version] != migration.name:
+                    raise ConfigurationError(
+                        f"Database migration {migration.version} was applied as "
+                        f"{recorded[migration.version]!r}, but this build ships "
+                        f"{migration.name!r}.",
+                        hint=(
+                            "The state database was migrated by a different build of Rinari "
+                            "(another branch). Use the build that migrated it, or restore a "
+                            "backup of ~/.rinari/state.db."
+                        ),
+                    )
                 continue
             sql = migration.path.read_text(encoding="utf-8")
             statements = [s.strip() for s in sql.split(";") if s.strip()]

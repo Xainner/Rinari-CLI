@@ -7,6 +7,7 @@ from rinari.shared.clock import FakeClock
 from rinari.shared.errors import ConfigurationError
 from rinari.storage.db import Database
 from rinari.storage.migrations import MigrationRunner
+from rinari.storage.migrations.runner import SUPERSEDED
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BUNDLED_0001 = REPO_ROOT / "src/rinari/storage/migrations/0001_initial.sql"
@@ -113,9 +114,9 @@ def test_migrate_fresh_database_applies_all(db):
         32,
         33,
         34,
-        35,
-        36,
-        37,
+        38,
+        39,
+        40,
     ]
     assert _table_names(db) == TABLES_AFTER_MIGRATIONS
 
@@ -124,7 +125,7 @@ def test_migrate_is_idempotent(db):
     runner = MigrationRunner(db, FakeClock())
     runner.migrate()
     assert runner.migrate() == []
-    assert runner.current_version() == 37
+    assert runner.current_version() == 40
 
 
 def _previous_home_migrations(tmp_path: Path, upto: int) -> Path:
@@ -251,3 +252,57 @@ def test_verify_raises_when_db_version_not_in_supported_set(db, tmp_path):
     # Version 1 is not in the newer set: verify() must object.
     with pytest.raises(ConfigurationError):
         runner2.verify()
+
+
+# -- migrations that two branches numbered alike ---------------------------------
+
+
+def _home_with(tmp_path: Path, extra: dict[str, str]) -> Path:
+    """0001..0034 plus other migrations, as another build would have shipped them."""
+    custom = _previous_home_migrations(tmp_path, upto=34)
+    for name, sql in extra.items():
+        (custom / name).write_text(sql, encoding="utf-8")
+    return custom
+
+
+def test_a_home_migrated_by_the_voice_branch_gets_the_missing_migrations(db, tmp_path):
+    """The owner's home had 0035_voice..0037_voice_context: the pins, skill
+    records and schedules (now 0038..0040) must still be applied."""
+    voice = _home_with(
+        tmp_path,
+        {
+            "0035_voice.sql": "CREATE TABLE voice_probe (id TEXT)",
+            "0036_turn_steering.sql": "CREATE TABLE steering_probe (id TEXT)",
+            "0037_voice_context.sql": "CREATE TABLE voice_context_probe (id TEXT)",
+        },
+    )
+    MigrationRunner(db, FakeClock(), directory=voice).migrate()
+    assert MigrationRunner(db, FakeClock()).migrate() == [38, 39, 40]
+    columns = {row["name"] for row in db.query("PRAGMA table_info(sessions)")}
+    assert "pinned_at" in columns
+    assert {"skill_records", "scheduled_tasks", "scheduled_runs"} <= _table_names(db)
+
+
+def test_a_home_that_applied_the_old_numbers_is_not_migrated_twice(db, tmp_path):
+    migrations = BUNDLED_0001.parent
+    old = _home_with(
+        tmp_path,
+        {
+            f"{old_name}.sql": (migrations / f"{new_name}.sql").read_text(encoding="utf-8")
+            for new_name, old_name in SUPERSEDED.items()
+        },
+    )
+    MigrationRunner(db, FakeClock(), directory=old).migrate()
+    runner = MigrationRunner(db, FakeClock())
+    assert runner.migrate() == []  # no duplicate pinned_at column, nothing re-run
+    recorded = {row["version"]: row["name"] for row in db.query("SELECT * FROM schema_migrations")}
+    assert recorded[38] == "0038_session_pins" and recorded[40] == "0040_scheduled_tasks"
+    # The old numbers are free again for the migrations that own them.
+    assert not {35, 36, 37} & set(recorded)
+
+
+def test_a_version_applied_under_another_name_stops_with_a_clear_error(db, tmp_path):
+    other = _home_with(tmp_path, {"0038_something_else.sql": "CREATE TABLE other_probe (id TEXT)"})
+    MigrationRunner(db, FakeClock(), directory=other).migrate()
+    with pytest.raises(ConfigurationError, match="0038_something_else"):
+        MigrationRunner(db, FakeClock()).migrate()

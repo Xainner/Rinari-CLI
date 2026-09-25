@@ -1,4 +1,4 @@
--- 0036: what the Engine knows about a skill beyond its folder. Where it came
+-- 0039 (shipped briefly as 0036): what the Engine knows about a skill beyond its folder. Where it came
 -- from (provenance and content hash, to tell a local edit from an update),
 -- whether the owner turned it off, and later whether it is still waiting for
 -- approval (learned skills). Keyed by the resolved skill name, so turning off
