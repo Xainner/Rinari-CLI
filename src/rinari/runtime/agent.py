@@ -120,6 +120,10 @@ class AgentContext:
     pending_origin: dict[str, Any] | None = None
     allow_unconfirmed_vision: bool = False
     collect_subagent_results: Callable[[CancellationToken], str | None] | None = None
+    # Messages the owner sent while this turn runs (steering). Each call
+    # hands over what arrived since the last one; the loop puts them in the
+    # history after the current step and the model reads them next.
+    collect_steering: Callable[[], list[ChatMessage]] | None = None
 
 
 class AgentLoop:
@@ -256,6 +260,7 @@ class AgentLoop:
                         governor=governor,
                     )
                 budget.reserve_model_call(model_only=True)
+            self._take_steering(ctx)
             request = self._build_request(ctx)
             request = replace(request, usage_observer=self._emit_activity)
             usage_call_id = request.usage_call_id
@@ -357,6 +362,13 @@ class AgentLoop:
             subagent_results = None
             if not response.has_tool_calls and ctx.collect_subagent_results is not None:
                 subagent_results = ctx.collect_subagent_results(cancel)
+            # A message that arrived while the model was answering keeps the
+            # turn going: the answer is not final, the model replies to it.
+            steered = (
+                ctx.collect_steering()
+                if not response.has_tool_calls and ctx.collect_steering is not None
+                else []
+            )
             if response.content:
                 self._emit_activity(
                     "model.content.completed",
@@ -364,7 +376,7 @@ class AgentLoop:
                         "model_call_id": model_call_id,
                         "content": response.content,
                         "output_kind": "progress"
-                        if response.has_tool_calls or subagent_results
+                        if response.has_tool_calls or subagent_results or steered
                         else "final",
                         "duration_ms": duration_ms,
                     },
@@ -439,6 +451,9 @@ class AgentLoop:
                             + subagent_results
                         )
                     )
+                if steered:
+                    self._append_steering(ctx, steered)
+                if subagent_results or steered:
                     continue
                 kind = "truncated" if response.stop_reason is StopReason.MAX_TOKENS else "answer"
                 self._emit_hook(
@@ -842,6 +857,21 @@ class AgentLoop:
         )
 
     # -- internals ------------------------------------------------------------
+
+    def _take_steering(self, ctx: AgentContext) -> None:
+        if ctx.collect_steering is not None:
+            self._append_steering(ctx, ctx.collect_steering())
+
+    def _append_steering(self, ctx: AgentContext, messages: list[ChatMessage]) -> None:
+        for message in messages:
+            ctx.history.append(message)
+            self._emit_activity(
+                "steer.applied",
+                {
+                    "steer_id": (message.origin or {}).get("steer_id"),
+                    "content": message.display_content or message.content,
+                },
+            )
 
     def _build_request(self, ctx: AgentContext, wire_tools=None) -> ModelRequest:
         context = replace(

@@ -294,3 +294,12 @@ def test_validate_provider_type() -> None:
     with pytest.raises(InvalidUsageError):
         validate_provider_type("custom", "api-key", protocol="bogus")
     assert set(PROVIDER_TYPES) == {"openai", "anthropic", "custom"}
+
+
+def test_tool_results_carry_only_the_chat_completions_fields() -> None:
+    """Strict endpoints (OpenCode Go) reject a "name" on tool messages."""
+    from rinari.models.types import ChatMessage
+    from rinari.providers.adapters.openai_compatible import _message_to_openai
+
+    wire = _message_to_openai(ChatMessage.tool_result("call_1", "fs.list", "ok"))
+    assert wire == {"role": "tool", "content": "ok", "tool_call_id": "call_1"}

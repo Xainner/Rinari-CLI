@@ -888,7 +888,19 @@ counts from CompactState, no invented pressure %), `usage.get` (model calls
 pricing unknown). No `pty.*` in v1 (see the post-v1 runtime entry below).
 Slice 11 adds workflow: `session.queue.add/list/clear` (bounded FIFO,
 auto-runs after the live turn with normal turn boundaries + approvals,
-`session.queue.updated` events), `profile_bundle.list/get/create/apply/remove`
+`session.queue.updated` events). Steering (`turn_steering_v1`):
+`session.turn.steer {session_id, message}` puts a message into the running
+turn instead of after it. Nothing is interrupted: the loop adds it to the
+history after the current step (a tool round, or an answer, which then stops
+being final) and the model continues with it. The model reads a short note
+that the owner sent it mid-task; the chat shows only the owner's text
+(`origin.steer_id`). Event `steer.applied {steer_id, content}` marks where it
+was read. With no turn running it is an ordinary message (`delivery:
+"queued"`, started at once); one that arrives while the turn is finishing
+becomes the next turn; one left unread by a turn that was stopped or failed
+comes back in `steer.returned {messages, reason}` instead of starting work
+the owner just stopped. Desktop only for now: the REPL reads input between
+turns. `profile_bundle.list/get/create/apply/remove`
 (soul + mode + per-agent models applied through the existing setters with
 an applied-report; no policy invention), and `rinari desktop [path] [--session id]`
 handoff to Rinari Agent (`rinari code` remains a compatibility alias).

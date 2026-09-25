@@ -427,9 +427,10 @@ def _message_to_openai(
             for tc in message.tool_calls
         ]
     if message.role == ROLE_TOOL:
+        # Chat Completions tool messages carry role, content and tool_call_id
+        # only. "name" belonged to the retired function role; strict
+        # endpoints (OpenCode Go/Zen) reject it with HTTP 400.
         msg["tool_call_id"] = message.tool_call_id
-        if message.name:
-            msg["name"] = message.name
     return msg
 
 

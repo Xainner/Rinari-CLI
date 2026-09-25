@@ -94,6 +94,9 @@ CAPABILITIES: dict[str, bool] = {
     # Desktop terminal: ConPTY on Windows, raw keystrokes, pty.shells, tail stream.
     "desktop_terminal_v1": True,
     "scheduled_tasks_v1": True,
+    # session.turn.steer: a message for the running turn, read after its
+    # current step; events steer.applied / steer.returned.
+    "turn_steering_v1": True,
 }
 
 
