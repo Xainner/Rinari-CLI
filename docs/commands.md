@@ -959,10 +959,11 @@ seeded as session grants of that session: creating the task approves them.
 Anything else asks as usual: the run turns `needs_you`, and if the approval
 expires the run ends `blocked` with what it needed as its reason.
 `schedule.grant` adds a capability to a task by task id or by the run's
-session ("allow for this task"). The model only drafts tasks with the lazy
-`schedule.propose` tool (validated, grants stripped, nothing stored), which
-the desktop receives whole as a `schedule.proposed` event; the owner creates
-them.
+session ("allow for this task"). The lazy `schedule.propose` tool creates
+the task at once when the owner asked in their own turn (`origin_kind` user)
+and only proposes it otherwise (another pane, another task); either way it
+carries no grants, so a run asks for what it needs. The desktop receives it
+whole as a `schedule.proposed` event (`created`, and `task` when created).
 The envelope contract is unchanged across slices.
 
 ---

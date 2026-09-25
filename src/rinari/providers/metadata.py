@@ -120,6 +120,15 @@ def model_metadata(provider, model_id):
         metadata.update(reasoning_effort=False, reasoning_levels=[])
     elif product in ("openai", "chatgpt", "github-copilot") and entry.get("reasoning") is True:
         metadata.update(reasoning_effort=True, reasoning_levels=["low", "medium", "high"])
+    elif (
+        product in ("opencode-go", "opencode-zen")
+        and transport == "chat"
+        and entry.get("reasoning") is True
+    ):
+        # Checked against OpenCode Go (2026-09-24): deepseek-v4-pro, glm-5.3
+        # and kimi-k3 accept `reasoning_effort` on /chat/completions and
+        # return reasoning with it.
+        metadata.update(reasoning_effort=True, reasoning_levels=["low", "medium", "high"])
     elif product not in ("custom", "chatgpt", "github-copilot") and transport == "chat":
         # Advertising thought generation is not evidence of the OpenAI effort dialect.
         metadata.update(reasoning_effort=False, reasoning_levels=[])

@@ -125,18 +125,29 @@ class ScheduleService:
         """A task as `create` would store it, without storing it (proposals)."""
         return self._normalize(raw)
 
-    def propose(self, raw: dict[str, Any], *, session_id: str = "") -> dict[str, Any]:
-        """Validate a model's draft and announce it; nothing is stored."""
+    def propose(
+        self, raw: dict[str, Any], *, session_id: str = "", create: bool = False
+    ) -> dict[str, Any]:
+        """Validate a model's draft and announce it.
+
+        With `create` (the owner asked in their own turn) the task is created
+        at once; otherwise nothing is stored and the owner confirms it. Either
+        way it carries no grants: permissions are only the owner's to give,
+        and anything a run needs is asked for when it runs."""
         draft = self._normalize(raw)
-        draft["grants"] = []  # the owner's to give, when confirming
-        proposal = {
+        draft["grants"] = []
+        result: dict[str, Any] = {
             "proposal": draft,
             "description": describe(parse_schedule(draft["schedule"])),
             "session_id": session_id,
+            "created": False,
         }
+        if create:
+            result["task"] = self.create(draft)
+            result["created"] = True
         if self.on_proposed is not None:
-            self.on_proposed(proposal)
-        return proposal
+            self.on_proposed(result)
+        return result
 
     # -- tasks -------------------------------------------------------------
 

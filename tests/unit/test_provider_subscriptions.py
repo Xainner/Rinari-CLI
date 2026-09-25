@@ -826,3 +826,23 @@ def test_chatgpt_catalog_asks_as_a_current_client_and_drops_hidden_models():
     assert models[0].capabilities["max_context_tokens"] == 400000
     assert models[0].capabilities["vision"] is True
     assert seen[0].url.params["client_version"] == CODEX_CLIENT_VERSION
+
+
+def test_opencode_chat_models_that_reason_offer_effort():
+    """Checked live on OpenCode Go (2026-09-24): chat models the catalog marks
+    as reasoning accept `reasoning_effort`; the others stay without it."""
+    from types import SimpleNamespace
+
+    from rinari.providers.metadata import model_metadata
+
+    provider = SimpleNamespace(
+        type="custom",
+        endpoint="https://opencode.ai/zen/go/v1",
+        settings={"product_id": "opencode-go"},
+        alias="go",
+    )
+    reasoning = model_metadata(provider, "deepseek-v4-pro")
+    assert reasoning["transport"] == "chat"
+    assert reasoning["reasoning_effort"] is True
+    assert reasoning["reasoning_levels"] == ["low", "medium", "high"]
+    assert model_metadata(provider, "deepseek-flash")["reasoning_effort"] is False
