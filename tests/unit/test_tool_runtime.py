@@ -269,7 +269,9 @@ def test_chat_shell_asks(project) -> None:
     assert "chat-ok" in result.data["stdout"].replace("\r", "")
 
 
-def test_symlink_escape_asks_denied(project) -> None:
+def test_symlink_escape_is_judged_by_its_real_target(project) -> None:
+    """Reads are free anywhere now; a write through a link that leaves the
+    project is a write outside it, and asks."""
     import os
 
     tmp_path, root, outside = project
@@ -279,9 +281,10 @@ def test_symlink_escape_asks_denied(project) -> None:
         pytest.skip(f"symlinks not permitted: {exc}")
     ctx = _ctx(tmp_path, root)
     runtime, _ = _runtime(ctx, tmp_path, answer="n")
-    result = runtime.execute("fs.read", {"path": "link.txt"}, ctx)
+    result = runtime.execute("fs.write", {"path": "link.txt", "content": "changed"}, ctx)
     assert result.ok is False
     assert result.error.code is ToolErrorCode.APPROVAL_DENIED
+    assert outside.read_text(encoding="utf-8") == "outside"
 
 
 # -- pipeline: redaction, spill, events, cancellation -----------------------------
