@@ -36,6 +36,7 @@ from rinari.engine_protocol.messages import event
 from rinari.engine_protocol.operations import OperationStore
 from rinari.engine_protocol.peers import PeerBroker
 from rinari.engine_protocol.token_usage import TurnTokenTracker
+from rinari.models.types import ChatMessage
 from rinari.policy.approvals import ApprovalRequest
 from rinari.shared.clock import now_iso
 from rinari.shared.errors import CancelledError, RinariError
@@ -52,6 +53,12 @@ MAX_DETAIL_CHARS = 2000
 MAX_STREAM_CHARS = 64_000
 MAX_QUEUE_DEPTH = 20
 MAX_QUEUE_MESSAGE_CHARS = 32768
+# What the model reads before a message the owner sent mid-turn. The chat
+# shows only the owner's text (display content).
+STEER_PREFIX = (
+    "[The user sent this while you were working. Take it into account from here on; "
+    "it may change or refine the current task.]\n\n"
+)
 DECISIONS = ("deny", "allow_once", "allow_session")
 _DECISION_TO_ANSWER = {"deny": "n", "allow_once": "y", "allow_session": "s"}
 
@@ -99,6 +106,13 @@ class _ActiveTurn:
     activity_keys: dict[str, int] = field(default_factory=dict)
     next_activity_seq: int = 1
     token_usage: TurnTokenTracker = field(default_factory=TurnTokenTracker)
+    # Steering: messages the owner sent while the turn runs, waiting for the
+    # loop to pick them up after the current step. Closed (under the
+    # manager lock) once the turn is finishing; later messages queue.
+    steering: list[ChatMessage] = field(default_factory=list)
+    steering_open: bool = True
+    steer_count: int = 0
+    terminal_event: str | None = None
     governor: dict[str, Any] = field(
         default_factory=lambda: {
             "execution": "automatic",
@@ -734,6 +748,8 @@ class TurnManager:
             turn.session.context.pending_attachments = tuple(turn.attachment_metadata or ())
             turn.session.context.pending_display_content = turn.display_message
             turn.session.context.pending_origin = dict(turn.origin) if turn.origin else None
+            if not turn.compaction_only:
+                turn.session.context.collect_steering = lambda: self._drain_steering(turn)
             if turn.compaction_only:
                 from rinari.cli.agent_runtime import compact_session
                 from rinari.runtime.agent import TurnResult
@@ -836,13 +852,16 @@ class TurnManager:
                         "error": "Parent turn ended before the agent returned a result.",
                     },
                 )
+            leftover = self._close_steering(turn)
             turn.done.set()
             if turn.session is not None:
+                turn.session.context.collect_steering = None
                 # Browser belongs to the desktop session, not this individual turn.
                 turn.session.context.tool_ctx = replace(turn.session.context.tool_ctx, browser=None)
                 turn.session.end()
             self._local.turn_id = None
             self._local.token = None
+            self._settle_steering(turn, leftover)
             self._start_next_queued(turn.session_id)
 
     def _prepare_session(self, turn: _ActiveTurn, record: Any, reasoning_effort: str | None) -> Any:
@@ -947,6 +966,103 @@ class TurnManager:
             if ok:
                 return value
             raise value
+
+    # -- steering ----------------------------------------------------------
+    # A message sent while a turn runs goes into that turn: the loop adds it
+    # to the history after the current step (a tool round or an answer) and
+    # the model continues with it. Nothing is interrupted. One that arrives
+    # while the turn is finishing becomes the next turn; one left unread by a
+    # turn that was stopped or failed goes back to the owner (`steer.returned`)
+    # instead of starting work they just stopped.
+
+    def steer(self, session_id: str, message: str) -> dict[str, Any]:
+        record = self._services.sessions.show(session_id)
+        text = (message or "").strip()
+        if not text:
+            raise EngineProtocolError(errors.INVALID_PARAMS, "Message is empty.")
+        if len(text) > MAX_QUEUE_MESSAGE_CHARS:
+            raise EngineProtocolError(
+                errors.INVALID_PARAMS,
+                f"Message exceeds {MAX_QUEUE_MESSAGE_CHARS} chars.",
+            )
+        with self._lock:
+            turn = next(
+                (
+                    active
+                    for active in self._turns.values()
+                    if active.session_id == record.id and not active.done.is_set()
+                ),
+                None,
+            )
+            if turn is not None and turn.steering_open and not turn.compaction_only:
+                if len(turn.steering) >= MAX_QUEUE_DEPTH:
+                    raise EngineProtocolError(
+                        errors.INVALID_PARAMS,
+                        f"Too many unread messages ({MAX_QUEUE_DEPTH}).",
+                    )
+                turn.steer_count += 1
+                steer_id = f"{turn.turn_id}:steer_{turn.steer_count}"
+                turn.steering.append(
+                    ChatMessage(
+                        role="user",
+                        content=STEER_PREFIX + text,
+                        display_content=text,
+                        origin={"kind": "user", "steer_id": steer_id},
+                    )
+                )
+                return {
+                    "session_id": record.id,
+                    "delivery": "steer",
+                    "turn_id": turn.turn_id,
+                    "steer_id": steer_id,
+                }
+        # No turn to steer (it just ended, or is finishing): an ordinary
+        # message for the next turn, started now when the session is idle.
+        queued = self.queue_add(record.id, text)
+        self._start_next_queued(record.id)
+        return {"session_id": record.id, "delivery": "queued", "position": queued["position"]}
+
+    def _drain_steering(self, turn: _ActiveTurn) -> list[ChatMessage]:
+        with self._lock:
+            taken, turn.steering = turn.steering, []
+        return taken
+
+    def _close_steering(self, turn: _ActiveTurn) -> list[ChatMessage]:
+        with self._lock:
+            turn.steering_open = False
+            taken, turn.steering = turn.steering, []
+        return taken
+
+    def _settle_steering(self, turn: _ActiveTurn, leftover: list[ChatMessage]) -> None:
+        if not leftover:
+            return
+        texts = [item.display_content or item.content for item in leftover]
+        if turn.terminal_event == "turn.completed":
+            with self._lock:
+                self._queue.setdefault(turn.session_id, collections.deque()).appendleft(
+                    _QueuedPrompt(message="\n\n".join(texts), origin={"kind": "user"})
+                )
+            self._emit(
+                event(
+                    "session.queue.updated",
+                    {
+                        "session_id": turn.session_id,
+                        "pending": self._pending_count(turn.session_id),
+                    },
+                )
+            )
+            return
+        self._emit(
+            event(
+                "steer.returned",
+                {
+                    "session_id": turn.session_id,
+                    "turn_id": turn.turn_id,
+                    "messages": texts,
+                    "reason": (turn.terminal_event or "turn.failed").removeprefix("turn."),
+                },
+            )
+        )
 
     # -- prompt queue ------------------------------------------------------
     # Queued messages run FIFO after the live turn ends, preserving normal
@@ -1295,6 +1411,7 @@ class TurnManager:
                     "turn.stopped",
                 }:
                     turn.terminal_emitted = True
+                    turn.terminal_event = event_name
 
         return _serialized
 
@@ -1309,6 +1426,8 @@ class TurnManager:
             )
         if payload.get("vision_id"):
             return f"vision:{payload['vision_id']}:{payload.get('attempt_id', 1)}"
+        if event_name == "steer.applied":
+            return f"steer:{payload.get('steer_id')}"
         if payload.get("tool_call_id"):
             return f"tool:{payload['tool_call_id']}"
         if payload.get("model_call_id"):

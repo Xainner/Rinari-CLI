@@ -236,6 +236,7 @@ class EngineServer:
         self._dispatcher.register("operation.get", self._operation_get)
         self._dispatcher.register("operation.cancel", self._operation_cancel)
         self._dispatcher.register("session.turn.cancel", self._turn_cancel)
+        self._dispatcher.register("session.turn.steer", self._turn_steer)
         self._dispatcher.register("turn.changes.get", self._turn_changes_get)
         self._dispatcher.register("turn.changes.review", self._turn_changes_review)
         self._dispatcher.register("turn.changes.undo.preview", self._turn_changes_undo_preview)
@@ -2595,6 +2596,14 @@ class EngineServer:
                 INVALID_PARAMS, "Param 'session_id' must be a non-empty string."
             )
         return self._turns.cancel_turn(session_id)
+
+    def _turn_steer(self, params: dict[str, Any]) -> dict[str, Any]:
+        """A message for the running turn; queued as the next one if none runs."""
+        session_id = self._need_str(params, "session_id")
+        message = params.get("message")
+        if not isinstance(message, str):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'message' must be a string.")
+        return self._turns.steer(session_id, message)
 
     def _turn_changes_get(self, params: dict[str, Any]) -> dict[str, Any]:
         return self._services.changes.get(self._need_str(params, "turn_id"))

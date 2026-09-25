@@ -1522,3 +1522,176 @@ def test_starting_a_turn_refreshes_session_recency(server, tmp_path, monkeypatch
     after = server.handle_line(_req("recency-s2", "session.get", {"ref": session_id}))
     assert after is not None and after["ok"] is True
     assert after["result"]["session"]["last_active_at"] > was
+
+
+# -- steering (session.turn.steer) ---------------------------------------------
+
+
+class GatedModel(FakeModel):
+    """First call waits until the test has sent its steering message."""
+
+    def __init__(self, scripted, gate: threading.Event) -> None:
+        super().__init__(scripted)
+        self.gate = gate
+        self.entered = threading.Event()
+
+    def invoke(self, request: ModelRequest) -> ModelResponse:
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            self.entered.set()
+            assert self.gate.wait(10)
+        return self.scripted.pop(0)
+
+
+def _steer(server, session_id, message, tag="steer"):
+    response = server.handle_line(
+        _req(tag, "session.turn.steer", {"session_id": session_id, "message": message})
+    )
+    assert response is not None
+    return response
+
+
+def test_steering_is_read_after_the_current_tool_round(
+    server, services, tmp_path, monkeypatch
+) -> None:
+    from rinari.models.types import ToolCall
+
+    sid = _create_chat(server, tmp_path, "steer-tool")
+    services.sessions.set_permission(sid, "full-access")
+    gate = threading.Event()
+    fake = GatedModel(
+        [
+            ModelResponse(
+                content="Miro la carpeta",
+                tool_calls=(ToolCall("steer-list", "fs.list", {"path": str(tmp_path)}),),
+            ),
+            _answer(),
+        ],
+        gate,
+    )
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda *args: fake)
+    assert server.handle_line(
+        _req("steer-t", "session.turn.start", {"session_id": sid, "message": "revisa"})
+    )["ok"]
+    assert fake.entered.wait(10)
+    steered = _steer(server, sid, "solo los .py, por favor")
+    assert steered["ok"] is True
+    assert steered["result"]["delivery"] == "steer"
+    gate.set()
+    events = _collect_until(server, sid)
+
+    assert events[-1]["event"] == "turn.completed"
+    second = fake.requests[1].messages
+    tool_at = next(i for i, m in enumerate(second) if m.tool_call_id == "steer-list")
+    steer_at = next(i for i, m in enumerate(second) if "solo los .py" in (m.content or ""))
+    assert steer_at == tool_at + 1
+    assert second[steer_at].role == "user"
+    assert second[steer_at].content.startswith("[The user sent this while you were working.")
+    applied = [e for e in events if e["event"] == "steer.applied"]
+    assert [e["payload"]["content"] for e in applied] == ["solo los .py, por favor"]
+    assert applied[0]["payload"]["steer_id"] == steered["result"]["steer_id"]
+    history = server.handle_line(_req("steer-h", "session.history", {"ref": sid}))["result"]
+    users = [m for m in history["messages"] if m["role"] == "user"]
+    assert [m["content"] for m in users] == ["revisa", "solo los .py, por favor"]
+    assert users[1]["origin"]["steer_id"] == steered["result"]["steer_id"]
+    # A reload finds it where it was read.
+    timeline = server.handle_line(_req("steer-tl", "session.timeline", {"ref": sid}))["result"]
+    items = timeline["turns"][-1]["items"]
+    replayed = [item for item in items if item["event"] == "steer.applied"]
+    assert [item["content"] for item in replayed] == ["solo los .py, por favor"]
+
+
+def test_steering_during_an_answer_keeps_the_turn_going(server, tmp_path, monkeypatch) -> None:
+    sid = _create_chat(server, tmp_path, "steer-answer")
+    gate = threading.Event()
+    fake = GatedModel(
+        [
+            ModelResponse(content="Primera versión", stop_reason=StopReason.END_TURN),
+            ModelResponse(content="Versión corta", stop_reason=StopReason.END_TURN),
+        ],
+        gate,
+    )
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda *args: fake)
+    assert server.handle_line(
+        _req("sa-t", "session.turn.start", {"session_id": sid, "message": "escribe"})
+    )["ok"]
+    assert fake.entered.wait(10)
+    assert _steer(server, sid, "más corto")["result"]["delivery"] == "steer"
+    gate.set()
+    events = _collect_until(server, sid)
+
+    assert len(fake.requests) == 2
+    assert [m.role for m in fake.requests[1].messages[-2:]] == ["assistant", "user"]
+    completed = [e for e in events if e["event"] == "model.content.completed"]
+    assert [e["payload"]["output_kind"] for e in completed] == ["progress", "final"]
+    assert [e["event"] for e in events].count("turn.completed") == 1
+    assert events[-1]["payload"]["content"] == "Versión corta"
+
+
+def test_steering_without_a_running_turn_starts_one(server, tmp_path, monkeypatch) -> None:
+    sid = _create_chat(server, tmp_path, "steer-idle")
+    fake = FakeModel(scripted=[_answer()])
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda *args: fake)
+    steered = _steer(server, sid, "hola")
+    assert steered["ok"] is True
+    assert steered["result"]["delivery"] == "queued"
+    events = _collect_until(server, sid)
+    assert events[-1]["event"] == "turn.completed"
+    assert fake.requests[0].messages[-1].content == "hola"
+
+
+def test_unread_steering_goes_back_when_the_turn_is_stopped(server, tmp_path, monkeypatch) -> None:
+    sid = _create_chat(server, tmp_path, "steer-stop")
+    gate, abort = threading.Event(), threading.Event()
+    fake = FakeBlockingModel(scripted=[_answer()], gate=gate, abort=abort)
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda *args: fake)
+    assert server.handle_line(
+        _req("ss-t", "session.turn.start", {"session_id": sid, "message": "lento"})
+    )["ok"]
+    deadline = time.time() + 10
+    while not fake.requests and time.time() < deadline:
+        time.sleep(0.02)
+    assert _steer(server, sid, "y además esto")["result"]["delivery"] == "steer"
+    assert server.handle_line(_req("ss-c", "session.turn.cancel", {"session_id": sid}))["ok"]
+    seen: list = []
+    deadline = time.time() + 10
+    while time.time() < deadline and not any(e["event"] == "steer.returned" for e in seen):
+        seen += [e for e in server.drain_events() if e["payload"].get("session_id") == sid]
+        time.sleep(0.02)
+    abort.set()
+    assert "turn.cancelled" in [e["event"] for e in seen]
+    returned = next(e for e in seen if e["event"] == "steer.returned")
+    assert returned["payload"]["messages"] == ["y además esto"]
+    assert returned["payload"]["reason"] == "cancelled"
+    time.sleep(0.2)
+    assert not server.has_active_turns()
+    assert (
+        server.handle_line(_req("ss-q", "session.queue.list", {"session_id": sid}))["result"][
+            "pending"
+        ]
+        == 0
+    )
+
+
+def test_steering_validates_the_message(server, tmp_path) -> None:
+    sid = _create_chat(server, tmp_path, "steer-bad")
+    assert _steer(server, sid, "   ")["error"]["code"] == "INVALID_PARAMS"
+    missing = server.handle_line(_req("sb", "session.turn.steer", {"session_id": sid}))
+    assert missing is not None and missing["error"]["code"] == "INVALID_PARAMS"
+
+
+def test_steering_that_arrives_while_the_turn_finishes_is_the_next_turn(server, tmp_path) -> None:
+    from rinari.models.types import ChatMessage
+
+    sid = _create_chat(server, tmp_path, "steer-late")
+    turn = turns_module._ActiveTurn(
+        turn_id="turn_late", session_id=sid, session=None, done=threading.Event()
+    )
+    turn.terminal_event = "turn.completed"
+    late = [
+        ChatMessage(role="user", content="x", display_content="una cosa"),
+        ChatMessage(role="user", content="y", display_content="y otra"),
+    ]
+    server.turns._settle_steering(turn, late)
+    queued = server.handle_line(_req("sl", "session.queue.list", {"session_id": sid}))
+    assert queued["result"]["queue"] == ["una cosa\n\ny otra"]

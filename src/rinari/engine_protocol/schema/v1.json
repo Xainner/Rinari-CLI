@@ -283,6 +283,7 @@
         "operation.get",
         "operation.cancel",
         "session.turn.cancel",
+        "session.turn.steer",
         "session.events",
         "session.timeline",
         "approval.resolve",
@@ -528,7 +529,9 @@
         "schedule.run.started",
         "schedule.run.needs_you",
         "schedule.run.completed",
-        "schedule.proposed"
+        "schedule.proposed",
+        "steer.applied",
+        "steer.returned"
       ]
     },
     "attachment": {
@@ -1971,6 +1974,12 @@
           ]
         },
         "run_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "steer_id": {
           "type": [
             "string",
             "null"
