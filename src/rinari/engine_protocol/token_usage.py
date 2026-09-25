@@ -36,6 +36,7 @@ class TurnTokenTracker:
             # Same opaque key on retry or final router normalization replaces the estimate.
             if call["source"] == "estimated":
                 call.update(input_tokens=payload["input_tokens"], output_tokens=0)
+            call["estimated_input"] = payload["input_tokens"]
         else:
             call["output_tokens"] = max(0, payload.get("output_chars", 0) // CHARS_PER_TOKEN)
         if complete:
@@ -83,9 +84,14 @@ class TurnTokenTracker:
         # size the next turn starts from (the sum above is what the turn cost).
         main_calls = [c for c in self.calls.values() if c.get("main", True)]
         last_call = main_calls[-1] if main_calls else {}
+        # A server that reuses a cached prefix may report only what it
+        # processed anew (1 990 for a ~11 000-token prompt, with no cached
+        # count): the conversation still occupies the whole prompt, so its
+        # size never drops below what was sent. The cost stays as reported.
+        context_input = max(last_call.get("input_tokens", 0), last_call.get("estimated_input", 0))
         result.update(
             total_tokens=result["input_tokens"] + result["output_tokens"],
-            context_tokens=last_call.get("input_tokens", 0) + last_call.get("output_tokens", 0),
+            context_tokens=context_input + last_call.get("output_tokens", 0),
             model_calls=len(self.calls),
             phase=phase,
             source="reported"

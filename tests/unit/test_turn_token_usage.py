@@ -146,3 +146,19 @@ def test_context_is_the_last_main_call_while_the_total_is_the_cost():
     update = tracker.finish()
     assert update["total_tokens"] == 9000 + 100 + 9300 + 2000
     assert update["context_tokens"] == 9300
+
+
+def test_a_cache_hiding_report_does_not_shrink_the_conversation():
+    """xAInner reported 1 990 input tokens for a ~11 000-token prompt (prefix
+    cache, no cached count): the cost is the report, the size is the prompt."""
+    tracker = TurnTokenTracker()
+    tracker.observe("usage.call.started", {"call_id": "a", "input_tokens": 10600})
+    update = tracker.observe(
+        "usage.call.completed",
+        {
+            "call_id": "a",
+            "usage": {"input_tokens": 1990, "output_tokens": 22, "source": "complete"},
+        },
+    )
+    assert update["total_tokens"] == 2012
+    assert update["context_tokens"] == 10600 + 22
