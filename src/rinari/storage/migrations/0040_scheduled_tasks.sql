@@ -1,4 +1,4 @@
--- 0037: scheduled tasks and their runs. A task says when (schedule, in the
+-- 0040 (shipped briefly as 0037): scheduled tasks and their runs. A task says when (schedule, in the
 -- machine's local time), what (a reminder, or a prompt for an agent turn in a
 -- project or a chat), how (mode, model, skills) and what it may do without
 -- asking (grants approved when it was created). Times are epoch seconds.

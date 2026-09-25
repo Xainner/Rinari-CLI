@@ -75,7 +75,8 @@ def test_upgrade_preserves_data(db_path, tmp_path):
     latest = max(m.version for m in discover_migrations())
     runner2 = MigrationRunner(db2, clock)
     applied = runner2.migrate()
-    assert applied == list(range(cutoff + 1, latest + 1))
+    # 0035..0037 belong to another branch (voice): the numbering has a gap.
+    assert applied == [m.version for m in discover_migrations() if m.version > cutoff]
     assert runner2.current_version() == latest
     runner2.verify()
 
