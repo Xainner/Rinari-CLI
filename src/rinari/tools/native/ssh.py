@@ -292,8 +292,10 @@ def ssh_tools(store, bound=None):
             capabilities=("network.outbound",),
             risk="medium",
             timeout_ms=35000,
+            # Running commands on another machine is acting, not reading:
+            # free on the LAN, asks for an internet host (workspace).
             classify=lambda args: ClassifiedAction(
-                "network.outbound", (target(args) or {}).get("host", "")
+                "network.outbound", (target(args) or {}).get("host", ""), "send"
             ),
             handler=inspect,
         )

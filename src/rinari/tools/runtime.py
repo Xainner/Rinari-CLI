@@ -74,6 +74,13 @@ PEER_ORIGIN_DENIED_CAPABILITIES = frozenset(
 PEER_ORIGIN_DENIED_TOOLS = frozenset({"agent.spawn", "agent.message", "agent.synthesize"})
 
 
+def grant_scope_key(ctx: ToolContext) -> str:
+    """Where an "always" grant lives: the project root, or all loose chats."""
+    if ctx.kind == "PROJECT" and ctx.project_root is not None:
+        return str(Path(ctx.project_root).resolve())
+    return "chats"
+
+
 def scope_from_context(ctx: ToolContext) -> SessionScope:
     return SessionScope(
         kind=ctx.kind,
@@ -84,7 +91,22 @@ def scope_from_context(ctx: ToolContext) -> SessionScope:
         worktree=ctx.worktree,
         private_roots=ctx.private_roots,
         read_profile=ctx.read_profile,
+        external_content=bool(getattr(ctx.turn_state, "external_content", False)),
     )
+
+
+def _external_source(action, tool) -> str | None:
+    """What makes this action's result untrusted outside content, if anything."""
+    from rinari.policy.engine import CAPABILITY_MCP_READ, CAPABILITY_MCP_WRITE, is_local_host
+    from rinari.policy.network import normalize_host
+
+    if action.capability in (CAPABILITY_MCP_READ, CAPABILITY_MCP_WRITE):
+        return f"mcp:{tool.name}"
+    if action.capability == CAPABILITY_NETWORK:
+        host = normalize_host(action.target)
+        if host and not is_local_host(host):
+            return host
+    return None
 
 
 class ToolRuntime:
@@ -291,6 +313,7 @@ class ToolRuntime:
                 risk=tool.risk,
                 risk_class=tool.side_effects,
                 target=action.target if action.capability == CAPABILITY_SESSION_MESSAGE else None,
+                network_mode=getattr(action, "mode", None) or "read",
             )
             self._event(
                 "PolicyDecision",
@@ -317,7 +340,19 @@ class ToolRuntime:
                 if not granted:
                     return self._error(ctx, ToolErrorCode.APPROVAL_DENIED, decision.reason)
 
-        return lambda: self._execute_authorized(tool, arguments, ctx, tool_call_id)
+        sources = [s for s in (_external_source(a, tool) for a in actions) if s]
+        if not sources or ctx.turn_state is None:
+            return lambda: self._execute_authorized(tool, arguments, ctx, tool_call_id)
+
+        def run_and_mark():
+            try:
+                return self._execute_authorized(tool, arguments, ctx, tool_call_id)
+            finally:
+                # Whatever came back (even an error page) is outside content.
+                for source in sources:
+                    ctx.turn_state.mark_external(source)
+
+        return run_and_mark
 
     def _execute_authorized(self, tool, arguments, ctx, tool_call_id):
         tool_name = tool.name
@@ -525,7 +560,7 @@ class ToolRuntime:
             target=decision.target,
             risk=decision.risk,
             session_id=ctx.session_id,
-            project_id=None,
+            project_id=grant_scope_key(ctx),
             rule_id=decision.rule_id,
             reusable=decision.reusable,
             choices=decision.choices,

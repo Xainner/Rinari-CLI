@@ -888,7 +888,24 @@ counts from CompactState, no invented pressure %), `usage.get` (model calls
 pricing unknown). No `pty.*` in v1 (see the post-v1 runtime entry below).
 Slice 11 adds workflow: `session.queue.add/list/clear` (bounded FIFO,
 auto-runs after the live turn with normal turn boundaries + approvals,
-`session.queue.updated` events). Steering (`turn_steering_v1`):
+`session.queue.updated` events). Permissions v3 (`permissions_v3`): the
+profiles are cut by what cannot be undone. read-only reads anything (files
+and the internet) and never writes, runs or sends. workspace is free inside
+the project or chat folder, on localhost/LAN and reading the internet; it asks
+once to write or run outside, send data to an internet host (a request body or
+a non-GET method, `ssh.inspect` to a public host), call an MCP tool, interact
+with a web page or `git push`. full-access asks for none of that. Every profile
+asks for the hard list (force push, deleting outside the project; never granted
+for good) and for system secrets (`~/.ssh`, GPG/cloud keys, OS and browser
+credential stores; project `.env` files are ordinary work). Once a turn has read
+external content (an internet page or API, an MCP result), sending data out
+asks even in full-access (`rule_id = external_content_send`). Approvals offer
+`allow_project`: "always" for this project, or for every loose chat, kept in
+`policies/project_grants.json`, bound to the rule that asked (a host, a folder
+or the rule itself) and listed/revoked with `permission.grants.list` /
+`permission.grants.revoke`. `network.mode` defaults to `auto` (the profile
+decides); `ask` keeps the old per-host prompt, `allow`/`off` as before.
+Steering (`turn_steering_v1`):
 `session.turn.steer {session_id, message}` puts a message into the running
 turn instead of after it. Nothing is interrupted: the loop adds it to the
 history after the current step (a tool round, or an answer, which then stops

@@ -43,7 +43,9 @@ profile = "workspace"
 approval_policy = "on-request"
 
 [network]
-mode = "ask"
+# auto: the permission profile decides (read free, sending asks per profile).
+# ask: every host asks once. allow: no network prompts. off: no network.
+mode = "auto"
 
 [workspace]
 project_root_markers = [".git", "package.json", "pyproject.toml", "go.mod"]

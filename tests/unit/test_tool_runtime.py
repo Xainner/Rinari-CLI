@@ -198,26 +198,42 @@ def test_approval_denied(project) -> None:
     assert not (tmp_path / "nope.txt").exists()
 
 
-def test_approved_external_read_is_scoped_to_call(project) -> None:
+def _free_reads(ctx):
+    """Production sandboxes read anywhere; the policy guards system secrets."""
+    from dataclasses import replace
+
+    sandbox = FilesystemSandbox(
+        ctx.sandbox.read_root, write_roots=ctx.sandbox.write_roots, unrestricted_reads=True
+    )
+    return replace(ctx, sandbox=sandbox)
+
+
+def test_reading_outside_the_project_needs_no_approval(project) -> None:
     tmp_path, root, outside = project
-    ctx = _ctx(tmp_path, root)
-    runtime, _ = _runtime(ctx, tmp_path, answer="y")
+    ctx = _free_reads(_ctx(tmp_path, root))
+    runtime, _ = _runtime(ctx, tmp_path, answer="n")
     result = runtime.execute("fs.read", {"path": str(outside)}, ctx)
     assert result.ok, result.error
     assert "outside" in str(result.data)
-    from rinari.shared.errors import SandboxViolationError
 
-    with pytest.raises(SandboxViolationError):
-        ctx.sandbox.assert_readable(outside)
+
+def test_system_secrets_still_ask(project) -> None:
+    tmp_path, root, _ = project
+    key = tmp_path / ".ssh" / "id_ed25519"
+    key.parent.mkdir()
+    key.write_text("synthetic", encoding="utf-8")
+    ctx = _free_reads(_ctx(tmp_path, root, profile="full-access"))
     denied, _ = _runtime(ctx, tmp_path, answer="n")
-    assert not denied.execute("fs.read", {"path": str(outside)}, ctx).ok
+    assert not denied.execute("fs.read", {"path": str(key)}, ctx).ok
+    approved, _ = _runtime(ctx, tmp_path, answer="y")
+    assert approved.execute("fs.read", {"path": str(key)}, ctx).ok
 
 
 def test_approved_external_directory_can_be_listed(project) -> None:
     tmp_path, root, _ = project
     destination = tmp_path / "Test Code ñ"
     destination.mkdir()
-    ctx = _ctx(tmp_path, root)
+    ctx = _free_reads(_ctx(tmp_path, root))
     runtime, _ = _runtime(ctx, tmp_path, answer="y")
     assert runtime.execute("fs.list", {"path": str(destination)}, ctx).ok
     result = runtime.execute(
@@ -253,7 +269,9 @@ def test_chat_shell_asks(project) -> None:
     assert "chat-ok" in result.data["stdout"].replace("\r", "")
 
 
-def test_symlink_escape_asks_denied(project) -> None:
+def test_symlink_escape_is_judged_by_its_real_target(project) -> None:
+    """Reads are free anywhere now; a write through a link that leaves the
+    project is a write outside it, and asks."""
     import os
 
     tmp_path, root, outside = project
@@ -263,9 +281,10 @@ def test_symlink_escape_asks_denied(project) -> None:
         pytest.skip(f"symlinks not permitted: {exc}")
     ctx = _ctx(tmp_path, root)
     runtime, _ = _runtime(ctx, tmp_path, answer="n")
-    result = runtime.execute("fs.read", {"path": "link.txt"}, ctx)
+    result = runtime.execute("fs.write", {"path": "link.txt", "content": "changed"}, ctx)
     assert result.ok is False
     assert result.error.code is ToolErrorCode.APPROVAL_DENIED
+    assert outside.read_text(encoding="utf-8") == "outside"
 
 
 # -- pipeline: redaction, spill, events, cancellation -----------------------------
@@ -488,47 +507,26 @@ def test_git_tools_in_repo(project) -> None:
     assert branch.ok is True and branch.data["current"]
 
 
-@pytest.mark.parametrize(
-    "read_profile,allowed", [("full-access", True), ("workspace", True), ("read-only", False)]
-)
-def test_immutable_execution_with_independent_read_scope(project, read_profile, allowed):
+@pytest.mark.parametrize("read_profile", ["full-access", "workspace", "read-only"])
+def test_immutable_execution_with_independent_read_scope(project, read_profile):
+    """Reads are free in every profile; read-only still never writes or runs."""
     from dataclasses import replace
 
     tmp_path, root, outside = project
     ctx = replace(
         _ctx(tmp_path, root, profile="read-only", write=False),
         read_profile=normalize_profile(read_profile),
-        sandbox=FilesystemSandbox(
-            root, write_roots=(), unrestricted_reads=read_profile == "full-access"
-        ),
+        sandbox=FilesystemSandbox(root, write_roots=(), unrestricted_reads=True),
     )
     runtime, _events = _runtime(ctx, tmp_path, answer="y")
     result = runtime.execute("fs.read", {"path": str(outside)}, ctx)
-    assert result.ok is allowed, result.error
+    assert result.ok, result.error
     assert not runtime.execute("fs.write", {"path": str(outside), "content": "changed"}, ctx).ok
     assert not runtime.execute(
         "fs.write", {"path": str(root / ".env"), "content": "changed"}, ctx
     ).ok
     assert not runtime.execute("shell.exec", {"command": "echo forbidden"}, ctx).ok
     assert outside.read_text(encoding="utf-8") == "outside"
-
-
-def test_full_read_scope_still_requires_sensitive_read_approval(project):
-    from dataclasses import replace
-
-    tmp_path, root, outside = project
-    secret = tmp_path / ".env"
-    secret.write_text("EXAMPLE=value", encoding="utf-8")
-    ctx = replace(
-        _ctx(tmp_path, root, profile="read-only", write=False),
-        read_profile=normalize_profile("full-access"),
-        sandbox=FilesystemSandbox(root, write_roots=(), unrestricted_reads=True),
-    )
-    denied, _ = _runtime(ctx, tmp_path, answer="n")
-    assert denied.execute("fs.read", {"path": str(outside)}, ctx).ok
-    assert not denied.execute("fs.read", {"path": str(secret)}, ctx).ok
-    approved, _ = _runtime(ctx, tmp_path, answer="y")
-    assert approved.execute("fs.read", {"path": str(secret)}, ctx).ok
 
 
 def test_line_range_beyond_initial_megabyte(project):

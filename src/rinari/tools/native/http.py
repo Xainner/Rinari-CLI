@@ -27,6 +27,7 @@ from rinari.tools.definition import (
     RISK_MEDIUM,
     SIDE_EFFECT_LOCAL_REVERSIBLE,
     SIDE_EFFECT_NONE,
+    ClassifiedAction,
     ToolContext,
     ToolDefinition,
     ToolErrorCode,
@@ -279,6 +280,18 @@ def http_sse(input: dict, ctx: ToolContext) -> ToolResult:
     )
 
 
+_READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def _classify_request(args: dict) -> ClassifiedAction:
+    """A body or a non-read method sends data out; the policy treats it so."""
+    method = str(args.get("method") or "GET").upper()
+    sends = method not in _READ_METHODS or bool(args.get("body") or args.get("body_json"))
+    return ClassifiedAction(
+        "network.outbound", str(args.get("url") or ""), "send" if sends else "read"
+    )
+
+
 def http_tools() -> list[ToolDefinition]:
     common = dict(capabilities=("network.outbound",), namespace="http")
     return [
@@ -323,6 +336,7 @@ def http_tools() -> list[ToolDefinition]:
             side_effects=SIDE_EFFECT_LOCAL_REVERSIBLE,
             timeout_ms=150_000,
             handler=http_request,
+            classify=_classify_request,
             **common,
         ),
         ToolDefinition(

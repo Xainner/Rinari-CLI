@@ -653,13 +653,9 @@ def test_peer_originated_turn_cannot_mutate_native_browser(server, tmp_path, mod
     )
     models[b] = model_b
     _start(server, b, "activa las herramientas del browser")
-    activation = _wait_event(server, "approval.requested", session_id=b)["payload"]
-    _ok(
-        server,
-        "approval.resolve",
-        {"approval_id": activation["approval_id"], "decision": "allow_once"},
-    )
+    # Loading tools into the exposure is bookkeeping: it no longer asks.
     _wait_terminal(server, b)
+    assert not _seen(server, "approval.requested", session_id=b)
     _buffered(server).clear()
 
     model_a = ScriptedModel()

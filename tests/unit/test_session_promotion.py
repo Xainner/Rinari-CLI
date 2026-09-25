@@ -92,7 +92,7 @@ def test_chat_candidate_workspace_writes_allowed(env) -> None:
     )
     decision = PolicyEngine().decide(CAPABILITY_FS_WRITE, scope, path="notes.md")
     assert decision.action is PolicyAction.ALLOW
-    assert "candidate project workspace" in decision.reason
+    assert "opened for this chat" in decision.reason
 
 
 def test_home_candidate_workspace_stays_locked(env) -> None:

@@ -8,7 +8,9 @@ Network policy remains authoritative regardless of model request
     3. mode = "off"             -> deny
     4. matching ALLOW rule      -> allow (the allowlist short-circuits "ask")
     5. mode = "allow"           -> allow
-    6. mode = "ask" (default)   -> ask (approval gate)
+    6. mode = "auto" (default)  -> the permission profile decides (policy engine):
+                                   reading is free, sending asks per profile
+    7. mode = "ask"             -> ask for every host (strict, opt-in)
 
 Host matching is exact or subdomain: a rule for `github.com` covers
 `api.github.com` but not `evil-github.com`.
@@ -31,7 +33,8 @@ from rinari.shared.errors import SandboxViolationError
 MODE_OFF = "off"
 MODE_ASK = "ask"
 MODE_ALLOW = "allow"
-VALID_MODES = (MODE_OFF, MODE_ASK, MODE_ALLOW)
+MODE_AUTO = "auto"
+VALID_MODES = (MODE_OFF, MODE_AUTO, MODE_ASK, MODE_ALLOW)
 
 DECISION_ALLOW = "allow"
 DECISION_DENY = "deny"
@@ -104,7 +107,7 @@ class NetworkPolicy:
     def __init__(
         self,
         *,
-        mode: str = MODE_ASK,
+        mode: str = MODE_AUTO,
         rules: Sequence[NetworkRule] = (),
         rules_provider=None,
     ) -> None:
@@ -167,6 +170,16 @@ class NetworkPolicy:
                 reason="network.mode=allow (no matching deny rule)",
                 target=host,
             )
+        if self._mode == MODE_AUTO:
+            # Not a verdict on its own: the policy engine applies the
+            # profile (read free, send per profile). The guard only enforces
+            # hard denies, so passing here is correct.
+            return NetworkDecision(
+                action=PolicyAction.ALLOW,
+                host=host,
+                reason="network.mode=auto (the permission profile decides)",
+                target=host,
+            )
         return NetworkDecision(
             action=PolicyAction.ASK,
             host=host,
@@ -210,6 +223,7 @@ __all__ = [
     "DECISION_DENY",
     "MODE_ALLOW",
     "MODE_ASK",
+    "MODE_AUTO",
     "MODE_OFF",
     "VALID_MODES",
     "NetworkDecision",

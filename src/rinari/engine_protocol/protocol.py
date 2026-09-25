@@ -97,6 +97,9 @@ CAPABILITIES: dict[str, bool] = {
     # session.turn.steer: a message for the running turn, read after its
     # current step; events steer.applied / steer.returned.
     "turn_steering_v1": True,
+    # Permissions v3: profiles cut by what cannot be undone, "allow_project"
+    # approvals ("always here"), permission.grants.list/revoke.
+    "permissions_v3": True,
 }
 
 

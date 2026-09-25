@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from rinari.application.context import AppContext
 from rinari.policy.network import (
-    MODE_ASK,
+    MODE_AUTO,
     VALID_MODES,
     NetworkDecision,
     NetworkPolicy,
@@ -30,9 +30,9 @@ class NetworkService:
     # -- state ----------------------------------------------------------------
 
     def mode(self) -> str:
-        mode = str(self._ctx.config.value("network.mode") or MODE_ASK)
+        mode = str(self._ctx.config.value("network.mode") or MODE_AUTO)
         if mode not in VALID_MODES:
-            return MODE_ASK
+            return MODE_AUTO
         return mode
 
     def policy(self) -> NetworkPolicy:
