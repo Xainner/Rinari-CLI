@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from collections.abc import Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
@@ -28,7 +29,7 @@ from rinari.providers.catalog import OPENCODE_RESPONSES_MODELS
 from rinari.providers.errors import invoke_with_retry
 from rinari.providers.metadata import effective_metadata
 from rinari.providers.registry import adapter_for
-from rinari.shared.errors import InvalidUsageError
+from rinari.shared.errors import InvalidUsageError, ProviderModelError
 
 if TYPE_CHECKING:
     from rinari.application.model_service import ModelService
@@ -187,6 +188,56 @@ def _unalias_response(
             replace(tc, name=real_by_alias.get(tc.name, tc.name)) for tc in response.tool_calls
         ),
     )
+
+
+_REASONING_REJECTIONS = (
+    "not allowed",
+    "not support",
+    "unsupported",
+    "not permitted",
+    "unknown parameter",
+    "unrecognized",
+)
+
+
+def rejects_reasoning_control(exc: Exception) -> bool:
+    """A 400/422 that names the reasoning control as what was refused.
+
+    Aggregators (OpenCode Go/Zen, OpenRouter) route one model to several
+    upstreams; some accept `reasoning_effort` and some refuse it, so the same
+    model can succeed thirteen calls in a row and fail the fourteenth. Only a
+    refusal that names reasoning qualifies: any other 400 is a real error.
+    """
+    text = str(exc).lower()
+    if not re.search(r"http (400|422)\b", text) or "reasoning" not in text:
+        return False
+    return any(marker in text for marker in _REASONING_REJECTIONS)
+
+
+def without_rejected_reasoning(request: ModelRequest, call, *, output_started=lambda: False):
+    """`call(request)`, repeated once without the reasoning control when the
+    endpoint refused that control before producing anything. The next call
+    asks for the chosen level again: the refusal belongs to one upstream."""
+    try:
+        return call(request)
+    except ProviderModelError as exc:
+        if (
+            not request.reasoning_effort
+            or exc.details.get("partial")
+            or output_started()
+            or not rejects_reasoning_control(exc)
+        ):
+            raise
+        if request.usage_observer is not None:
+            request.usage_observer(
+                "provider.reasoning.dropped",
+                {
+                    "model": request.model,
+                    "effort": request.reasoning_effort,
+                    "reason": str(exc)[:300],
+                },
+            )
+        return call(replace(request, reasoning_effort=None))
 
 
 def scheduled(method):
@@ -458,7 +509,13 @@ class ModelRouter:
         return observe_call(
             request,
             lambda _: _unalias_response(
-                self._adapter_invoke(provider, request, transport, real_by_alias), real_by_alias
+                without_rejected_reasoning(
+                    request,
+                    lambda attempt: self._adapter_invoke(
+                        provider, attempt, transport, real_by_alias
+                    ),
+                ),
+                real_by_alias,
             ),
         )
 
@@ -512,18 +569,21 @@ class ModelRouter:
                 if on_visible is not None:
                     on_visible(delta)
 
-            return self._authenticated_call(
-                provider,
-                lambda secret: adapter.invoke_stream(
-                    request,
-                    secret,
-                    provider.endpoint,
-                    deliver,
-                    transport=transport,
-                    tool_aliases=real_by_alias,
-                ),
-                output_started=lambda: emitted,
-            )
+            def attempt(current):
+                return self._authenticated_call(
+                    provider,
+                    lambda secret: adapter.invoke_stream(
+                        current,
+                        secret,
+                        provider.endpoint,
+                        deliver,
+                        transport=transport,
+                        tool_aliases=real_by_alias,
+                    ),
+                    output_started=lambda: emitted,
+                )
+
+            return without_rejected_reasoning(request, attempt, output_started=lambda: emitted)
 
         response = observe_call(request, invoke, on_delta)
         return self._scope_response(
