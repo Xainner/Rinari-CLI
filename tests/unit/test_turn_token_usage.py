@@ -131,3 +131,18 @@ def test_every_request_gets_its_own_call_key():
     second = ModelRequest(model="m", messages=(ChatMessage.user("x"),))
     assert first.usage_call_id != second.usage_call_id
     assert replace(first, model="n").usage_call_id == first.usage_call_id
+
+
+def test_context_is_the_last_main_call_while_the_total_is_the_cost():
+    tracker = TurnTokenTracker()
+    tracker.observe("usage.call.started", {"call_id": "a", "input_tokens": 9000})
+    tracker.observe("usage.call.completed", {"call_id": "a", "output_chars": 400})
+    # A tool round-trip resends the whole conversation: the cost adds up...
+    tracker.observe("usage.call.started", {"call_id": "b", "input_tokens": 9300})
+    # ...and a subagent's call is cost, not size of this conversation.
+    tracker.observe(
+        "usage.call.started", {"call_id": "c", "input_tokens": 2000, "agent_id": "agt_1"}
+    )
+    update = tracker.finish()
+    assert update["total_tokens"] == 9000 + 100 + 9300 + 2000
+    assert update["context_tokens"] == 9300

@@ -21,7 +21,15 @@ class TurnTokenTracker:
             return None
         key = payload["call_id"]
         call = self.calls.setdefault(
-            key, {"input_tokens": 0, "output_tokens": 0, "source": "estimated"}
+            key,
+            {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "source": "estimated",
+                # Subagent calls arrive with their agent id: they count toward
+                # the cost, not toward the size of this conversation.
+                "main": not payload.get("agent_id"),
+            },
         )
         complete = event == "usage.call.completed"
         if event == "usage.call.started":
@@ -70,8 +78,14 @@ class TurnTokenTracker:
             name: sum(c.get(name, 0) for c in self.calls.values())
             for name in ("input_tokens", "output_tokens")
         }
+        # What the conversation occupies after the turn: every call resends
+        # the whole context, so the last call's input plus its output is the
+        # size the next turn starts from (the sum above is what the turn cost).
+        main_calls = [c for c in self.calls.values() if c.get("main", True)]
+        last_call = main_calls[-1] if main_calls else {}
         result.update(
             total_tokens=result["input_tokens"] + result["output_tokens"],
+            context_tokens=last_call.get("input_tokens", 0) + last_call.get("output_tokens", 0),
             model_calls=len(self.calls),
             phase=phase,
             source="reported"

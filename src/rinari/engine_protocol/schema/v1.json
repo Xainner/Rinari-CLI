@@ -3396,6 +3396,10 @@
             "streaming",
             "settled"
           ]
+        },
+        "context_tokens": {
+          "type": "integer",
+          "minimum": 0
         }
       }
     }
