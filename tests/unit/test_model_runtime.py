@@ -1378,3 +1378,59 @@ def test_conforming_tool_names_pass_through_untouched(monkeypatch, tmp_path) -> 
         assert unaliased <= {"fs_read", "web.search"}
     finally:
         ctx.close()
+
+
+def test_router_stream_repeats_without_a_refused_reasoning_control(monkeypatch, tmp_path) -> None:
+    """OpenCode Go routes one model to several upstreams; one refused the
+    control mid-turn and the whole turn failed. The call now repeats once
+    without it, and the next call asks for the level again."""
+    from rinari.models.types import ProviderCapabilities
+
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        seen.append(body)
+        if "reasoning_effort" in body:
+            return httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "Upstream request failed: [invalid_request_error] "
+                        "native reasoning control reasoning_effort is not allowed",
+                    }
+                },
+            )
+        chunk = {"choices": [{"index": 0, "delta": {"content": "hola"}, "finish_reason": "stop"}]}
+        return httpx.Response(
+            200,
+            content=f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n".encode(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    ctx, services = _app_and_services(handler, monkeypatch, tmp_path)
+    try:
+        provider = services.providers.add(_add_custom_input("go", OPENCODE_GO_URL))
+        model = services.models.add(provider.alias, "glm-5.3-flash", "flash")
+        router = ModelRouter(services.providers, services.models, http_client=_client(handler))
+        monkeypatch.setattr(
+            router,
+            "capabilities",
+            lambda *_: ProviderCapabilities(
+                streaming=True, tool_calls=True, structured_output=True, reasoning_effort=True
+            ),
+        )
+        events: list = []
+        request = _request(
+            reasoning_effort="medium",
+            usage_observer=lambda name, payload: events.append(name),
+        )
+        deltas: list[str] = []
+        response = router.invoke_stream(provider, model.id, request, deltas.append)
+        assert response.content == "hola"
+        assert deltas == ["hola"]
+        assert ["reasoning_effort" in body for body in seen] == [True, False]
+        assert "provider.reasoning.dropped" in events
+    finally:
+        ctx.close()
