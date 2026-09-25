@@ -153,11 +153,16 @@ class ToolResult:
 
 
 class ClassifiedAction:
-    """What the action touches, extracted from the tool input."""
+    """What the action touches, extracted from the tool input.
 
-    def __init__(self, capability: str, target: str | None = None) -> None:
+    `mode` qualifies network actions: "read" (default) fetches, "send" puts
+    data on the wire (a request body, a non-GET method).
+    """
+
+    def __init__(self, capability: str, target: str | None = None, mode: str | None = None) -> None:
         self.capability = capability
         self.target = target
+        self.mode = mode
 
     @property
     def fs_path(self) -> str | None:
@@ -166,6 +171,24 @@ class ClassifiedAction:
     @property
     def command(self) -> str | None:
         return self.target if self.capability == "shell.exec" else None
+
+
+class TurnState:
+    """Per-turn facts the policy needs. Subagents share their parent's.
+
+    `external_content` turns on once the turn has read something from outside
+    the machine (a web page, an internet API, an MCP result): from then on,
+    sending data out asks even in full-access.
+    """
+
+    def __init__(self) -> None:
+        self.external_content = False
+        self.sources: list[str] = []
+
+    def mark_external(self, source: str) -> None:
+        self.external_content = True
+        if source and source not in self.sources and len(self.sources) < 20:
+            self.sources.append(source)
 
 
 # Live output sink: (stream_name, text_chunk) as bytes arrive from a process.
@@ -195,6 +218,9 @@ class ToolContext:
     ask_user: Any = None
     read_profile: PermissionProfile | None = None
     processes: Any = None
+    # TurnState of the running turn (untrusted-content guard); None outside a
+    # turn, which the policy reads as "nothing external seen".
+    turn_state: Any = None
     # Session-scoped PtyRegistry (tools.native.pty); None on platforms without
     # a POSIX pty or for CHAT sessions that disable interactive processes.
     pty: Any = None

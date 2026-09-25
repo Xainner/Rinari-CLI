@@ -85,10 +85,13 @@ def _decision(policy: NetworkPolicy, target: str) -> NetworkDecision:
     return policy.decide(target)
 
 
-def test_decision_mode_ask_default_asks() -> None:
+def test_decision_mode_auto_is_default_and_defers_to_the_profile() -> None:
     d = _decision(NetworkPolicy(), "api.example.com")
-    assert d.action is PolicyAction.ASK
+    assert d.action is PolicyAction.ALLOW
+    assert "auto" in d.reason
     assert d.host == "api.example.com"
+    # Strict mode stays available as an explicit choice.
+    assert _decision(NetworkPolicy(mode="ask"), "api.example.com").action is PolicyAction.ASK
 
 
 def test_decision_mode_allow_allows() -> None:
@@ -152,10 +155,14 @@ def test_guard_hard_blocks_deny_but_passes_consent() -> None:
 
 def test_engine_delegates_network_capability() -> None:
     scope = SessionScope(kind="CHAT", root=None, cwd=Path("/tmp"), user_home=None)
-    engine = PolicyEngine()  # default mode = ask
+    engine = PolicyEngine()  # default mode = auto: the profile decides
     d = engine.decide(CAPABILITY_NETWORK, scope, host="api.example.com")
     assert d.capability == CAPABILITY_NETWORK
-    assert d.action is PolicyAction.ASK
+    assert d.action is PolicyAction.ALLOW  # reading is free
+    send = engine.decide(CAPABILITY_NETWORK, scope, host="api.example.com", network_mode="send")
+    assert send.action is PolicyAction.ASK
+    assert send.rule_id == "network_send"
+    assert "allow_project" in send.choices
     off = PolicyEngine(network=NetworkPolicy(mode="off"))
     assert off.decide(CAPABILITY_NETWORK, scope, host="api.example.com").action is PolicyAction.DENY
     # Non-network capabilities are unaffected.
@@ -177,7 +184,7 @@ def env(app_ctx, tmp_path):
 def test_service_rules_status_and_test(env) -> None:
     s = env
     before = s.network.status()
-    assert before["mode"] == "ask"
+    assert before["mode"] == "auto"
     row = s.network.add_rule("https://api.github.com:443/x", "allow", reason="ci")
     assert row["host"] == "api.github.com"
     s.network.add_rule("evil.example", "deny")
@@ -188,10 +195,11 @@ def test_service_rules_status_and_test(env) -> None:
 
     assert s.network.test("api.github.com")["action"] == "allow"
     assert s.network.test("www.evil.example")["action"] == "deny"
-    assert s.network.test("other.example")["action"] == "ask"
+    # auto: the rule table passes; the profile decides at call time.
+    assert s.network.test("other.example")["action"] == "allow"
 
     assert s.network.remove_rule("api.github.com", "allow") == 1
-    assert s.network.test("api.github.com")["action"] == "ask"
+    assert "auto" in s.network.test("api.github.com")["reason"]
     assert s.network.remove_rule("unknown.host") == 0
 
     with pytest.raises(InvalidUsageError):
@@ -291,12 +299,25 @@ def test_runtime_network_mode_off_denies_and_audits(env, tmp_path) -> None:
 
 def test_runtime_network_ask_denied_by_user(env, tmp_path) -> None:
     s = env
+    original_mode = s.network.mode
+    s.network.mode = lambda: "ask"  # type: ignore[method-assign]
+    try:
+        runtime, ctx = _build_runtime(s, tmp_path, approval="n")
+        result = runtime.execute("web.fetch", {"url": "https://api.example.com"}, ctx)
+        assert result.ok is False
+        assert result.error is not None
+        assert result.error.code is ToolErrorCode.APPROVAL_DENIED
+        assert s.network.events()[-1]["action"] == "ask"
+    finally:
+        s.network.mode = original_mode  # type: ignore[method-assign]
+
+
+def test_runtime_reading_the_internet_is_free_in_auto_mode(env, tmp_path) -> None:
+    s = env
     runtime, ctx = _build_runtime(s, tmp_path, approval="n")
     result = runtime.execute("web.fetch", {"url": "https://api.example.com"}, ctx)
-    assert result.ok is False
-    assert result.error is not None
-    assert result.error.code is ToolErrorCode.APPROVAL_DENIED
-    assert s.network.events()[-1]["action"] == "ask"
+    assert result.ok is True
+    assert s.network.events()[-1]["action"] == "allow"
 
 
 def test_runtime_network_allow_rule_skips_approval(env, tmp_path) -> None:
@@ -332,7 +353,7 @@ def test_cli_network_round_trip(env) -> None:
     result = runner.invoke(cli_main.app, ["--json", "network", "status"])
     assert result.exit_code == 0, result.output
     payload = _json_payload(result.output)
-    assert payload["data"]["mode"] == "ask"
+    assert payload["data"]["mode"] == "auto"
 
     result = runner.invoke(cli_main.app, ["network", "allow", "https://api.github.com"])
     assert result.exit_code == 0, result.output

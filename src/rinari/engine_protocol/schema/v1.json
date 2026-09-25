@@ -364,6 +364,8 @@
         "skill.settings.set",
         "tool.list",
         "policy.get",
+        "permission.grants.list",
+        "permission.grants.revoke",
         "task.tree",
         "task.get",
         "verification.latest",

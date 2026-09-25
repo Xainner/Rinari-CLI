@@ -59,8 +59,8 @@ STEER_PREFIX = (
     "[The user sent this while you were working. Take it into account from here on; "
     "it may change or refine the current task.]\n\n"
 )
-DECISIONS = ("deny", "allow_once", "allow_session")
-_DECISION_TO_ANSWER = {"deny": "n", "allow_once": "y", "allow_session": "s"}
+DECISIONS = ("deny", "allow_once", "allow_session", "allow_project")
+_DECISION_TO_ANSWER = {"deny": "n", "allow_once": "y", "allow_session": "s", "allow_project": "p"}
 
 
 @dataclass
@@ -1561,6 +1561,9 @@ class TurnManager:
             "choices": list(request.choices),
             "rule_id": request.rule_id,
             "reusable": request.reusable,
+            # Where "allow_project" keeps the grant: this project, or every
+            # loose chat.
+            "grant_scope": "chats" if request.project_id in (None, "chats") else "project",
             # `exact`: a session grant binds to this target only (peer messaging).
             "binding_mode": request.binding_mode,
         }

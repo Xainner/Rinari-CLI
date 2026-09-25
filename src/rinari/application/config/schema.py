@@ -13,7 +13,7 @@ from typing import Any
 from rinari.shared.errors import ConfigurationError
 
 PROFILE_NAMES = ("safe", "read-only", "workspace", "full-access")
-NETWORK_MODES = ("off", "ask", "allow")
+NETWORK_MODES = ("off", "auto", "ask", "allow")
 SESSION_MODES = ("ask", "plan", "agent", "review", "full-access")
 
 
@@ -82,7 +82,7 @@ class PermissionsSettings:
 
 @dataclass(frozen=True, slots=True)
 class NetworkSettings:
-    mode: str = "ask"
+    mode: str = "auto"
 
 
 @dataclass(frozen=True, slots=True)

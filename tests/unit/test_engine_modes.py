@@ -216,5 +216,5 @@ def test_runtime_preserves_read_scope_without_enabling_execution(
     ctx = session.context.tool_ctx
     assert ctx.profile is PermissionProfile.READ_ONLY
     assert ctx.read_profile.value == permission
-    assert ctx.sandbox.unrestricted_reads is (permission == "full-access")
+    assert ctx.sandbox.unrestricted_reads is True  # reads are free in every profile
     assert not ctx.sandbox.write_roots

@@ -7,6 +7,7 @@ roundtrips, provider/model reads. Envelope contract is unchanged.
 
 from __future__ import annotations
 
+import contextlib
 import secrets
 import threading
 import time
@@ -328,6 +329,8 @@ class EngineServer:
         self._dispatcher.register("skill.settings.set", self._skills.settings_set)
         self._dispatcher.register("tool.list", self._tool_list)
         self._dispatcher.register("policy.get", self._policy_get)
+        self._dispatcher.register("permission.grants.list", self._permission_grants_list)
+        self._dispatcher.register("permission.grants.revoke", self._permission_grants_revoke)
         from rinari.engine_protocol.media import register_media
 
         self._attachment_jobs = register_media(self._dispatcher, self._services)
@@ -2183,6 +2186,40 @@ class EngineServer:
             },
             "note": "Profiles and souls never relax this mapping; PLAN/REVIEW stay read-only.",
         }
+
+    # -- lasting grants ("always in this project") -----------------------------
+
+    def _permission_grants_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Every "always" grant, labelled with its project (or "chats")."""
+        from rinari.cli.agent_runtime import project_grant_store
+
+        names: dict[str, str] = {}
+        for project in self._services.projects.list(include_archived=True):
+            with contextlib.suppress(OSError, RuntimeError, ValueError):
+                names[str(Path(project.canonical_root).resolve())] = project.name
+        grants = []
+        for row in project_grant_store(self._services).list():
+            scope = str(row.get("scope") or "")
+            grants.append(
+                {
+                    "id": row["id"],
+                    "scope": scope,
+                    "scope_kind": "chats" if scope == "chats" else "project",
+                    "scope_label": "" if scope == "chats" else names.get(scope, Path(scope).name),
+                    "capability": row.get("capability"),
+                    "rule_id": row.get("rule_id"),
+                    "target": row.get("target"),
+                    "description": row.get("description") or "",
+                    "granted_at": row.get("granted_at") or "",
+                }
+            )
+        return {"grants": grants}
+
+    def _permission_grants_revoke(self, params: dict[str, Any]) -> dict[str, Any]:
+        from rinari.cli.agent_runtime import project_grant_store
+
+        grant_id = self._need_str(params, "id")
+        return {"id": grant_id, "revoked": project_grant_store(self._services).revoke(grant_id)}
 
     # -- observability (Phase 10) -------------------------------------------------
 

@@ -315,7 +315,8 @@ class _SubagentRunner:
             if profile == PermissionProfile.READ_ONLY
             else ((cwd,) if worktree_path else parent_sandbox.write_roots),
             unrestricted=profile == PermissionProfile.FULL_ACCESS and parent_sandbox.unrestricted,
-            unrestricted_reads=parent_sandbox.unrestricted_reads or parent_sandbox.unrestricted,
+            # Reads are free in every profile; the policy still asks for secrets.
+            unrestricted_reads=True,
             approved_read_roots=parent_sandbox.approved_read_roots,
         )
         token = _LinkedToken(spec.token, getattr(parent_ctx, "cancellation", None))

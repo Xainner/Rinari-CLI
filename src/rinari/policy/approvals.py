@@ -4,8 +4,13 @@ A policy decision of `ask` routes here. Grants have an explicit scope:
 
     once        valid for a single action (default)
     session     valid for the lifetime of this session
-    project     valid for this project's sessions
+    project     "always in this project" (or in every loose chat): persisted
+                in policies/project_grants.json until revoked in Settings
     persistent  valid until revoked (stored outside the session)
+
+Grants are bound to the policy rule that asked (`rule_id`): allowing a push
+does not also allow writing outside the project. Hard-list asks
+(`reusable=False`) never consult or create a lasting grant.
 
 Project grants never leak into global chat or another project
 (harness.md section 79).
@@ -50,6 +55,9 @@ class ApprovalGrant:
     session_id: str | None = None
     project_id: str | None = None
     granted_at: str = ""
+    # Rule that asked; None = legacy capability-wide grant (task grants).
+    rule_id: str | None = None
+    grant_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +83,7 @@ class ApprovalEngine:
         prompt: AnswerPrompt | None = None,
         persistent_store: dict | None = None,
         session_grants: list[ApprovalGrant] | None = None,
+        project_store=None,
     ) -> None:
         self._prompt = prompt
         # The host may inject a session-bound list so grants outlive the tool
@@ -84,6 +93,9 @@ class ApprovalEngine:
             session_grants if session_grants is not None else []
         )
         self._project_grants: list[ApprovalGrant] = []
+        # ProjectGrantStore (approval_store): "always" grants survive the
+        # session and the process. Without it they live in memory only.
+        self._project_store = project_store
         self._store = persistent_store
         self._audit: list[ApprovalOutcome] = []
 
@@ -112,7 +124,8 @@ class ApprovalEngine:
         # it offered: hiding a button in a client is not a security boundary.
         wide_ok = request.binding_mode != "exact"
         if answer in ("p", "project", "always-project") and (
-            wide_ok or "allow_project" in request.choices
+            "allow_project" in request.choices
+            or (wide_ok and request.reusable and self._project_store is None)
         ):
             return self._record(
                 self._issue(request, GrantScope.PROJECT, reason="approved for project")
@@ -128,9 +141,12 @@ class ApprovalEngine:
         return outcome
 
     def _find_grant(self, request: ApprovalRequest) -> ApprovalGrant | None:
+        project_grants = list(self._project_grants)
+        if self._project_store is not None and request.project_id:
+            project_grants.extend(self._project_store.grants_for(request.project_id))
         for store, scope_filter in (
             (self._store.values() if self._store else [], GrantScope.PERSISTENT),
-            (self._project_grants, GrantScope.PROJECT),
+            (project_grants, GrantScope.PROJECT),
             (self._session_grants, GrantScope.SESSION),
         ):
             for grant in store:
@@ -148,18 +164,37 @@ class ApprovalEngine:
     def _matches(grant: ApprovalGrant, request: ApprovalRequest) -> bool:
         if grant.capability != request.capability:
             return False
+        if grant.rule_id is not None and grant.rule_id != request.rule_id:
+            return False
         if request.binding_mode == "exact":
             # A wildcard grant never covers an exact request; the target must
             # match byte for byte.
             return grant.target is not None and grant.target == request.target
-        return grant.target is None or grant.target == request.target
+        if grant.target is None or grant.target == request.target:
+            return True
+        # A folder granted for writes covers what is inside it.
+        return (
+            request.capability == "fs.write"
+            and request.target is not None
+            and _inside(request.target, grant.target)
+        )
 
     def _issue(
         self, request: ApprovalRequest, scope: GrantScope, *, reason: str
     ) -> ApprovalOutcome:
+        if scope is GrantScope.PROJECT and self._project_store is not None:
+            grant = self._project_store.add(
+                scope_key=request.project_id or "chats",
+                capability=request.capability,
+                rule_id=request.rule_id,
+                target=_lasting_target(request),
+                description=request.description,
+            )
+            return ApprovalOutcome(granted=True, grant=grant, reason="approved always here")
         grant = ApprovalGrant(
             capability=request.capability,
             scope=scope,
+            rule_id=request.rule_id,
             # A session grant intentionally covers subsequent targets of the
             # same capability in this session (legacy binding). Exact-bound
             # requests keep their target on every scope. Policy and sandbox
@@ -190,3 +225,25 @@ class ApprovalEngine:
             *self._project_grants,
             *(self._store.values() if self._store else []),
         ]
+
+
+def _inside(child: str, parent: str) -> bool:
+    from pathlib import Path
+
+    try:
+        child_path, parent_path = Path(child).resolve(), Path(parent).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return child_path == parent_path or parent_path in child_path.parents
+
+
+def _lasting_target(request: ApprovalRequest) -> str | None:
+    """What an "always" grant keeps: the host or destination for exact rules,
+    the folder for writes outside the project, nothing (the rule) otherwise."""
+    if request.binding_mode == "exact":
+        return request.target
+    if request.capability == "fs.write" and request.target:
+        from pathlib import Path
+
+        return str(Path(request.target).resolve().parent)
+    return None

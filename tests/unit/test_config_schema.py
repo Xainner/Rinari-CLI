@@ -103,5 +103,5 @@ def test_key_type_unknown_is_error():
 def test_value_dotted_access(defaults):
     config = Config.from_dict(defaults)
     assert config.value("agent.max_turns") == 200
-    assert config.value("network.mode") == "ask"
+    assert config.value("network.mode") == "auto"
     assert config.value("does.not.exist") is None
