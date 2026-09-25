@@ -326,10 +326,12 @@ class SkillService:
 
     @staticmethod
     def _known_tools() -> set[str]:
+        """Every tool a session can register (rinari.*, skills.*, agent.*…),
+        not only the native ones: validating against less flagged real tools."""
         try:
-            from rinari.tools.native import all_native_tools
+            from rinari.tools.catalog import builtin_catalog
 
-            return {tool.name for tool in all_native_tools()}
+            return set(builtin_catalog().names())
         except Exception:
             return set()
 

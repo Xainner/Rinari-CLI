@@ -268,11 +268,16 @@ def _skill_prompt_parts(services: ServiceContainer, root: Path | None, record: S
         # Paid on every turn: descriptions are clipped, and a large library
         # (imported from other agents) lists names only and points to search.
         names_only = len(rows) > _CATALOG_FULL_LIMIT
-        lines = ["Available skills (pin one with skills.activate for its full procedure):"]
+        lines = [
+            "Available skills. Before acting on a request, check this list: when a skill "
+            "matches it (by name, app or task), activate it with skills.activate first and "
+            "follow its procedure instead of improvising. [active] ones are already loaded:"
+        ]
         if names_only:
             lines[0] = (
-                f"Available skills ({len(rows)}; find the right one with skills.list and a "
-                "query, pin it with skills.activate):"
+                f"Available skills ({len(rows)}). Before acting, find the one that matches the "
+                "request with skills.list and a query (or capability.search), activate it with "
+                "skills.activate and follow its procedure:"
             )
         for row in rows:
             flag = " [active]" if row["active"] else ""
@@ -937,7 +942,10 @@ def _build_tools(
         # is added last (harness.md: search across native/plugin/MCP/OpenAPI/browser).
         from rinari.capability_search import capability_activation_tools, capability_search_tool
 
-        registry.register(capability_search_tool(registry))
+        def _skills_for_search():
+            return services.skills.summaries(root, session=services.sessions.show(record.id))
+
+        registry.register(capability_search_tool(registry, skills=_skills_for_search))
         registry.register_all(capability_activation_tools(registry))
         registry.register_all(ssh_tools(TargetStore(services.ctx.layout.root)))
 
@@ -1348,6 +1356,8 @@ def _prepare_owner_memory_source(
         images=tuple(session.context.pending_images),
         attachments=tuple(session.context.pending_attachments),
         display_content=session.context.pending_display_content,
+        # Read, not consumed: the loop still attaches it to its own copy.
+        origin=dict(session.context.pending_origin) if session.context.pending_origin else None,
     )
     records = _persist_new_messages(services, record, [owner_message], turn_id)
     if not records:

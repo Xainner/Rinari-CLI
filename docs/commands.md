@@ -905,6 +905,12 @@ asks even in full-access (`rule_id = external_content_send`). Approvals offer
 or the rule itself) and listed/revoked with `permission.grants.list` /
 `permission.grants.revoke`. `network.mode` defaults to `auto` (the profile
 decides); `ask` keeps the old per-host prompt, `allow`/`off` as before.
+A turn started with a command keeps it on the owner message:
+`origin = {kind: "user", command, command_kind: "command" | "skill"}`, so a
+client shows a chip instead of the raw `/name`. `capability.search` also
+returns matching skills (`skills[]`) and tells the model to activate the first
+one; skill validation checks required tools against every built-in tool
+(`rinari.*`, `skills.*`…), not only the native ones, and skips MCP/plugin tools.
 Steering (`turn_steering_v1`):
 `session.turn.steer {session_id, message}` puts a message into the running
 turn instead of after it. Nothing is interrupted: the loop adds it to the

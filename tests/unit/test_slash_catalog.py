@@ -145,6 +145,8 @@ def test_a_command_turn_switches_mode_and_the_model_gets_the_prompt(
         assert "Review the uncommitted changes" in sent
         history = services.ctx.message_repo.list(session_id)
         assert any(m.role == "user" and m.display_content == "/review" for m in history)
+        review = next(m for m in history if m.role == "user" and m.display_content == "/review")
+        assert review.origin == {"kind": "user", "command": "review", "command_kind": "command"}
 
         _ok(
             _call(
@@ -160,6 +162,12 @@ def test_a_command_turn_switches_mode_and_the_model_gets_the_prompt(
         _events_until_done(server, session_id)
         pinned = dict(services.sessions.show(session_id).active_skills or ())
         assert "research" in pinned
+        research = [
+            m
+            for m in services.ctx.message_repo.list(session_id)
+            if m.role == "user" and (m.origin or {}).get("command") == "research"
+        ]
+        assert research and research[0].origin["command_kind"] == "skill"
 
         bad = _call(
             server,
@@ -193,3 +201,31 @@ def test_skill_commands_in_the_terminal(services, tmp_path, monkeypatch) -> None
         assert "/plan [text]" in help_text and "/<skill> [text]" in help_text
     finally:
         session.end()
+
+
+def test_capability_search_points_to_a_matching_skill() -> None:
+    from rinari.capability_search import capability_search_tool
+    from rinari.tools.registry import ToolRegistry
+
+    skills = [
+        {"name": "lusamine-generate", "description": "Genera imagenes en la app Lusamine"},
+        {"name": "deploy", "description": "Deploy the web app"},
+    ]
+    tool = capability_search_tool(ToolRegistry(), skills=lambda: skills)
+    result = tool.handler({"query": "Lusamine imagen"}, None)
+    assert result.ok
+    assert [row["name"] for row in result.data["skills"]] == ["lusamine-generate"]
+    assert result.data["matched"] is True
+    assert "skills.activate" in result.data["guidance"]
+    none = tool.handler({"query": "kubernetes"}, None)
+    assert none.data["skills"] == [] and none.data["matched"] is False
+
+
+def test_packaged_skills_require_only_tools_that_exist(services) -> None:
+    unknown = [
+        issue
+        for row in services.skills.validate()
+        for issue in row.get("issues") or []
+        if issue.get("code") == "TOOL_NOT_FOUND"
+    ]
+    assert unknown == []
