@@ -1,5 +1,20 @@
 # Rinari CLI — Tools Catalog
 
+## Autoría de skills
+
+`skills.validate_draft` recibe `{name, skill_md, references?, update_of?}` y
+devuelve `{name, version, valid, issues, warnings, review}`. Tiene capacidad
+`state.read`: revisa archivos temporales privados sin cambiar la biblioteca,
+propuestas pendientes, registros, historial ni eventos. `ok` indica que la
+validación corrió; `valid` indica si el borrador pasó.
+
+`skills.propose` recibe el mismo contenido y vuelve a validarlo antes de guardar.
+Los errores conservan `details.skill_code` y `details.issues` cuando existen.
+Las referencias deben incluir el prefijo `references/`, `scripts/` o `assets/`.
+Las herramientas requeridas usan nombres canónicos (`shell.exec`, `fs.write`),
+no los nombres de transporte del proveedor. Una dependencia dinámica pendiente
+de conexión devuelve `TOOL_DEFERRED`; no equivale a permiso o disponibilidad.
+
 ## Contexto de imágenes (Hermes, 2026-09-12)
 
 `fs.read_image` carga la referencia solicitada mediante la política visual del

@@ -7,6 +7,12 @@
 
 ## 1. Core Agent Skills
 
+El flujo implementado para crear una skill es `skill-author` →
+`skills.validate_draft` → `skills.propose`. La validación acepta el documento y
+sus referencias sin guardarlos en la biblioteca ni crear historial. Se corrigen
+los `issues` antes de proponer; las dependencias dinámicas no verificadas se
+devuelven como `warnings`. Véase [el contrato de autoría](harness.md#draft-validation-and-learned-skills-implemented).
+
 - Goal interpretation
 - Intent classification
 - Requirement extraction

@@ -178,6 +178,12 @@ def skill_tools(host: SkillToolHost):
         )
 
     def propose(arguments, ctx):
+        return author(arguments, ctx, save=True)
+
+    def validate_draft(arguments, ctx):
+        return author(arguments, ctx, save=False)
+
+    def author(arguments, ctx, *, save):
         args = arguments or {}
         name = str(args.get("name") or "")
         skill_md = args.get("skill_md")
@@ -191,24 +197,46 @@ def skill_tools(host: SkillToolHost):
         # with /learn saves the skill active; anything else waits for approval.
         owner_asked = getattr(ctx, "turn_command", "") == "learn"
         try:
-            result = service.propose(
+            method = service.propose if save else service.validate_draft
+            result = method(
                 name,
                 skill_md,
                 args.get("references") or None,
-                session_id=_sid(ctx),
                 update_of=args.get("update_of") or None,
-                owner_asked=owner_asked,
+                **({"session_id": _sid(ctx), "owner_asked": owner_asked} if save else {}),
             )
         except SkillError as exc:
             return ToolResult(
                 ok=False,
-                error=ToolErrorInfo(ToolErrorCode.INVALID_ARGUMENT, f"{exc.code}: {exc.message}"),
+                error=ToolErrorInfo(
+                    ToolErrorCode.INVALID_ARGUMENT,
+                    f"{exc.code}: {exc.message}",
+                    details={"skill_code": exc.code, **exc.details},
+                ),
                 origin="skills",
             )
         return ToolResult(ok=True, data=result, origin="skills")
 
     read = ("state.read",)
     write = ("state.write",)
+    draft_schema = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"},
+            "skill_md": {"type": "string", "minLength": 1, "maxLength": 60000},
+            "references": {
+                "type": "object",
+                "description": (
+                    "Relative paths including references/, scripts/ or assets/ "
+                    "(e.g. references/payload.json)"
+                ),
+                "additionalProperties": {"type": "string"},
+            },
+            "update_of": {"type": "string"},
+        },
+        "required": ["name", "skill_md"],
+        "additionalProperties": False,
+    }
     return [
         ToolDefinition(
             name="skills.list",
@@ -279,6 +307,20 @@ def skill_tools(host: SkillToolHost):
             handler=activate,
         ),
         ToolDefinition(
+            name="skills.validate_draft",
+            description=(
+                "Check a draft SKILL.md and its reference files before saving. Uses the same "
+                "checks as skills.propose, without installing, activating, recording history "
+                "or notifying. Read valid, issues, warnings and review; a successful tool "
+                "call alone does not mean the draft is valid. Pass update_of for an update."
+            ),
+            input_schema=draft_schema,
+            capabilities=read,
+            always_loaded=False,
+            classify=lambda _i: ClassifiedAction("state.read"),
+            handler=validate_draft,
+        ),
+        ToolDefinition(
             name="skills.propose",
             description=(
                 "Save a skill learned from this conversation: the full SKILL.md "
@@ -286,22 +328,11 @@ def skill_tools(host: SkillToolHost):
                 "optional text files under references/ or scripts/. It is saved active "
                 "only when the owner asked with /learn; otherwise it waits for the "
                 "owner's approval. Never include secrets: a token or password is refused. "
-                "To improve an existing skill pass update_of with its name."
+                "To improve an existing skill pass update_of with its name. "
+                "Validate with skills.validate_draft first; this tool saves real content, "
+                "so never use it for diagnostic probes."
             ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"},
-                    "skill_md": {"type": "string", "minLength": 1, "maxLength": 60000},
-                    "references": {
-                        "type": "object",
-                        "additionalProperties": {"type": "string"},
-                    },
-                    "update_of": {"type": "string"},
-                },
-                "required": ["name", "skill_md"],
-                "additionalProperties": False,
-            },
+            input_schema=draft_schema,
             capabilities=write,
             side_effects="local_reversible",
             always_loaded=False,

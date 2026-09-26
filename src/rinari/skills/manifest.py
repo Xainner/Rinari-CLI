@@ -1,6 +1,6 @@
 """Skill manifest: schema, parsing and validation (phase 6).
 
-A skill is a directory `<root>/<name>/SKILL.md`. The YAML-ish frontmatter
+A skill is a directory `<root>/<name>/SKILL.md`. The YAML frontmatter
 carries the metadata; the markdown body carries the procedure. Per
 harness.md 48:
 
@@ -23,8 +23,7 @@ harness.md 48:
     # Failure handling ...
     # Success criteria ...
 
-Parsing is stdlib-only (the phase-4 catalog parser handled flat scalars;
-this one additionally collects `- item` lists). A `required_tools` entry is
+Frontmatter uses the shared YAML reader with legacy fallback. A `required_tools` entry is
 a *capability request*, never a grant: the runtime still evaluates every
 tool call against the policy engine (harness.md 51).
 """
@@ -136,6 +135,7 @@ class SkillManifest:
     # Standard `allowed-tools`: a hint of what the skill expects to use. Never
     # a grant (harness.md 51); tool names are the original product's.
     allowed_tools: tuple[str, ...] = ()
+    procedure_present: bool = False
 
     def requests(self) -> tuple[str, ...]:
         return self.required_tools + self.optional_tools
@@ -182,24 +182,44 @@ def parse_frontmatter_lists(text: str) -> dict[str, list[str] | str]:
 
 
 def _split_sections(body: str) -> dict[str, str]:
-    sections: dict[str, str | None] = {k: None for k in _BODY_KEYS.values()}
-    chunks: dict[str, list[str]] = {k: [] for k in _BODY_KEYS.values()}
+    """Extract named sections without losing their nested Markdown.
+
+    Recognized section names are explicit boundaries at any level (legacy
+    skills mix levels). Other headings only end a section at its own level
+    or above. Fenced and indented code is literal, not section metadata.
+    Absent keys distinguish a missing section from an explicitly empty one.
+    """
+    chunks: dict[str, list[str]] = {}
     active: str | None = None
-    preamble: list[str] = []
+    level = 0
+    fence: str | None = None
     for line in body.splitlines():
-        header = re.match(r"^#{1,3}\s+(.*)$", line.strip())
-        if header:
-            active = _section_key(header.group(1))
+        if fence is not None:
+            if active is not None:
+                chunks[active].append(line)
+            if re.fullmatch(
+                r" {0,3}" + re.escape(fence[0]) + "{" + str(len(fence)) + r",}\s*", line
+            ):
+                fence = None
             continue
-        if active is None:
-            preamble.append(line)
-        else:
+        opening = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        if opening and not (opening[1][0] == "`" and "`" in opening[2]):
+            fence = opening[1]
+            if active is not None:
+                chunks[active].append(line)
+            continue
+        header = re.match(r"^ {0,3}(#{1,6})(?:[ \t]+(.*?)|[ \t]*)$", line)
+        if header:
+            title = re.sub(r"[ \t]+#+[ \t]*$", "", header[2] or "")
+            key = _section_key(title)
+            if key is not None or len(header[1]) <= level:
+                active, level = key, len(header[1])
+                if active is not None:
+                    chunks.setdefault(active, [])
+                continue
+        if active is not None:
             chunks[active].append(line)
-    for key, lines_ in chunks.items():
-        text = "\n".join(lines_).strip()
-        if text:
-            sections[key] = text
-    return {k: (v or "") for k, v in sections.items()}
+    return {key: "\n".join(lines_).strip("\r\n") for key, lines_ in chunks.items()}
 
 
 def load_skill_manifest(path: str | Path, source: str) -> SkillManifest:
@@ -216,7 +236,7 @@ def load_skill_manifest(path: str | Path, source: str) -> SkillManifest:
 
     fields, body = read_frontmatter(text)
     sections = _split_sections(body)
-    skill_format = "rinari" if _RINARI_KEYS & set(fields) or sections["procedure"] else "standard"
+    skill_format = "rinari" if _RINARI_KEYS & set(fields) or "procedure" in sections else "standard"
     metadata = as_str_map(fields.get("metadata"))
 
     name = as_text(fields.get("name")) or skill_md.parent.name
@@ -252,10 +272,11 @@ def load_skill_manifest(path: str | Path, source: str) -> SkillManifest:
         risk=risk,
         can_delegate=can_delegate_raw in ("true", "yes", "1"),
         # A standard skill has no sections: the whole body is the procedure.
-        procedure=sections["procedure"] or (body.strip() if skill_format == "standard" else ""),
-        verification=sections["verification"],
-        failure_policy=sections["failure_policy"],
-        success_criteria=sections["success_criteria"],
+        procedure=sections.get("procedure", "")
+        or (body.strip() if skill_format == "standard" else ""),
+        verification=sections.get("verification", ""),
+        failure_policy=sections.get("failure_policy", ""),
+        success_criteria=sections.get("success_criteria", ""),
         body=body.strip(),
         path=str(skill_md),
         format=skill_format,
@@ -263,6 +284,7 @@ def load_skill_manifest(path: str | Path, source: str) -> SkillManifest:
         compatibility=as_text(fields.get("compatibility")),
         metadata=metadata,
         allowed_tools=as_list(fields.get("allowed-tools")),
+        procedure_present="procedure" in sections,
     )
 
 
@@ -270,11 +292,18 @@ def validate_skill(m: SkillManifest, known_tools: set[str]) -> list[dict]:
     """Static validation: schema + referenced tools exist (harness.md 52)."""
     issues: list[dict] = []
     if not m.description:
-        issues.append({"code": "MISSING_DESCRIPTION", "message": f"{m.name} has no description"})
+        issues.append(
+            {
+                "code": "MISSING_DESCRIPTION",
+                "field": "description",
+                "message": f"{m.name} has no description",
+            }
+        )
     elif len(m.description) > DESCRIPTION_MAX_CHARS:
         issues.append(
             {
                 "code": "DESCRIPTION_TOO_LONG",
+                "field": "description",
                 "message": f"{m.name} description exceeds {DESCRIPTION_MAX_CHARS} characters",
             }
         )
@@ -282,30 +311,44 @@ def validate_skill(m: SkillManifest, known_tools: set[str]) -> list[dict]:
         issues.append(
             {
                 "code": "NAME_MISMATCH",
+                "field": "name",
                 "message": f"{m.name} lives in folder {Path(m.path).parent.name!r}",
             }
         )
-    if not m.procedure:
+    if not m.procedure.strip():
         # Rinari format names the section; a standard skill just needs a body.
         issues.append(
             {
-                "code": "MISSING_PROCEDURE",
+                "code": "EMPTY_PROCEDURE" if m.procedure_present else "MISSING_PROCEDURE",
+                "field": "procedure",
                 "message": (
-                    f"{m.name} has no procedure: after the frontmatter, add a line "
+                    f"{m.name} has an empty Procedure section; add the steps under that heading"
+                    if m.procedure_present
+                    else f"{m.name} has no procedure: after the frontmatter, add a line "
                     "'# Procedure' followed by the steps"
                 ),
             }
             if m.format == "rinari"
-            else {"code": "MISSING_BODY", "message": f"{m.name} has no instructions"}
+            else {
+                "code": "MISSING_BODY",
+                "field": "body",
+                "message": f"{m.name} has no instructions",
+            }
         )
     for tool in m.required_tools:
         # MCP, plugin and OpenAPI tools exist only once their source connects.
         dynamic = tool.startswith(("mcp.", "mcp_", "plugin.", "openapi."))
         if known_tools and tool not in known_tools and not dynamic:
+            # Provider transports may spell dots as underscores. Suggest only
+            # an unambiguous registered name; never silently grant/alias a tool.
+            matches = sorted(name for name in known_tools if name.replace(".", "_") == tool)
             issues.append(
                 {
                     "code": "TOOL_NOT_FOUND",
+                    "field": "required_tools",
+                    "tool": tool,
                     "message": f"{m.name} requires unknown tool {tool!r}",
+                    **({"suggestion": matches[0]} if len(matches) == 1 else {}),
                 }
             )
     return issues

@@ -626,6 +626,11 @@ class SkillService:
             name, skill_md, references, known=self._known_tools(), **kwargs
         )
 
+    def validate_draft(self, name: str, skill_md: str, references=None, **kwargs) -> dict:
+        return self.learning.validate_draft(
+            name, skill_md, references, known=self._known_tools(), **kwargs
+        )
+
     def auto_learn(self) -> str:
         from rinari.skills.learning import AUTO_LEARN_KEY
 
