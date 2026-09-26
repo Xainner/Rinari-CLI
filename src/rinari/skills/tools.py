@@ -328,10 +328,13 @@ def skill_tools(host: SkillToolHost):
             description=(
                 "Save a skill learned from this conversation: the full SKILL.md "
                 "(frontmatter with name and description, then the procedure) plus "
-                "optional text files under references/ or scripts/. It is saved active "
-                "only when the owner asked with /learn; otherwise it waits for the "
-                "owner's approval. Never include secrets: a token or password is refused. "
-                "To improve an existing skill pass update_of with its name. "
+                "optional text files under references/ or scripts/. A new skill is saved "
+                "active when the owner asked with /learn; otherwise it waits for the "
+                "owner's approval. To improve a skill pass update_of with its name and a "
+                "higher version: an update of a learned skill is saved active and the owner "
+                "is notified to review it (undo restores the previous version); reference "
+                "files you do not resend are kept. Dangerous content always waits for "
+                "approval. Never include secrets: a token or password is refused. "
                 "Validate with skills.validate_draft first; this tool saves real content, "
                 "so never use it for diagnostic probes."
             ),

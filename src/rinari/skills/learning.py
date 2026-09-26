@@ -3,13 +3,17 @@ proposes on its own after a verified task.
 
 Who decides the state is the Engine, never the model:
 
-    /learn (the owner asked)   saved active at once; the chat offers undo
-    anything else              kept aside as a proposal until the owner approves
+    /learn (the owner asked)          saved active at once; the chat offers undo
+    update of a learned skill         saved active at once; notified for review
+    anything else                     kept aside until the owner approves
 
-A proposal with dangerous review findings waits for approval even under
-/learn. Secrets are refused, not silently masked: the model must rewrite the
-skill without them. An update keeps the previous version in `.history/`, so
-«Deshacer» restores it; a brand-new learned skill is simply removed.
+"Anything else" is a brand-new skill Rinari proposes on its own, or a change
+to a skill the owner installed or created. Dangerous review findings always
+wait for approval, even under /learn. Secrets are refused, not silently
+masked: the model must rewrite the skill without them. An update must raise
+the version, keeps the reference files it does not resend, and keeps the
+previous version in `.history/`, so «Deshacer» restores it; a brand-new
+learned skill is simply removed. Resending identical content changes nothing.
 
 Layout under ~/.rinari/skills (dot folders are never discovered as skills):
 
@@ -26,7 +30,7 @@ import re
 import shutil
 import tempfile
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path, PurePosixPath
 
 from rinari.shared.redaction import redact_text
@@ -37,6 +41,9 @@ _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 _REFERENCE_ROOTS = ("references", "scripts", "assets")
 _REFERENCE_MAX_BYTES = 256 * 1024
 _REFERENCES_MAX = 20
+# Snapshots kept per learned skill; updates no longer wait for approval, so
+# the undo trail must not grow without bound.
+_HISTORY_KEPT = 20
 AUTO_LEARN_KEY = "skills.auto_learn"
 AUTO_LEARN_MODES = ("propose", "never")
 
@@ -98,19 +105,30 @@ class SkillLearning:
                     "; ".join(issue["message"] for issue in report["issues"]),
                     details={"issues": report["issues"], "warnings": report["warnings"]},
                 )
-            active = owner_asked and report["review"]["verdict"] != "danger"
+            result = {
+                "name": name,
+                "status": "active",
+                "version": report["version"],
+                "update": bool(update_of),
+                "review": report["review"]["verdict"],
+                "warnings": report["warnings"],
+                "previous_version": report["previous_version"],
+            }
+            if report["unchanged"]:
+                # A retry of what is already active: no snapshot, no notice.
+                return {**result, "status": "unchanged"}
+            # Rinari keeps improving what it learned without asking again: the
+            # owner reviews the notice and can undo. What it did not write (an
+            # installed or owner-created skill) still waits for approval.
+            learned = (
+                bool(update_of) and (self._service.record(name) or {}).get("origin") == "learned"
+            )
+            active = (owner_asked or learned) and report["review"]["verdict"] != "danger"
             if active:
                 self._activate(draft, name, session_id=session_id)
             else:
                 self._stage(draft, name, session_id=session_id, update=bool(update_of))
-        result = {
-            "name": name,
-            "status": "active" if active else "pending",
-            "version": report["version"],
-            "update": bool(update_of),
-            "review": report["review"]["verdict"],
-            "warnings": report["warnings"],
-        }
+                result["status"] = "pending"
         self._service.notify_learned({**result, "session_id": session_id})
         return result
 
@@ -155,6 +173,7 @@ class SkillLearning:
                 f"{leaks} file(s) contain what looks like a secret (token, key, password). "
                 "Rewrite the skill without it and propose again.",
             )
+        current = self._root / name
         with tempfile.TemporaryDirectory(
             prefix="rinari-learn-", ignore_cleanup_errors=True
         ) as work:
@@ -163,8 +182,27 @@ class SkillLearning:
                 target = draft / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(text, encoding="utf-8")
+            kept = _keep_references(current, draft) if update_of else []
             manifest = load_skill_manifest(draft, "user")
             issues = validate_skill(manifest, known or set())
+            previous_version = None
+            unchanged = False
+            if update_of:
+                unchanged = content_hash(draft) == content_hash(current)
+                with suppress(SkillError):
+                    previous_version = load_skill_manifest(current, "user").version
+                if not unchanged and not _is_newer(manifest.version, previous_version):
+                    issues.append(
+                        {
+                            "code": "VERSION_NOT_INCREASED",
+                            "field": "version",
+                            "message": (
+                                f"an update must raise the version above {previous_version} "
+                                f"(got {manifest.version or 'none'})"
+                            ),
+                            "suggestion": _next_minor(previous_version),
+                        }
+                    )
             warnings = [
                 {
                     "code": "TOOL_DEFERRED",
@@ -189,6 +227,18 @@ class SkillLearning:
                         ),
                     }
                 )
+            if kept:
+                warnings.append(
+                    {
+                        "code": "REFERENCES_KEPT",
+                        "field": "references",
+                        "files": kept,
+                        "message": (
+                            f"kept {len(kept)} file(s) of the installed version that the "
+                            "update did not resend; resend a file to change it"
+                        ),
+                    }
+                )
             review = review_skill(draft)
             yield (
                 draft,
@@ -199,6 +249,8 @@ class SkillLearning:
                     "issues": issues,
                     "warnings": warnings,
                     "review": review.to_dict(),
+                    "previous_version": previous_version,
+                    "unchanged": unchanged,
                 },
             )
 
@@ -208,7 +260,11 @@ class SkillLearning:
             snapshot = self._history / name / self._service.stamp()
             snapshot.parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(current, snapshot)
+            for stale in sorted(snapshot.parent.iterdir())[:-_HISTORY_KEPT]:
+                shutil.rmtree(stale, ignore_errors=True)
         self._service.place(draft, name, replace=True)
+        # An older proposal for this name would overwrite what is now active.
+        self._discard(name)
         previous = self._service.record(name) or {}
         now = self._service.now()
         self._service.upsert_record(
@@ -303,6 +359,24 @@ class SkillLearning:
         self._service.remove(name)
         return {"name": name, "restored": None, "removed": True}
 
+    def previous(self, name: str) -> dict | None:
+        """The version «Deshacer» would restore, for reviewing an update."""
+        folder = self._history / name
+        snapshots = sorted(folder.iterdir()) if folder.is_dir() else []
+        if not snapshots:
+            return None
+        skill_md = snapshots[-1] / SKILL_FILE
+        try:
+            version = load_skill_manifest(snapshots[-1], "user").version
+        except SkillError:
+            version = None
+        return {
+            "version": version,
+            "skill_md": skill_md.read_text(encoding="utf-8", errors="replace")
+            if skill_md.is_file()
+            else "",
+        }
+
     def _discard(self, name: str) -> None:
         shutil.rmtree(self._pending / name, ignore_errors=True)
         (self._pending / f"{name}.json").unlink(missing_ok=True)
@@ -334,6 +408,46 @@ def _checked_references(references: dict[str, str]) -> dict[str, str]:
             raise SkillError("SKILL_INVALID", f"reference {raw_path!r} is not text or too large")
         checked[path.as_posix()] = text
     return checked
+
+
+def _keep_references(current: Path, draft: Path) -> list[str]:
+    """Copy the installed reference files an update did not resend.
+
+    An update usually rewrites SKILL.md only; replacing the folder would drop
+    the references its procedure still points to.
+    """
+    kept: list[str] = []
+    for root in _REFERENCE_ROOTS:
+        base = current / root
+        if not base.is_dir() or base.is_symlink():
+            continue
+        for path in sorted(base.rglob("*")):
+            if path.is_symlink() or not path.is_file():
+                continue
+            relative = path.relative_to(current)
+            target = draft / relative
+            if target.exists():
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(path, target)
+            kept.append(relative.as_posix())
+    return kept
+
+
+def _semver(version: str | None) -> tuple[int, int, int] | None:
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version or "")
+    return (int(match[1]), int(match[2]), int(match[3])) if match else None
+
+
+def _is_newer(version: str | None, previous: str | None) -> bool:
+    new, old = _semver(version), _semver(previous)
+    # Only comparable versions are enforced; a loose standard version is not.
+    return new is None or old is None or new > old
+
+
+def _next_minor(version: str | None) -> str:
+    parsed = _semver(version)
+    return f"{parsed[0]}.{parsed[1] + 1}.0" if parsed else "1.1.0"
 
 
 __all__ = ["AUTO_LEARN_KEY", "AUTO_LEARN_MODES", "SkillLearning"]

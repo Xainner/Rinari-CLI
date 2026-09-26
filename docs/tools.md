@@ -3,7 +3,8 @@
 ## Autoría de skills
 
 `skills.validate_draft` recibe `{name, skill_md, references?, update_of?}` y
-devuelve `{name, version, valid, issues, warnings, review}`. Tiene capacidad
+devuelve `{name, version, valid, issues, warnings, review, previous_version,
+unchanged}`. Tiene capacidad
 `state.read`: revisa archivos temporales privados sin cambiar la biblioteca,
 propuestas pendientes, registros, historial ni eventos. `ok` indica que la
 validación corrió; `valid` indica si el borrador pasó.
@@ -14,6 +15,13 @@ Las referencias deben incluir el prefijo `references/`, `scripts/` o `assets/`.
 Las herramientas requeridas usan nombres canónicos (`shell.exec`, `fs.write`),
 no los nombres de transporte del proveedor. Una dependencia dinámica pendiente
 de conexión devuelve `TOOL_DEFERRED`; no equivale a permiso o disponibilidad.
+
+Una actualización (`update_of`) debe subir la versión (`VERSION_NOT_INCREASED`)
+y conserva las referencias que no se reenvían (`REFERENCES_KEPT`). Si la skill es
+aprendida, `skills.propose` la guarda activa sin aprobación y el dueño recibe un
+aviso para revisarla y deshacerla; una skill nueva fuera de `/learn`, una skill
+instalada o creada por el dueño y cualquier contenido peligroso esperan
+aprobación. Reenviar el mismo contenido devuelve `status: unchanged`.
 
 ## Contexto de imágenes (Hermes, 2026-09-12)
 
