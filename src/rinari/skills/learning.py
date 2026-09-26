@@ -256,6 +256,12 @@ class SkillLearning:
 
     def _activate(self, draft: Path, name: str, *, session_id: str) -> None:
         current = self._root / name
+        previous = self._service.record(name) or {}
+        # A skill the owner installed or created stays theirs when Rinari
+        # changes it: same origin, source and installed hash, so the library
+        # shows a local modification and an update from its source still
+        # refuses to discard it. Only what Rinari wrote itself is "learned".
+        owned = current.is_dir() and previous.get("origin") != "learned"
         if current.is_dir():
             snapshot = self._history / name / self._service.stamp()
             snapshot.parent.mkdir(parents=True, exist_ok=True)
@@ -265,8 +271,10 @@ class SkillLearning:
         self._service.place(draft, name, replace=True)
         # An older proposal for this name would overwrite what is now active.
         self._discard(name)
-        previous = self._service.record(name) or {}
         now = self._service.now()
+        if owned:
+            self._service.upsert_record(name, status="active", updated_at=now)
+            return
         self._service.upsert_record(
             name,
             origin="learned",
@@ -338,10 +346,16 @@ class SkillLearning:
         return True
 
     def revert(self, name: str) -> dict:
-        """Undo a learned skill: back to its previous version, or gone if new."""
+        """Undo Rinari's last change: the previous version, or gone if it was new.
+
+        Only a learned skill can be removed this way; an installed or created
+        skill Rinari changed goes back to its previous version and keeps its
+        provenance (the installed hash then matches again).
+        """
         record = self._service.record(name) or {}
-        if record.get("origin") != "learned":
-            raise SkillError("NOT_EDITABLE", f"{name} is not a learned skill")
+        learned = record.get("origin") == "learned"
+        if not learned and not (self._root / name).is_dir():
+            raise SkillError("NOT_EDITABLE", f"{name} is not a skill Rinari can undo")
         snapshots = (
             sorted((self._history / name).iterdir()) if (self._history / name).is_dir() else []
         )
@@ -349,13 +363,14 @@ class SkillLearning:
             latest = snapshots[-1]
             self._service.place(latest, name, replace=True)
             shutil.rmtree(latest)
-            self._service.upsert_record(
-                name,
-                content_hash=content_hash(self._root / name),
-                updated_at=self._service.now(),
-            )
+            fields = {"updated_at": self._service.now()}
+            if learned:
+                fields["content_hash"] = content_hash(self._root / name)
+            self._service.upsert_record(name, **fields)
             restored = load_skill_manifest(self._root / name, "user").version
             return {"name": name, "restored": restored, "removed": False}
+        if not learned:
+            raise SkillError("NO_HISTORY", f"{name} has no change by Rinari to undo")
         self._service.remove(name)
         return {"name": name, "restored": None, "removed": True}
 

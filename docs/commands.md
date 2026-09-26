@@ -2502,8 +2502,10 @@ also saved active in any turn: the owner is notified to review it, not to
 approve it. A new skill Rinari proposes on its own (setting
 `skills.auto_learn`, default `propose`), a change to an installed or
 owner-created skill, and anything with dangerous review findings wait in
-`rinari skills pending` until `approve` or `reject`. `revert` undoes a learned
-skill: its previous version, or removed if it was new. Secrets are refused.
+`rinari skills pending` until `approve` or `reject`. An approved change keeps an
+installed skill's source and shows as a local modification. `revert` undoes
+Rinari's last change: the previous version, or removed if it was a new learned
+skill; an installed skill is never removed by it. Secrets are refused.
 
 ---
 

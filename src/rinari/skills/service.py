@@ -463,9 +463,11 @@ class SkillService:
         else:
             view["body"] = view["skill_md"]
             view["references"] = []
-        # A learned skill changes without approval: what «Deshacer» restores
-        # is shown next to it so the owner can review the change.
-        view["previous"] = self.learning.previous(name) if entry["origin"] == "learned" else None
+        # What «Deshacer» restores after Rinari changed a learned or installed
+        # skill, shown next to it so the owner can review the change.
+        view["previous"] = (
+            self.learning.previous(name) if entry["origin"] in _EDITABLE_ORIGINS else None
+        )
         return view
 
     def _folder_of(self, name: str, project: Path | None = None) -> Path:
@@ -609,7 +611,11 @@ class SkillService:
                 "LOCALLY_MODIFIED",
                 f"{name} was edited after it was installed; updating would discard those edits",
             )
-        return self.install(origin, name, expected_hash=expected_hash, replace=True)
+        manifest = self.install(origin, name, expected_hash=expected_hash, replace=True)
+        # The source replaced every version Rinari saved: «Deshacer» must not
+        # bring back content from before this update.
+        shutil.rmtree(self.user_skills_dir() / ".history" / name, ignore_errors=True)
+        return manifest
 
     def remove(self, name: str) -> bool:
         dest = self.user_skills_dir() / name

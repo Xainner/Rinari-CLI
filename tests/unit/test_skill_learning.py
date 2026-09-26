@@ -186,6 +186,68 @@ def test_what_rinari_did_not_write_still_waits_for_approval(services) -> None:
     assert services.skills.get("deploy-saturno").version == "1.0.0"
 
 
+def _install_from_folder(services, tmp_path, version: str = "1.0.0") -> dict:
+    vendor = tmp_path / "vendor" / "deploy-saturno"
+    vendor.mkdir(parents=True, exist_ok=True)
+    (vendor / "SKILL.md").write_text(_v(skill_md(), version), encoding="utf-8")
+    services.skills.install(vendor)
+    return services.ctx.skill_repo.get("deploy-saturno")
+
+
+@pytest.mark.parametrize("owner_asked", [True, False])
+def test_rinari_changing_an_installed_skill_keeps_its_provenance(
+    services, tmp_path, owner_asked
+) -> None:
+    installed = _install_from_folder(services, tmp_path)
+    assert installed["origin"] == "installed" and installed["source"]
+    improved = _v(skill_md(body="1. Build.\n2. Copy.\n3. Restart.\n"), "1.1.0")
+    result = services.skills.propose(
+        "deploy-saturno", improved, update_of="deploy-saturno", owner_asked=owner_asked
+    )
+    if not owner_asked:
+        # Rinari did not write it: the change waits for the owner.
+        assert result["status"] == "pending"
+        services.skills.learning.approve("deploy-saturno")
+    record = services.ctx.skill_repo.get("deploy-saturno")
+    for field in ("origin", "source_kind", "source", "content_hash", "installed_at"):
+        assert record[field] == installed[field], field
+    detail = services.skills.detail("deploy-saturno")
+    assert detail["version"] == "1.1.0" and detail["origin"] == "installed"
+    # Rinari's change is a local modification of the installed skill.
+    assert detail["modified"] is True and detail["previous"]["version"] == "1.0.0"
+    with pytest.raises(SkillError) as exc:
+        services.skills.update("deploy-saturno")
+    assert exc.value.code == "LOCALLY_MODIFIED"
+
+    undone = services.skills.learning.revert("deploy-saturno")
+    assert undone == {"name": "deploy-saturno", "restored": "1.0.0", "removed": False}
+    assert services.ctx.skill_repo.get("deploy-saturno")["source"] == installed["source"]
+    assert services.skills.detail("deploy-saturno")["modified"] is False
+    # Nothing left to undo: an installed skill is never removed by «Deshacer».
+    with pytest.raises(SkillError) as nothing:
+        services.skills.learning.revert("deploy-saturno")
+    assert nothing.value.code == "NO_HISTORY"
+    assert "deploy-saturno" in services.skills.discover()
+
+
+def test_updating_from_the_source_drops_the_undo_trail(services, tmp_path) -> None:
+    _install_from_folder(services, tmp_path)
+    services.skills.propose(
+        "deploy-saturno",
+        _v(skill_md(body="1. Local change.\n"), "1.1.0"),
+        update_of="deploy-saturno",
+        owner_asked=True,
+    )
+    vendor = tmp_path / "vendor" / "deploy-saturno" / "SKILL.md"
+    vendor.write_text(_v(skill_md(), "2.0.0"), encoding="utf-8")  # the source moved on
+    services.skills.update("deploy-saturno", force=True)
+    detail = services.skills.detail("deploy-saturno")
+    assert detail["version"] == "2.0.0" and detail["modified"] is False
+    assert detail["previous"] is None
+    with pytest.raises(SkillError):
+        services.skills.learning.revert("deploy-saturno")
+
+
 def test_an_update_must_raise_the_version(services) -> None:
     services.skills.propose("deploy-saturno", skill_md(), owner_asked=True)
     same_version = skill_md(body="1. Build.\n2. Copy.\n3. Restart.\n")
