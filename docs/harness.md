@@ -2401,6 +2401,14 @@ dangerous review findings (any case)      → pending until the owner approves
 same content as the installed version     → "unchanged": no history, no event
 ```
 
+A change Rinari makes to an installed or owner-created skill (approved, or
+under `/learn`) keeps that skill's record: origin, source, source kind,
+installed date and installed content hash. The library therefore shows it as
+locally modified, and `rinari skills update` refuses to discard it without
+`--force`. «Deshacer» restores its previous version and never removes an
+installed skill (`NO_HISTORY` when Rinari has not changed it). Updating a
+skill from its source clears the versions Rinari saved for it.
+
 Updates of learned skills do not ask for approval: Rinari keeps improving what
 it learned, and the `skill.learned` notice (`status: active`, `update: true`,
 `previous_version`) is for review, not consent. `skill.get` returns `previous`

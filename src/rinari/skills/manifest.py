@@ -96,7 +96,7 @@ class SkillError(Exception):
         # | SKILL_NOT_FOUND | ALREADY_EXISTS | REMOVE_FAILED
         # | TOOL_NOT_FOUND | TRUST_REQUIRED | LOAD_FAILED
         # | SOURCE_INVALID | SOURCE_TOO_LARGE | DOWNLOAD_FAILED | SKILL_AMBIGUOUS
-        # | REVIEW_REQUIRED | NOT_UPDATABLE | LOCALLY_MODIFIED | NOT_EDITABLE
+        # | REVIEW_REQUIRED | NOT_UPDATABLE | LOCALLY_MODIFIED | NOT_EDITABLE | NO_HISTORY
         self.code = code
         self.message = message
         # Structured context for clients: review findings, candidate names…
