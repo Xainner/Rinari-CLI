@@ -646,9 +646,9 @@ class PolicyEngine:
                 choices=("deny",),
             )
         target = net.target or None
-        if net.rule is not None or self._network.mode == MODE_ALLOW:
-            return self._allow(CAPABILITY_NETWORK, net.reason, risk, risk_class, target)
         sending = mode == "send"
+        # Profile floors come before the owner's allow rules and mode: an
+        # allowlisted host or network.mode=allow relaxes prompts, never these.
         if sending and scope.profile is PermissionProfile.READ_ONLY:
             return self._deny(
                 CAPABILITY_NETWORK,
@@ -657,6 +657,19 @@ class PolicyEngine:
                 risk=risk,
                 risk_class=risk_class,
             )
+        if sending and scope.external_content and not is_local_host(net.host):
+            return self._outbound(
+                scope,
+                CAPABILITY_NETWORK,
+                f"sending data to {net.host}",
+                target=target,
+                risk=risk,
+                risk_class=risk_class,
+                rule_id="network_send",
+                binding_mode="exact",
+            )
+        if net.rule is not None or self._network.mode == MODE_ALLOW:
+            return self._allow(CAPABILITY_NETWORK, net.reason, risk, risk_class, target)
         if self._network.mode == MODE_ASK:
             # Explicit strict mode chosen by the owner: every host asks once.
             return self._ask(
