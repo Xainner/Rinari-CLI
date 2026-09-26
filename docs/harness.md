@@ -2306,9 +2306,13 @@ can_delegate: true
 ## References and exposed tools (implemented)
 
 Rinari section extraction preserves nested Markdown headings and fenced or
-indented code. Recognized section titles (including Spanish aliases) remain
+indented code. Canonical section titles (including Spanish aliases) remain
 explicit boundaries at any heading level for compatibility with existing
-skills that mix levels. Other headings end a section only at its own level
+skills that mix levels. Nested aliases of the active section and generic titles
+(`Steps`, `Instructions`, `Pasos`, `Instrucciones`, `Verify`, `Troubleshooting`)
+remain content without changing the parent section's level. At peer/parent
+levels or outside an active section, those aliases still identify sections.
+Other headings end a section only at its own level
 or above. An absent Procedure section reports `MISSING_PROCEDURE`; an empty
 one reports `EMPTY_PROCEDURE`. YAML multiline descriptions and lists use the
 same reader for installed skills and learned drafts.

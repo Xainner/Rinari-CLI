@@ -312,7 +312,10 @@ def skill_tools(host: SkillToolHost):
                 "Check a draft SKILL.md and its reference files before saving. Uses the same "
                 "checks as skills.propose, without installing, activating, recording history "
                 "or notifying. Read valid, issues, warnings and review; a successful tool "
-                "call alone does not mean the draft is valid. Pass update_of for an update."
+                "call alone does not mean the draft is valid. Content issues return "
+                "valid=false; invalid names, conflicts, missing update targets, invalid "
+                "references and secrets return a tool error with details.skill_code. "
+                "Pass update_of for an update."
             ),
             input_schema=draft_schema,
             capabilities=read,

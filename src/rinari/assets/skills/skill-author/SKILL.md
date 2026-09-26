@@ -30,6 +30,7 @@ required_tools:
    - How to verify it worked.
    - Pitfalls and how to recover.
 5. Write the SKILL.md: YAML frontmatter with name (lowercase, hyphens), description, version (1.0.0; bump the minor version on an update), risk and required_tools; then `# Procedure`, `# Verification`, `# Failure handling`, `# Success criteria`. Use canonical Rinari tool names such as `shell.exec`, `fs.write`, `fs.stat` (not provider spellings such as `shell_exec`). YAML multiline descriptions, Unicode, nested Markdown headings and fenced code are supported. Keep it under about 150 lines; long material goes to `references/<topic>.md` or `references/payload.json`, referenced from the procedure. Include that directory prefix in each key of the references argument.
+   - Use the four section headings at the same level. Generic nested titles such as `## Steps` or `## Verify` stay in Procedure. Canonical names of other sections (`Verification`, `Failure handling`, `Success criteria`, including Spanish aliases) still start those sections even at a deeper level for compatibility; use a descriptive subtitle such as `## Verify the deployment` for a substep instead.
 6. Never write secrets: tokens, passwords, keys, credentials. Use placeholders (`<TOKEN>`, `$API_KEY`) and say where the owner keeps the real value. skills.propose refuses content that looks like a secret.
 7. Call skills.validate_draft with name, skill_md, references and update_of when updating. Inspect `valid`, `issues`, `warnings` and `review`: tool `ok` only means validation ran. Correct the reported fields and validate again as needed. This does not save, activate or create history. Never use skills.propose to bisect a parser problem or save dummy probes under the real name.
 8. When the complete draft is valid, call skills.propose with the same payload. It revalidates before saving. Report the result as it is: saved, or waiting for the owner's approval, including any unresolved dependency warnings. A saved skill is not proof that every procedure variant has been executed.
@@ -43,6 +44,7 @@ required_tools:
 - SENSITIVE_CONTENT: replace the secret with a placeholder and propose again.
 - ALREADY_EXISTS: read that skill with skills.show and propose a new version with update_of.
 - NAME_TAKEN: the name belongs to one of Rinari's own skills; choose another.
+- NAME_INVALID: fix the lowercase, hyphenated name. SKILL_NOT_FOUND on an update: inspect the library before deciding whether this is a new skill. Name conflicts, invalid references and secrets return tool errors; content issues return a successful validation report with `valid=false`.
 - SKILL_INVALID: inspect `details.issues` and the field/code, not guesses about encoding. MISSING_PROCEDURE means add the section; EMPTY_PROCEDURE means the section exists but needs steps. TOOL_NOT_FOUND means correct the required tool name, using the suggestion when present. Then validate the draft again.
 - TOOL_DEFERRED warns that an MCP, plugin or OpenAPI dependency still needs its integration connected. It does not grant access or confirm availability.
 

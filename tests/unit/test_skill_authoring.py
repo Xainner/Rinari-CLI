@@ -74,6 +74,37 @@ def test_peer_unknown_heading_ends_section_but_children_do_not(tmp_path):
 
 
 @pytest.mark.parametrize(
+    "heading", ["Steps", "Instructions", "Pasos", "Instrucciones", "Procedure"]
+)
+def test_nested_procedure_alias_does_not_change_parent_level(tmp_path, heading):
+    body = f"intro\n## {heading}\n1. a\n## Notes\nnote"
+    manifest = load(tmp_path, document(f"# Procedure\n{body}\n# Verification\nv\n"))
+    assert manifest.procedure == body
+    assert manifest.verification == "v"
+
+
+@pytest.mark.parametrize("heading", ["Verify", "Verify (result):", "Troubleshooting"])
+def test_nested_generic_section_alias_stays_in_procedure(tmp_path, heading):
+    body = f"1. build\n## {heading}\nrun tests\n2. deploy"
+    manifest = load(tmp_path, document(f"# Procedure\n{body}\n"))
+    assert manifest.procedure == body
+    assert manifest.verification == manifest.failure_policy == ""
+
+
+@pytest.mark.parametrize("level", ["#", "##"])
+def test_generic_alias_remains_a_boundary_at_peer_or_parent_level(tmp_path, level):
+    manifest = load(tmp_path, document(f"## Steps\n1. build\n{level} Verify\nrun tests\n"))
+    assert manifest.procedure == "1. build"
+    assert manifest.verification == "run tests"
+
+
+def test_canonical_mixed_level_boundaries_remain_compatible(tmp_path):
+    manifest = load(tmp_path, document("# Procedure\n1. build\n## Verificación\nrun tests\n"))
+    assert manifest.procedure == "1. build"
+    assert manifest.verification == "run tests"
+
+
+@pytest.mark.parametrize(
     "body,code",
     [
         ("# Context\nAlgo.\n", "MISSING_PROCEDURE"),

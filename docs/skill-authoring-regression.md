@@ -48,6 +48,24 @@ the permanent tests use synthetic equivalents of their relevant structure.
 
 ## Compatibility and limits
 
+### Release note: editing previously learned skills
+
+The stricter checks apply to both new skills and updates through `update_of`.
+An existing skill with unknown built-in `required_tools` or a description longer
+than 1024 characters remains installed, but its next proposed update is refused
+until those fields are corrected. No automatic migration or deletion occurs.
+Use the diagnostic field and canonical-name suggestion to repair the draft.
+
+### Review follow-up
+
+The review found two additional losses: nested `## Steps` changed the parent
+level and dropped following `## Notes`, while `## Verify` moved deployment
+steps to verification. Eleven new cases cover same-section aliases, generic
+nested aliases, peer/parent boundaries and canonical mixed-level compatibility.
+Before the follow-up fix, eight failed and three passed. Canonical names of
+different sections remain reserved boundaries at any level; `skill-author`
+documents this compatibility rule and recommends peer-level main sections.
+
 No database migration or second skill implementation is introduced. Draft
 validation uses private temporary files and shares parsing, reference checks,
 secret checks and static review with proposals. It is not an approval token;

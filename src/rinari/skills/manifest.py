@@ -52,16 +52,6 @@ SKILL_FORMATS = ("rinari", "standard")
 # The standard caps the description; the catalog shows it on every turn.
 DESCRIPTION_MAX_CHARS = 1024
 
-# Body sections recognized by convention (harness.md 48). Order matters:
-# the first `# <title>` line after each marker starts that section.
-_SECTION_TITLES = ("procedure", "verification", "failure handling", "success criteria")
-
-_BODY_KEYS = {
-    "procedure": "procedure",
-    "verification": "verification",
-    "failure handling": "failure_policy",
-    "success criteria": "success_criteria",
-}
 # Headings a model or a person writes for the same sections. A learned skill
 # failed validation for writing "## Procedimiento" instead of "# Procedure".
 _SECTION_ALIASES = {
@@ -81,15 +71,20 @@ _SECTION_ALIASES = {
     "success criteria": "success_criteria",
     "criterios de exito": "success_criteria",
 }
+# These are also ordinary subheadings. Only peer/parent headings (or a
+# heading outside an active section) may use them as section boundaries.
+_GENERIC_SECTION_TITLES = frozenset(
+    {"steps", "instructions", "pasos", "instrucciones", "verify", "troubleshooting"}
+)
 
 
-def _section_key(title: str) -> str | None:
-    """`## Procedimiento (pasos):` -> "procedure"; unknown headings -> None."""
+def _section_title(title: str) -> str:
+    """Normalize accents, parenthetical hints and trailing punctuation."""
     import unicodedata
 
     plain = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode()
     plain = re.sub(r"\(.*?\)", "", plain).strip().rstrip(":.").strip().lower()
-    return _SECTION_ALIASES.get(plain)
+    return plain
 
 
 class SkillError(Exception):
@@ -184,9 +179,10 @@ def parse_frontmatter_lists(text: str) -> dict[str, list[str] | str]:
 def _split_sections(body: str) -> dict[str, str]:
     """Extract named sections without losing their nested Markdown.
 
-    Recognized section names are explicit boundaries at any level (legacy
-    skills mix levels). Other headings only end a section at its own level
-    or above. Fenced and indented code is literal, not section metadata.
+    Canonical section names are boundaries at any level (legacy skills mix
+    levels). Nested aliases of the active section, and generic titles such as
+    Steps/Verify, remain content without changing its level. Other headings
+    only end a section at its own level or above. Fenced and indented code is literal.
     Absent keys distinguish a missing section from an explicitly empty one.
     """
     chunks: dict[str, list[str]] = {}
@@ -210,8 +206,14 @@ def _split_sections(body: str) -> dict[str, str]:
             continue
         header = re.match(r"^ {0,3}(#{1,6})(?:[ \t]+(.*?)|[ \t]*)$", line)
         if header:
-            title = re.sub(r"[ \t]+#+[ \t]*$", "", header[2] or "")
-            key = _section_key(title)
+            title = _section_title(re.sub(r"[ \t]+#+[ \t]*$", "", header[2] or ""))
+            key = _SECTION_ALIASES.get(title)
+            if (
+                active is not None
+                and len(header[1]) > level
+                and (key == active or title in _GENERIC_SECTION_TITLES)
+            ):
+                key = None
             if key is not None or len(header[1]) <= level:
                 active, level = key, len(header[1])
                 if active is not None:
