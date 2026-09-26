@@ -1535,7 +1535,9 @@ class EngineServer:
         existing = self._services.sessions.latest_for_root(root)
         created = False
         if existing is None:
-            record = self._services.sessions.new(cwd=root)
+            # A desktop session is born in a real mode; the legacy default
+            # ("ask") left no mode selected in the composer.
+            record = self._services.sessions.new(cwd=root, mode="build")
             if record.kind != "PROJECT":
                 record = self._services.sessions.promote(record.id, root)
             created = True

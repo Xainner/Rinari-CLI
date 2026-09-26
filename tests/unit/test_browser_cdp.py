@@ -1204,6 +1204,20 @@ def test_browser_click_requires_consent_once_per_session(tmp_path, fake_cdp, mon
     manager.close()
 
 
+def test_browser_click_by_coordinates_accepts_an_empty_selector(
+    tmp_path, fake_cdp, monkeypatch
+) -> None:
+    """Models send selector="" with x/y; that was rejected as invalid."""
+    manager = _connected_manager(tmp_path, fake_cdp, monkeypatch)
+    runtime = _runtime(tmp_path, manager=manager, network_mode="allow", answer="s")
+    ctx = _ctx(tmp_path, manager=manager, network=NetworkGuard(NetworkPolicy(mode="allow")))
+    result = runtime.execute("browser.click", {"selector": "", "x": 10, "y": 20}, ctx)
+    assert result.ok, result.error
+    empty = runtime.execute("browser.click", {"selector": ""}, ctx)
+    assert not empty.ok
+    manager.close()
+
+
 def test_browser_click_denied_for_read_only_profile(tmp_path, fake_cdp, monkeypatch) -> None:
     manager = _connected_manager(tmp_path, fake_cdp, monkeypatch)
     runtime = _runtime(tmp_path, manager=manager, network_mode="allow")
@@ -1264,6 +1278,30 @@ def test_browser_screenshot_artifact(tmp_path, fake_cdp, monkeypatch) -> None:
     png_path = Path(result.data["artifact"][len("file://") :])
     assert png_path.exists()
     assert result.artifacts[0].kind == "screenshot"
+    manager.close()
+
+
+def test_browser_screenshot_is_a_session_image_the_chat_can_show(
+    tmp_path, fake_cdp, monkeypatch, app_ctx
+) -> None:
+    """A bare file:// path rendered as a broken image in the chat."""
+    from dataclasses import replace
+
+    from rinari.artifacts.store import ArtifactStore
+
+    manager = _connected_manager(tmp_path, fake_cdp, monkeypatch)
+    runtime = _runtime(tmp_path, manager=manager, network_mode="allow")
+    ctx = replace(
+        _ctx(tmp_path, manager=manager, network=NetworkGuard(NetworkPolicy(mode="allow"))),
+        artifact_store=ArtifactStore(app_ctx),
+    )
+    result = runtime.execute("browser.screenshot", {"target_id": "t1"}, ctx)
+    assert result.ok, result.error
+    uri = result.data["uri"]
+    assert uri.startswith("artifact://") and result.data["artifact"] == uri
+    assert result.data["markdown"] == f"![{result.data['name']}]({uri})"
+    assert result.presentation["kind"] == "image"
+    assert result.artifacts[0].kind == "image" and result.artifacts[0].uri == uri
     manager.close()
 
 

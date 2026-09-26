@@ -102,6 +102,7 @@ def test_open_creates_project_and_promotes_session(server, tmp_path) -> None:
     assert first["created"] is True
     assert first["project"]["root"] == str(plain.resolve())
     assert first["session"]["kind"] == "PROJECT"
+    assert first["session"]["mode"] == "build"  # not the legacy "ask"
     assert first["session"]["project_root"] == str(plain.resolve())
 
     second = _open(server, "o2", plain)

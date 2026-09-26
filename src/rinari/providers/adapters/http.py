@@ -187,10 +187,25 @@ def auth_failure(
     provider: str | None = None,
     model: str | None = None,
 ) -> ProviderModelError:
-    from rinari.providers.errors import ProviderError, ProviderErrorCode
+    import re
 
+    from rinari.providers.errors import (
+        ProviderError,
+        ProviderErrorCode,
+        _error_payload,
+        _safe_error_fields,
+    )
+
+    # The provider's own reason is what tells the owner what to do (OpenAI's
+    # Codex outage read "Incorrect API key provided: sk-svcac…"). Anything
+    # that looks like a key or token is masked even if the provider did not.
+    detail, _, _ = _safe_error_fields(_error_payload(response))
+    detail = re.sub(
+        r"[A-Za-z0-9_\-]{6}[A-Za-z0-9_\-*]{18,}", lambda m: m.group(0)[:6] + "…", detail
+    )
+    suffix = f": {detail}" if detail else ""
     return ProviderError(
-        f"Authentication failed (HTTP {response.status_code}) for {url}",
+        f"Authentication failed (HTTP {response.status_code}) for {url}{suffix}",
         code=ProviderErrorCode.AUTH,
         retryable=False,
         provider=provider,

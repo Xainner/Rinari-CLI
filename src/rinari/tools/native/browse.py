@@ -395,9 +395,50 @@ def browser_screenshot(input: dict, ctx: ToolContext) -> ToolResult:
         )
     path = _artifact_dir(ctx) / f"screenshot-{int(time.time())}.png"
     path.write_bytes(png)
-    ref = ArtifactRef(uri=f"file://{path}", name=path.name, kind="screenshot")
-    return _with_artifacts(
-        {"artifact": ref.uri, "bytes": len(png), "sha256": _sha256(path)}, (ref,)
+    digest = _sha256(path)
+    store = getattr(ctx, "artifact_store", None)
+    if store is None:
+        ref = ArtifactRef(uri=f"file://{path}", name=path.name, kind="screenshot")
+        return _with_artifacts({"artifact": ref.uri, "bytes": len(png), "sha256": digest}, (ref,))
+    # In the session media store the chat and the activity can show it; a
+    # bare file:// path renders as a broken image (the renderer cannot read it).
+    from PIL import Image
+
+    from rinari.artifacts.transfer import import_file
+
+    record = import_file(
+        store,
+        ctx.session_id,
+        path,
+        expected_hash=digest,
+        cancellation=ctx.cancellation,
+        provenance=f"browser.screenshot:{path}",
+    )
+    width = height = None
+    try:
+        with Image.open(path) as image:
+            width, height = image.size
+    except Exception:  # dimensions are a nicety; the capture itself is valid
+        pass
+    uri = record.uri()
+    data = {
+        "artifact": uri,
+        "uri": uri,
+        "name": path.name,
+        "path": str(path),
+        "bytes": len(png),
+        "sha256": digest,
+        "width": width,
+        "height": height,
+        "mime_type": "image/png",
+        # How to show it to the owner: file:// paths do not render in the chat.
+        "markdown": f"![{path.name}]({uri})",
+    }
+    return ToolResult(
+        ok=True,
+        data=data,
+        artifacts=(ArtifactRef(uri, path.name, "image"),),
+        presentation={"kind": "image", "image": data},
     )
 
 
@@ -406,6 +447,10 @@ def browser_click(input: dict, ctx: ToolContext) -> ToolResult:
     if isinstance(target, ToolResult):
         return target
     selector = input.get("selector")
+    # Clicking by coordinates: models send selector="" next to x/y; that is
+    # "no selector", not an invalid one.
+    if selector == "" and input.get("x") is not None and input.get("y") is not None:
+        selector = None
     if selector is not None and (not isinstance(selector, str) or not selector):
         return _run_invalid("selector must be a non-empty string")
 
