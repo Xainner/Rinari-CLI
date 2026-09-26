@@ -904,7 +904,9 @@ asks even in full-access (`rule_id = external_content_send`). Approvals offer
 `policies/project_grants.json`, bound to the rule that asked (a host, a folder
 or the rule itself) and listed/revoked with `permission.grants.list` /
 `permission.grants.revoke`. `network.mode` defaults to `auto` (the profile
-decides); `ask` keeps the old per-host prompt, `allow`/`off` as before.
+decides); `ask` keeps the old per-host prompt, `allow`/`off` as before. An allow rule
+or `network.mode = allow` relaxes prompts only: read-only still never sends,
+and after external content a send to an internet host still asks.
 A turn started with a command keeps it on the owner message:
 `origin = {kind: "user", command, command_kind: "command" | "skill"}`, so a
 client shows a chip instead of the raw `/name`. `capability.search` also

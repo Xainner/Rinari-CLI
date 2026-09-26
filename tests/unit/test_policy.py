@@ -538,3 +538,38 @@ def test_shell_classification_false_positives() -> None:
         assert (
             engine.decide(CAPABILITY_SHELL, work, command=command).action is PolicyAction.ALLOW
         ), command
+
+
+@pytest.mark.parametrize(
+    "network",
+    [
+        pytest.param("rule", id="allow-rule"),
+        pytest.param("mode", id="mode-allow"),
+    ],
+)
+def test_allow_rules_and_mode_never_lift_the_profile_floors(network) -> None:
+    """An allowlisted host or network.mode=allow relaxes prompts, not the
+    read-only floor nor the untrusted-content guard (Codex review, 2026-09-25)."""
+    from rinari.policy.network import NetworkPolicy, NetworkRule
+
+    policy = (
+        NetworkPolicy(rules=[NetworkRule(host="api.example.com", decision="allow")])
+        if network == "rule"
+        else NetworkPolicy(mode="allow")
+    )
+    engine = PolicyEngine(network=policy)
+
+    def send(scope, host="api.example.com"):
+        return engine.decide(CAPABILITY_NETWORK, scope, host=host, network_mode="send")
+
+    assert send(_scope(profile="read-only")).action is PolicyAction.DENY
+    tainted = _replace(_scope(profile="full-access"), external_content=True)
+    guarded = send(tainted)
+    assert guarded.action is PolicyAction.ASK
+    assert guarded.rule_id == "external_content_send"
+    # What the rule or mode is for still works: sending untainted, reading
+    # (even read-only), and the local network after external content.
+    assert send(_scope()).action is PolicyAction.ALLOW
+    read = engine.decide(CAPABILITY_NETWORK, _scope(profile="read-only"), host="api.example.com")
+    assert read.action is PolicyAction.ALLOW
+    assert send(tainted, host="127.0.0.1").action is PolicyAction.ALLOW
