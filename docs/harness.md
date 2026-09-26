@@ -2369,9 +2369,9 @@ draft, validate, then save. Model tools share one validation path:
 
 ```text
 skills.validate_draft {name, skill_md, references?, update_of?}
-  → {name, version, valid, issues, warnings, review}
+  → {name, version, valid, issues, warnings, review, previous_version, unchanged}
 skills.propose       {name, skill_md, references?, update_of?}
-  → {name, version, status, update, review, warnings}
+  → {name, version, status, update, review, warnings, previous_version}
 ```
 
 Validation stages private temporary files for the normal parser/reviewer and
@@ -2390,11 +2390,33 @@ their runtime availability is not verified by the built-in catalog. An unavailab
 catalog is explicitly reported. Neither validation nor a clean content review
 proves that the procedure has been executed or grants tool permission.
 
-Only `/learn` can save immediately, and dangerous review findings still stage a
-pending proposal. Other turns stage proposals for approval. Validation is never
-an approval token. Updates keep history only when actually saved: do not use
-`skills.propose` for parser probes. Existing installed skills and their history
-are not rewritten or deleted by this authoring change.
+The Engine, never the model, decides whether a proposal is saved or staged:
+
+```text
+new skill under /learn (owner asked)      → active, notified with undo
+update of a learned skill (any turn)      → active, notified for review + undo
+new skill outside /learn                  → pending until the owner approves
+update of an installed/owner-created skill → pending until the owner approves
+dangerous review findings (any case)      → pending until the owner approves
+same content as the installed version     → "unchanged": no history, no event
+```
+
+Updates of learned skills do not ask for approval: Rinari keeps improving what
+it learned, and the `skill.learned` notice (`status: active`, `update: true`,
+`previous_version`) is for review, not consent. `skill.get` returns `previous`
+(`{version, skill_md}`) for a learned skill with history, the version «Deshacer»
+(`skill.revert`) restores. Applying a version discards any older pending
+proposal for the same name, so a stale approval cannot overwrite it.
+
+An update must raise a semantic version above the installed one
+(`VERSION_NOT_INCREASED`, with the next minor as suggestion). Reference files
+the update does not resend are carried over from the installed version and
+reported as `REFERENCES_KEPT`; resending a file replaces it. Each learned skill
+keeps its last 20 snapshots in `.history/`.
+
+Validation is never an approval token. Updates keep history only when actually
+saved: do not use `skills.propose` for parser probes. Existing installed skills
+and their history are not rewritten or deleted by this authoring change.
 
 ---
 

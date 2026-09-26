@@ -292,7 +292,9 @@ def _skill_prompt_parts(services: ServiceContainer, root: Path | None, record: S
             lines.append(
                 "After a complex task that ended verified, if the approach is reusable and "
                 "no skill covers it, you may propose one: activate skill-author, then "
-                "skills.propose (it waits for the owner's approval)."
+                "skills.propose (it waits for the owner's approval). When a learned skill "
+                "you followed proved wrong or incomplete, update it the same way with "
+                "update_of: it is saved at once and the owner reviews it."
             )
         catalog = "\n".join(lines)
     else:

@@ -463,6 +463,9 @@ class SkillService:
         else:
             view["body"] = view["skill_md"]
             view["references"] = []
+        # A learned skill changes without approval: what «Deshacer» restores
+        # is shown next to it so the owner can review the change.
+        view["previous"] = self.learning.previous(name) if entry["origin"] == "learned" else None
         return view
 
     def _folder_of(self, name: str, project: Path | None = None) -> Path:

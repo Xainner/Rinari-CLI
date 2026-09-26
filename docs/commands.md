@@ -2497,8 +2497,11 @@ shows it and asks once, and `--yes` accepts exactly the reviewed content.
 
 Learned skills: `/learn [focus]` (terminal or desktop) pins the packaged
 `skill-author` skill and marks that turn as the owner's request; the skill it
-proposes with `skills.propose` is saved active. Anything Rinari proposes on its
-own (setting `skills.auto_learn`, default `propose`) waits in
+proposes with `skills.propose` is saved active. An update of a learned skill is
+also saved active in any turn: the owner is notified to review it, not to
+approve it. A new skill Rinari proposes on its own (setting
+`skills.auto_learn`, default `propose`), a change to an installed or
+owner-created skill, and anything with dangerous review findings wait in
 `rinari skills pending` until `approve` or `reject`. `revert` undoes a learned
 skill: its previous version, or removed if it was new. Secrets are refused.
 

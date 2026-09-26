@@ -61,8 +61,10 @@ FIELDS = {
         "format:s? folder:s?"
     ),
     "skills.read": "name:s path:s text:s offset:i total_lines:i next_offset:i?",
-    "skills.validate_draft": "name:s version:s valid:b issues:a warnings:a review:o",
-    "skills.propose": "name:s status:s version:s update:b review:s warnings:a",
+    "skills.validate_draft": (
+        "name:s version:s valid:b issues:a warnings:a review:o previous_version:s? unchanged:b"
+    ),
+    "skills.propose": "name:s status:s version:s update:b review:s warnings:a previous_version:s?",
     "skills.activate": "name:s version:s active:b tools_activated:a?",
     "schedule.propose": "status:s proposal:o? task_id:s? next_run_at:n? description:s note:s",
     "rinari.status": (
