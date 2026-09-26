@@ -757,7 +757,8 @@ def browse_tools() -> list[ToolDefinition]:
         ToolDefinition(
             name="browser.status",
             description=(
-                "Browser session state: connected/disconnected, endpoint, managed, open tabs."
+                "Diagnose the browser: connected or not, endpoint, open tabs. Not a "
+                "prerequisite: call it only when another browser tool fails."
             ),
             input_schema={"type": "object", "properties": {}},
             risk=RISK_LOW,
@@ -770,8 +771,9 @@ def browse_tools() -> list[ToolDefinition]:
         ToolDefinition(
             name="browser.launch",
             description=(
-                "Launch a managed headless Chromium-family browser with an isolated "
-                "per-session profile, or connect when RINARI_BROWSER_CDP is set."
+                "Terminal sessions only: launch a managed headless Chromium-family browser "
+                "with an isolated per-session profile (or connect when RINARI_BROWSER_CDP "
+                "is set). The desktop app's browser is already there; open a page directly."
             ),
             input_schema={
                 "type": "object",
@@ -840,7 +842,11 @@ def browse_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="browser.open",
-            description="Open a new tab at a URL (network-gated for http/https).",
+            description=(
+                "Open a web page (URL, website) in a new tab. The usual first step: in the "
+                "desktop app no launch or status call is needed. The page may still be "
+                "loading when this returns; check it with browser.snapshot."
+            ),
             input_schema={
                 "type": "object",
                 "properties": {"url": {"type": "string"}},
@@ -856,8 +862,8 @@ def browse_tools() -> list[ToolDefinition]:
         ToolDefinition(
             name="browser.navigate",
             description=(
-                "Navigate the current (or given target) tab to a URL (network-gated "
-                "for http/https)."
+                "Go to a URL in the current (or given) tab instead of opening a new one. "
+                "Returns before the page finishes loading; check it with browser.snapshot."
             ),
             input_schema={
                 "type": "object",
@@ -874,9 +880,10 @@ def browse_tools() -> list[ToolDefinition]:
         ToolDefinition(
             name="browser.snapshot",
             description=(
-                "Bounded DOM snapshot (outer HTML) of the page; truncated output is "
-                "spilled to an artifact with the first 8 KiB returned. Prefer format=semantic "
-                "for compact roles/names and element_ids usable as click selectors."
+                "Read what is on the page. Use format=semantic: compact roles/names plus "
+                "element_ids to pass as the selector of click/fill/type (take a fresh "
+                "snapshot after the page changes). format=html returns the bounded outer "
+                "HTML; truncated output is spilled to an artifact with the first 8 KiB."
             ),
             input_schema={
                 "type": "object",
@@ -905,7 +912,10 @@ def browse_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="browser.screenshot",
-            description="Screenshot the page as PNG; saved to the session artifact dir.",
+            description=(
+                "Capture the page as a PNG image. It returns an artifact:// image; to show "
+                "it in the chat, include the returned `markdown` in your reply."
+            ),
             input_schema=optional_target,
             risk=RISK_LOW,
             side_effects=SIDE_EFFECT_LOCAL_REVERSIBLE,
@@ -917,7 +927,9 @@ def browse_tools() -> list[ToolDefinition]:
         ToolDefinition(
             name="browser.click",
             description=(
-                "Click at the center of a selector's bounding box, or at x/y coordinates."
+                "Click an element (link, button). Prefer selector = an element_id from "
+                "browser.snapshot (or a CSS selector); use x/y coordinates only when "
+                "there is no element to name."
             ),
             input_schema={
                 "type": "object",
