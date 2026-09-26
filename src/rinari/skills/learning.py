@@ -25,6 +25,8 @@ import json
 import re
 import shutil
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 
 from rinari.shared.redaction import redact_text
@@ -35,9 +37,6 @@ _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 _REFERENCE_ROOTS = ("references", "scripts", "assets")
 _REFERENCE_MAX_BYTES = 256 * 1024
 _REFERENCES_MAX = 20
-_BLOCKING_ISSUES = frozenset(
-    {"MISSING_DESCRIPTION", "MISSING_PROCEDURE", "MISSING_BODY", "NAME_MISMATCH"}
-)
 AUTO_LEARN_KEY = "skills.auto_learn"
 AUTO_LEARN_MODES = ("propose", "never")
 
@@ -60,7 +59,23 @@ class SkillLearning:
     def _history(self) -> Path:
         return self._root / ".history"
 
-    # -- propose -----------------------------------------------------------------
+    # -- validate and propose share the exact same draft checks --------------------
+
+    def validate_draft(
+        self,
+        name: str,
+        skill_md: str,
+        references: dict[str, str] | None = None,
+        *,
+        update_of: str | None = None,
+        known: set[str] | None = None,
+    ) -> dict:
+        """Inspect a temporary draft; never touch skills, records or events."""
+        with self._draft(name, skill_md, references, update_of=update_of, known=known) as (
+            _,
+            report,
+        ):
+            return report
 
     def propose(
         self,
@@ -73,8 +88,51 @@ class SkillLearning:
         owner_asked: bool = False,
         known: set[str] | None = None,
     ) -> dict:
+        with self._draft(name, skill_md, references, update_of=update_of, known=known) as (
+            draft,
+            report,
+        ):
+            if not report["valid"]:
+                raise SkillError(
+                    "SKILL_INVALID",
+                    "; ".join(issue["message"] for issue in report["issues"]),
+                    details={"issues": report["issues"], "warnings": report["warnings"]},
+                )
+            active = owner_asked and report["review"]["verdict"] != "danger"
+            if active:
+                self._activate(draft, name, session_id=session_id)
+            else:
+                self._stage(draft, name, session_id=session_id, update=bool(update_of))
+        result = {
+            "name": name,
+            "status": "active" if active else "pending",
+            "version": report["version"],
+            "update": bool(update_of),
+            "review": report["review"]["verdict"],
+            "warnings": report["warnings"],
+        }
+        self._service.notify_learned({**result, "session_id": session_id})
+        return result
+
+    @contextmanager
+    def _draft(
+        self,
+        name: str,
+        skill_md: str,
+        references: dict[str, str] | None,
+        *,
+        update_of: str | None,
+        known: set[str] | None,
+    ) -> Iterator[tuple[Path, dict]]:
+        """Temporary files are private and removed even on validation failure.
+
+        Re-run checks on every proposal; validation is neither authorization
+        nor a cached promise that the destination still has the same state.
+        """
         if not _NAME_RE.match(name or ""):
             raise SkillError("NAME_INVALID", f"skill name invalid: {name!r}")
+        if not isinstance(skill_md, str) or not skill_md.strip() or len(skill_md) > 60000:
+            raise SkillError("SKILL_INVALID", "skill_md must contain 1 to 60000 characters")
         if update_of and update_of != name:
             raise SkillError("SKILL_INVALID", "an update keeps the skill's name")
         if (self._service.packaged_dir() / name).is_dir():
@@ -106,34 +164,43 @@ class SkillLearning:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(text, encoding="utf-8")
             manifest = load_skill_manifest(draft, "user")
-            if manifest.name != name:
-                raise SkillError("SKILL_INVALID", f"the SKILL.md name must be {name!r}")
-            issues = [
-                issue
-                for issue in validate_skill(manifest, known or set())
-                if issue["code"] in _BLOCKING_ISSUES
+            issues = validate_skill(manifest, known or set())
+            warnings = [
+                {
+                    "code": "TOOL_DEFERRED",
+                    "field": "required_tools",
+                    "tool": tool,
+                    "message": (
+                        f"{tool} requires its integration to be connected; "
+                        "availability is not verified"
+                    ),
+                }
+                for tool in manifest.required_tools
+                if tool not in (known or set())
+                and tool.startswith(("mcp.", "mcp_", "plugin.", "openapi."))
             ]
-            if issues:
-                raise SkillError(
-                    "SKILL_INVALID",
-                    "; ".join(issue["message"] for issue in issues),
-                    details={"issues": issues},
+            if not known and manifest.required_tools:
+                warnings.append(
+                    {
+                        "code": "TOOL_CATALOG_UNAVAILABLE",
+                        "field": "required_tools",
+                        "message": (
+                            "Tool inventory unavailable; required tools have not been verified"
+                        ),
+                    }
                 )
             review = review_skill(draft)
-            active = owner_asked and review.verdict != "danger"
-            if active:
-                self._activate(draft, name, session_id=session_id)
-            else:
-                self._stage(draft, name, session_id=session_id, update=bool(update_of))
-        result = {
-            "name": name,
-            "status": "active" if active else "pending",
-            "version": manifest.version,
-            "update": bool(update_of),
-            "review": review.verdict,
-        }
-        self._service.notify_learned({**result, "session_id": session_id})
-        return result
+            yield (
+                draft,
+                {
+                    "name": name,
+                    "version": manifest.version,
+                    "valid": not issues,
+                    "issues": issues,
+                    "warnings": warnings,
+                    "review": review.to_dict(),
+                },
+            )
 
     def _activate(self, draft: Path, name: str, *, session_id: str) -> None:
         current = self._root / name

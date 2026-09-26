@@ -2305,6 +2305,18 @@ can_delegate: true
 
 ## References and exposed tools (implemented)
 
+Rinari section extraction preserves nested Markdown headings and fenced or
+indented code. Canonical section titles (including Spanish aliases) remain
+explicit boundaries at any heading level for compatibility with existing
+skills that mix levels. Nested aliases of the active section and generic titles
+(`Steps`, `Instructions`, `Pasos`, `Instrucciones`, `Verify`, `Troubleshooting`)
+remain content without changing the parent section's level. At peer/parent
+levels or outside an active section, those aliases still identify sections.
+Other headings end a section only at its own level
+or above. An absent Procedure section reports `MISSING_PROCEDURE`; an empty
+one reports `EMPTY_PROCEDURE`. YAML multiline descriptions and lists use the
+same reader for installed skills and learned drafts.
+
 A skill directory may carry more text files next to `SKILL.md`, usually under
 `references/` (`.md`, `.txt`, `.json`). Only `SKILL.md` is injected while the
 skill is active; references are read on demand:
@@ -2349,6 +2361,40 @@ HTTPS only and size-capped.
 in session scope, and returns them as `tools_activated`: no extra
 `capability.activate` call. The session pin is what persists, so each new
 runtime (the desktop builds one per turn) re-exposes the pinned skills' tools.
+
+## Draft validation and learned skills (implemented)
+
+`/learn` activates `skill-author`. Its authoring workflow is read the evidence,
+draft, validate, then save. Model tools share one validation path:
+
+```text
+skills.validate_draft {name, skill_md, references?, update_of?}
+  → {name, version, valid, issues, warnings, review}
+skills.propose       {name, skill_md, references?, update_of?}
+  → {name, version, status, update, review, warnings}
+```
+
+Validation stages private temporary files for the normal parser/reviewer and
+removes them afterwards. It does not alter the skill library, pending proposals,
+history, database records or learned events. `ok: true` on the tool envelope
+means the check ran; inspect `valid` and `issues`. Invalid input such as a
+reference outside `references/`, `scripts/` or `assets/`, a name conflict, or
+sensitive content returns a tool error. Errors preserve `details.skill_code`
+and `details.issues` when available, including the field and tool-name suggestion.
+
+Proposing re-runs the checks and refuses all static validation issues, including
+unknown built-in required tools and descriptions longer than 1024 characters.
+Use canonical names (`shell.exec`), not provider spellings (`shell_exec`). Dynamic
+MCP/plugin/OpenAPI dependencies remain allowed with `TOOL_DEFERRED` warnings;
+their runtime availability is not verified by the built-in catalog. An unavailable
+catalog is explicitly reported. Neither validation nor a clean content review
+proves that the procedure has been executed or grants tool permission.
+
+Only `/learn` can save immediately, and dangerous review findings still stage a
+pending proposal. Other turns stage proposals for approval. Validation is never
+an approval token. Updates keep history only when actually saved: do not use
+`skills.propose` for parser probes. Existing installed skills and their history
+are not rewritten or deleted by this authoring change.
 
 ---
 

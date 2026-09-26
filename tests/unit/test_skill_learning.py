@@ -185,15 +185,43 @@ def test_auto_learn_setting_and_prompt_line(services) -> None:
 class ProposingModel:
     """First turn: calls skills.propose; then answers."""
 
-    def __init__(self) -> None:
+    def __init__(self, validate_first=False, before_save=None) -> None:
         self.requests: list[ModelRequest] = []
+        self.validate_first = validate_first
+        self.before_save = before_save
 
     def capabilities(self) -> ProviderCapabilities:
         return ProviderCapabilities(streaming=False, tool_calls=True, structured_output=True)
 
     def invoke(self, request: ModelRequest) -> ModelResponse:
         self.requests.append(request)
-        if len(self.requests) == 1:
+        if self.validate_first and len(self.requests) == 1:
+            return ModelResponse(
+                content="",
+                stop_reason=StopReason.TOOL_CALLS,
+                tool_calls=(
+                    ToolCall(
+                        id="validate1",
+                        name="skills.validate_draft",
+                        arguments={
+                            "name": "deploy-saturno",
+                            "skill_md": skill_md(body="## Preparación\n1. Build.\n"),
+                        },
+                    ),
+                ),
+            )
+        if len(self.requests) == (2 if self.validate_first else 1):
+            if self.validate_first:
+                observation = next(
+                    message
+                    for message in request.messages
+                    if message.role == "tool" and message.tool_call_id == "validate1"
+                )
+                report = json.loads(observation.content)
+                assert report["ok"] is True and report["data"]["valid"] is True
+                assert report["data"]["issues"] == []
+            if self.before_save is not None:
+                self.before_save()
             return ModelResponse(
                 content="",
                 stop_reason=StopReason.TOOL_CALLS,
@@ -201,7 +229,10 @@ class ProposingModel:
                     ToolCall(
                         id="tc1",
                         name="skills.propose",
-                        arguments={"name": "deploy-saturno", "skill_md": skill_md()},
+                        arguments={
+                            "name": "deploy-saturno",
+                            "skill_md": skill_md(body="## Preparación\n1. Build.\n"),
+                        },
                     ),
                 ),
             )
@@ -221,10 +252,19 @@ def _ok(response):
     return response["result"]
 
 
+@pytest.mark.parametrize("validate_first", [False, True])
 def test_learn_over_the_protocol_saves_active_and_announces_it(
-    services, tmp_path, monkeypatch
+    services, tmp_path, monkeypatch, validate_first
 ) -> None:
-    fake = ProposingModel()
+    seen = []
+
+    def before_save():
+        assert services.skills.record("deploy-saturno") is None
+        assert not (services.skills.user_skills_dir() / "deploy-saturno").exists()
+        assert not (services.skills.user_skills_dir() / ".history").exists()
+        seen.append("not saved")
+
+    fake = ProposingModel(validate_first=validate_first, before_save=before_save)
     monkeypatch.setattr(agent_runtime, "_caller_for", lambda services, rec: fake)
     server = EngineServer(services, user_home=tmp_path / "home")
     try:
@@ -248,6 +288,8 @@ def test_learn_over_the_protocol_saves_active_and_announces_it(
         assert learned is not None, "no skill.learned event"
         assert learned["name"] == "deploy-saturno" and learned["status"] == "active"
         assert learned["session_id"] == session_id
+        assert seen == ["not saved"]
+        assert "skills.validate_draft" in services.skills.get("skill-author").required_tools
         pinned = dict(services.sessions.show(session_id).active_skills or ())
         assert "skill-author" in pinned
         assert _ok(_call(server, "skill.settings.get"))["auto_learn"] == "propose"
