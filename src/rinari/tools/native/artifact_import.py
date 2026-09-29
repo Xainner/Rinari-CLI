@@ -13,9 +13,7 @@ from rinari.tools.native.fs import _resolve_read
 
 
 def artifact_import_tools(store, *, remote_target=None):
-    from rinari.application.ssh_targets import TargetStore
-
-    from rinari.application.ssh_targets import TargetStoreUnavailable
+    from rinari.application.ssh_targets import TargetStore, TargetStoreUnavailable
 
     targets = TargetStore(store._ctx.layout.root)
     try:

@@ -2559,9 +2559,7 @@ class EngineServer:
         return expanded.message, command["name"]
 
     def _target_list(self, params: dict[str, Any]) -> dict[str, Any]:
-        from rinari.application.ssh_targets import TargetStore
-
-        from rinari.application.ssh_targets import TargetStoreUnavailable
+        from rinari.application.ssh_targets import TargetStore, TargetStoreUnavailable
 
         try:
             return {"targets": TargetStore(self._services.ctx.layout.root).list()}
