@@ -75,6 +75,75 @@ def _optional_str(input: dict, key: str, *, max_len: int) -> tuple[str | None, T
     return cleaned, None
 
 
+def _owner_source(ctx: ToolContext) -> dict | None:
+    """The owner message that started this turn, set by the host.
+
+    Only turns the owner started (interactive or an owner channel) carry it:
+    a subagent, a scheduled run or a peer message has none, so personal
+    memory stays the owner's even when the model words the entry itself.
+    """
+    source = getattr(ctx, "memory_source", None)
+    if (
+        not isinstance(source, dict)
+        or source.get("session_id") != ctx.session_id
+        or not source.get("message_id")
+    ):
+        return None
+    return source
+
+
+def _remember_for_owner(
+    service, input: dict, ctx: ToolContext, topic: str, text: str
+) -> ToolResult:
+    """Personal memory, written by the model in the owner's turn.
+
+    The model distils what to keep in its own words; the record points at
+    the owner message that started the turn. Sensitive personal data is not
+    stored: it becomes a proposal the owner approves. Every refusal says
+    whether retrying can help, because a code that suggested a pending
+    approval made the model retry until the loop detector stopped the turn.
+    """
+    source = _owner_source(ctx)
+    if source is None:
+        return _fail(
+            ToolErrorCode.PERMISSION_DENIED,
+            "personal memory can only be written during a turn the owner started "
+            "(not from a subagent, a scheduled run or another session). Do not retry.",
+        )
+    kind = input.get("kind", "fact")
+    if kind not in _USER_KINDS:
+        return _fail(
+            ToolErrorCode.INVALID_ARGUMENT,
+            f"user kind must be one of: {', '.join(_USER_KINDS)}",
+        )
+    confidence = input.get("confidence", 1.0)
+    if (
+        isinstance(confidence, bool)
+        or not isinstance(confidence, (int, float))
+        or not 0.0 <= float(confidence) <= 1.0
+    ):
+        return _fail(ToolErrorCode.INVALID_ARGUMENT, "confidence must be a number 0..1")
+    try:
+        result = service.remember_for_owner(
+            ctx.session_id,
+            source["message_id"],
+            source.get("text") or "",
+            text=text,
+            topic=topic,
+            kind=kind,
+            confidence=float(confidence),
+        )
+    except Exception as exc:
+        message = getattr(exc, "message", str(exc))
+        return _fail(ToolErrorCode.VALIDATION_FAILED, f"{message} Do not retry with the same text.")
+    if result.get("pending"):
+        result["message"] = (
+            "Sensitive personal data is not stored without the owner's approval: it was "
+            "saved as a proposal for the owner to review. Tell the owner; do not retry."
+        )
+    return _ok(result)
+
+
 def memory_remember(input: dict, ctx: ToolContext) -> ToolResult:
     service = _service(ctx)
     if service is None:
@@ -95,31 +164,10 @@ def memory_remember(input: dict, ctx: ToolContext) -> ToolResult:
     if scope == "user" and not service.extraction_allowed(ctx.session_id):
         return _fail(
             ToolErrorCode.PERMISSION_DENIED,
-            "memory is excluded for this conversation; owner must re-enable it explicitly",
+            "memory is excluded for this conversation; the owner must re-enable it. Do not retry.",
         )
     if scope == "user":
-        source = getattr(ctx, "memory_source", None)
-        if not isinstance(source, dict) or source.get("session_id") != ctx.session_id:
-            return _fail(
-                ToolErrorCode.PERMISSION_DENIED,
-                "user memory writes require a validated owner-message source",
-            )
-        if source.get("text") != text.strip() or not source.get("message_id"):
-            return _fail(
-                ToolErrorCode.APPROVAL_REQUIRED,
-                "user memory must quote the validated owner message exactly",
-            )
-        candidate = service.capture_owner_message(
-            ctx.session_id, source["message_id"], source["text"]
-        )
-        if candidate is None:
-            return _fail(
-                ToolErrorCode.PERMISSION_DENIED,
-                "the owner-message source is unavailable or has been withdrawn",
-            )
-        if candidate.get("status") != "accepted":
-            return _ok({"pending": True, "candidate": candidate})
-        return _ok({"id": candidate["memory_id"], "candidate": candidate})
+        return _remember_for_owner(service, input, ctx, topic.strip(), text.strip())
     provenance = input.get("provenance")
     if provenance is not None and not isinstance(provenance, str):
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "provenance must be a string")
@@ -237,13 +285,11 @@ def memory_update(input: dict, ctx: ToolContext) -> ToolResult:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "scope must be user or project")
     if not isinstance(memory_id, str) or not memory_id:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "id is required")
-    if scope == "user":
-        source = getattr(ctx, "memory_source", None)
-        if not isinstance(source, dict) or source.get("session_id") != ctx.session_id:
-            return _fail(
-                ToolErrorCode.PERMISSION_DENIED,
-                "user memory updates require a validated owner-message source",
-            )
+    if scope == "user" and _owner_source(ctx) is None:
+        return _fail(
+            ToolErrorCode.PERMISSION_DENIED,
+            "personal memory can only be updated during a turn the owner started. Do not retry.",
+        )
     expected_revision = input.get("expected_revision")
     if scope == "user" and (
         isinstance(expected_revision, bool)
@@ -257,13 +303,6 @@ def memory_update(input: dict, ctx: ToolContext) -> ToolResult:
     text, err = _optional_str(input, "text", max_len=4096)
     if err is not None:
         return err
-    if scope == "user":
-        source = getattr(ctx, "memory_source", None)
-        if text is None or source.get("text") != text:
-            return _fail(
-                ToolErrorCode.APPROVAL_REQUIRED,
-                "user memory updates must quote the validated owner message exactly",
-            )
     topic, err = _optional_str(input, "topic", max_len=128)
     if err is not None:
         return err
@@ -309,7 +348,7 @@ def memory_update(input: dict, ctx: ToolContext) -> ToolResult:
     except Exception as exc:
         return _fail(
             ToolErrorCode.VALIDATION_FAILED,
-            getattr(exc, "message", str(exc)),
+            f"{getattr(exc, 'message', str(exc))} Do not retry with the same values.",
         )
     return _ok(row)
 
@@ -387,12 +426,16 @@ def memory_tools() -> list[ToolDefinition]:
             name="memory.remember",
             description=(
                 "Store one explicit durable memory. scope=user: a preference/rule/"
-                "fact that should survive across sessions (store only what the user "
-                "actually stated or verified — never your own speculation). "
+                "fact about the owner or their environment that should survive "
+                "across sessions, written in your own words (store only what the "
+                "owner said or you verified — never speculation); only in a turn the "
+                "owner started. Sensitive personal data (health, money, identity) is "
+                "saved as a proposal for the owner to approve. "
                 "scope=project: a stable fact/rule/convention of this project "
                 "(PROJECT sessions only). scope=pattern: a reusable procedure. "
-                "A re-statement with the same topic kind+topic refreshes the record; "
-                "a conflicting statement supersedes the old one. Secrets are rejected."
+                "A re-statement with the same kind+topic refreshes the record; "
+                "a conflicting statement supersedes the old one. Secrets are rejected. "
+                "A refusal that says 'Do not retry' will fail again: tell the owner."
             ),
             input_schema={
                 "type": "object",

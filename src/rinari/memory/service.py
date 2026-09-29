@@ -617,6 +617,15 @@ class MemoryService:
             return None
         if self.repo.source_suppressed(session_id, message_id):
             return None
+        # The model already kept something from this message in its own words
+        # (`remember_for_owner`): extracting the literal sentence as well
+        # would store the same memory twice under another topic.
+        has_candidate = self.repo._db.query_one(
+            "SELECT 1 FROM memory_candidates WHERE session_id = ? AND message_id = ?",
+            (session_id, message_id),
+        )
+        if not has_candidate and self.repo.sources_for_message(session_id, message_id):
+            return None
         source_message = next(
             (row for row in self._ctx.message_repo.list(session_id) if row.id == message_id),
             None,
@@ -692,6 +701,70 @@ class MemoryService:
             )
             return self.repo.candidate_get(candidate_id)
 
+    def remember_for_owner(
+        self,
+        session_id: str,
+        message_id: str,
+        owner_text: str,
+        *,
+        text: str,
+        topic: str,
+        kind: str,
+        confidence: float,
+    ) -> dict:
+        """Personal memory the model writes during the owner's turn.
+
+        The model words the entry; provenance is the owner message that
+        started the turn, never a claim of the model. Sensitive personal data
+        becomes a pending proposal with its text, because only the owner can
+        approve it and the review needs to show what would be kept. Secrets
+        are rejected here, as in every other write.
+        """
+        control = self.repo.control(session_id)
+        if control is not None and control.get("mode") != "auto":
+            raise InvalidUsageError("memory is excluded for this conversation.")
+        if self.repo.source_suppressed(session_id, message_id):
+            raise InvalidUsageError("the owner withdrew this message from memory.")
+        text = self._require(text, "text")
+        topic = self._require(topic, "topic")
+        self._check_sensitive(text)
+        self._check_sensitive(topic, "topic")
+        source = {
+            "session_id": session_id,
+            "message_id": message_id,
+            "source_hash": hashlib.sha256(_normalize_text(owner_text).encode("utf-8")).hexdigest(),
+            "quote": "",
+        }
+        if self.requires_owner_consent(topic, text):
+            now = self._now()
+            candidate_id = self._ctx.ids.new("mem-candidate")
+            self.repo.candidate_insert(
+                {
+                    "id": candidate_id,
+                    "session_id": session_id,
+                    "message_id": message_id,
+                    "topic": topic,
+                    "text": text,
+                    "kind": kind,
+                    "confidence": confidence,
+                    "classification": "agent_sensitive",
+                    "reason": "sensitive personal data requires owner consent",
+                    "status": "pending",
+                    "memory_id": None,
+                    "created_at": now,
+                    "resolved_at": None,
+                }
+            )
+            return {"pending": True, "candidate": self.repo.candidate_get(candidate_id)}
+        return self.remember_user(
+            text,
+            kind=kind,
+            topic=topic,
+            provenance=f"session:{session_id}/message:{message_id}",
+            confidence=confidence,
+            source=source,
+        )
+
     def list_candidates(self, *, status: str | None = "pending", limit: int = 100) -> list[dict]:
         rows = self.repo.candidates(status=status, limit=limit)
         # The owner panel may preview a pending candidate, but the durable
@@ -737,6 +810,34 @@ class MemoryService:
             )
             if source_message is None:
                 raise MemoryNotFoundError("source message not found")
+            if candidate.get("classification") == "agent_sensitive":
+                # A proposal the model wrote in the owner's turn: the owner
+                # approves exactly the text shown, not a re-parse of the message.
+                quote = source_message.content or ""
+                result = self.remember_user(
+                    candidate["text"],
+                    kind=candidate["kind"],
+                    topic=candidate["topic"],
+                    provenance=(
+                        f"session:{candidate['session_id']}/message:{candidate['message_id']}"
+                    ),
+                    confidence=float(candidate["confidence"]),
+                    source={
+                        "session_id": candidate["session_id"],
+                        "message_id": candidate["message_id"],
+                        "source_hash": hashlib.sha256(
+                            _normalize_text(quote).encode("utf-8")
+                        ).hexdigest(),
+                        "quote": "",
+                    },
+                )
+                self.repo.candidate_resolve(
+                    candidate_id,
+                    status="accepted",
+                    memory_id=result["id"],
+                    resolved_at=self._now(),
+                )
+                return self.repo.candidate_get(candidate_id)
             parsed = self._candidate_from_text(source_message.content or "")
             if parsed is None:
                 raise InvalidUsageError("source message is no longer an eligible memory candidate")

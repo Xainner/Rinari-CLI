@@ -1082,6 +1082,60 @@ def test_owner_memory_tool_receives_persisted_source_before_loop(
     assert [row.role for row in messages].count("user") == 1
 
 
+def test_owner_turn_keeps_a_memory_in_the_models_own_words(server, services, tmp_path, monkeypatch):
+    # «Guarda en memoria: …» or any other wording: the model distils what to
+    # keep, and the record points at the owner message. Before, the text had
+    # to equal the whole message and match a fixed grammar, and the refusal
+    # said APPROVAL_REQUIRED, so the model retried until the loop detector
+    # stopped the turn.
+    from rinari.models.types import ToolCall
+
+    session_id = _create_chat(server, tmp_path, tag="memory-own-words")
+    fake = FakeModel(
+        scripted=[
+            ModelResponse(
+                content="",
+                tool_calls=(
+                    ToolCall(
+                        id="remember",
+                        name="memory.remember",
+                        arguments={
+                            "scope": "user",
+                            "kind": "fact",
+                            "topic": "casa3090",
+                            "text": "El bot de Discord de casa3090 es el stack Docker Together.",
+                        },
+                    ),
+                ),
+                stop_reason=StopReason.TOOL_CALLS,
+            ),
+            _answer(),
+        ]
+    )
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda *_: fake)
+    message = "Guarda en memoria: el bot de discord de casa3090 es Together"
+    started = server.handle_line(
+        _req(
+            "memory-own-start", "session.turn.start", {"session_id": session_id, "message": message}
+        )
+    )
+    assert started["ok"], started
+    events = _collect_until(server, session_id)
+    assert events[-1]["event"] == "turn.completed", events
+    completed = [
+        e
+        for e in events
+        if e["event"] == "tool.completed" and e["payload"].get("tool") == "memory.remember"
+    ]
+    assert completed and completed[0]["payload"]["ok"] is True, events
+    records = services.memory.list_user()
+    assert [row["text"] for row in records] == [
+        "El bot de Discord de casa3090 es el stack Docker Together."
+    ]
+    owner = [row for row in services.ctx.message_repo.list(session_id) if row.role == "user"]
+    assert records[0]["provenance"] == f"session:{session_id}/message:{owner[0].id}"
+
+
 def test_owner_source_preserves_attachment_metadata(server, services, tmp_path, monkeypatch):
     note = tmp_path / "reference.txt"
     note.write_text("synthetic attachment", encoding="utf-8")
