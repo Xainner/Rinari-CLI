@@ -328,7 +328,7 @@ def models_refresh(
 ) -> None:
     """Refresh availability. Missing models are marked unavailable, never deleted."""
     with services(ctx) as s:
-        results = s.models.refresh(provider)
+        results = s.models.refresh(provider, public_catalog=provider is None)
         data = {
             alias: {
                 "saved": r.saved,

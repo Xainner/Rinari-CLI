@@ -3167,7 +3167,12 @@ class EngineServer:
         add_new = params.get("add_new", False)
         if not isinstance(add_new, bool):
             raise EngineProtocolError(INVALID_PARAMS, "Param 'add_new' must be a boolean.")
-        results = self._services.models.refresh(self._opt_str(params, "provider"), add_new=add_new)
+        provider = self._opt_str(params, "provider")
+        # Refreshing every provider (the "Refresh models" button) also refreshes
+        # the public catalog the context windows come from.
+        results = self._services.models.refresh(
+            provider, add_new=add_new, public_catalog=provider is None
+        )
         providers: dict[str, Any] = {}
         for alias, result in results.items():
             providers[alias] = {
@@ -3178,6 +3183,8 @@ class EngineServer:
                 "added": list(result.added),
                 "error": result.error,
             }
+        if provider is None and self._services.models.last_catalog_refresh is not None:
+            return {"providers": providers, "catalog": self._services.models.last_catalog_refresh}
         return {"providers": providers}
 
     def _model_test(self, params: dict[str, Any]) -> dict[str, Any]:

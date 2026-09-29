@@ -68,6 +68,9 @@ def build_services(
     http_client: httpx.Client | None = None,
     user_home: Path | None = None,
 ) -> ServiceContainer:
+    from rinari.providers import metadata
+
+    metadata.use_cache_dir(ctx.layout.dir("cache"))
     credentials = CredentialStore(ctx.layout)
     providers = ProviderService(ctx, http_client=http_client, credentials=credentials)
     models = ModelService(ctx, providers, http_client=http_client)
