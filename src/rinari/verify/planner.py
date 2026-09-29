@@ -17,6 +17,7 @@ Low risk = the narrower level is enough; high risk forces the broader set.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 RISK_LOW = "low"
@@ -86,7 +87,13 @@ def _stem(rel_path: str) -> str:
 
 
 def _heuristic_test_paths(rel_path: str) -> list[str]:
-    """Conventional test locations for a source file, without an index."""
+    """Conventional pytest locations for a Python source, without an index.
+
+    Only Python has them: a changed `index.html` or `render.ps1` used to get
+    `pytest test_index.py`, a suite nobody wrote.
+    """
+    if not rel_path.lower().endswith(".py"):
+        return []
     stem = _stem(rel_path)
     base_dir = rel_path.replace("\\", "/").rsplit("/", 1)[0]
     if base_dir:
@@ -166,7 +173,18 @@ def plan_verification(
     discovered: dict[str, list[str]] | None = None,
     user_constraints: list[str] | None = None,
     project_instructions: list[str] | None = None,
+    exists: Callable[[str], bool] | None = None,
 ) -> VerificationPlan:
+    """Plan what to verify for a change set.
+
+    ``exists`` checks a repository-relative path. With it, conventional test
+    locations are proposed only when the file is there; the planner never
+    turns a guess into a command for a test that does not exist.
+    """
+
+    def present(path: str) -> bool:
+        return exists is None or exists(path)
+
     changed = _normalize_changed(changed_files)
     constraints = [str(c).strip() for c in (user_constraints or []) if str(c).strip()]
     instructions = [str(i).strip() for i in (project_instructions or []) if str(i).strip()]
@@ -193,15 +211,17 @@ def plan_verification(
             if path not in targeted:
                 targeted.append(path)
         if not mapped:
-            reasons.append(f"no test mapping for {rel}; using conventions")
-            for path in _heuristic_test_paths(rel):
+            conventional = [path for path in _heuristic_test_paths(rel) if present(path)]
+            if conventional:
+                reasons.append(f"no test mapping for {rel}; using conventions")
+            for path in conventional:
                 if path not in targeted:
                     targeted.append(path)
     for rel in tests:
         if rel not in targeted:
             targeted.append(rel)
 
-    adjacent = _adjacent_tests(sources, changed)
+    adjacent = [path for path in _adjacent_tests(sources, changed) if present(path)]
     if adjacent:
         reasons.append("adjacent tests: same-directory test files of changed sources")
 
@@ -225,14 +245,17 @@ def plan_verification(
     lint_commands = _cmds("lint")
     typecheck_commands = _cmds("typecheck")
     test_commands = _cmds("test")
-    if not test_commands and targeted:
-        test_commands = tuple(f"pytest {path}" for path in targeted[:8])
+    python_tests = [path for path in targeted if path.lower().endswith(".py")]
+    if not test_commands and python_tests:
+        test_commands = tuple(f"pytest {path}" for path in python_tests[:8])
         reasons.append("default test command from targeted selection (pytest)")
     if not test_commands and sources:
-        default = _default_test_command()
-        if default:
-            test_commands = (default,)
-            reasons.append("no discovered test command; using repository default")
+        # No suite was found: say so instead of inventing one. The evidence is
+        # then running the change itself (build, render, open the output).
+        reasons.append(
+            "no automated test suite detected; verify by running the change and "
+            "record what you checked as manual evidence"
+        )
     if shared:
         build_commands = _cmds("build")
         if build_commands:
@@ -288,9 +311,11 @@ def _is_build_file(rel: str) -> bool:
 def _adjacent_tests(sources: list[str], all_changed: list[str]) -> list[str]:
     adjacent: list[str] = []
     for rel in sources:
+        if not rel.lower().endswith(".py"):
+            continue
         base = rel.rsplit("/", 1)[0] if "/" in rel else ""
         for other in all_changed:
-            if other == rel or _is_test_file(other):
+            if other == rel or _is_test_file(other) or not other.lower().endswith(".py"):
                 continue
             other_base = other.rsplit("/", 1)[0] if "/" in other else ""
             if base and other_base == base:
@@ -299,10 +324,6 @@ def _adjacent_tests(sources: list[str], all_changed: list[str]) -> list[str]:
                 if f"{base}/test_{_stem(other)}.py" not in adjacent:
                     adjacent.append(f"{base}/test_{_stem(other)}.py")
     return adjacent
-
-
-def _default_test_command() -> str | None:
-    return "pytest"
 
 
 def _risk(

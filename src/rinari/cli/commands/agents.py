@@ -89,10 +89,13 @@ def show(
         typer.echo(f"  context:  {agent.context_scope}   can_delegate: {agent.can_delegate}")
         typer.echo(f"  tools:    {', '.join(agent.tool_allowlist) or '-'}")
         budget = agent.budget
-        typer.echo(
-            f"  budget:   model={budget.max_model_calls} tools={budget.max_tool_calls} "
-            f"wall={budget.max_wall_time_s}s"
-        )
+        if budget.max_model_calls is None and budget.max_tool_calls is None:
+            typer.echo("  budget:   shares the spawning turn's budget")
+        else:
+            typer.echo(
+                f"  budget:   model={budget.max_model_calls} tools={budget.max_tool_calls} "
+                f"wall={budget.max_wall_time_s}s"
+            )
         if agent.description:
             typer.echo(f"  {agent.description}")
         if agent.objective:

@@ -121,6 +121,7 @@ class VerificationService:
             discovered=self._discovered_commands(root),
             user_constraints=constraints,
             project_instructions=instructions,
+            exists=lambda rel: (root / rel).is_file(),
         )
 
     def project_instructions(self, root: Path) -> list[str]:

@@ -1,19 +1,116 @@
 """Shared, destination-scoped metadata for routing, context and presentation.
 
-The bundled public catalog is advisory. Saved overrides remain separate and
-never get overwritten by discovery. No credentials are sent to models.dev.
+The public catalog is advisory. Saved overrides remain separate and never get
+overwritten by discovery. No credentials are sent to models.dev.
+
+The bundled snapshot ages with the release: a model published after it (Space
+Bunny, one day later) fell back to 128k. "Refresh models" downloads the public
+list into the home's cache, and the newer of the two is used.
 """
 
+import contextlib
 import json
+import os
+from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
 
 from rinari.providers.catalog import OPENCODE_RESPONSES_MODELS, product_for
 
+PUBLIC_CATALOG_URL = "https://models.dev/api.json"
+#: Rinari product -> models.dev provider key.
+PUBLIC_PRODUCTS = {
+    "openai": "openai",
+    "anthropic": "anthropic",
+    "gemini": "google",
+    "xai": "xai",
+    "deepseek": "deepseek",
+    "mistral": "mistral",
+    "opencode-go": "opencode-go",
+    "opencode-zen": "opencode",
+    "openrouter": "openrouter",
+    "groq": "groq",
+    "together": "togetherai",
+    "deepinfra": "deepinfra",
+    "fireworks": "fireworks-ai",
+    "zai": "zai",
+    "zai-coding": "zai-coding-plan",
+    "moonshot": "moonshotai",
+    "kimi-coding": "kimi-code-plan-global",
+    "minimax": "minimax",
+    "minimax-coding": "minimax-coding-plan",
+    "github-copilot": "github-copilot",
+}
+PUBLIC_FIELDS = ("limit", "modalities", "tool_call", "reasoning", "provider", "interleaved")
+_CACHE_NAME = "model_metadata.json"
+_cache_dir: Path | None = None
+
+
+def use_cache_dir(path: Path | None) -> None:
+    """Where a downloaded catalog lives (the home's cache directory)."""
+    global _cache_dir
+    _cache_dir = path
+    catalog.cache_clear()
+
+
+def _bundled() -> dict:
+    return json.loads(Path(__file__).with_name(_CACHE_NAME).read_text(encoding="utf-8"))
+
+
+def _cached() -> dict | None:
+    if _cache_dir is None:
+        return None
+    with contextlib.suppress(OSError, ValueError):
+        data = json.loads((_cache_dir / _CACHE_NAME).read_text(encoding="utf-8"))
+        if isinstance(data.get("models"), dict) and isinstance(data.get("updated_at"), str):
+            return data
+    return None
+
 
 @lru_cache(maxsize=1)
 def catalog():
-    return json.loads(Path(__file__).with_name("model_metadata.json").read_text(encoding="utf-8"))
+    bundled = _bundled()
+    cached = _cached()
+    if cached is not None and cached["updated_at"] > bundled["updated_at"]:
+        return cached
+    return bundled
+
+
+def public_snapshot(upstream: dict, *, now: datetime | None = None) -> dict:
+    """Rinari's snapshot of the models.dev payload (only the fields it uses)."""
+    models = {}
+    for product, key in PUBLIC_PRODUCTS.items():
+        entries = (upstream.get(key) or {}).get("models") or {}
+        models[product] = {
+            name: {field: value[field] for field in PUBLIC_FIELDS if field in value}
+            for name, value in entries.items()
+            if isinstance(value, dict)
+        }
+    if not any(models.values()):
+        raise ValueError("the public catalog had none of the known providers")
+    stamp = (now or datetime.now(UTC)).isoformat()
+    return {"source": PUBLIC_CATALOG_URL, "updated_at": stamp, "models": models}
+
+
+def refresh_public_catalog(get) -> dict:
+    """Download the public list into the cache. ``get`` is an httpx-style get."""
+    if _cache_dir is None:
+        raise RuntimeError("no cache directory for the model catalog")
+    response = get(
+        PUBLIC_CATALOG_URL, timeout=20, headers={"User-Agent": "Rinari catalog updater/0.1"}
+    )
+    response.raise_for_status()
+    snapshot = public_snapshot(response.json())
+    _cache_dir.mkdir(parents=True, exist_ok=True)
+    target = _cache_dir / _CACHE_NAME
+    temporary = target.with_suffix(".tmp")
+    temporary.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
+    os.replace(temporary, target)
+    catalog.cache_clear()
+    return {
+        "updated_at": snapshot["updated_at"],
+        "models": sum(len(entries) for entries in snapshot["models"].values()),
+    }
 
 
 def claude_reasoning(model):

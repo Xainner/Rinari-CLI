@@ -1695,3 +1695,48 @@ def test_steering_that_arrives_while_the_turn_finishes_is_the_next_turn(server, 
     server.turns._settle_steering(turn, late)
     queued = server.handle_line(_req("sl", "session.queue.list", {"session_id": sid}))
     assert queued["result"]["queue"] == ["una cosa\n\ny otra"]
+
+
+def test_compact_and_continue_runs_the_message_in_the_same_turn(
+    server, tmp_path, monkeypatch
+) -> None:
+    """Card 01: after a failed compaction the owner compacted and typed "Continua"."""
+    session_id = _create_chat(server, tmp_path)
+    model = FakeModel(scripted=[_answer(), _answer()])
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda services, rec: model)
+    server.handle_line(
+        _req("t1", "session.turn.start", {"session_id": session_id, "message": "hi"})
+    )
+    assert _collect_until(server, session_id)[-1]["event"] == "turn.completed"
+
+    bad = server.handle_line(
+        _req("c0", "context.compact", {"session_id": session_id, "continue_with": " "})
+    )
+    assert bad["ok"] is False and bad["error"]["code"] == "INVALID_PARAMS"
+
+    started = server.handle_line(
+        _req("c1", "context.compact", {"session_id": session_id, "continue_with": "Continúa"})
+    )
+    assert started["ok"] is True
+    events = _collect_until(server, session_id)
+    assert events[0]["event"] == "turn.started"
+    assert events[0]["payload"]["message"] == "Continúa"
+    assert any(e["event"] == "governor.compact" for e in events)
+    completed = events[-1]
+    assert completed["event"] == "turn.completed"
+    assert completed["payload"]["kind"] == "answer"
+    assert model.requests[-1].messages[-1].content == "Continúa"
+
+
+def test_plain_compaction_does_not_continue(server, tmp_path, monkeypatch) -> None:
+    session_id = _create_chat(server, tmp_path)
+    model = FakeModel(scripted=[_answer()])
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda services, rec: model)
+    server.handle_line(
+        _req("t1", "session.turn.start", {"session_id": session_id, "message": "hi"})
+    )
+    _collect_until(server, session_id)
+    server.handle_line(_req("c1", "context.compact", {"session_id": session_id}))
+    completed = _collect_until(server, session_id)[-1]
+    assert completed["payload"]["kind"] == "compaction"
+    assert len(model.requests) == 1

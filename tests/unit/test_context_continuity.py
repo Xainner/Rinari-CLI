@@ -266,3 +266,45 @@ def test_the_instruction_keeps_operational_facts_out_of_the_summary(app_ctx):
     instruction = w.summarize.requests[0].messages[0].content
     assert "nothing is pending" in instruction
     assert "tests passed" in instruction
+
+
+def test_an_empty_summary_is_retried_once(app_ctx):
+    """ses_01M3M992…: the automatic compaction failed where a manual one passed."""
+    replies = iter([ModelResponse(content=""), ModelResponse(content=GOOD)])
+    requests = []
+
+    def flaky(request):
+        requests.append(request)
+        return next(replies, ModelResponse(content=GOOD))
+
+    w = world(app_ctx, summarizer=flaky)
+    w.compact()
+    assert GOOD in state_of(w)["summary"]
+    assert len(requests) >= 2
+
+
+def test_a_failed_summary_says_why(app_ctx):
+    from rinari.models.types import StopReason, Usage
+
+    def thinking_only(request):
+        return ModelResponse(
+            content="", stop_reason=StopReason.END_TURN, usage=Usage(reasoning_tokens=4096)
+        )
+
+    w = world(app_ctx, summarizer=thinking_only)
+    with pytest.raises(ContextPreparationError, match="no text after 4096 reasoning tokens"):
+        w.compact()
+
+
+def test_summary_problems_name_the_condition():
+    from rinari.context.preparation import summary_problem
+    from rinari.models.types import StopReason, ToolCall
+
+    cut = ModelResponse(content="Goal: CSV", stop_reason=StopReason.MAX_TOKENS)
+    tools = ModelResponse(
+        content="", stop_reason=StopReason.TOOL_CALLS, tool_calls=(ToolCall("t", "fs.read", {}),)
+    )
+    assert summary_problem(cut) == "it was cut off at the output limit"
+    assert summary_problem(tools) == "it asked for tools instead of answering"
+    assert summary_problem(ModelResponse(content="")) == "it returned no text"
+    assert summary_problem(ModelResponse(content=GOOD)) is None

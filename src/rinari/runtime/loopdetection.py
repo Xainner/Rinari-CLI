@@ -5,7 +5,10 @@ Detectors (harness.md loop-detection list):
     same tool/args          the same (tool, canonical args) repeated within the
                             recent action window
     two-action oscillation  A,B,A,B in the last four actions
-    repeated rewrites       the same target path written by fs.write/fs.patch
+    repeated rewrites       a file brought back to a state it already had: the
+                            same edit applied again, an edit undone, or the
+                            same content written again. Different successive
+                            edits of one file are progress, not a loop.
     same error              the same error signature repeated
     repeated denied approval the same tool denied N times in a row
     duplicated subagent work the same subagent objective repeated (no subagents
@@ -21,6 +24,7 @@ legitimate action in successive user turns is not a loop.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 
@@ -61,13 +65,40 @@ def _canonical_args(arguments: object) -> str:
         return repr(arguments)
 
 
-def _canonical_path(name: str, arguments: object) -> str | None:
-    if name not in _DEFAULT_REWRITES:
-        return None
-    if not isinstance(arguments, dict):
-        return None
-    path = arguments.get("path")
-    return str(path) if path else None
+def _digest(*parts: object) -> str:
+    raw = json.dumps(parts, default=str, ensure_ascii=False)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _file_changes(name: str, arguments: object) -> list[tuple[str, str, str | None]]:
+    """What a write does to each file: ``(path, state, undo)``.
+
+    ``state`` identifies the change itself (the written content, or the edit);
+    ``undo`` is the state an earlier change would have if this one reverses
+    it. A write has no undo: writing earlier content again is already seen as
+    the same state.
+    """
+    if name not in _DEFAULT_REWRITES or not isinstance(arguments, dict):
+        return []
+    if name == "fs.write":
+        path = arguments.get("path")
+        if not path:
+            return []
+        return [(str(path), _digest("write", arguments.get("content")), None)]
+    rows = arguments.get("files")
+    if not isinstance(rows, list):
+        rows = [{"path": arguments.get("path"), "edits": [arguments]}]
+    changes: list[tuple[str, str, str | None]] = []
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("path"):
+            continue
+        edits = row.get("edits")
+        for edit in edits if isinstance(edits, list) else ():
+            if not isinstance(edit, dict):
+                continue
+            old, new = edit.get("old_string"), edit.get("new_string")
+            changes.append((str(row["path"]), _digest("edit", old, new), _digest("edit", new, old)))
+    return changes
 
 
 def _error_signature(code: str, message: str) -> str:
@@ -83,6 +114,9 @@ class LoopDetector:
         self._actions: list[str] = []  # canonical tool and arguments
         self._errors: list[tuple[str, str]] = []  # (signature, tool)
         self._denials: dict[str, int] = {}
+        # Per file: the states its writes produced, and how many writes brought
+        # it back to one of them.
+        self._file_states: dict[str, set[str]] = {}
         self._rewrites: dict[tuple[str, str], int] = {}
         self._last_rewrite: tuple[str, str] | None = None
         self._subagents: list[str] = []
@@ -99,10 +133,14 @@ class LoopDetector:
         key = f"{name}|{_canonical_args(arguments)}"
         self._actions.append(key)
         del self._actions[: -self._window]
-        path = _canonical_path(name, arguments)
-        self._last_rewrite = (name, path) if path is not None else None
-        if path is not None:
-            self._rewrites[(name, path)] = self._rewrites.get((name, path), 0) + 1
+        self._last_rewrite = None
+        for path, state, undo in _file_changes(name, arguments):
+            seen = self._file_states.setdefault(path, set())
+            if state in seen or (undo is not None and undo in seen):
+                key = (name, path)
+                self._rewrites[key] = self._rewrites.get(key, 0) + 1
+                self._last_rewrite = key
+            seen.add(state)
 
     def record_error(self, name: str, code: str, message: str) -> None:
         self._error_serial += 1
@@ -184,11 +222,13 @@ def _oscillation(det: LoopDetector) -> str | None:
 
 
 def _rewrites(det: LoopDetector) -> str | None:
+    # One return to an earlier state can be a deliberate revert; the second is
+    # going in circles.
     if det._last_rewrite is not None:
         name, path = det._last_rewrite
         count = det._rewrites[det._last_rewrite]
-        if count >= det._repeats:
-            return f"{path} rewritten by {name} {count} times"
+        if count >= det._repeats - 1:
+            return f"{path} returned to an earlier state by {name} {count} times"
     return None
 
 

@@ -59,6 +59,22 @@ def invoke_summary(caller, request, cancel):
         raise value
 
 
+def summary_problem(response) -> str | None:
+    """Why a summarizer reply cannot be used, or None when it can."""
+    if response.tool_calls:
+        return "it asked for tools instead of answering"
+    if response.stop_reason == StopReason.MAX_TOKENS:
+        return "it was cut off at the output limit"
+    if response.stop_reason != StopReason.END_TURN:
+        return f"it stopped with {response.stop_reason.value}"
+    if not response.content.strip():
+        reasoning = getattr(response.usage, "reasoning_tokens", None)
+        if reasoning:
+            return f"it returned no text after {reasoning} reasoning tokens"
+        return "it returned no text"
+    return None
+
+
 def prepare(service, ctx, request, caller, rebuild, emit, cancel):
     """Persist a verified replacement before changing the running projection."""
     config = service._ctx.config.config
@@ -167,27 +183,30 @@ def prepare(service, ctx, request, caller, rebuild, emit, cancel):
         meter = getattr(ctx.tool_ctx, "parent_budget", None)
 
         def summarize(summary_request):
-            if meter is not None:
-                from rinari.runtime.budget import NETWORK_CALLS, TOOL_CALLS
+            # One retry: a model that answered with nothing, or spent its
+            # output on reasoning, often summarizes on a second call (a manual
+            # compaction of the same history then passed). The reason is kept:
+            # before, the failure did not say which condition it hit.
+            problem = None
+            for _attempt in range(2):
+                if meter is not None:
+                    from rinari.runtime.budget import NETWORK_CALLS, TOOL_CALLS
 
-                if meter.first_exhausted(ignore=(TOOL_CALLS, NETWORK_CALLS)):
-                    raise ContextPreparationError(
-                        "Turn budget exhausted during context compaction."
-                    )
-                meter.reserve_model_call(model_only=True)
-            response = invoke_summary(summary_caller, summary_request, cancel)
-            if meter is not None:
-                meter.note_usage(response.usage)
-            if (
-                response.tool_calls
-                or response.stop_reason != StopReason.END_TURN
-                or not response.content.strip()
-            ):
-                checks["structure"] = "failed"
-                raise ContextPreparationError(
-                    "The summarizer did not return a complete text summary."
-                )
-            return response.content
+                    if meter.first_exhausted(ignore=(TOOL_CALLS, NETWORK_CALLS)):
+                        raise ContextPreparationError(
+                            "Turn budget exhausted during context compaction."
+                        )
+                    meter.reserve_model_call(model_only=True)
+                response = invoke_summary(summary_caller, summary_request, cancel)
+                if meter is not None:
+                    meter.note_usage(response.usage)
+                problem = summary_problem(response)
+                if problem is None:
+                    return response.content
+            checks["structure"] = "failed"
+            raise ContextPreparationError(
+                f"The summarizer did not return a complete text summary ({problem})."
+            )
 
         # Bounded chunks also support historical single messages larger than the
         # summarizer window. Splitting is text-only and cannot execute tool calls.

@@ -190,3 +190,27 @@ def test_context_models_answers_for_every_model_even_if_one_fails(env, handlers,
     rows = {row["model_alias"]: row for row in handlers["context.models"]({})["models"]}
     assert rows["fake-one"]["window_tokens"] == 128_000
     assert rows["fake-two"]["error"] == "metadata unreadable"
+
+
+def test_subagent_calls_do_not_replace_the_session_measurement(env, handlers):
+    """ses_01M3GPXSP…: a child's 5k-token call hid the parent's 68k ring."""
+    s, record, session = env
+    run_turn(session(answer(input_tokens=9000)), "hello")
+    model = session().context.model_ref
+    for anchor_model, tag in ((model, {"agent_session": f"{record.id}-agt_001"}), ("", {})):
+        s.context._persist_event(
+            record.id,
+            "ModelInvoked",
+            {
+                "context_anchor": {
+                    "actual": 700,
+                    "estimated": 800,
+                    "model": anchor_model,
+                    "compact_revision": 0,
+                },
+                **tag,
+            },
+        )
+    status = handlers["context.status"]({"session_id": record.id})
+    assert status["last_request"]["input_tokens"] == 9000
+    assert session().context.context_usage["actual"] == 9000

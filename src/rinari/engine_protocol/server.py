@@ -26,6 +26,7 @@ from rinari.engine_protocol import protocol
 from rinari.engine_protocol.dispatcher import EngineDispatcher
 from rinari.engine_protocol.ecosystem import mcp_row_view, plugin_row_view, tool_row_view
 from rinari.engine_protocol.errors import (
+    ENGINE_ERROR,
     INVALID_PARAMS,
     TURN_RUNNING,
     EngineProtocolError,
@@ -277,12 +278,7 @@ class EngineServer:
         self._dispatcher.register("agent.config.get", self._agent_config_get)
         self._dispatcher.register("agent.config.set", self._agent_config_set)
         self._dispatcher.register("model.capabilities", self._model_capabilities)
-        self._dispatcher.register(
-            "context.compact",
-            lambda params: self._turns.start_turn(
-                params.get("session_id"), "", compaction_only=True
-            ),
-        )
+        self._dispatcher.register("context.compact", self._context_compact)
         self._dispatcher.register("session.events", self._session_events)
         self._dispatcher.register("soul.list", self._soul_list)
         self._dispatcher.register("soul.get", self._soul_get)
@@ -481,6 +477,27 @@ class EngineServer:
             **self._browser_registry.describe(record.id),
         }
 
+    def _context_compact(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Compact a session's context now.
+
+        With `continue_with`, the same turn then sends that message: a turn
+        stopped by a failed automatic compaction resumes in one step, and
+        nothing continues if the compaction fails again.
+        """
+        message = params.get("continue_with")
+        if message is not None and (
+            not isinstance(message, str) or not message.strip() or len(message) > 2000
+        ):
+            raise EngineProtocolError(
+                INVALID_PARAMS, "Param 'continue_with' must be a non-empty string."
+            )
+        return self._turns.start_turn(
+            params.get("session_id"),
+            message or "",
+            compaction_only=True,
+            continue_after=message is not None,
+        )
+
     def _browser_control_set(self, params: dict[str, Any]) -> dict[str, Any]:
         """`browser.control.set` (documento 03 §7): tomar o devolver el control.
 
@@ -495,7 +512,12 @@ class EngineServer:
             raise EngineProtocolError(
                 INVALID_PARAMS, "Param 'expected_revision' must be an integer."
             )
-        return self._browser_registry.set_control(record.id, owner, expected)
+        automatic = params.get("automatic", False)
+        if not isinstance(automatic, bool):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'automatic' must be a boolean.")
+        # `automatic`: la interfaz da la vista en vivo sola (entre turnos). El
+        # agente la recupera en su primera acción; un control tomado a mano no.
+        return self._browser_registry.set_control(record.id, owner, expected, automatic=automatic)
 
     # -- sessions --------------------------------------------------------
 
@@ -2558,9 +2580,12 @@ class EngineServer:
         return expanded.message, command["name"]
 
     def _target_list(self, params: dict[str, Any]) -> dict[str, Any]:
-        from rinari.application.ssh_targets import TargetStore
+        from rinari.application.ssh_targets import TargetStore, TargetStoreUnavailable
 
-        return {"targets": TargetStore(self._services.ctx.layout.root).list()}
+        try:
+            return {"targets": TargetStore(self._services.ctx.layout.root).list()}
+        except TargetStoreUnavailable as exc:
+            raise EngineProtocolError(ENGINE_ERROR, str(exc)) from exc
 
     def _target_add(self, params: dict[str, Any]) -> dict[str, Any]:
         from rinari.application.ssh_targets import TargetStore
@@ -3158,7 +3183,12 @@ class EngineServer:
         add_new = params.get("add_new", False)
         if not isinstance(add_new, bool):
             raise EngineProtocolError(INVALID_PARAMS, "Param 'add_new' must be a boolean.")
-        results = self._services.models.refresh(self._opt_str(params, "provider"), add_new=add_new)
+        provider = self._opt_str(params, "provider")
+        # Refreshing every provider (the "Refresh models" button) also refreshes
+        # the public catalog the context windows come from.
+        results = self._services.models.refresh(
+            provider, add_new=add_new, public_catalog=provider is None
+        )
         providers: dict[str, Any] = {}
         for alias, result in results.items():
             providers[alias] = {
@@ -3169,6 +3199,8 @@ class EngineServer:
                 "added": list(result.added),
                 "error": result.error,
             }
+        if provider is None and self._services.models.last_catalog_refresh is not None:
+            return {"providers": providers, "catalog": self._services.models.last_catalog_refresh}
         return {"providers": providers}
 
     def _model_test(self, params: dict[str, Any]) -> dict[str, Any]:

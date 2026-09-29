@@ -185,3 +185,23 @@ def test_hardware_defaults_to_one_connection_with_partial_sections(setup, monkey
     assert result.data["sections"]["cpu"]["ok"]
     assert not result.data["sections"]["gpu"]["ok"]
     assert result.data["sections"]["gpu"]["exit_code"] == 127
+
+
+def test_an_unreadable_ssh_folder_does_not_break_building_the_store(tmp_path, monkeypatch):
+    """Card 07: the `.rinari/ssh` folder closed to this account failed every turn."""
+    from pathlib import Path
+
+    from rinari.application.ssh_targets import TargetStoreUnavailable
+
+    def denied(self, *args, **kwargs):
+        raise PermissionError(5, "Access is denied", str(self))
+
+    monkeypatch.setattr(Path, "mkdir", denied)
+    store = TargetStore(tmp_path)  # what every turn does: must not raise
+    tool = next(t for t in ssh.ssh_tools(store) if t.name == "ssh.inspect")
+    with pytest.raises(TargetStoreUnavailable, match="give this account ownership"):
+        store.list()
+    result = tool.handler({"target_id": "fixture", "section": "cpu"}, None)
+    assert not result.ok
+    assert result.error.code.value == "PERMISSION_DENIED"
+    assert str(tmp_path / "ssh") in result.error.message

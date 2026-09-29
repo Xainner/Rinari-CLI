@@ -609,6 +609,7 @@ def _run_subagent(monkeypatch, git_repo: Path, definition: AgentDefinition, mode
         sandbox_factory=sandbox_factory,
         parent_session_ctx=_ParentCtx(git_repo, clock),
         worktrees=None,
+        **config_extra,
     )
     runner = make_subagent_runner(config)
     spec = SubagentRunSpec(
@@ -1145,3 +1146,129 @@ def test_child_activity_contains_output_without_parent_model_collision(git_repo,
     assert all(payload["agent_id"] == "a" for _, payload in emitted)
     assert any(payload["child_event"] == "tool.completed" for _, payload in emitted)
     assert any(payload.get("content") == "child result" for _, payload in emitted)
+
+
+class _WriteThenLoopModel(_AnswerModel):
+    """Writes one file, then keeps working until something stops it."""
+
+    def __init__(self, root: Path):
+        super().__init__(None, {}, "")
+        self._root = root
+
+    def invoke(self, request):
+        ModelResponse, _c, StopReason, ToolCall, _u = self._types
+        self.calls += 1
+        if self.calls == 1:
+            call = ToolCall(
+                id="w1",
+                name="fs.write",
+                arguments={"path": str(self._root / "generate.ps1"), "content": "param()"},
+            )
+            return ModelResponse(
+                content="Writing the helper.", stop_reason=StopReason.TOOL_CALLS, tool_calls=(call,)
+            )
+        # A different range each time: repeating one call would be a loop.
+        call = ToolCall(
+            id=f"r{self.calls}",
+            name="fs.read_lines",
+            arguments={"path": str(self._root / "app.py"), "start": 1, "end": self.calls},
+        )
+        return ModelResponse(content="", stop_reason=StopReason.TOOL_CALLS, tool_calls=(call,))
+
+
+def test_builtin_subagent_shares_the_parent_turn_budget(monkeypatch, git_repo):
+    """No ceiling of its own: the child runs until the parent turn's limit."""
+    from rinari.agents.definition import BUILTIN_AGENTS
+    from rinari.agents.orchestrator import SubagentRunSpec
+    from rinari.agents.runtime import SubagentRuntimeConfig, make_subagent_runner
+    from rinari.policy.engine import PolicyEngine
+    from rinari.policy.sandbox import FilesystemSandbox
+    from rinari.runtime.budget import BudgetMeter, TurnBudgetLimits
+
+    assert BUILTIN_AGENTS["implementer"].budget.max_model_calls is None
+    clock = FakeClock(start=1_700_000_000.0, step=0.05)
+    model = _WriteThenLoopModel(git_repo)
+    config = SubagentRuntimeConfig(
+        caller=model,
+        base_registry=None,
+        parent_token=CancellationToken(),
+        policy=PolicyEngine(),
+        sandbox_factory=lambda p, c, w: FilesystemSandbox(read_root=git_repo, write_roots=tuple(w)),
+        parent_session_ctx=_ParentCtx(git_repo, clock),
+        worktrees=None,
+    )
+    parent = BudgetMeter(TurnBudgetLimits(max_model_calls=20), clock)
+    parent.model_calls = 5  # the coordinator's own calls so far
+    spec = SubagentRunSpec(
+        agent_id="agt_shared",
+        definition=BUILTIN_AGENTS["explore"],
+        objective="look around",
+        project_root=git_repo,
+        session_id="parent",
+        parent_budget=parent,
+    )
+    monkeypatch.setattr("rinari.agents.runtime._make_assembler", lambda: _NoopAssembler())
+    result = make_subagent_runner(config).run(spec)
+    assert result.status == "budget"
+    assert model.calls == 15  # well past the old ceiling of 12
+    assert parent.model_calls == 20
+
+
+def test_stopped_subagent_reports_how_far_it_got(monkeypatch, git_repo):
+    """ses_01M3GPXSP…: the coordinator got an empty result after real work."""
+    from dataclasses import replace
+
+    from rinari.agents.definition import BUILTIN_AGENTS
+
+    explore = replace(BUILTIN_AGENTS["explore"], budget=AgentBudget(max_model_calls=3))
+    result = _run_subagent(monkeypatch, git_repo, explore, _WriteThenLoopModel(git_repo))
+    assert result.status == "budget"
+    assert "Stopped: turn budget exhausted" in result.summary
+    assert "Stopped before finishing (budget); 2 tool calls ran." in result.summary
+    assert "Last progress: Writing the helper." in result.summary
+
+
+def test_child_progress_collects_files_it_wrote():
+    import json
+
+    from rinari.agents.runtime import _ChildProgress
+
+    progress = _ChildProgress()
+    written = {"ok": True, "tool": "fs.write", "data": {"path": "C:/w/scripts/generate.ps1"}}
+    patched = {"ok": True, "tool": "fs.patch", "data": {"files": [{"path": "C:/w/a.py"}]}}
+    refused = {"ok": False, "tool": "fs.write", "error": {"code": "DENIED"}}
+    for tool, observation in (("fs.write", written), ("fs.patch", patched), ("fs.write", refused)):
+        progress.note(
+            "tool.completed", {"tool": tool, "ok": True, "observation": json.dumps(observation)}
+        )
+    progress.note("tool.failed", {"tool": "fs.write", "ok": False, "observation": "{}"})
+    assert progress.files == ["C:/w/scripts/generate.ps1", "C:/w/a.py"]
+    assert "Files written: C:/w/scripts/generate.ps1, C:/w/a.py" in progress.summary("cancelled")
+
+
+def test_subagent_measurements_carry_the_model_they_called(monkeypatch, git_repo):
+    from rinari.agents.definition import BUILTIN_AGENTS
+
+    class _MeasuredModel(_AnswerModel):
+        model_id = "mdl_child"
+
+        def invoke(self, request):
+            ModelResponse, _c, StopReason, _t, Usage = self._types
+            self.calls += 1
+            return ModelResponse(
+                content="done",
+                stop_reason=StopReason.END_TURN,
+                usage=Usage(input_tokens=5493, output_tokens=30),
+            )
+
+    model = _MeasuredModel(None, {}, "done")
+    invoked = []
+
+    def sink(session_id, event, payload):
+        if event == "ModelInvoked":
+            invoked.append((session_id, payload))
+
+    _run_subagent(monkeypatch, git_repo, BUILTIN_AGENTS["explore"], model, event_sink=sink)
+    assert invoked
+    assert invoked[0][0] == "parent-agt_test"
+    assert invoked[0][1]["context_anchor"]["model"] == "mdl_child"

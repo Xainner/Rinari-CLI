@@ -237,6 +237,32 @@ class TestArbitraje:
         assert host.control_revision == 3
         assert fake.calls == []
 
+    def test_la_vista_en_vivo_automatica_la_recupera_el_agente_al_actuar(self) -> None:
+        # Tarjeta 19: el panel daba el control al usuario entre turnos y, si no
+        # estaba montado al empezar el turno, nadie lo devolvía.
+        host, fake = backend()
+        changes: list[str] = []
+        host.on_control_change(changes.append)
+        host.set_control("user", automatic=True)
+        assert host.wait_for_control(timeout=5) == "user"
+        assert host.status()["control_automatic"] is True
+        fake.calls.clear()
+        host.send("t1", "Page.navigate", {"url": "http://127.0.0.1/x"})
+        assert fake.calls == [("page.navigate", {"url": "http://127.0.0.1/x"})]
+        assert host.control == "agent"
+        assert host.status()["control_automatic"] is False
+        assert changes[-1] == "agent"  # main retira la vista en vivo
+
+    def test_el_control_tomado_a_mano_se_respeta(self) -> None:
+        host, _ = backend()
+        host.set_control("user", automatic=True)
+        assert host.wait_for_control(timeout=5) == "user"
+        host.set_control("user")  # el usuario pulsa «tomar el control»
+        with pytest.raises(BrowserError) as raised:
+            host.send("t1", "Page.navigate", {"url": "http://127.0.0.1/x"})
+        assert raised.value.code == "BROWSER_INTERVENED"
+        assert "took control" in raised.value.message
+
     def test_pedirlo_dos_veces_mientras_se_toma_no_arranca_otra_transicion(self) -> None:
         """Documento 03 §7: el traspaso lo decide **un** hilo.
 

@@ -12,22 +12,57 @@ import sqlite3
 from pathlib import Path
 
 
+class TargetStoreUnavailable(PermissionError):
+    """The SSH folder exists but this account cannot open it."""
+
+
 class TargetStore:
+    """Opened on first use, not when built.
+
+    Every turn builds one to register the SSH tools; a folder this account
+    cannot open used to fail *every* turn, SSH or not. On Windows the folder
+    is created with mode 0o700, which Python turns into an ACL for its owner
+    only: a `.rinari` created by another account, or by an elevated process,
+    is then closed to the current one.
+    """
+
     def __init__(self, root: Path):
         self.root = root / "ssh"
-        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        (self.root / "identities").mkdir(mode=0o700, exist_ok=True)
         self.path = self.root / "targets.sqlite"
-        with self.connect() as db:
-            if db.execute("PRAGMA user_version").fetchone()[0] not in (0, 1):
-                raise ValueError("Unsupported target schema")
-            db.execute(
-                "CREATE TABLE IF NOT EXISTS targets (id TEXT PRIMARY KEY, data TEXT NOT NULL)"
-            )
-            db.execute("PRAGMA user_version=1")
+        self._ready = False
+
+    def _ensure(self) -> None:
+        if self._ready:
+            return
+        try:
+            self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            (self.root / "identities").mkdir(mode=0o700, exist_ok=True)
+            with self._open() as db:
+                if db.execute("PRAGMA user_version").fetchone()[0] not in (0, 1):
+                    raise ValueError("Unsupported target schema")
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS targets (id TEXT PRIMARY KEY, data TEXT NOT NULL)"
+                )
+                db.execute("PRAGMA user_version=1")
+        except (PermissionError, sqlite3.OperationalError) as exc:
+            if isinstance(exc, sqlite3.OperationalError) and "unable to open" not in str(exc):
+                raise
+            raise TargetStoreUnavailable(
+                f"Rinari cannot open its SSH folder {self.root}: access denied. The folder is "
+                "restricted to the account that created it; if this .rinari came from another "
+                "Windows account or from a run as administrator, give this account ownership "
+                "of the folder, or delete it so Rinari recreates it."
+            ) from exc
+        self._ready = True
 
     @contextlib.contextmanager
     def connect(self):
+        self._ensure()
+        with self._open() as db:
+            yield db
+
+    @contextlib.contextmanager
+    def _open(self):
         db = sqlite3.connect(self.path)
         try:
             with db:

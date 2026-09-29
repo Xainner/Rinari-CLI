@@ -163,13 +163,13 @@ def test_policy_deny_read_only_write(project) -> None:
     assert "deny" in decisions
 
 
-def test_policy_deny_shell_in_read_only(project) -> None:
+def test_shell_in_read_only_needs_an_approval(project) -> None:
     tmp_path, root, _ = project
     ctx = _ctx(tmp_path, root, profile="read-only")
     runtime, _ = _runtime(ctx, tmp_path)
     result = runtime.execute("shell.exec", {"command": "echo hi"}, ctx)
-    assert result.ok is False
-    assert result.error.code is ToolErrorCode.POLICY_DENIED
+    assert result.ok is False  # the test prompt denies: nothing ran unasked
+    assert result.error.code is ToolErrorCode.APPROVAL_DENIED
 
 
 # -- pipeline: approvals ----------------------------------------------------------
@@ -509,7 +509,8 @@ def test_git_tools_in_repo(project) -> None:
 
 @pytest.mark.parametrize("read_profile", ["full-access", "workspace", "read-only"])
 def test_immutable_execution_with_independent_read_scope(project, read_profile):
-    """Reads are free in every profile; read-only still never writes or runs."""
+    """Reads are free in every profile; read-only never writes, and runs a
+    command only when the user approves that one (here the prompt says yes)."""
     from dataclasses import replace
 
     tmp_path, root, outside = project
@@ -525,7 +526,6 @@ def test_immutable_execution_with_independent_read_scope(project, read_profile):
     assert not runtime.execute(
         "fs.write", {"path": str(root / ".env"), "content": "changed"}, ctx
     ).ok
-    assert not runtime.execute("shell.exec", {"command": "echo forbidden"}, ctx).ok
     assert outside.read_text(encoding="utf-8") == "outside"
 
 

@@ -69,8 +69,13 @@ def ssh_tools(store, bound=None):
             return None
 
     def inspect(args, ctx):
+        from rinari.application.ssh_targets import TargetStoreUnavailable
+
         args = {"section": "hardware", **args}
-        destination = target(args)
+        try:
+            destination = target(args)
+        except TargetStoreUnavailable as exc:
+            return _fail(ToolErrorCode.PERMISSION_DENIED, str(exc))
         if destination is None or args.get("section") not in COMMANDS:
             return _fail(
                 ToolErrorCode.INVALID_ARGUMENT,

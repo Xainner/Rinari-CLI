@@ -2335,6 +2335,10 @@
           "type": "integer",
           "minimum": 0,
           "description": "Mutaciones admitidas que la transicion esta esperando."
+        },
+        "control_automatic": {
+          "type": "boolean",
+          "description": "El control del usuario lo dio la interfaz (vista en vivo entre turnos); la primera accion del agente lo recupera."
         }
       }
     },

@@ -63,6 +63,8 @@ class ModelService:
         self._ctx = ctx
         self._providers = providers
         self._client = http_client
+        #: Outcome of the last public catalog download (``refresh(public_catalog=True)``).
+        self.last_catalog_refresh: dict | None = None
 
     def _now(self) -> str:
         return now_iso(self._ctx.clock)
@@ -299,14 +301,30 @@ class ModelService:
     # -- discovery / refresh / test --------------------------------------
 
     def refresh(
-        self, provider_ref: str | None = None, *, add_new: bool = False
+        self,
+        provider_ref: str | None = None,
+        *,
+        add_new: bool = False,
+        public_catalog: bool = False,
     ) -> dict[str, RefreshResult]:
         """Re-read what each provider offers and update the saved models.
 
         With ``add_new`` a model the provider now offers and is not saved yet
         is saved under its provider ID, and providers without saved models are
-        read too.
+        read too. With ``public_catalog`` the public model list (context
+        windows, modalities) is downloaded first: a provider's own model list
+        often names models without saying how large they are.
         """
+        if public_catalog:
+            from rinari.providers import metadata
+
+            try:
+                get = self._client.get if self._client is not None else httpx.get
+                self.last_catalog_refresh = metadata.refresh_public_catalog(get)
+            except Exception as exc:  # offline: keep the catalog already in use
+                self.last_catalog_refresh = {
+                    "error": f"{exc.__class__.__name__}: {getattr(exc, 'message', exc)}"
+                }
         provider = self._providers.get(provider_ref) if provider_ref else None
         providers = [provider] if provider else self._providers.list()
         results: dict[str, RefreshResult] = {}

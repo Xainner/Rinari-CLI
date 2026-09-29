@@ -69,6 +69,25 @@ def test_plan_discovered_commands():
     assert plan.lint_commands == ("uv run ruff check .",)
 
 
+def test_plan_does_not_invent_a_suite_for_a_media_pipeline():
+    """Card 03: `pytest work/gfx/test_scenes.py` for a project with no tests."""
+    plan = plan_verification(
+        ["work/gfx/scenes.py", "work/index.html", "render.ps1"],
+        exists=lambda path: False,
+        user_constraints=["validate the render with ffprobe; there is no test suite"],
+    )
+    assert plan.targeted == ()
+    assert plan.adjacent == ()
+    assert plan.test_commands == ()
+    assert any("no automated test suite detected" in reason for reason in plan.reasons)
+
+
+def test_plan_conventions_apply_only_to_python_and_existing_tests():
+    plan = plan_verification(["web/app.js", "src/foo.py"], exists=lambda p: p == "src/test_foo.py")
+    assert plan.targeted == ("src/test_foo.py",)
+    assert plan.test_commands == ("pytest src/test_foo.py",)
+
+
 # -- completion gate -----------------------------------------------------------
 
 
@@ -223,9 +242,11 @@ def test_verify_record_tool_requires_fields(app_ctx, tmp_path):
 
 def test_verify_plan_and_evaluate_tools(app_ctx, tmp_path):
     ctx = _tool_ctx(app_ctx, tmp_path)
+    (ctx.project_root / "src").mkdir()
+    (ctx.project_root / "src" / "test_foo.py").write_text("def test_x(): pass\n", encoding="utf-8")
     plan = _handler("verify.plan").handler({"changed_files": ["src/foo.py"]}, ctx)
     assert plan.ok
-    assert plan.data["targeted"]
+    assert plan.data["targeted"] == ["src/test_foo.py"]
     _handler("verify.record").handler(
         {"kind": "test", "result": "passed", "command": "pytest", "detail": "2 passed"}, ctx
     )

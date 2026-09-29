@@ -194,6 +194,13 @@ class HostBackend:
         #: son estables; `taking-user-control` es el hueco entre pedirlo y
         #: confirmarlo, y `uncertain` es no haber podido garantizar exclusión.
         self._control_state = "agent"
+        #: El control del usuario lo dio la interfaz sola (la vista en vivo
+        #: entre turnos), no una decisión suya. Así no bloquea al agente: su
+        #: primera mutación lo recupera. Antes lo devolvía el panel del
+        #: navegador al empezar el turno, y si el panel no estaba montado
+        #: (otra sesión, panel cerrado) el agente recibía BROWSER_INTERVENED
+        #: sin que nadie hubiera tomado el control.
+        self._automatic_user = False
         #: Mutaciones admitidas y todavía sin terminar. Tomar el control espera
         #: a que se vacíe: un booleano no impide que una operación que ya pasó
         #: el guard se aplique después de confirmar al usuario.
@@ -225,6 +232,8 @@ class HostBackend:
             "control": self._control,
             "control_state": self._control_state,
             "control_revision": self._control_revision,
+            "control_automatic": self._automatic_user
+            and self._control_state in ("user", "taking-user-control"),
         }
 
     @property
@@ -255,6 +264,7 @@ class HostBackend:
         *,
         expected_revision: int | None = None,
         drain_timeout_s: float = 10.0,
+        automatic: bool = False,
     ) -> dict[str, Any]:
         """Pide una transición de control (§7). **Vuelve enseguida.**
 
@@ -284,6 +294,9 @@ class HostBackend:
                     f"current is {self._control_revision}"
                 )
             if owner == self._control and self._control_state == owner:
+                if owner == "user" and not automatic:
+                    # Tomarlo a mano cuando ya estaba en vivo lo hace tuyo.
+                    self._automatic_user = False
                 return self.status()
 
             # Pedirlo otra vez mientras ya se está tomando **no** arranca otra
@@ -294,9 +307,12 @@ class HostBackend:
             # decidiendo la misma transición, y la revisión moviéndose por algo
             # que el usuario ya había pedido.
             if owner == "user" and self._control_state == "taking-user-control":
+                if not automatic:
+                    self._automatic_user = False
                 return {**self.status(), "outstanding_mutations": len(self._leases)}
 
             if owner == "agent":
+                self._automatic_user = False
                 # Devolver el control es inmediato: mientras mandaba el usuario
                 # no se admitió ninguna mutación del agente, así que no hay
                 # nada que drenar.
@@ -307,6 +323,7 @@ class HostBackend:
             # El hueco entre pedirlo y concederlo es justo donde se colaba otra
             # mutación.
             self._control_state = "taking-user-control"
+            self._automatic_user = automatic
             self._settled.clear()
             outstanding = len(self._leases)
 
@@ -413,11 +430,15 @@ class HostBackend:
         from rinari.browser.manager import BrowserError
 
         with self._control_lock:
+            if self._automatic_user and self._control_state in ("user", "taking-user-control"):
+                # Vista en vivo que dio la interfaz: el agente la recupera.
+                self._automatic_user = False
+                self._settle("agent", "agent")
             if self._control_state != "agent":
                 raise BrowserError(
                     "BROWSER_INTERVENED",
-                    f"the user is taking control of this browser; {what} is not "
-                    "available until control returns to the agent",
+                    f"the user took control of this browser; {what} is not "
+                    "available until they hand it back",
                 )
             lease = secrets.token_hex(8)
             self._leases[lease] = what

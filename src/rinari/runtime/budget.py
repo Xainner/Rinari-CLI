@@ -180,15 +180,35 @@ class BudgetMeter:
         is_network overrides the name-prefix heuristic with ground truth
         from tool classification; the loop always passes it.
         """
-        if self.limits.max_tool_calls is not None and self.tool_calls >= self.limits.max_tool_calls:
-            return False
         network = is_network if is_network is not None else self._net(name)
-        if network:
-            return (
-                self.limits.max_network_calls is None
-                or self.network_calls < self.limits.max_network_calls
-            )
+        meter: BudgetMeter | None = self
+        # A child's calls count against every ancestor, so every ancestor
+        # gates them too.
+        while meter is not None:
+            limits = meter.limits
+            if limits.max_tool_calls is not None and meter.tool_calls >= limits.max_tool_calls:
+                return False
+            if (
+                network
+                and limits.max_network_calls is not None
+                and meter.network_calls >= limits.max_network_calls
+            ):
+                return False
+            meter = meter.parent
         return True
+
+    def first_exhausted_in_chain(self, *, ignore: tuple[str, ...] = ()) -> str | None:
+        """First exhausted dimension of this meter or of the turns above it.
+
+        An ancestor's spawn counters (subagents, depth) describe how many
+        children it may start, not whether a running child may continue.
+        """
+        hit = self.first_exhausted(ignore=ignore)
+        meter = self.parent
+        while hit is None and meter is not None:
+            hit = meter.first_exhausted(ignore=(*ignore, SUBAGENTS, RECURSION_DEPTH))
+            meter = meter.parent
+        return hit
 
     # -- state ---------------------------------------------------------------
 
@@ -285,7 +305,7 @@ class EmergencyCircuitBreaker:
     meter: BudgetMeter
 
     def before_model_call(self) -> str | None:
-        return self.meter.first_exhausted(ignore=(TOOL_CALLS, NETWORK_CALLS))
+        return self.meter.first_exhausted_in_chain(ignore=(TOOL_CALLS, NETWORK_CALLS))
 
     def allows_tool(self, name: str, *, is_network: bool | None = None) -> bool:
         return self.meter.allows_tool(name, is_network=is_network)

@@ -13,10 +13,13 @@ from rinari.tools.native.fs import _resolve_read
 
 
 def artifact_import_tools(store, *, remote_target=None):
-    from rinari.application.ssh_targets import TargetStore
+    from rinari.application.ssh_targets import TargetStore, TargetStoreUnavailable
 
     targets = TargetStore(store._ctx.layout.root)
-    snapshot = {r["id"]: r for r in targets.list()}
+    try:
+        snapshot = {r["id"]: r for r in targets.list()}
+    except TargetStoreUnavailable:
+        snapshot = {}  # an import from a registered target then reports it unknown
 
     def handle(args, ctx):
         temporary = None
