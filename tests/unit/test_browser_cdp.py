@@ -1358,3 +1358,44 @@ def test_browser_download_timeout_without_trigger(tmp_path, fake_cdp, monkeypatc
     assert result.error.code.value == "TIMEOUT"
     assert result.error.retryable
     manager.close()
+
+
+def test_a_local_html_file_is_served_on_loopback_and_opened(
+    tmp_path, fake_cdp, monkeypatch
+) -> None:
+    """Card 18: the agent had to start a static server by hand to open a page."""
+    import httpx
+
+    manager = _connected_manager(tmp_path, fake_cdp, monkeypatch)
+    runtime = _runtime(tmp_path, manager=manager, network_mode="off", answer="s")
+    ctx = _ctx(tmp_path, manager=manager, network=NetworkGuard(NetworkPolicy(mode="off")))
+    site = ctx.cwd / "site"
+    site.mkdir()
+    (site / "index.html").write_text("<h1>hola</h1>", encoding="utf-8")
+    (site / ".env").write_text("SECRET=1", encoding="utf-8")
+    opened = []
+    monkeypatch.setattr(manager, "new_page", lambda url: opened.append(url) or {"url": url})
+    result = runtime.execute("browser.open", {"url": (site / "index.html").as_uri()}, ctx)
+    assert result.ok, result.error
+    url = opened[0]
+    assert url.startswith("http://127.0.0.1:") and url.endswith("/index.html")
+    assert httpx.get(url).text == "<h1>hola</h1>"
+    base = url.rsplit("/", 1)[0]
+    assert httpx.get(base + "/.env").status_code == 404  # dot-files never served
+    (site / "assets").mkdir()
+    assert httpx.get(base + "/assets/").status_code == 404  # no listings
+    unguessed = url.split("/", 3)
+    assert httpx.get(f"{unguessed[0]}//{unguessed[2]}/index.html").status_code == 404
+    manager.close()
+
+
+def test_local_page_paths() -> None:
+    from rinari.browser.local_pages import local_page_path
+
+    assert local_page_path("https://example.com/a.html") is None
+    assert local_page_path("about:blank") is None
+    assert local_page_path("notes.txt") is None
+    assert local_page_path("report/index.HTML") == "report/index.HTML"
+    assert local_page_path(Path("/tmp/x y/p.html").resolve().as_uri()) == str(
+        Path("/tmp/x y/p.html").resolve()
+    )

@@ -155,6 +155,24 @@ def _run(ctx: ToolContext, fn: Callable[[], Any]) -> ToolResult:
         )
 
 
+def _served_page(input: dict, ctx: ToolContext) -> tuple[str | None, ToolResult | None]:
+    """A local page to open: the loopback URL that serves it, or an error.
+
+    (None, None) when the navigation is not a local file.
+    """
+    from rinari.browser.local_pages import PAGES, local_page_path
+
+    raw = local_page_path(input.get("url"))
+    if raw is None:
+        return None, None
+    resolved, error = _resolve_read(ctx, raw)
+    if error is not None:
+        return None, error
+    if not resolved.is_file():
+        return None, _run_invalid(f"not a file: {raw}")
+    return PAGES.url_for(resolved), None
+
+
 def _nav_url_ok(value: Any) -> str | None:
     """http(s) URLs (web validation) or the local about:blank page."""
     if isinstance(value, str) and value.strip() == "about:blank":
@@ -170,6 +188,12 @@ def _nav_guard(ctx: ToolContext, url: str) -> ToolResult | None:
 
 
 def _nav_classify(input: dict[str, Any]) -> ClassifiedAction:
+    from rinari.browser.local_pages import local_page_path
+
+    local = local_page_path(input.get("url"))
+    if local is not None:
+        # Opening a local page reads that file (the policy guards secrets).
+        return ClassifiedAction("fs.read", local)
     url = str(input.get("url") or "")
     if url.startswith(("http://", "https://")):
         return ClassifiedAction("network.outbound", url)
@@ -285,11 +309,17 @@ def _page_target(input: dict, ctx: ToolContext) -> str | ToolResult | None:
     return target
 
 
+_NAV_INVALID = "url must be an http(s) URL, about:blank, or a local .html file"
+
+
 def browser_open(input: dict, ctx: ToolContext) -> ToolResult:
-    url = input.get("url")
+    served, error = _served_page(input, ctx)
+    if error is not None:
+        return error
+    url = served or input.get("url")
     if not _nav_url_ok(url):
-        return _run_invalid("url must be a valid http(s) URL or about:blank")
-    guard_error = _nav_guard(ctx, str(url))
+        return _run_invalid(_NAV_INVALID)
+    guard_error = None if served else _nav_guard(ctx, str(url))
     if guard_error is not None:
         return guard_error
     target = _page_target(input, ctx)
@@ -312,10 +342,13 @@ def browser_open(input: dict, ctx: ToolContext) -> ToolResult:
 
 
 def browser_navigate(input: dict, ctx: ToolContext) -> ToolResult:
-    url = input.get("url")
+    served, error = _served_page(input, ctx)
+    if error is not None:
+        return error
+    url = served or input.get("url")
     if not _nav_url_ok(url):
-        return _run_invalid("url must be a valid http(s) URL or about:blank")
-    guard_error = _nav_guard(ctx, str(url))
+        return _run_invalid(_NAV_INVALID)
+    guard_error = None if served else _nav_guard(ctx, str(url))
     if guard_error is not None:
         return guard_error
     target = _page_target(input, ctx)
@@ -844,8 +877,10 @@ def browse_tools() -> list[ToolDefinition]:
             name="browser.open",
             description=(
                 "Open a web page (URL, website) in a new tab. The usual first step: in the "
-                "desktop app no launch or status call is needed. The page may still be "
-                "loading when this returns; check it with browser.snapshot."
+                "desktop app no launch or status call is needed. A local .html file (a path "
+                "or file:// URL) is served read-only from 127.0.0.1 and opened; no need to "
+                "start a server. The page may still be loading when this returns; check it "
+                "with browser.snapshot."
             ),
             input_schema={
                 "type": "object",
@@ -862,8 +897,9 @@ def browse_tools() -> list[ToolDefinition]:
         ToolDefinition(
             name="browser.navigate",
             description=(
-                "Go to a URL in the current (or given) tab instead of opening a new one. "
-                "Returns before the page finishes loading; check it with browser.snapshot."
+                "Go to a URL (or a local .html file, served read-only) in the current (or "
+                "given) tab instead of opening a new one. Returns before the page finishes "
+                "loading; check it with browser.snapshot."
             ),
             input_schema={
                 "type": "object",
