@@ -91,7 +91,10 @@ resumes the original task.
 - `context.models {refresh?}`: every saved model's capacity in one call, sharing one
   discovery per endpoint; `refresh: true` drops the discovery cache first. A model that
   fails reports `error` without hiding the others.
-- `context.compact`: cancelable context-only operation on an existing session.
+- `context.compact`: cancelable context-only operation on an existing session. With
+  `continue_with` (a message), the same turn then sends that message once the compaction
+  succeeds; nothing continues if it fails. The desktop offers it as "Compact and continue"
+  after a turn stopped by a failed automatic compaction.
 - `governor.compact`: stable `compaction_id`, reason, actual lifecycle state and accounting.
 - Capabilities: `persistent_context_compaction_v1`; `context_status_v2` for the session
   scope and `context.models`.
