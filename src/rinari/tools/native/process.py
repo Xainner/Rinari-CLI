@@ -157,7 +157,9 @@ class ProcessRegistry:
             )
         else:
             kwargs["start_new_session"] = True
-        process = subprocess.Popen(command, **kwargs)
+        from rinari.tools.native.shell import resolve_argv
+
+        process = subprocess.Popen(resolve_argv(command, process_env), **kwargs)
         with self._lock:
             self._counter += 1
             handle_id = f"proc_{self._counter:03d}"

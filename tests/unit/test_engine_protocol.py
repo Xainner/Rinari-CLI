@@ -259,6 +259,38 @@ def test_session_open_resume(server, tmp_path) -> None:
     assert opened["result"]["created"] is False
 
 
+def test_session_open_reports_trust_state(server, tmp_path) -> None:
+    # A new Git remote changes the project's identity: the Engine asks to
+    # revalidate, and the client must be able to say that instead of
+    # "not trusted" (the grant exists, it just no longer matches).
+    import subprocess
+
+    repo = tmp_path / "trusted-repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    created = server.handle_line(_req("t0", "session.create", {"cwd": str(repo)}))
+    assert created["ok"] is True
+    session = created["result"]["session"]
+    assert session["kind"] == "PROJECT"
+
+    opens = iter(range(100))
+
+    def state() -> str | None:
+        request = _req(f"open-{next(opens)}", "session.open", {"ref": session["id"]})
+        opened = server.handle_line(request)
+        assert opened["ok"] is True, opened
+        return opened["result"]["trust_state"]
+
+    assert state() == "not-trusted"
+    trusted = server.handle_line(_req("t2", "project.trust", {"path": str(repo)}))
+    assert trusted["ok"] is True
+    assert state() == "trusted"
+    subprocess.run(["git", "remote", "add", "origin", "../elsewhere.git"], cwd=repo, check=True)
+    assert state() == "revalidation-required"
+    intel = server.handle_line(_req("t3", "project.intelligence", {"path": str(repo)}))
+    assert intel["result"]["instructions"]["trust_state"] == "revalidation-required"
+
+
 def test_session_get_missing_maps_to_not_found(server) -> None:
     response = server.handle_line(_req("m1", "session.get", {"ref": "ses_missing"}))
     assert response is not None and response["ok"] is False

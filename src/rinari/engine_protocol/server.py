@@ -753,11 +753,28 @@ class EngineServer:
         if not isinstance(ref, str) or not ref:
             raise EngineProtocolError(INVALID_PARAMS, "Param 'ref' must be a non-empty string.")
         started = self._services.sessions.resume(ref=ref)
+        record = started.session
         return {
-            "session": session_to_dict(started.session),
+            "session": session_to_dict(record),
             "created": started.created,
             "warnings": list(started.warnings),
+            # Structured, so a client can tell "never trusted" from "the
+            # project's identity changed since the grant" (a new Git remote,
+            # a re-created repository) without parsing the warning text.
+            "trust_state": (
+                self._trust_state(record.project_root_snapshot)
+                if record.kind == "PROJECT"
+                else None
+            ),
         }
+
+    def _trust_state(self, root_text: str | None) -> str | None:
+        if not root_text:
+            return None
+        root = Path(root_text)
+        if not root.is_dir():
+            return None
+        return self._services.trust.status(root).state
 
     def _session_history(self, params: dict[str, Any]) -> dict[str, Any]:
         ref = params.get("ref")
@@ -1652,7 +1669,8 @@ class EngineServer:
 
         root = self._openable_root(params)
         summary = analyze_repository(root)
-        trusted = self._services.trust.status(root).state == STATE_TRUSTED
+        trust_state = self._services.trust.status(root).state
+        trusted = trust_state == STATE_TRUSTED
         entries = resolve_project_instructions(
             root,
             root,
@@ -1674,6 +1692,7 @@ class EngineServer:
             "index": self._services.index.status(root),
             "instructions": {
                 "trusted": trusted,
+                "trust_state": trust_state,
                 "scopes": [
                     {
                         "scope": entry.scope,
@@ -1980,9 +1999,16 @@ class EngineServer:
     def _soul_list(self, params: dict[str, Any]) -> dict[str, Any]:
         _ = params
         store = self._soul_store()
+        # `active_id` is only an explicit activation. A fresh home has none
+        # and still speaks as the bundled default, so the list also says which
+        # Soul is in effect: showing "Activate" on the one already in use
+        # misrepresented the state.
+        effective = self._soul_global_effective()
         return {
             "souls": [self._soul_view(d) for d in store.list()],
             "active_id": store.active_id(),
+            "effective_id": effective["soul_id"],
+            "effective_source": effective["source"],
         }
 
     def _soul_get(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -2045,8 +2071,6 @@ class EngineServer:
         wins; otherwise the global Soul 3.0 chain applies. A pin pointing
         at a removed Soul fails loudly (NOT_FOUND) instead of silently
         falling back to another personality."""
-        from rinari.soul.store import DEFAULT_SOUL_ID
-
         store = self._soul_store()
         if record.soul_id is not None:
             try:
@@ -2054,6 +2078,14 @@ class EngineServer:
             except NotFoundError:
                 raise NotFoundError(f"Session pins unknown soul: {record.soul_id}") from None
             return {"soul_id": record.soul_id, "source": "session"}
+        return self._soul_global_effective()
+
+    def _soul_global_effective(self) -> dict[str, Any]:
+        """The Soul 3.0 chain without a session pin: activation, legacy
+        `soul.md`, bundled default."""
+        from rinari.soul.store import DEFAULT_SOUL_ID
+
+        store = self._soul_store()
         active = store.active_id()
         if active is not None:
             try:

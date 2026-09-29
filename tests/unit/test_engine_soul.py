@@ -149,6 +149,10 @@ def test_list_contains_bundled_default(server) -> None:
     assert default["source"] == "bundled"
     assert default["version"] == "3.0"
     assert result["active_id"] is None
+    # Nothing was activated, and still the bundled default is the Soul in
+    # use: the list says so instead of offering to activate it.
+    assert result["effective_id"] == "rinari-default"
+    assert result["effective_source"] == "default"
     # List view carries no identity text.
     assert "identity" not in default
 
@@ -179,6 +183,7 @@ def test_create_get_update_activate_remove(server) -> None:
 
     listed = _ok(server.handle_line(_req("s6", "soul.list", {})))
     assert listed["active_id"] == "mio"
+    assert (listed["effective_id"], listed["effective_source"]) == ("mio", "global")
 
     removed = _ok(server.handle_line(_req("s7", "soul.remove", {"id": "mio"})))
     assert removed["removed"]["id"] == "mio"

@@ -30,6 +30,29 @@ MAX_OUTPUT_BYTES = 1_000_000
 MAX_CAPTURE_BYTES = 50 * 1024 * 1024
 
 
+def resolve_argv(command: Any, env: dict[str, str]) -> Any:
+    """Find argv[0] on PATH the way a Windows shell would.
+
+    Without a shell, CreateProcess only finds `.exe` files: `npm`, `npx` or
+    `yarn` are `.cmd` scripts, so `argv: ["npm", "test"]` failed with
+    FileNotFoundError before running anything. `shutil.which` applies PATHEXT
+    against the PATH the process will get. Only PATH is searched, like
+    PowerShell: a `git.cmd` inside the project must not stand in for git. A
+    name with a directory, or one that is not found, is left alone and fails
+    exactly as before.
+    """
+    if sys.platform != "win32" or not isinstance(command, list) or not command:
+        return command
+    program = command[0]
+    if not program or os.path.dirname(program):
+        return command
+    import shutil
+
+    search = env.get("PATH") or env.get("Path") or os.environ.get("PATH", "")
+    found = shutil.which(program, path=search)
+    return [found, *command[1:]] if found else command
+
+
 def _ok(data: Any) -> ToolResult:
     return ToolResult(ok=True, data=data)
 
@@ -210,7 +233,7 @@ def shell_exec(input: dict, ctx: ToolContext) -> ToolResult:
         kwargs["start_new_session"] = True
 
     try:
-        process = subprocess.Popen(command, **kwargs)
+        process = subprocess.Popen(resolve_argv(command, env), **kwargs)
     except (OSError, ValueError) as exc:
         return _fail(
             ToolErrorCode.DEPENDENCY_ERROR, f"Failed to start process: {exc.__class__.__name__}"

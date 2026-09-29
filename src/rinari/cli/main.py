@@ -66,6 +66,9 @@ app.add_typer(models_cmd.app, name="models")
 app.add_typer(model_cmd.app, name="model")
 app.add_typer(vision_cmd.app, name="vision")
 app.add_typer(sessions_cmd.session_app, name="session")
+# `rinari sessions list` is how most people type it; without the alias it
+# became a prompt and started a real turn.
+app.add_typer(sessions_cmd.session_app, name="sessions", hidden=True)
 app.add_typer(trust_cmd.app, name="trust")
 app.add_typer(index_cmd.app, name="index")
 app.add_typer(tasks_cmd.app, name="tasks")
@@ -217,6 +220,37 @@ def dispatch_root_command(args: list[str]) -> list[str]:
     return args
 
 
+def mistyped_command(args: list[str]) -> tuple[str, str] | None:
+    """The word that looks like a misspelt subcommand, and that subcommand.
+
+    A prompt starts a real model turn, so `rinari sesions list` must not run
+    one by accident. The check compares against the commands that exist, not
+    against a word list, and only looks at a bare first word: a quoted prompt
+    (one argument with spaces) is always sent as a prompt.
+    """
+    import difflib
+
+    import typer.main as _typer_main
+
+    routed = dispatch_root_command(args)
+    if "_session" not in routed or "_session" in args:
+        return None
+    position = routed.index("_session") + 1
+    if position >= len(routed):
+        return None
+    word = routed[position]
+    if not word or any(ch.isspace() for ch in word) or word.startswith("-"):
+        return None
+    group = _typer_main.get_command(app)
+    visible = [
+        name
+        for name, command in group.commands.items()
+        if not command.hidden and not name.startswith("_")
+    ]
+    match = difflib.get_close_matches(word.lower(), visible, n=1, cutoff=0.8)
+    return (word, match[0]) if match else None
+
+
 def main() -> int:
     from rinari.cli.text import configure_utf8_stdio
 
@@ -233,6 +267,19 @@ def main() -> int:
     argv = [a for a in raw if a != "--json"]
     if len(argv) != len(raw):
         _deps.set_global_json(True)
+    typo = mistyped_command(argv)
+    if typo is not None:
+        word, command = typo
+        from rinari.shared.errors import InvalidUsageError
+
+        error = InvalidUsageError(
+            f"'{word}' is not a command. Did you mean 'rinari {command}'?",
+            hint=f'To send it to Rinari as a prompt, quote it: rinari "{word} …"',
+        )
+        try:
+            fail(None, "command", error)
+        except typer.Exit as stop:
+            return int(stop.exit_code)
     try:
         app(dispatch_root_command(argv))
     except RinariError as err:
