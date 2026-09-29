@@ -316,7 +316,12 @@ def fs_list(input: dict, ctx: ToolContext) -> ToolResult:
         offset = max(0, int(input.get("offset", 0)))
         limit = max(1, min(MAX_LIST_ENTRIES, int(input.get("limit", MAX_LIST_ENTRIES))))
         revision = str(resolved.stat().st_mtime_ns)
-        if input.get("revision") is not None and input["revision"] != revision:
+        # The revision only guards a continuation. On the first page there is
+        # nothing to restart, and models with strict schemas send "" (or a
+        # guess) for every optional field: rejecting that failed the very
+        # first listing of a turn.
+        expected = input.get("revision")
+        if offset > 0 and expected and expected != revision:
             return _fail(ToolErrorCode.CONFLICT, "Directory changed; restart pagination")
         all_entries = sorted(
             resolved.iterdir(), key=lambda p: (p.is_file(), p.name.lower(), p.name)
@@ -619,7 +624,11 @@ def filesystem_tools() -> list[ToolDefinition]:
                     "path": {"type": "string"},
                     "offset": {"type": "integer", "minimum": 0},
                     "limit": {"type": "integer", "minimum": 1, "maximum": MAX_LIST_ENTRIES},
-                    "revision": {"type": "string"},
+                    "revision": {
+                        "type": "string",
+                        "description": "Only when continuing (offset > 0): the revision "
+                        "returned by the previous page.",
+                    },
                 },
             },
             risk=RISK_LOW,

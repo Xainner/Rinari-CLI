@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -440,6 +441,30 @@ def test_fs_list_glob_search_stat_diff(project) -> None:
     assert diff.ok and "+planet" in diff.data["diff"]
 
 
+def test_fs_list_revision_only_guards_a_continuation(project) -> None:
+    # A strict-schema model sends every optional field; an empty or guessed
+    # revision on the first page failed the turn's first listing.
+    tmp_path, root, _ = project
+    ctx = _ctx(tmp_path, root)
+    runtime, _ = _runtime(ctx, tmp_path)
+    for revision in ("", "0"):
+        first = runtime.execute("fs.list", {"path": ".", "offset": 0, "revision": revision}, ctx)
+        assert first.ok, first.error
+
+    root.joinpath("one.txt").write_text("1", encoding="utf-8")
+    root.joinpath("two.txt").write_text("2", encoding="utf-8")
+    page = runtime.execute("fs.list", {"path": ".", "limit": 1}, ctx)
+    assert page.ok and page.data["next_offset"] == 1
+    stale = runtime.execute(
+        "fs.list", {"path": ".", "offset": 1, "revision": "not-" + page.data["revision"]}, ctx
+    )
+    assert stale.ok is False and stale.error.code is ToolErrorCode.CONFLICT
+    resumed = runtime.execute(
+        "fs.list", {"path": ".", "offset": 1, "revision": page.data["revision"]}, ctx
+    )
+    assert resumed.ok
+
+
 def test_fs_read_lines(project) -> None:
     tmp_path, root, _ = project
     ctx = _ctx(tmp_path, root)
@@ -463,6 +488,28 @@ def test_shell_exec_ok_and_nonzero(project) -> None:
     failure = runtime.execute("shell.exec", {"command": 'python -c "import sys; sys.exit(3)"'}, ctx)
     assert failure.ok is True
     assert failure.data["exit_code"] == 3
+
+
+def test_shell_argv_finds_a_cmd_script_on_path(project) -> None:
+    # `argv: ["npm", "test"]` failed with FileNotFoundError on Windows: npm is
+    # npm.cmd and CreateProcess without a shell only looks for .exe.
+    if not sys_platform_is_windows():
+        pytest.skip("PATHEXT resolution is Windows-only")
+    tmp_path, root, _ = project
+    ctx = _ctx(tmp_path, root)
+    runtime, _ = _runtime(ctx, tmp_path)
+    tools = tmp_path / "tools-bin"
+    tools.mkdir()
+    (tools / "rinari-probe.cmd").write_text("@echo probe %1\r\n", encoding="utf-8")
+    env = {"PATH": f"{tools};{os.environ.get('PATH', '')}"}
+    result = runtime.execute("shell.exec", {"argv": ["rinari-probe", "ok"], "env": env}, ctx)
+    assert result.ok, result.error
+    assert "probe ok" in result.data["stdout"]
+
+    # Only PATH is searched: a script inside the project does not stand in.
+    (root / "rinari-local.cmd").write_text("@echo hijacked\r\n", encoding="utf-8")
+    missing = runtime.execute("shell.exec", {"argv": ["rinari-local"]}, ctx)
+    assert missing.ok is False and missing.error.code is ToolErrorCode.DEPENDENCY_ERROR
 
 
 def test_shell_timeout(project) -> None:
