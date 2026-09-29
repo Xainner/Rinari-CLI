@@ -219,6 +219,7 @@ def skill_tools(host: SkillToolHost):
 
     read = ("state.read",)
     write = ("state.write",)
+    session = ("state.mutate",)
     draft_schema = {
         "type": "object",
         "properties": {
@@ -301,9 +302,12 @@ def skill_tools(host: SkillToolHost):
                 "properties": {"name": {"type": "string"}},
                 "required": ["name"],
             },
-            capabilities=write,
+            capabilities=session,
             side_effects="local_reversible",
-            classify=lambda _i: ClassifiedAction("state.write"),
+            # Loads the procedure into this session's context, like
+            # capability.load: nothing outside the session changes, so it is
+            # allowed in read-only modes (REVIEW needs its review skills).
+            classify=lambda _i: ClassifiedAction("state.mutate"),
             handler=activate,
         ),
         ToolDefinition(
@@ -353,9 +357,9 @@ def skill_tools(host: SkillToolHost):
                 "properties": {"name": {"type": "string"}},
                 "required": ["name"],
             },
-            capabilities=write,
+            capabilities=session,
             side_effects="local_reversible",
-            classify=lambda _i: ClassifiedAction("state.write"),
+            classify=lambda _i: ClassifiedAction("state.mutate"),
             handler=deactivate,
         ),
     ]

@@ -174,9 +174,19 @@ def test_shell_project_workspace_allowed() -> None:
     assert d.action is PolicyAction.ALLOW
 
 
-def test_shell_read_only_denied() -> None:
+def test_shell_read_only_asks_every_time() -> None:
+    """REVIEW re-runs tests with approval; the answer is never kept."""
     d = PolicyEngine().decide(CAPABILITY_SHELL, _scope(profile="read-only"), command="ls")
-    assert d.action is PolicyAction.DENY
+    assert d.action is PolicyAction.ASK
+    assert d.choices == ("deny", "allow_once")
+
+
+def test_read_only_still_denies_writes_and_allows_skill_activation() -> None:
+    scope = _scope(profile="read-only")
+    assert (
+        PolicyEngine().decide("fs.write", scope, path=PROJECT / "a.py").action is PolicyAction.DENY
+    )
+    assert PolicyEngine().decide("state.mutate", scope).action is PolicyAction.ALLOW
 
 
 def test_shell_chat_runs_but_writing_into_home_asks() -> None:

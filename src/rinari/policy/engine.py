@@ -403,10 +403,23 @@ class PolicyEngine:
                 rule_id="peer-message",
                 binding_mode="exact",
             )
-        if read_only and capability in (CAPABILITY_FS_WRITE, CAPABILITY_SHELL):
+        if read_only and capability == CAPABILITY_SHELL:
+            # A review re-runs the tests; a command can also change files, so
+            # read-only asks for each one and never keeps the answer (as
+            # Codex's read-only sandbox does).
+            return self._ask(
+                capability,
+                "read-only mode: a command could change files, so each one is asked",
+                target=command,
+                risk=risk,
+                risk_class=risk_class,
+                rule_id="read_only_command",
+                choices=CHOICES_HARD,
+            )
+        if read_only and capability == CAPABILITY_FS_WRITE:
             return self._deny(
                 capability,
-                "read-only execution cannot write files or execute commands",
+                "read-only execution cannot write files",
                 target=str(path) if path is not None else command,
                 risk=risk,
                 risk_class=risk_class,

@@ -380,7 +380,9 @@ def _policy_summary(
     if profile is PermissionProfile.READ_ONLY:
         return (
             "Runtime policy: read-only execution. Read any file and the internet freely; "
-            "do not write files, run commands or send data out. " + secrets
+            "do not write files or send data out. A command (for example re-running the "
+            "tests you review) asks the user every time; run one only to check, never to "
+            "change anything. " + secrets
         )
     if kind == "PROJECT":
         return (
