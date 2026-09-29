@@ -27,6 +27,66 @@ from rinari.tools.native import all_native_tools
 from rinari.tools.registry import ToolRegistry
 from rinari.tools.runtime import ToolRuntime
 
+_WRITE_TOOLS = frozenset({"fs.write", "fs.patch"})
+_PROGRESS_LIMIT = 2000
+
+
+class _ChildProgress:
+    """What a subagent actually did, from its own tool and model events.
+
+    A subagent stopped by the budget, a cancellation or an error has no final
+    answer to parse, and the coordinator used to receive an empty result even
+    when files had been written: it then redid the work.
+    """
+
+    def __init__(self) -> None:
+        self.files: list[str] = []
+        self.tools = 0
+        self.last_progress = ""
+
+    def note(self, event: str, payload: dict) -> None:
+        if event == "tool.completed":
+            self.tools += 1
+            if payload.get("tool") in _WRITE_TOOLS and payload.get("ok") is not False:
+                for path in _written_paths(payload.get("observation")):
+                    if path not in self.files:
+                        self.files.append(path)
+        elif event == "model.content.completed":
+            text = str(payload.get("content") or "").strip()
+            if text:
+                self.last_progress = text[:_PROGRESS_LIMIT]
+
+    def summary(self, status: str) -> str:
+        lines = [f"Stopped before finishing ({status}); {self.tools} tool calls ran."]
+        if self.files:
+            lines.append("Files written: " + ", ".join(self.files[:20]))
+        if self.last_progress:
+            lines.append("Last progress: " + self.last_progress)
+        return "\n".join(lines)
+
+
+def _written_paths(observation: object) -> list[str]:
+    import json
+
+    if isinstance(observation, str):
+        try:
+            observation = json.loads(observation)
+        except ValueError:
+            return []
+    if not isinstance(observation, dict) or observation.get("ok") is False:
+        return []
+    data = observation.get("data")
+    if not isinstance(data, dict):
+        return []
+    if data.get("path"):
+        return [str(data["path"])]
+    rows = data.get("files")
+    return (
+        [str(row["path"]) for row in rows if isinstance(row, dict) and row.get("path")]
+        if (isinstance(rows, list))
+        else []
+    )
+
 
 class _LinkedToken(CancellationToken):
     """Cancelled when either its own flag or the parent session token sets."""
@@ -89,6 +149,12 @@ class _SubagentRunner:
     def run(self, spec: SubagentRunSpec) -> AgentResult:
         cfg = self._config
         definition = spec.definition
+        progress = _ChildProgress()
+
+        def activity(event, payload):
+            progress.note(event, payload)
+            self._activity(spec, event, payload)
+
         tool_ctx = self._build_tool_ctx(spec)
         self._activity(
             spec, "agent.context", {"cwd": str(tool_ctx.cwd), "profile": tool_ctx.profile.value}
@@ -132,7 +198,7 @@ class _SubagentRunner:
         visual_caller = caller.current if isinstance(caller, SessionModelGateway) else caller
         if isinstance(visual_caller, VisionCaller):
             caller = copy(visual_caller)
-            caller.activity_sink = lambda event, payload: self._activity(spec, event, payload)
+            caller.activity_sink = activity
             caller.budget_getter = lambda: budget
         loop = AgentLoop(
             caller,
@@ -140,36 +206,46 @@ class _SubagentRunner:
             _make_assembler(),
             event_sink=cfg.event_sink,
             hook_sink=cfg.hook_sink,
-            activity_sink=lambda event, payload: self._activity(spec, event, payload),
+            activity_sink=activity,
             reasoning_effort=effort,
         )
         base = self._assembler_base(spec, definition)
         context = AgentContext(
             session_id=f"{spec.session_id}-{spec.agent_id}",
-            model_ref=getattr(cfg.parent_session_ctx, "model_ref", "") or "",
+            # The model this agent really calls: its measurements carry it, and
+            # an empty one made every child measurement unattributable.
+            model_ref=str(
+                getattr(getattr(caller, "current", caller), "model_id", None)
+                or getattr(cfg.parent_session_ctx, "model_ref", "")
+                or ""
+            ),
             tool_ctx=tool_ctx,
             assembler_base=base,
         )
         parent_budget = getattr(spec, "parent_budget", None)
+        own = definition.budget
         if parent_budget is not None:
             # Hierarchical ledger (P0.10): the child's spend forwards to
-            # the spawning turn; the spawn itself is counted with depth.
+            # the spawning turn; the spawn itself is counted with depth. A
+            # limit the agent does not set is the parent's: the ledger checks
+            # every ancestor before each call.
             budget = parent_budget.spawn_child(
                 TurnBudgetLimits(
-                    max_model_calls=definition.budget.max_model_calls,
-                    max_tool_calls=definition.budget.max_tool_calls,
-                    max_network_calls=definition.budget.max_tool_calls,
-                    max_wall_time_s=definition.budget.max_wall_time_s,
+                    max_model_calls=own.max_model_calls,
+                    max_tool_calls=own.max_tool_calls,
+                    max_network_calls=own.max_tool_calls,
+                    max_wall_time_s=own.max_wall_time_s,
                 ),
                 depth=spec.depth,
             )
         else:
+            defaults = TurnBudgetLimits()
             budget = BudgetMeter(
                 TurnBudgetLimits(
-                    max_model_calls=definition.budget.max_model_calls,
-                    max_tool_calls=definition.budget.max_tool_calls,
-                    max_network_calls=definition.budget.max_tool_calls,
-                    max_wall_time_s=definition.budget.max_wall_time_s,
+                    max_model_calls=own.max_model_calls or defaults.max_model_calls,
+                    max_tool_calls=own.max_tool_calls or defaults.max_tool_calls,
+                    max_network_calls=own.max_tool_calls,
+                    max_wall_time_s=own.max_wall_time_s or defaults.max_wall_time_s,
                 ),
                 clock=cfg.parent_session_ctx.clock,
             )
@@ -218,7 +294,14 @@ class _SubagentRunner:
         for process in tool_ctx.processes.list():
             with contextlib.suppress(Exception):
                 tool_ctx.processes.kill(process)
-        files_changed = self._collect_files(spec, content)
+        files_changed = list(progress.files)
+        for path in self._collect_files(spec, content):
+            if path not in files_changed:
+                files_changed.append(path)
+        if status != "completed":
+            content = "\n".join(
+                part for part in (content.strip(), progress.summary(status)) if part
+            )
         patch, branch, commit, conflicts = "", None, None, ()
         if spec.worktree is not None and cfg.worktrees is not None and status == "completed":
             try:

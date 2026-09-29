@@ -175,9 +175,9 @@ class ContextService:
         It calibrates the estimate only for the same model and the same
         projection; after a compaction or a model change it is dropped.
         """
-        from rinari.runtime.agent import EVENT_MODEL_INVOKED
+        from rinari.runtime.agent import last_own_model_call
 
-        event = self._ctx.event_repo.latest(agent_ctx.session_id, [EVENT_MODEL_INVOKED])
+        event = last_own_model_call(self._ctx.event_repo, agent_ctx.session_id)
         anchor = (event.payload or {}).get("context_anchor") if event else None
         if (
             isinstance(anchor, dict)

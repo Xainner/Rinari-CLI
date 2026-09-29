@@ -375,14 +375,55 @@ def test_two_action_oscillation() -> None:
     assert signal.action == NUDGE
 
 
-def test_repeated_rewrites_same_path() -> None:
+def test_repeated_rewrites_back_to_an_earlier_state() -> None:
     det = LoopDetector(repeats=3)
-    for i in range(3):
-        det.record_tool("fs.write", {"path": "x.txt", "content": f"v{i}"})
+    for i, content in enumerate(("a", "b", "a")):
+        det.record_tool("fs.write", {"path": "x.txt", "content": content})
+        det.record_tool("shell.exec", {"command": f"run {i}"})
+        assert det.check() is None  # one revert can be deliberate
+    det.record_tool("fs.write", {"path": "x.txt", "content": "b"})
     signal = det.check()
     assert signal is not None
     assert signal.kind == "repeated-rewrites"
     assert signal.action == NUDGE
+
+
+def test_different_edits_of_one_file_are_progress() -> None:
+    """ses_01M3F5SH…: four distinct patches of a fresh template were stopped."""
+    det = LoopDetector()
+    for i in range(8):
+        det.record_tool(
+            "fs.patch",
+            {"path": "work/index.html", "old_string": f"old {i}", "new_string": f"new {i}"},
+        )
+        det.record_tool("shell.exec", {"command": f"render {i}"})
+        assert det.check() is None
+
+
+def test_undoing_and_redoing_an_edit_is_a_loop() -> None:
+    det = LoopDetector()
+    edit = {"path": "a.py", "old_string": "x = 1", "new_string": "x = 2"}
+    undo = {"path": "a.py", "old_string": "x = 2", "new_string": "x = 1"}
+    for i, arguments in enumerate((edit, undo)):
+        det.record_tool("fs.patch", arguments)
+        det.record_tool("shell.exec", {"command": f"test {i}"})
+        assert det.check() is None
+    det.record_tool("fs.patch", edit)
+    assert det.check().action == NUDGE
+    det.record_tool("shell.exec", {"command": "test again"})
+    det.record_tool("fs.patch", undo)
+    assert det.check().action == STOP
+
+
+def test_multi_file_patch_edits_count_per_file() -> None:
+    det = LoopDetector()
+    patch = {"files": [{"path": "a.py", "edits": [{"old_string": "1", "new_string": "2"}]}]}
+    for i in range(2):
+        det.record_tool("fs.patch", patch)
+        det.record_tool("fs.read", {"path": f"log{i}"})
+    assert det.check() is None
+    det.record_tool("fs.patch", patch)
+    assert det.check().kind == "repeated-rewrites"
 
 
 def test_repeated_denied_approval() -> None:
@@ -507,15 +548,16 @@ def test_answer_turn_reports_budget_snapshot(env) -> None:
 
 def test_historical_rewrite_warning_does_not_stop_progress():
     det = LoopDetector()
-    for i in range(3):
-        det.record_tool("fs.write", {"path": "desc.ps1", "content": str(i)})
+    for i, content in enumerate(("a", "b", "a", "b")):
+        det.record_tool("fs.read", {"path": f"out{i}"})
+        det.record_tool("fs.write", {"path": "desc.ps1", "content": content})
     assert det.check().action == NUDGE
     assert det.check() is None
     det.record_tool("shell.exec", {"argv": ["pwsh", "-File", "desc.ps1"]})
     assert det.check() is None
     det.record_tool("fs.read", {"path": "resp.txt"})
     assert det.check() is None
-    det.record_tool("fs.write", {"path": "desc.ps1", "content": "fourth"})
+    det.record_tool("fs.write", {"path": "desc.ps1", "content": "a"})
     assert det.check().action == STOP
 
 
@@ -534,8 +576,9 @@ def test_new_duplicate_subagent_escalates_but_checks_do_not():
 def test_independent_rewrite_targets_do_not_share_escalation():
     det = LoopDetector()
     for path in ("a.py", "b.py"):
-        for i in range(3):
-            det.record_tool("fs.write", {"path": path, "content": str(i)})
+        for i, content in enumerate(("1", "2", "1", "2")):
+            det.record_tool("fs.read", {"path": f"{path}.{i}"})
+            det.record_tool("fs.write", {"path": path, "content": content})
         assert det.check().action == NUDGE
-    det.record_tool("fs.write", {"path": "b.py", "content": "fourth"})
+    det.record_tool("fs.write", {"path": "b.py", "content": "1"})
     assert det.check().action == STOP

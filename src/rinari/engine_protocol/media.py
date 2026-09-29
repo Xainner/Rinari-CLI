@@ -277,7 +277,7 @@ def register_media(dispatcher, services):
         an engine restart without having seen the events.
         """
         from rinari.context.settings import load as context_settings
-        from rinari.runtime.agent import EVENT_MODEL_INVOKED
+        from rinari.runtime.agent import last_own_model_call
 
         record = services.ctx.session_repo.get(session_id)
         if record is None:
@@ -286,7 +286,7 @@ def register_media(dispatcher, services):
         projection = record.compact_state or {}
         revision = int(projection.get("revision") or 0)
         events = services.ctx.event_repo
-        invoked = events.latest(session_id, [EVENT_MODEL_INVOKED])
+        invoked = last_own_model_call(events, session_id)
         anchor = (invoked.payload or {}).get("context_anchor") if invoked else None
         compaction = events.latest(session_id, ["governor.compact"])
         last = compaction.payload if compaction else None

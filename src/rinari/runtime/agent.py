@@ -48,6 +48,25 @@ from rinari.tools.scheduler import schedule
 # Event names persist verbatim into session_events (trace base, phase 2).
 EVENT_TURN_STARTED = "AgentTurnStarted"
 EVENT_MODEL_INVOKED = "ModelInvoked"
+
+
+def last_own_model_call(event_repo, session_id: str):
+    """The session's own last ``ModelInvoked``, skipping its subagents'.
+
+    Subagent calls are persisted in the parent session tagged with
+    ``agent_session`` (older ones carry an empty model) and measure the
+    child's much smaller context, not the session's.
+    """
+    for event in event_repo.recent(session_id, [EVENT_MODEL_INVOKED]):
+        payload = event.payload or {}
+        if payload.get("agent_session"):
+            continue
+        if not (payload.get("context_anchor") or {}).get("model"):
+            continue
+        return event
+    return None
+
+
 EVENT_TOOL_COMPLETED = "ToolCompleted"
 EVENT_TURN_COMPLETED = "AgentTurnCompleted"
 EVENT_LOOP_DETECTED = "LoopDetected"

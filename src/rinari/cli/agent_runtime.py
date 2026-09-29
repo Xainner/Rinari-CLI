@@ -798,7 +798,14 @@ def _build_orchestrator(
         constitution="",  # subagents carry a scoped policy, not full identity
         soul="",
         runtime_policy="",
-        event_sink=lambda sid, event, payload: _persist_event(services, record.id, event, payload),
+        # A subagent's events land in the parent session, marked with the
+        # agent's own session so they are not read as the parent's.
+        event_sink=lambda sid, event, payload: _persist_event(
+            services,
+            record.id,
+            event,
+            payload if sid == record.id else {**payload, "agent_session": sid},
+        ),
         project_instructions=(),
     )
 

@@ -24,9 +24,17 @@ MAX_TOTAL = 12
 
 @dataclass(frozen=True, slots=True)
 class AgentBudget:
-    max_model_calls: int = 12
-    max_tool_calls: int = 48
-    max_wall_time_s: float = 600.0
+    """Limits of one agent of its own; ``None`` shares the spawning turn's.
+
+    Built-in agents have none: a subagent cut at a small ceiling returned
+    nothing usable and the coordinator redid the work (12 model calls stopped
+    an implementer halfway through its own tests). Its spend still counts
+    against the parent turn, whose limits stop both.
+    """
+
+    max_model_calls: int | None = None
+    max_tool_calls: int | None = None
+    max_wall_time_s: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
