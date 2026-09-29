@@ -72,6 +72,16 @@ class ChatMessage:
         return cls(role=ROLE_USER, content=content)
 
     @classmethod
+    def harness(cls, content: str, source: str) -> ChatMessage:
+        """A note the runtime adds for the model (loop detector, governor…).
+
+        It travels as a user message because providers have no other turn for
+        it, but it is not the owner's: clients read `origin.kind` and must not
+        show it as something the owner wrote.
+        """
+        return cls(role=ROLE_USER, content=content, origin={"kind": "harness", "source": source})
+
+    @classmethod
     def assistant(
         cls, content: str, tool_calls: tuple[ToolCall, ...] = (), *, continuation=None
     ) -> ChatMessage:

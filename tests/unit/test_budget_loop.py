@@ -493,6 +493,12 @@ def test_loop_nudge_then_stop_in_real_turn(env) -> None:
     # the nudge reached the model conversation before the 4th call
     joined = " ".join(m.content for m in model.requests[3].messages)
     assert "[harness loop-detector]" in joined
+    # …as a runtime note, not as something the owner wrote: clients showed it
+    # in a user bubble.
+    [nudge] = [
+        m for m in model.requests[3].messages if "[harness loop-detector]" in (m.content or "")
+    ]
+    assert nudge.origin == {"kind": "harness", "source": "loop-detector"}
     loop_events = [p for _, t, p in events if t == "LoopDetected"]
     assert [p["action"] for p in loop_events] == ["nudge", "stop"]
     assert loop_events[0]["kind"] == "same-tool-args"

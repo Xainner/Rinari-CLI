@@ -85,6 +85,12 @@ def _run_git(ctx: ToolContext, input: dict, *args: str) -> tuple[int, str, bool]
         detail = process.stderr.strip()
         if "not a git repository" in (out + detail).lower():
             return _fail(ToolErrorCode.NOT_FOUND, f"Not a git repository: {root}")
+        if "unknown revision" in detail or "bad revision" in detail:
+            return _fail(
+                ToolErrorCode.NOT_FOUND,
+                f"git {args[0]}: no such commit or ref in this repository ({detail[:200]}). "
+                "Use git.log to list the real commits.",
+            )
         return _fail(ToolErrorCode.UNKNOWN, f"git {args[0]} failed: {detail[:300]}")
     return process.returncode, out, False
 
@@ -159,7 +165,15 @@ def git_diff(input: dict, ctx: ToolContext) -> ToolResult:
             return _fail(ToolErrorCode.INVALID_ARGUMENT, "files must be literal path strings")
         args += ["--", *files]
     elif input.get("path"):
-        args += ["--", str(input["path"])]
+        # `_run_git` already runs inside `path` (its folder, for a file), so
+        # the pathspec is relative to there. Passing `path` again made
+        # `path: "src"` diff `src/src`: an empty diff for a modified folder.
+        try:
+            target = ctx.sandbox.resolve(str(input["path"]), base=ctx.cwd)
+        except SandboxViolationError:
+            target = None  # `_run_git` reports it with its own error.
+        if target is not None:
+            args += ["--", target.name if target.is_file() else "."]
     result = _run_git(ctx, input, *args)
     if isinstance(result, ToolResult):
         return result
@@ -261,7 +275,10 @@ def git_tools() -> list[ToolDefinition]:
             input_schema={
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string"},
+                    "path": {
+                        "type": "string",
+                        "description": "File or folder to limit the diff to.",
+                    },
                     "cached": {"type": "boolean"},
                     "stat": {"type": "boolean", "default": False},
                     "files": {"type": "array", "items": {"type": "string"}, "maxItems": 100},

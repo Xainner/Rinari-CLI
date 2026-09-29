@@ -50,6 +50,7 @@ from rinari.engine_protocol.workspace import InvalidGitError, git_diff, git_file
 from rinari.models.router import ModelRouter
 from rinari.projects.detector import is_home_root
 from rinari.shared.errors import (
+    ConflictError,
     InvalidUsageError,
     NotFoundError,
     PermissionDeniedError,
@@ -262,6 +263,7 @@ class EngineServer:
         self._dispatcher.register("project.add", self._project_add)
         self._dispatcher.register("project.update", self._project_update)
         self._dispatcher.register("project.remove", self._project_remove)
+        self._dispatcher.register("project.delete", self._project_delete)
         self._dispatcher.register("project.open", self._project_open)
         self._dispatcher.register("project.status", self._project_status)
         self._dispatcher.register("project.intelligence", self._project_intelligence)
@@ -1553,6 +1555,52 @@ class EngineServer:
             "project": self._project_view(project),
             "session_policy": policy,
             "sessions_affected": affected,
+            "filesystem_deleted": False,
+        }
+
+    def _project_delete(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Delete an archived project for good, with everything Rinari keeps about it.
+
+        `project.remove` only archives, so an archived project stayed in the
+        sidebar forever. This is the irreversible step and it asks for the
+        reversible one first: only an archived project can be deleted. Its
+        sessions go with it (cascade), and so do its checkpoints, scheduled
+        tasks, memory, tasks, verification records, index and trust. The
+        folder and its files are never touched.
+        """
+        project_id = self._need_str(params, "project_id")
+        project = self._services.projects.get(project_id)
+        if not project.archived:
+            raise ConflictError(
+                f"Project {project.id} is not archived; archive it before deleting it."
+            )
+        sessions = self._services.sessions.list(project_id=project.id, limit=100_000)
+        running = [record.id for record in sessions if self._turns.has_active_turn(record.id)]
+        if running:
+            raise EngineProtocolError(
+                TURN_RUNNING,
+                "A project session has a running turn; cancel it before deleting the project.",
+                details={"session_ids": running},
+            )
+        for record in sessions:
+            self._session_delete({"ref": record.id, "cascade": True})
+        # By stored root, not through the service: the folder may be gone or no
+        # longer a Git repository, and deleting must still work.
+        checkpoints = self._services.checkpoints.repo.list(project.canonical_root, limit=100_000)
+        for checkpoint in checkpoints:
+            self._services.checkpoints.remove(checkpoint["id"])
+        schedules = [
+            task for task in self._schedule.tasks.list() if task.get("project_id") == project.id
+        ]
+        for task in schedules:
+            self._schedule.delete({"task_id": task["id"]})
+        removed = self._services.projects.purge(project.id)
+        return {
+            "deleted": {"id": project.id, "root": project.canonical_root},
+            "sessions_deleted": len(sessions),
+            "checkpoints_deleted": len(checkpoints),
+            "schedules_deleted": len(schedules),
+            "records_deleted": removed,
             "filesystem_deleted": False,
         }
 
