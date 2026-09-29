@@ -26,6 +26,7 @@ from rinari.engine_protocol import protocol
 from rinari.engine_protocol.dispatcher import EngineDispatcher
 from rinari.engine_protocol.ecosystem import mcp_row_view, plugin_row_view, tool_row_view
 from rinari.engine_protocol.errors import (
+    ENGINE_ERROR,
     INVALID_PARAMS,
     TURN_RUNNING,
     EngineProtocolError,
@@ -2560,7 +2561,12 @@ class EngineServer:
     def _target_list(self, params: dict[str, Any]) -> dict[str, Any]:
         from rinari.application.ssh_targets import TargetStore
 
-        return {"targets": TargetStore(self._services.ctx.layout.root).list()}
+        from rinari.application.ssh_targets import TargetStoreUnavailable
+
+        try:
+            return {"targets": TargetStore(self._services.ctx.layout.root).list()}
+        except TargetStoreUnavailable as exc:
+            raise EngineProtocolError(ENGINE_ERROR, str(exc)) from exc
 
     def _target_add(self, params: dict[str, Any]) -> dict[str, Any]:
         from rinari.application.ssh_targets import TargetStore
