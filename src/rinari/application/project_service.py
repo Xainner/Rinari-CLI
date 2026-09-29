@@ -133,6 +133,37 @@ class ProjectService:
     def archive(self, project_id: str) -> ProjectRecord:
         return self.update(project_id, archived=True, pinned=False)
 
+    def purge(self, project_id: str) -> dict[str, int]:
+        """Forget what Rinari keeps about a project, then the project itself.
+
+        The caller removes sessions, checkpoints and scheduled tasks first:
+        those carry runtime state and files of their own. What is left is keyed
+        by the project root (memory, tasks, verification, repository index,
+        trust) and goes here in one transaction. The folder is never touched.
+        """
+        record = self.get(project_id)
+        root = record.canonical_root
+        removed: dict[str, int] = {}
+        with self._ctx.db.transaction() as db:
+            for table, column, key in (
+                ("project_memory", "project_root", root),
+                ("episodic_memory", "project_root", root),
+                ("tasks", "project_root", root),
+                ("validation_records", "project_root", root),
+                ("repo_index_files", "project_root", root),
+                ("repo_index_symbols", "project_root", root),
+                ("repo_index_references", "project_root", root),
+                ("repo_index_test_map", "project_root", root),
+                ("repo_index_meta", "project_root", root),
+                ("trust_entries", "canonical_path", root),
+                ("network_rules", "project_id", record.id),
+            ):
+                removed[table] = db.execute(
+                    f"DELETE FROM {table} WHERE {column} = ?", (key,)
+                ).rowcount
+            db.execute("DELETE FROM projects WHERE id = ?", (record.id,))
+        return removed
+
     def _normalize(self, record: ProjectRecord) -> ProjectRecord:
         if record.name and record.name != record.canonical_root:
             return record

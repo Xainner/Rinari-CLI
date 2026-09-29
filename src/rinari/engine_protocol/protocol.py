@@ -83,6 +83,8 @@ CAPABILITIES: dict[str, bool] = {
     # consent, provenance ceiling in the receiving turn.
     "session_peer_messaging_v1": True,
     "project_flow_v1": True,
+    # project.delete: an archived project and everything Rinari keeps about it.
+    "project_delete_v1": True,
     # session.pin + sessionSummary.pinned_at (desktop Fijados).
     "session_pins_v1": True,
     # skill.* library: standard skills, reviewed installs, on/off, edit, import.

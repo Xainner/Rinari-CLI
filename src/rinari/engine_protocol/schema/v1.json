@@ -296,6 +296,7 @@
         "project.add",
         "project.update",
         "project.remove",
+        "project.delete",
         "project.list_recent",
         "project.open",
         "project.status",
@@ -1917,7 +1918,8 @@
             "user",
             "peer",
             "automation",
-            "schedule"
+            "schedule",
+            "harness"
           ]
         },
         "message_id": {
@@ -1994,6 +1996,12 @@
           ]
         },
         "command_kind": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
           "type": [
             "string",
             "null"

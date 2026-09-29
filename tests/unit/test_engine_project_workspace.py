@@ -384,3 +384,42 @@ def test_chat_lifecycle_and_project_fork_identity(server, tmp_path) -> None:
     forked = _ok(server.handle_line(_req("lc6", "session.fork", {"ref": source["id"]})))["session"]
     assert forked["project_id"] == project["id"]
     assert forked["project_root"] == project["root"]
+
+
+def test_project_delete_forgets_an_archived_project_but_never_its_files(
+    services, server, tmp_path
+) -> None:
+    repo = _git_repo(tmp_path, "forget-me")
+    marker = repo / "owned.txt"
+    marker.write_text("user data", encoding="utf-8")
+    project = _ok(server.handle_line(_req("pd0", "project.add", {"path": str(repo)})))["project"]
+    _ok(server.handle_line(_req("pd1", "project.trust", {"path": str(repo)})))
+    root = project["root"]
+    services.memory.remember_project(root, "Uses pnpm.", topic="tooling")
+    session = _ok(server.handle_line(_req("pd2", "session.create", {"project_id": project["id"]})))[
+        "session"
+    ]
+
+    # Deleting is the irreversible step: it asks for the reversible one first.
+    live = _err(server.handle_line(_req("pd3", "project.delete", {"project_id": project["id"]})))
+    assert live["code"] == "CONFLICT"
+
+    _ok(server.handle_line(_req("pd4", "project.remove", {"project_id": project["id"]})))
+    deleted = _ok(server.handle_line(_req("pd5", "project.delete", {"project_id": project["id"]})))
+    assert deleted["sessions_deleted"] == 1
+    assert deleted["filesystem_deleted"] is False
+    assert deleted["records_deleted"]["project_memory"] == 1
+    assert deleted["records_deleted"]["trust_entries"] == 1
+
+    assert (
+        _err(server.handle_line(_req("pd6", "project.get", {"project_id": project["id"]})))["code"]
+        == "NOT_FOUND"
+    )
+    assert (
+        _err(server.handle_line(_req("pd7", "session.get", {"ref": session["id"]})))["code"]
+        == "NOT_FOUND"
+    )
+    listed = _ok(server.handle_line(_req("pd8", "project.list", {"include_archived": True})))
+    assert project["id"] not in [row["id"] for row in listed["projects"]]
+    assert services.memory.list_project(root) == []
+    assert marker.read_text(encoding="utf-8") == "user data"

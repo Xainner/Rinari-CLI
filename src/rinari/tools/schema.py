@@ -58,7 +58,9 @@ def _validate(schema: dict[str, Any], value: Any, path: str, errors: list[str]) 
                 _validate(sub, value[key], f"{path}.{key}", errors)
         for key in schema.get("required", ()):
             if key not in value:
-                errors.append(f"{path}: missing required property {key!r}")
+                errors.append(
+                    f"{path}: missing required property {key!r}{_expected(props.get(key))}"
+                )
         additional = schema.get("additionalProperties", True)
         for key in value:
             if key in props:
@@ -117,3 +119,18 @@ def type_name(value: Any) -> str:
     if value is None:
         return "null"
     return type(value).__name__
+
+
+def _expected(schema: Any) -> str:
+    """What a missing property takes, so the model can fix the call in one go.
+
+    `missing required property 'result'` alone left a model re-sending the
+    same call; naming the allowed values is the correction it needs.
+    """
+    if not isinstance(schema, dict):
+        return ""
+    enum = schema.get("enum")
+    if isinstance(enum, list) and enum:
+        return " (one of: " + ", ".join(str(value) for value in enum) + ")"
+    kind = schema.get("type")
+    return f" ({kind})" if isinstance(kind, str) else ""

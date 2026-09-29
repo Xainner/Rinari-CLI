@@ -554,6 +554,39 @@ def test_git_tools_in_repo(project) -> None:
     assert branch.ok is True and branch.data["current"]
 
 
+def test_git_diff_of_a_folder_shows_its_changes_and_a_bad_ref_says_so(project) -> None:
+    """`path: "src"` ran git inside src/ and filtered by `src` again (src/src),
+    so a modified folder read back as an empty diff; the model then invented
+    a commit to explain it, and git.show on that made-up hash failed as UNKNOWN."""
+    import subprocess
+
+    tmp_path, root, _ = project
+    ctx = _ctx(tmp_path, root)
+    runtime, _ = _runtime(ctx, tmp_path)
+
+    def git(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
+
+    git("init", "-q")
+    git("config", "user.email", "a@b.c")
+    git("config", "user.name", "t")
+    (root / "app").mkdir()
+    (root / "app" / "order.js").write_text("export const total = 1\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "-qm", "init")
+    (root / "app" / "order.js").write_text("export const total = 2\n", encoding="utf-8")
+
+    for path in ("app", "app/order.js"):
+        diff = runtime.execute("git.diff", {"path": path}, ctx)
+        assert diff.ok, diff.error
+        assert "total = 2" in diff.data["diff"], path
+
+    missing = runtime.execute("git.show", {"ref": "a2f24b1"}, ctx)
+    assert missing.ok is False
+    assert missing.error.code is ToolErrorCode.NOT_FOUND
+    assert "git.log" in missing.error.message
+
+
 @pytest.mark.parametrize("read_profile", ["full-access", "workspace", "read-only"])
 def test_immutable_execution_with_independent_read_scope(project, read_profile):
     """Reads are free in every profile; read-only never writes, and runs a

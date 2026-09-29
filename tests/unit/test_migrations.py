@@ -117,6 +117,7 @@ def test_migrate_fresh_database_applies_all(db):
         38,
         39,
         40,
+        41,
     ]
     assert _table_names(db) == TABLES_AFTER_MIGRATIONS
 
@@ -125,7 +126,7 @@ def test_migrate_is_idempotent(db):
     runner = MigrationRunner(db, FakeClock())
     runner.migrate()
     assert runner.migrate() == []
-    assert runner.current_version() == 40
+    assert runner.current_version() == 41
 
 
 def _previous_home_migrations(tmp_path: Path, upto: int) -> Path:
@@ -277,7 +278,7 @@ def test_a_home_migrated_by_the_voice_branch_gets_the_missing_migrations(db, tmp
         },
     )
     MigrationRunner(db, FakeClock(), directory=voice).migrate()
-    assert MigrationRunner(db, FakeClock()).migrate() == [38, 39, 40]
+    assert MigrationRunner(db, FakeClock()).migrate() == [38, 39, 40, 41]
     columns = {row["name"] for row in db.query("PRAGMA table_info(sessions)")}
     assert "pinned_at" in columns
     assert {"skill_records", "scheduled_tasks", "scheduled_runs"} <= _table_names(db)
@@ -294,7 +295,8 @@ def test_a_home_that_applied_the_old_numbers_is_not_migrated_twice(db, tmp_path)
     )
     MigrationRunner(db, FakeClock(), directory=old).migrate()
     runner = MigrationRunner(db, FakeClock())
-    assert runner.migrate() == []  # no duplicate pinned_at column, nothing re-run
+    # No duplicate pinned_at column and nothing re-run: only what came after.
+    assert runner.migrate() == [41]
     recorded = {row["version"]: row["name"] for row in db.query("SELECT * FROM schema_migrations")}
     assert recorded[38] == "0038_session_pins" and recorded[40] == "0040_scheduled_tasks"
     # The old numbers are free again for the migrations that own them.
@@ -306,3 +308,40 @@ def test_a_version_applied_under_another_name_stops_with_a_clear_error(db, tmp_p
     MigrationRunner(db, FakeClock(), directory=other).migrate()
     with pytest.raises(ConfigurationError, match="0038_something_else"):
         MigrationRunner(db, FakeClock()).migrate()
+
+
+def test_stored_runtime_notes_are_marked_as_harness_not_as_the_owner(db, tmp_path):
+    """0041: loop-detector and governor notes stored as plain user messages
+    get origin kind "harness"; what the owner wrote is left alone."""
+    from rinari.storage.repositories.sessions import SessionMessageRepository
+
+    runner = MigrationRunner(db, FakeClock(), directory=_previous_home_migrations(tmp_path, 40))
+    runner.migrate()
+    db.execute(
+        "INSERT INTO sessions (id, kind, created_cwd, current_cwd, provider_id, model_id, "
+        "state, created_at, updated_at, last_active_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("ses_h", "CHAT", "/w", "/w", "prov", "mdl", "active", "t0", "t0", "t0"),
+    )
+    rows = [
+        ("m1", 1, "Arregla el total"),
+        ("m2", 2, "[harness loop-detector] repeated-rewrites: src/order.js returned ..."),
+        ("m3", 3, "[runtime governor] Consolidate the evidence already gathered."),
+        ("m4", 4, "Runtime: delegated work has returned. Treat the following results ..."),
+        ("m5", 5, "¿Qué hace [harness loop-detector]?"),
+    ]
+    for message_id, seq, content in rows:
+        db.execute(
+            "INSERT INTO session_messages (id, session_id, seq, role, content, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (message_id, "ses_h", seq, "user", content, "t0"),
+        )
+
+    assert MigrationRunner(db, FakeClock()).migrate() == [41]
+    origins = {m.id: m.origin for m in SessionMessageRepository(db).list("ses_h")}
+    assert origins == {
+        "m1": None,
+        "m2": {"kind": "harness", "source": "loop-detector"},
+        "m3": {"kind": "harness", "source": "governor"},
+        "m4": {"kind": "harness", "source": "subagents"},
+        "m5": None,
+    }
