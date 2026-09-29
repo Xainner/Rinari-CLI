@@ -97,6 +97,9 @@ class _ActiveTurn:
     attachment_metadata: list | None = None
     allow_unconfirmed_vision: bool = False
     compaction_only: bool = False
+    # Compact, then run the turn's message: "Compact and continue" after a
+    # turn stopped by a failed automatic compaction.
+    continue_after: bool = False
     # Slash command that started the turn (`learn`…); becomes turn_command.
     command: str = ""
     activity_lock: Any = field(default_factory=threading.RLock)
@@ -394,6 +397,7 @@ class TurnManager:
         origin: dict[str, Any] | None = None,
         peer_message_id: str | None = None,
         command: str = "",
+        continue_after: bool = False,
     ) -> dict[str, Any]:
         record = self._services.sessions.show(session_id)
         if record.state in {SESSION_STATE_CLOSED, SESSION_STATE_ARCHIVED}:
@@ -406,7 +410,7 @@ class TurnManager:
         # a session stayed where it was however much was said in it. Compaction
         # is housekeeping the user did not ask for and must not reorder a list.
         # Runs on the caller's thread, before any worker exists.
-        if not compaction_only:
+        if not compaction_only or continue_after:
             record = self._services.sessions.touch(record.id)
         turn_id = turn_id or self._services.ctx.ids.new("turn")
         turn = _ActiveTurn(
@@ -425,6 +429,7 @@ class TurnManager:
             attachment_metadata=attachment_metadata,
             allow_unconfirmed_vision=allow_unconfirmed_vision,
             compaction_only=compaction_only,
+            continue_after=continue_after and compaction_only,
             command=command,
         )
         with self._lock:
@@ -748,14 +753,23 @@ class TurnManager:
             turn.session.context.pending_attachments = tuple(turn.attachment_metadata or ())
             turn.session.context.pending_display_content = turn.display_message
             turn.session.context.pending_origin = dict(turn.origin) if turn.origin else None
-            if not turn.compaction_only:
+            if not turn.compaction_only or turn.continue_after:
                 turn.session.context.collect_steering = lambda: self._drain_steering(turn)
             if turn.compaction_only:
                 from rinari.cli.agent_runtime import compact_session
                 from rinari.runtime.agent import TurnResult
 
                 compact_session(agent_session, self._activity_cb(turn))
-                result = TurnResult(kind="compaction", content="", tool_calls=0, usage=None)
+                if turn.continue_after and message:
+                    # A failed compaction raised above and nothing continues.
+                    result = run_turn(
+                        agent_session,
+                        message,
+                        turn_id=turn_id,
+                        memory_origin=turn.memory_origin,
+                    )
+                else:
+                    result = TurnResult(kind="compaction", content="", tool_calls=0, usage=None)
             else:
                 result = run_turn(
                     agent_session,
@@ -994,7 +1008,11 @@ class TurnManager:
                 ),
                 None,
             )
-            if turn is not None and turn.steering_open and not turn.compaction_only:
+            if (
+                turn is not None
+                and turn.steering_open
+                and (not turn.compaction_only or turn.continue_after)
+            ):
                 if len(turn.steering) >= MAX_QUEUE_DEPTH:
                     raise EngineProtocolError(
                         errors.INVALID_PARAMS,

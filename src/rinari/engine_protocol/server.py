@@ -278,12 +278,7 @@ class EngineServer:
         self._dispatcher.register("agent.config.get", self._agent_config_get)
         self._dispatcher.register("agent.config.set", self._agent_config_set)
         self._dispatcher.register("model.capabilities", self._model_capabilities)
-        self._dispatcher.register(
-            "context.compact",
-            lambda params: self._turns.start_turn(
-                params.get("session_id"), "", compaction_only=True
-            ),
-        )
+        self._dispatcher.register("context.compact", self._context_compact)
         self._dispatcher.register("session.events", self._session_events)
         self._dispatcher.register("soul.list", self._soul_list)
         self._dispatcher.register("soul.get", self._soul_get)
@@ -481,6 +476,27 @@ class EngineServer:
             "supported": True,
             **self._browser_registry.describe(record.id),
         }
+
+    def _context_compact(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Compact a session's context now.
+
+        With `continue_with`, the same turn then sends that message: a turn
+        stopped by a failed automatic compaction resumes in one step, and
+        nothing continues if the compaction fails again.
+        """
+        message = params.get("continue_with")
+        if message is not None and (
+            not isinstance(message, str) or not message.strip() or len(message) > 2000
+        ):
+            raise EngineProtocolError(
+                INVALID_PARAMS, "Param 'continue_with' must be a non-empty string."
+            )
+        return self._turns.start_turn(
+            params.get("session_id"),
+            message or "",
+            compaction_only=True,
+            continue_after=message is not None,
+        )
 
     def _browser_control_set(self, params: dict[str, Any]) -> dict[str, Any]:
         """`browser.control.set` (documento 03 §7): tomar o devolver el control.

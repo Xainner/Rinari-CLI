@@ -88,9 +88,7 @@ class LocalPages:
             entry = self._servers.get(folder)
             if entry is None:
                 token = secrets.token_urlsafe(12)
-                server = http.server.ThreadingHTTPServer(
-                    ("127.0.0.1", 0), _handler(folder, token)
-                )
+                server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _handler(folder, token))
                 server.daemon_threads = True
                 threading.Thread(
                     target=server.serve_forever, name="rinari-local-page", daemon=True
