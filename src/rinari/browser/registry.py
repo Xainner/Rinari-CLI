@@ -101,7 +101,12 @@ class BrowserRegistry:
             return manager
 
     def set_control(
-        self, session_id: str, owner: str, expected_revision: int | None = None
+        self,
+        session_id: str,
+        owner: str,
+        expected_revision: int | None = None,
+        *,
+        automatic: bool = False,
     ) -> dict[str, Any]:
         """Transición de control de la sesión (§7, `browser.control.set`)."""
         with self._lock:
@@ -113,7 +118,7 @@ class BrowserRegistry:
                 "BROWSER_DISCONNECTED", "this session has no desktop browser context"
             )
         backend = entry["manager"]._backend
-        return backend.set_control(owner, expected_revision=expected_revision)
+        return backend.set_control(owner, expected_revision=expected_revision, automatic=automatic)
 
     def release(self, session_id: str) -> None:
         """Cierra el contexto de una sesión. Idempotente."""

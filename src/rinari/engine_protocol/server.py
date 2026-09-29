@@ -496,7 +496,12 @@ class EngineServer:
             raise EngineProtocolError(
                 INVALID_PARAMS, "Param 'expected_revision' must be an integer."
             )
-        return self._browser_registry.set_control(record.id, owner, expected)
+        automatic = params.get("automatic", False)
+        if not isinstance(automatic, bool):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'automatic' must be a boolean.")
+        # `automatic`: la interfaz da la vista en vivo sola (entre turnos). El
+        # agente la recupera en su primera acción; un control tomado a mano no.
+        return self._browser_registry.set_control(record.id, owner, expected, automatic=automatic)
 
     # -- sessions --------------------------------------------------------
 
