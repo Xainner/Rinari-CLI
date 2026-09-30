@@ -1,8 +1,11 @@
-"""`rinari update`: check the published version (commands.md 57)."""
+"""`rinari update`: the desktop app and this CLI, from the published release.
+
+It used to ask PyPI, where `rinari-cli` is not published, so it could never
+answer; and it knew nothing about the desktop app. Now it reads the latest
+release of Xainner/Rinari-Agent and plans both pieces (see `rinari.update`).
+"""
 
 from __future__ import annotations
-
-import re
 
 import httpx
 import typer
@@ -10,58 +13,135 @@ import typer
 from rinari import __version__
 from rinari.cli.deps import is_json
 from rinari.cli.output import emit_json, success_envelope
+from rinari.shared.paths import resolve_home
+from rinari.update.apply import reinstall_cli, update_desktop
+from rinari.update.inventory import detect_cli, detect_desktop
+from rinari.update.plan import Step, build_plan
+from rinari.update.releases import ReleaseError, fetch_latest
 
-PYPI_URL = "https://pypi.org/pypi/rinari-cli/json"
-
-
-def _fetch_latest(client: httpx.Client, timeout_s: float = 10.0) -> str:
-    response = client.get(PYPI_URL, timeout=timeout_s)
-    response.raise_for_status()
-    latest = response.json().get("info", {}).get("version")
-    if not isinstance(latest, str):
-        raise LookupError("unrecognized PyPI response")
-    return latest
+_LABEL = {"desktop": "Rinari Agent", "cli": "rinari CLI"}
 
 
-def _parse(version: str) -> tuple[int, ...]:
-    parts = re.findall(r"\d+", version.split("+")[0].split("-")[0])
-    return tuple(int(p) for p in parts) if parts else (0,)
-
-
-def check_update(client: httpx.Client, timeout_s: float = 10.0) -> dict:
-    """Caller owns the transport lifetime."""
-    latest = _fetch_latest(client, timeout_s=timeout_s)
-    current = __version__
-    return {
-        "current": current,
-        "latest": latest,
-        "update_available": _parse(latest) > _parse(current),
-    }
+def _line(step: Step) -> str:
+    versions = ""
+    if step.current or step.target_version:
+        versions = f"  {step.current or '—'} → {step.target_version or '—'}"
+    return f"  {_LABEL[step.target]:<13} {step.action:<13}{versions}  ({step.reason})"
 
 
 def update(
     ctx: typer.Context,
-    check: bool = typer.Option(False, "--check", help="Exit 1 when an update is available."),
+    check: bool = typer.Option(
+        False, "--check", help="Only report; exit 1 when something is pending."
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Apply without asking."),
+    desktop_only: bool = typer.Option(False, "--desktop-only", help="Only the desktop app."),
+    cli_only: bool = typer.Option(False, "--cli-only", help="Only this CLI."),
 ) -> None:
-    """Check for a new published version of Rinari."""
+    """Update Rinari Agent and this CLI to the latest published release."""
+    cli = detect_cli()
+    desktop = None if cli_only else detect_desktop()
     client = httpx.Client()
     try:
-        data = check_update(client=client)
-    except (httpx.HTTPError, LookupError, OSError) as err:
-        data = {"current": __version__, "latest": None, "update_available": None, "error": str(err)}
+        try:
+            release = fetch_latest(client)
+        except ReleaseError as err:
+            data = {
+                "current": __version__,
+                "latest": None,
+                "update_available": None,
+                "error": str(err),
+                "cli": cli.kind,
+                "desktop": desktop.version if desktop else None,
+            }
+            if is_json(ctx):
+                emit_json(success_envelope("update", data))
+                return
+            typer.echo(f"rinari {__version__}  (could not check for updates: {err})")
+            return
+
+        steps = build_plan(cli, desktop, release, desktop_only=desktop_only, cli_only=cli_only)
+        pending = [step for step in steps if step.pending]
+        data = {
+            "current": __version__,
+            "latest": release.version,
+            "update_available": bool(pending),
+            "engine_git_sha": release.engine_git_sha,
+            "release_page": release.page,
+            "cli": cli.kind,
+            "desktop": (
+                {
+                    "version": desktop.version,
+                    "running": desktop.running,
+                    "path": str(desktop.install_dir),
+                }
+                if desktop
+                else None
+            ),
+            "steps": [step.to_dict() for step in steps],
+        }
+        # JSON and --check only report: applying asks, and a script cannot answer.
+        if check or (is_json(ctx) and not yes):
+            if is_json(ctx):
+                emit_json(success_envelope("update", data))
+            else:
+                typer.echo(f"Latest release: Rinari Agent {release.version}")
+                for step in steps:
+                    typer.echo(_line(step))
+            raise typer.Exit(1 if check and pending else 0)
+
+        human = not is_json(ctx)
+        if human:
+            typer.echo(f"Latest release: Rinari Agent {release.version}")
+            for step in steps:
+                typer.echo(_line(step))
+        if not pending:
+            if human:
+                typer.echo("Everything is up to date.")
+            else:
+                emit_json(success_envelope("update", data))
+            return
+        if not yes and not typer.confirm("Apply these updates?", default=True):
+            return
+
+        results: dict[str, dict] = {}
+        cache = resolve_home() / "cache" / "updates"
+        for step in pending:
+            if step.target == "desktop" and desktop is not None:
+                results["desktop"] = update_desktop(
+                    client, desktop, release, cache, detach=cli.kind == "bundled"
+                )
+            elif step.target == "cli":
+                if (
+                    step.action == "switch"
+                    and not yes
+                    and not typer.confirm(
+                        f"This CLI is a development checkout ({cli.source}). Replace it "
+                        f"with a normal install at {release.engine_git_sha[:7]}? "
+                        "The checkout is not touched.",
+                        default=False,
+                    )
+                ):
+                    continue
+                results["cli"] = reinstall_cli(release, cache / "cli-update.log")
+        data["results"] = results
+        if not human:
+            emit_json(success_envelope("update", data))
+            return
+        messages = {
+            "handed-to-app": "Rinari Agent is open: confirm «Restart and update» in its window.",
+            "started": "The installer is running; it continues once this command exits.",
+            "updated": "Rinari Agent updated.",
+            "scheduled": "The CLI is reinstalled as soon as this command exits.",
+        }
+        for target, result in results.items():
+            note = messages.get(result["status"], result["status"])
+            if target == "cli" and result["status"] == "updated":
+                note = "rinari CLI updated."
+            log = f"  (log: {result['log']})" if result.get("log") else ""
+            typer.echo(f"{_LABEL[target]}: {note}{log}")
+    except ReleaseError as err:
+        typer.echo(f"Update failed: {err}", err=True)
+        raise typer.Exit(1) from err
     finally:
         client.close()
-    check_exit = 1 if (check and data.get("update_available")) else 0
-    if is_json(ctx):
-        emit_json(success_envelope("update", data))
-        raise typer.Exit(check_exit)
-    if data.get("latest") is None:
-        typer.echo(f"rinari {__version__}  (could not check for updates: {data.get('error')})")
-        return
-    if data["update_available"]:
-        typer.echo(f"update available: {__version__} -> {data['latest']}")
-        typer.echo("upgrade with:  uv tool upgrade rinari-cli   (or your package manager)")
-    else:
-        typer.echo(f"rinari {__version__} is up to date")
-    if check_exit:
-        raise typer.Exit(check_exit)
