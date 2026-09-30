@@ -2853,12 +2853,28 @@ Imported executable code is not auto-trusted.
 # 57. `update`
 
 ```bash
-rinari update
-rinari update --check
-rinari update --channel stable
-rinari update --channel beta
-rinari update --version 1.4.0
+rinari update                 # plan, confirm, apply
+rinari update --check         # report only; exit 1 when something is pending
+rinari update --yes           # apply without asking
+rinari update --desktop-only
+rinari update --cli-only
 ```
+
+The source is the latest **published release** of `Xainner/Rinari-Agent`.
+Its `rinari-release.json` names the version and the Engine commit the app
+ships. `RINARI_UPDATE_FEED` points to a folder or URL with the same files, for
+tests and local rehearsals. Each piece is planned with its reason:
+
+| Piece | How it is updated |
+| --- | --- |
+| Desktop app, closed | The installer is downloaded to `<home>/cache/updates`, verified by size and SHA-512, and run in updater mode (`--updated`). |
+| Desktop app, open | `rinari-agent.exe --update`: the app asks with its own «Restart and update» dialog. |
+| CLI bundled with the app | Moves with the app (it runs on the app's Engine). |
+| CLI installed with uv from git | `uv tool install --force "rinari @ git+…@<engine_git_sha>"`. On Windows it runs after this command exits: uv cannot replace a running tool. |
+| Editable CLI (a checkout) | Offers the same normal install; the checkout is never touched. |
+
+`--json` without `--yes` only reports: applying asks, and a script cannot
+answer.
 
 Updates must preserve:
 

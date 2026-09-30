@@ -465,32 +465,4 @@ def test_sandbox_status_and_test(env):
     assert "inside" in res.output
 
 
-# --- update -----------------------------------------------------------------
-
-
-def test_update_with_mocked_client(env, monkeypatch):
-    from rinari.cli.commands import update_cmd
-
-    class _Resp:
-        def raise_for_status(self):
-            pass
-
-        def json(self):
-            return {"info": {"version": "99.0.0"}}
-
-    class FakeClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def get(self, url, timeout=None):
-            return _Resp()
-
-        def close(self):
-            pass
-
-    monkeypatch.setattr(update_cmd.httpx, "Client", FakeClient)
-    res = _call("--json", "update", "--check")
-    assert res.exit_code == 1  # new version available -> exit 1 with --check
-    data = json.loads(res.output)["data"]
-    assert data["update_available"] is True
-    assert data["latest"] == "99.0.0"
+# --- update: tests/unit/test_update_rework.py ------------------------------
