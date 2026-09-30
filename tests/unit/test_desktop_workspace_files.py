@@ -649,3 +649,60 @@ def test_file_watch_detects_parent_replaced_by_junction(tmp_path) -> None:
     finally:
         watches.close()
         os.rmdir(sub)
+
+
+def test_a_file_the_running_turn_wrote_opens_before_the_turn_ends(desktop_runtime) -> None:
+    # A chat writes outside its workspace; the stored changeset only appears
+    # when the turn ends, so «View file» during the turn said the file was
+    # outside this turn's workspace.
+    from types import SimpleNamespace
+
+    from rinari.changes.tracker import FileState, TurnChangeTracker
+    from rinari.storage.records import SessionEventRecord
+
+    services, server, primary, other, _workspace, tmp_path = desktop_runtime
+    target = tmp_path / "external" / "world.js"
+    untouched = tmp_path / "external" / "other.js"
+    target.parent.mkdir()
+    target.write_text("export {}", encoding="utf-8")
+    untouched.write_text("export {}", encoding="utf-8")
+    digest = hashlib.sha256(target.read_bytes()).hexdigest()
+
+    tracker = TurnChangeTracker(services, primary, "turn_live")
+    key = str(target.resolve())
+    tracker.before[key] = FileState(Path(key), False)
+    tracker.after[key] = FileState(Path(key), True, sha256=digest)
+    context = SimpleNamespace(tool_ctx=SimpleNamespace(change_tracker=tracker))
+    live = SimpleNamespace(session_id=primary.id, session=SimpleNamespace(context=context))
+    server._turns._turns["turn_live"] = live
+    services.ctx.event_repo.insert(
+        SessionEventRecord(
+            id="evt_live",
+            session_id=primary.id,
+            seq=1,
+            type="turn.started",
+            payload={"turn_id": "turn_live"},
+            created_at="2026-01-01T00:00:00Z",
+            turn_id="turn_live",
+        )
+    )
+    try:
+        for turn in ("turn_live", None):
+            params = {"session_id": primary.id, "path": str(target)}
+            if turn:
+                params["turn_id"] = turn
+            result = _request(server, "workspace.file.read", params)
+            assert result["ok"] is True, result
+            assert result["result"]["content"] == "export {}"
+
+        # Only what the turn wrote, and only for its own session.
+        denied = _request(
+            server, "workspace.file.read", {"session_id": primary.id, "path": str(untouched)}
+        )
+        assert denied["error"]["code"] == "PERMISSION_DENIED"
+        foreign = _request(
+            server, "workspace.file.read", {"session_id": other.id, "path": str(target)}
+        )
+        assert foreign["error"]["code"] == "PERMISSION_DENIED"
+    finally:
+        server._turns._turns.pop("turn_live", None)

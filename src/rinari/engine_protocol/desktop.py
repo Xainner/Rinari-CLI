@@ -341,6 +341,11 @@ class DesktopWorkspace:
                 # A file this session created or edited stays reachable from any
                 # of its turns, not only from the one that last touched it.
                 changed = self._session_change(record.id, path)
+            if changed is None and (turn_found or changeset is not None):
+                # …and so does one the running turn just wrote: the stored
+                # changeset only exists once the turn ends, so «View file» on a
+                # file outside the workspace failed while the turn was going.
+                changed = self._live_change(record.id, path)
             if changed is None:
                 message = (
                     "Unknown turn provenance."
@@ -388,6 +393,20 @@ class DesktopWorkspace:
                 if isinstance(absolute, str) and _same_path(Path(absolute), path):
                     latest = row
         return self._external_change({"files": [latest]}, path) if latest else None
+
+    def _live_change(self, session_id: str, path: Path) -> dict[str, Any] | None:
+        """What a running turn of this session has done to ``path`` so far."""
+        with self.server._turns._lock:
+            turns = [t for t in self.server._turns._turns.values() if t.session_id == session_id]
+        for turn in turns:
+            ctx = turn.session.context.tool_ctx if turn.session else None
+            tracker = getattr(ctx, "change_tracker", None) if ctx else None
+            if tracker is None:
+                continue
+            changed = self._external_change({"files": tracker.live_files()}, path)
+            if changed is not None:
+                return changed
+        return None
 
     def read(self, params):
         return self._preview(self.resolve_file(params))
