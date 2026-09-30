@@ -144,6 +144,34 @@ class TurnChangeTracker:
             self.before.setdefault(key, prior)
             self.after[key] = current
 
+    def live_files(self) -> list[dict[str, Any]]:
+        """What this turn has changed so far, before `finalize()` records it.
+
+        The desktop opens files from a turn that is still running; they are only
+        in the stored changeset once the turn ends. No blobs, no diffs: just what
+        `desktop.file.*` needs to authorize the path.
+        """
+        rows = []
+        for key, after in list(self.after.items()):
+            before = self.before.get(key)
+            if (
+                before is not None
+                and before.exists == after.exists
+                and before.sha256 == after.sha256
+            ):
+                continue
+            existed = before is not None and before.exists
+            rows.append(
+                {
+                    "kind": "deleted" if not after.exists else "modified" if existed else "created",
+                    "absolute_path": str(after.path),
+                    "after_exists": after.exists,
+                    "after_hash": after.sha256,
+                    "sensitive": after.sensitive or bool(before and before.sensitive),
+                }
+            )
+        return rows
+
     def finalize(self) -> dict[str, Any] | None:
         if not self.mutating_tool_seen:
             return None
