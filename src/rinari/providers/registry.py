@@ -43,13 +43,26 @@ PROVIDER_TYPES: dict[str, ProviderTypeSpec] = {
     "custom": ProviderTypeSpec(
         name="custom",
         adapter=OpenAICompatibleAdapter,
-        auth_methods=("api-key", "none", "oauth"),
+        auth_methods=("api-key", "none", "oauth", "external-cli"),
     ),
 }
 
 
 def adapter_for(record: ProviderRecord, client: httpx.Client | None = None) -> ProviderAdapter:
     from rinari.providers.catalog import product_for
+
+    # An external runtime is resolved before any HTTP adapter: it has no
+    # endpoint to call and no credential to resolve.
+    if record.auth_method == "external-cli":
+        if product_for(record) != "claude-subscription":
+            raise InvalidUsageError(
+                "Unsupported external CLI provider.",
+                hint="Add it again from the Claude Subscription catalog entry.",
+            )
+        from rinari.providers.adapters.claude_subscription import ClaudeSubscriptionAdapter
+
+        settings: dict[str, Any] = record.settings or {}
+        return ClaudeSubscriptionAdapter(runtime=_claude_runtime(settings))
 
     if record.auth_method == "oauth":
         from rinari.providers.adapters.subscriptions import ChatGPTAdapter, CopilotAdapter
@@ -104,3 +117,11 @@ def validate_provider_type(
             hint=f"Supported: {', '.join(spec.auth_methods)} ({supported}).",
         )
     return spec
+
+
+def _claude_runtime(settings: dict[str, Any]):
+    """Runtime for a saved provider, honouring a user-set binary override."""
+    from rinari.providers.claude_cli import ClaudeCliRuntime
+
+    override = settings.get("command_path")
+    return ClaudeCliRuntime(command_override=override if isinstance(override, str) else None)

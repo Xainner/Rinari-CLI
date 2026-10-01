@@ -23,6 +23,16 @@ class ProviderPreset:
     auth: str = "api-key"
     experimental: bool = False
     enabled: bool = True
+    # How the provider is reached. "http" is every API endpoint; an external
+    # runtime ("claude-cli") is a request-scoped child process that owns its
+    # own authentication, so it has no API key and no HTTP client.
+    runtime: str = "http"
+    requires_binary: str | None = None
+
+
+# A `process://` endpoint is an identity for routing and diagnostics, never a
+# URL: nothing may hand it to an HTTP client.
+CLAUDE_CLI_ENDPOINT = "process://claude"
 
 
 PROVIDER_CATALOG: tuple[ProviderPreset, ...] = (
@@ -158,11 +168,32 @@ PROVIDER_CATALOG: tuple[ProviderPreset, ...] = (
         auth="oauth",
         experimental=True,
     ),
+    ProviderPreset(
+        "claude-subscription",
+        "Claude Subscription",
+        "custom",
+        CLAUDE_CLI_ENDPOINT,
+        auth="external-cli",
+        experimental=True,
+        runtime="claude-cli",
+        requires_binary="claude",
+    ),
 )
 
 
 def product_for(record) -> str:
     """Never identify accounts by alias or by a model name on a custom gateway."""
+    # An external-runtime product is privileged (no credential, spawns a
+    # process), so endpoint, auth method and transport must all agree before
+    # a record may claim it. Any custom provider could otherwise set
+    # `product_id` and borrow the behaviour.
+    settings = record.settings or {}
+    if (
+        (record.endpoint or "").rstrip("/") == CLAUDE_CLI_ENDPOINT
+        and record.auth_method == "external-cli"
+        and settings.get("transport") == "claude-cli"
+    ):
+        return "claude-subscription"
     endpoint = (
         record.endpoint
         or (
@@ -183,6 +214,7 @@ def product_for(record) -> str:
         p
         for p in PROVIDER_CATALOG
         if p.key != "custom"
+        and p.runtime == "http"
         and p.provider_type == record.type
         and endpoint == (p.base_url or "https://api.anthropic.com").rstrip("/")
     ]
@@ -217,6 +249,7 @@ DASHBOARDS = {
     "kimi-coding": "https://www.kimi.com/code/console",
     "minimax": "https://platform.minimax.io/",
     "minimax-coding": "https://platform.minimax.io/",
+    "claude-subscription": "https://claude.ai/settings/usage",
 }
 
 
@@ -233,6 +266,8 @@ def catalog_view():
             "experimental": p.experimental,
             "enabled": p.enabled,
             "local": p.local,
+            "runtime": p.runtime,
+            "requires_external_binary": p.requires_binary,
         }
         for p in PROVIDER_CATALOG
     ]

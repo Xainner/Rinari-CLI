@@ -2901,9 +2901,15 @@ class EngineServer:
         from rinari.providers.catalog import product_for
 
         provider = self._services.providers.get(self._need_str(params, "ref"))
+        runtime = (
+            self._external_runtime_diagnostics(provider)
+            if provider.auth_method == "external-cli"
+            else None
+        )
         return {
             "provider_id": provider.id,
             "product_id": product_for(provider),
+            "runtime": runtime,
             "endpoint": provider.endpoint,
             "auth_method": provider.auth_method,
             "has_credential": bool(self._services.providers.credential_ref(provider)),
@@ -2919,6 +2925,46 @@ class EngineServer:
                 for m in self._services.models.list(provider.id)
             ],
         }
+
+    def _external_runtime_diagnostics(self, provider: Any) -> dict[str, Any]:
+        """Ordered checks for a CLI-backed provider: binary, version, auth, source.
+
+        Never runs inference and never echoes a token, a credential path or
+        the child environment (plan sections 25, 75, 76).
+        """
+        from rinari.providers.registry import adapter_for
+
+        adapter = adapter_for(provider)
+        runtime = adapter.runtime
+        binary = runtime.resolve()
+        _env, dropped = runtime.child_env()
+        block: dict[str, Any] = {
+            "transport": "claude-cli",
+            "experimental": True,
+            "installed": binary is not None,
+            "path": binary.path if binary else None,
+            "discovered_via": binary.source if binary else None,
+            "sanitized_env": dropped,
+        }
+        if binary is None:
+            from rinari.providers.claude_cli import STATE_MISSING_CLI, platform_install_hint
+
+            block.update(state=STATE_MISSING_CLI, hint=platform_install_hint())
+            return block
+        version = runtime.version()
+        block.update(version=version.raw or None, supported=version.supported)
+        status = runtime.auth_status()
+        block["auth"] = {
+            "logged_in": status.logged_in,
+            "auth_method": status.auth_method,
+            "api_provider": status.api_provider,
+            "subscription_type": status.subscription_type,
+            "safe_for_subscription": status.safe_for_subscription,
+        }
+        block["state"] = status.state if version.supported else "unsupported_cli"
+        if status.detail:
+            block["detail"] = status.detail
+        return block
 
     def _provider_list(self, params: dict[str, Any]) -> dict[str, Any]:
         _ = params

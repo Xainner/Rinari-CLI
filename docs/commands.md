@@ -1140,7 +1140,14 @@ rinari providers add
 rinari providers add openai
 rinari providers add anthropic --name anthropic-work
 rinari providers add custom --name local-llm
+rinari providers add --claude-subscription
 ```
+
+`--claude-subscription` saves the experimental Claude Subscription provider,
+which authenticates through the official Claude Code CLI instead of a
+credential. It takes no endpoint, API key or protocol, and is refused unless
+the CLI is installed and signed in through claude.ai
+(`docs/providers/claude-subscription.md`).
 
 Adding a provider never removes or replaces another provider unless the user explicitly selects update/overwrite behavior.
 

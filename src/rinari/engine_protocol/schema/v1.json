@@ -3061,7 +3061,9 @@
         "auth_methods",
         "experimental",
         "enabled",
-        "local"
+        "local",
+        "runtime",
+        "requires_external_binary"
       ],
       "properties": {
         "id": {
@@ -3090,6 +3092,21 @@
         },
         "local": {
           "type": "boolean"
+        },
+        "runtime": {
+          "type": "string",
+          "description": "How the provider is reached: 'http' or an external runtime id such as 'claude-cli'."
+        },
+        "requires_external_binary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executable the user must install themselves; null for HTTP providers."
         }
       }
     },
