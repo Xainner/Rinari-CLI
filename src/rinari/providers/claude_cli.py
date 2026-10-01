@@ -62,6 +62,16 @@ BILLING_ENV_VARS: tuple[str, ...] = (
 
 ENV_COMMAND_OVERRIDE = "RINARI_CLAUDE_COMMAND"
 
+#: Prefixes of variables that belong to a vendor session, not to this
+#: transport: identity, tokens, scopes and per-session wiring.
+VENDOR_ENV_PREFIXES: tuple[str, ...] = ("ANTHROPIC_", "CLAUDE_", "CLAUDECODE")
+
+
+def _is_vendor_var(name: str) -> bool:
+    upper = name.upper()
+    return any(upper.startswith(prefix) for prefix in VENDOR_ENV_PREFIXES)
+
+
 # Provider states surfaced to the UI (plan section 9).
 STATE_MISSING_CLI = "missing_cli"
 STATE_UNSUPPORTED_CLI = "unsupported_cli"
@@ -246,17 +256,25 @@ class ClaudeCliRuntime:
     # -- environment -------------------------------------------------------
 
     def child_env(self) -> tuple[dict[str, str], list[str]]:
-        """Child environment with every billing-source override removed.
+        """Child environment with every vendor variable removed.
 
-        Returns the environment and the names that were dropped so diagnostics
-        can say so out loud. The user's own shell is never modified.
+        Two kinds of leak matter here. The billing overrides move the call off
+        the subscription and onto an API bill. The `CLAUDE_*` family carries
+        another Claude Code session's identity -- a messaging token, OAuth
+        scopes, account and organization ids -- which the first real smoke
+        caught being inherited whole when Rinari itself ran inside Claude Code.
+        Neither belongs to this transport, so the child gets neither: it
+        authenticates from the user's own `~/.claude`, reached through HOME and
+        USERPROFILE, not through environment hints.
+
+        Returns the environment and the dropped names, so diagnostics can say
+        so out loud. The user's own shell is never modified.
         """
         env = dict(self._env)
-        dropped = [name for name in BILLING_ENV_VARS if name in env]
+        dropped = sorted(name for name in env if name in BILLING_ENV_VARS or _is_vendor_var(name))
         for name in dropped:
             env.pop(name, None)
-        # Keep the child out of the user's Claude Code telemetry/session noise
-        # without touching their config.
+        # Our own marker, set after the sweep so it survives it.
         env["CLAUDE_CODE_ENTRYPOINT"] = "rinari"
         return env, dropped
 
@@ -269,6 +287,12 @@ class ClaudeCliRuntime:
             return self._run(
                 [binary.path, *args],
                 capture_output=True,
+                # The Engine speaks NDJSON over its own stdin. `capture_output`
+                # only redirects stdout/stderr, so without this the probe's
+                # child inherits that pipe and can swallow protocol bytes: the
+                # host then times out every request. Unit tests never see it
+                # because their stdin is a console.
+                stdin=subprocess.DEVNULL,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
@@ -588,18 +612,24 @@ class ClaudeCliStream:
 
         binary = self._runtime.require_binary()
         env, _ = self._runtime.child_env()
-        args = [binary.path, *_isolation_args()]
-        if request.model:
-            args += ["--model", request.model]
-        if request.system:
-            args += ["--system-prompt", request.system]
-        if request.effort:
-            args += ["--effort", request.effort]
-
         # Isolated cwd: even with built-in tools off, this keeps Claude Code
         # from discovering the repo's CLAUDE.md, .claude/, hooks or MCP config
         # (plan section 33). The real workspace is reached only via Rinari.
         cwd = Path(tempfile.mkdtemp(prefix="rinari-claude-"))
+        args = [binary.path, *_isolation_args()]
+        if request.model:
+            args += ["--model", request.model]
+        if request.system:
+            # The prompt travels as a file, never as an argument: Rinari's
+            # system prompt runs well past the 32 KB Windows command line (the
+            # first real smoke failed here), and an argument would also put it
+            # in the process list for any other user to read.
+            prompt_file = cwd / "system.md"
+            prompt_file.write_text(request.system, encoding="utf-8")
+            args += ["--system-prompt-file", str(prompt_file)]
+        if request.effort:
+            args += ["--effort", request.effort]
+
         try:
             process = subprocess.Popen(  # argv list, never a shell string
                 args,

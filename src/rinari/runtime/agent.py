@@ -918,6 +918,13 @@ class AgentLoop:
             wire_tools = exposure.for_model(self._tools.registry)
         else:
             wire_tools = self._tools.registry.for_model()
+        # A provider that announces no tool support gets none. Sending them
+        # anyway means either a hard failure or, worse, a transport that drops
+        # them quietly and answers as if it had none.
+        # Only an explicit "no" strips them: an adapter that does not state the
+        # capability keeps today's behaviour instead of silently losing tools.
+        if wire_tools and getattr(self._provider.capabilities(), "tool_calls", True) is False:
+            wire_tools = ()
         return ModelRequest(
             model=ctx.model_ref,
             messages=tuple(messages),

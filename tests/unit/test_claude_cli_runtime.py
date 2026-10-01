@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -86,6 +87,26 @@ def test_env_override_resolves_before_path(tmp_path):
     assert Path(found.path) == binary
 
 
+def test_probes_never_inherit_the_engine_stdin(tmp_path):
+    """The Engine speaks NDJSON over stdin; a probe must not touch that pipe.
+
+    `capture_output` redirects only stdout and stderr. Inheriting stdin let the
+    probe's child swallow protocol bytes, and the desktop host then timed out
+    every request - a failure no unit test sees, because their stdin is a
+    console. Caught by the first real Electron smoke.
+    """
+    seen: dict[str, object] = {}
+
+    def runner(*args, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(args[0], 0, "2.1.286 (Claude Code)", "")
+
+    ClaudeCliRuntime(
+        command_override=str(fake_cli(tmp_path)), env=dict(_BASE_ENV), runner=runner
+    ).version()
+    assert seen["stdin"] is subprocess.DEVNULL
+
+
 def test_version_is_parsed_from_the_real_child(tmp_path):
     version = runtime(tmp_path).version()
     assert version.raw.startswith("2.1.286")
@@ -144,11 +165,42 @@ def test_billing_env_is_stripped_from_the_child_only(tmp_path):
     dirty["KEEP_ME"] = "yes"
     cli = ClaudeCliRuntime(command_override=str(fake_cli(tmp_path)), env=dirty)
     env, dropped = cli.child_env()
-    assert set(dropped) == set(BILLING_ENV_VARS)
+    assert set(BILLING_ENV_VARS) <= set(dropped)
     assert not any(name in env for name in BILLING_ENV_VARS)
     assert env["KEEP_ME"] == "yes"
     # The caller's own environment is untouched.
     assert set(dirty) >= set(BILLING_ENV_VARS)
+
+
+def test_another_claude_session_identity_never_reaches_the_child(tmp_path):
+    """A parent Claude Code session must not lend the child its identity.
+
+    Caught in the first real smoke: running Rinari from inside Claude Code
+    handed the transport's child a messaging token, OAuth scopes and the
+    account id of an unrelated session. The CLI authenticates from the user's
+    own ~/.claude, so none of it is needed.
+    """
+    dirty = {
+        **_BASE_ENV,
+        "CLAUDE_CODE_MESSAGING_TOKEN": "tok",
+        "CLAUDE_CODE_OAUTH_SCOPES": "user:inference",
+        "CLAUDE_CODE_ACCOUNT_UUID": "acct",
+        "CLAUDECODE": "1",
+        "CLAUDE_EFFORT": "max",
+        "USERPROFILE": "C:/Users/someone",
+        "HOME": "/home/someone",
+    }
+    env, dropped = ClaudeCliRuntime(command_override=str(fake_cli(tmp_path)), env=dirty).child_env()
+    assert not [name for name in env if name.upper().startswith(("ANTHROPIC_", "CLAUDECODE"))]
+    assert "CLAUDE_CODE_MESSAGING_TOKEN" not in env
+    assert "CLAUDE_CODE_OAUTH_SCOPES" not in env
+    assert "CLAUDE_CODE_ACCOUNT_UUID" not in env
+    assert {"CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_OAUTH_SCOPES", "CLAUDECODE"} <= set(dropped)
+    # What the CLI needs to find its own credentials survives.
+    assert env["USERPROFILE"] == "C:/Users/someone"
+    assert env["HOME"] == "/home/someone"
+    # Rinari's own marker is set after the sweep.
+    assert env["CLAUDE_CODE_ENTRYPOINT"] == "rinari"
 
 
 def test_the_child_really_runs_without_the_api_key(tmp_path):
@@ -194,11 +246,37 @@ def test_the_child_is_started_as_a_transport_not_as_an_agent(tmp_path):
     assert "--strict-mcp-config" in argv
     assert "--no-session-persistence" in argv
     assert argv[argv.index("--setting-sources") + 1] == ""
-    assert argv[argv.index("--system-prompt") + 1] == "Sos Rinari."
+    # The prompt travels as a file, so a system prompt larger than the Windows
+    # command-line limit still works and never shows up in the process list.
+    assert "--system-prompt" not in argv
+    assert seen["system_prompt"] == "Sos Rinari."
+    assert Path(argv[argv.index("--system-prompt-file") + 1]).parent == Path(seen["cwd"])
     assert argv[argv.index("--model") + 1] == "sonnet"
     # `--bare` would force ANTHROPIC_API_KEY auth and never read the
     # subscription, so it must never appear.
     assert "--bare" not in argv
+
+
+def test_a_system_prompt_larger_than_the_command_line_limit_still_runs(tmp_path):
+    """Rinari's system prompt runs past the 32 KB Windows command line.
+
+    Passing it as an argument failed in the first real Electron smoke with a
+    bare non-zero exit, which is exactly the kind of failure a fixture-only
+    suite never sees.
+    """
+    record = tmp_path / "record.json"
+    huge = "x" * 60_000
+    result = ClaudeCliStream(runtime(tmp_path, FAKE_CLAUDE_RECORD=str(record))).run(
+        ClaudeRunRequest(
+            model=None,
+            system=huge,
+            messages=({"role": "user", "content": [{"type": "text", "text": "hola"}]},),
+        )
+    )
+    assert result.text
+    seen = json.loads(record.read_text(encoding="utf-8"))
+    assert len(" ".join(seen["argv"])) < 32_000
+    assert seen["system_prompt"] == huge
 
 
 def test_the_child_runs_outside_the_workspace(tmp_path, monkeypatch):

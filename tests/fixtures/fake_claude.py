@@ -55,6 +55,22 @@ def _auth_payload() -> dict:
     }
 
 
+def _system_prompt(argv: list[str]) -> str | None:
+    """The real CLI reads the prompt from a file; the record keeps its text.
+
+    The transport deletes the request directory when the turn ends, so a test
+    can only see the prompt from inside the child.
+    """
+    if "--system-prompt-file" not in argv:
+        return None
+    path = argv[argv.index("--system-prompt-file") + 1]
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+    except OSError:
+        return None
+
+
 def _record(argv: list[str], stdin_text: str) -> None:
     path = os.environ.get(ENV_RECORD)
     if not path:
@@ -64,6 +80,7 @@ def _record(argv: list[str], stdin_text: str) -> None:
             {
                 "argv": argv,
                 "stdin": stdin_text,
+                "system_prompt": _system_prompt(argv),
                 "cwd": os.getcwd(),
                 "env": {
                     k: v for k, v in os.environ.items() if k.startswith(("ANTHROPIC", "CLAUDE"))

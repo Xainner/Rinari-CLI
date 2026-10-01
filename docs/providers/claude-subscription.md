@@ -35,23 +35,38 @@ without the user's shell additions, so the last step is not a nicety.
 
 The child starts with `--tools ""`, `--disable-slash-commands`,
 `--setting-sources ""`, `--strict-mcp-config` and `--no-session-persistence`,
-in a temporary working directory, with `--system-prompt` replacing Claude
-Code's own. `--bare` is deliberately never used: it forces `ANTHROPIC_API_KEY`
-or `apiKeyHelper` authentication and never reads the subscription.
+in a temporary working directory. Rinari's system prompt replaces Claude
+Code's own and travels as `--system-prompt-file`, never as an argument: it runs
+well past the 32 KB Windows command line, and an argument would also expose it
+in the process list. `--bare` is deliberately never used: it forces
+`ANTHROPIC_API_KEY` or `apiKeyHelper` authentication and never reads the
+subscription.
 
-These environment variables are removed from the child only, because any of
-them can move the call onto API or cloud billing:
+Probes run with `stdin` closed. The Engine speaks NDJSON over its own stdin,
+and `capture_output` redirects only stdout and stderr, so an inherited stdin
+let a probe's child swallow protocol bytes and time out every request.
 
-```text
-ANTHROPIC_API_KEY            CLAUDE_CODE_USE_BEDROCK
-ANTHROPIC_AUTH_TOKEN         CLAUDE_CODE_USE_VERTEX
-ANTHROPIC_BASE_URL           CLAUDE_CODE_USE_FOUNDRY
-ANTHROPIC_BEDROCK_BASE_URL   CLAUDE_CODE_SKIP_BEDROCK_AUTH
-ANTHROPIC_VERTEX_BASE_URL    CLAUDE_CODE_SKIP_VERTEX_AUTH
-ANTHROPIC_API_KEY_HELPER
-```
+Every `ANTHROPIC_*`, `CLAUDE_*` and `CLAUDECODE` variable is removed from the
+child, and only from the child. Two different leaks make this necessary:
 
-`provider.diagnostics.get` lists which ones it stripped; it never carries their
+- **Billing.** `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
+  `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY_HELPER` and the
+  `CLAUDE_CODE_USE_BEDROCK` / `_VERTEX` / `_FOUNDRY` switches move the call off
+  the subscription and onto an API or cloud bill.
+- **Identity.** The `CLAUDE_CODE_*` family carries another Claude Code
+  session's messaging token, OAuth scopes, account and organization ids. The
+  first real smoke caught all of them being inherited whole when Rinari itself
+  ran inside a Claude Code session.
+
+The child authenticates from the user's own `~/.claude`, reached through `HOME`
+and `USERPROFILE`, so it needs none of them. Rinari sets
+`CLAUDE_CODE_ENTRYPOINT=rinari` after the sweep and nothing else.
+
+A side effect worth knowing: configuration the user passes through those
+variables (for example `CLAUDE_CONFIG_DIR`) does not reach this transport.
+That is deliberate for an isolated transport, not an oversight.
+
+`provider.diagnostics.get` lists the names it stripped; it never carries their
 values.
 
 ## Authentication states
@@ -116,9 +131,10 @@ usage, never converted into a bill.
 ## Limits of this version
 
 - **No tools.** Until the Rinari tool bridge lands, the provider announces
-  `tool_calls: false` and refuses a request that carries tools instead of
-  dropping them silently. Text turns work; a session that needs the filesystem
-  does not.
+  `tool_calls: false`. The agent runtime honours that and offers the model no
+  tools, so an ordinary text turn completes; the adapter still refuses a
+  request that arrives carrying tools, rather than dropping them silently. A
+  session that needs the filesystem cannot use this provider yet.
 - **No vision**, no structured output, no continuation reuse.
 - **Concurrency** is not yet limited per account.
 - The CLI has no `--max-turns` in 2.1.286, so a single generation per Rinari
