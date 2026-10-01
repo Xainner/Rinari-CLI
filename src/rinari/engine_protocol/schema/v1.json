@@ -451,6 +451,7 @@
         "provider.catalog.get",
         "provider.usage.get",
         "provider.diagnostics.get",
+        "provider.runtime.probe",
         "provider.auth.start",
         "provider.auth.get",
         "provider.auth.cancel",

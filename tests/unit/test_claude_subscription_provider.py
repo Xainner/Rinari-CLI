@@ -199,3 +199,44 @@ def test_diagnostics_report_the_runtime_without_leaking_anything(
     blob = json.dumps(response["result"])
     assert "sk-secret" not in blob
     assert ".claude" not in blob
+
+
+def test_the_setup_flow_can_probe_the_runtime_before_a_provider_exists(
+    engine_server, tmp_path, monkeypatch
+):
+    """The card must tell "not installed" from "wrong account" before saving."""
+    monkeypatch.setenv("FAKE_CLAUDE_AUTH", "console")
+    response = engine_server.handle_line(
+        json.dumps(
+            {
+                "id": "p1",
+                "method": "provider.runtime.probe",
+                "params": {"runtime": "claude-cli", "command_path": str(fake_cli(tmp_path))},
+            }
+        )
+    )
+    assert response["ok"] is True
+    runtime = response["result"]["runtime"]
+    assert runtime["installed"] is True
+    assert runtime["state"] == "non_subscription_auth"
+    assert runtime["auth"]["safe_for_subscription"] is False
+
+
+def test_probing_an_unknown_runtime_is_rejected(engine_server):
+    response = engine_server.handle_line(
+        json.dumps({"id": "p2", "method": "provider.runtime.probe", "params": {"runtime": "nope"}})
+    )
+    assert response["ok"] is False
+    assert response["error"]["code"] == "INVALID_PARAMS"
+
+
+def test_the_probe_is_declared_in_the_protocol_schema():
+    import json as _json
+
+    schema = _json.loads(
+        (
+            Path(__file__).resolve().parents[2] / "src/rinari/engine_protocol/schema/v1.json"
+        ).read_text(encoding="utf-8")
+    )
+    methods = schema["$defs"]["method"]["enum"]
+    assert "provider.runtime.probe" in methods

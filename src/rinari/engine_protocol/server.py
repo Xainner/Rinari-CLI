@@ -373,6 +373,7 @@ class EngineServer:
         self._dispatcher.register("provider.auth.logout", self._provider_auth_logout)
         self._dispatcher.register("provider.usage.get", self._provider_usage)
         self._dispatcher.register("provider.diagnostics.get", self._provider_diagnostics)
+        self._dispatcher.register("provider.runtime.probe", self._provider_runtime_probe)
         self._dispatcher.register("provider.create", self._provider_create)
         self._dispatcher.register("provider.get", self._provider_get)
         self._dispatcher.register("provider.update", self._provider_update)
@@ -2926,6 +2927,24 @@ class EngineServer:
             ],
         }
 
+    def _provider_runtime_probe(self, params: dict[str, Any]) -> dict[str, Any]:
+        """State of an external runtime before any provider exists.
+
+        The setup flow has to tell "not installed" from "signed in with the
+        wrong account" before it offers to save anything, and diagnostics
+        needs a saved provider. Stays provider-neutral: the runtime is named
+        by id, so another CLI transport reuses this instead of a `claude.*`
+        command.
+        """
+        runtime_id = self._need_str(params, "runtime")
+        if runtime_id != "claude-cli":
+            raise EngineProtocolError(INVALID_PARAMS, f"Unknown runtime: {runtime_id}")
+        from rinari.providers.adapters.claude_subscription import ClaudeSubscriptionAdapter
+
+        command_path = self._opt_str(params, "command_path")
+        adapter = ClaudeSubscriptionAdapter(runtime=_claude_probe_runtime(command_path))
+        return {"runtime": _runtime_block(adapter.runtime)}
+
     def _external_runtime_diagnostics(self, provider: Any) -> dict[str, Any]:
         """Ordered checks for a CLI-backed provider: binary, version, auth, source.
 
@@ -2934,37 +2953,7 @@ class EngineServer:
         """
         from rinari.providers.registry import adapter_for
 
-        adapter = adapter_for(provider)
-        runtime = adapter.runtime
-        binary = runtime.resolve()
-        _env, dropped = runtime.child_env()
-        block: dict[str, Any] = {
-            "transport": "claude-cli",
-            "experimental": True,
-            "installed": binary is not None,
-            "path": binary.path if binary else None,
-            "discovered_via": binary.source if binary else None,
-            "sanitized_env": dropped,
-        }
-        if binary is None:
-            from rinari.providers.claude_cli import STATE_MISSING_CLI, platform_install_hint
-
-            block.update(state=STATE_MISSING_CLI, hint=platform_install_hint())
-            return block
-        version = runtime.version()
-        block.update(version=version.raw or None, supported=version.supported)
-        status = runtime.auth_status()
-        block["auth"] = {
-            "logged_in": status.logged_in,
-            "auth_method": status.auth_method,
-            "api_provider": status.api_provider,
-            "subscription_type": status.subscription_type,
-            "safe_for_subscription": status.safe_for_subscription,
-        }
-        block["state"] = status.state if version.supported else "unsupported_cli"
-        if status.detail:
-            block["detail"] = status.detail
-        return block
+        return _runtime_block(adapter_for(provider).runtime)
 
     def _provider_list(self, params: dict[str, Any]) -> dict[str, Any]:
         _ = params
@@ -3369,3 +3358,48 @@ class EngineServer:
         if not path.is_dir():
             raise EngineProtocolError(INVALID_PARAMS, f"Param 'cwd' is not a directory: {raw}.")
         return path.resolve()
+
+
+def _claude_probe_runtime(command_path: str | None):
+    from rinari.providers.claude_cli import ClaudeCliRuntime
+
+    return ClaudeCliRuntime(command_override=command_path)
+
+
+def _runtime_block(runtime: Any) -> dict[str, Any]:
+    """Ordered checks for a CLI-backed transport: binary, version, auth, source.
+
+    Shared by `provider.diagnostics.get` and `provider.runtime.probe` so the
+    setup flow and the saved provider can never disagree about the state.
+    Never runs inference, and never carries a token, a credential path or the
+    child environment: only the names of the billing overrides it strips.
+    """
+    from rinari.providers.claude_cli import STATE_MISSING_CLI, platform_install_hint
+
+    binary = runtime.resolve()
+    _env, dropped = runtime.child_env()
+    block: dict[str, Any] = {
+        "transport": "claude-cli",
+        "experimental": True,
+        "installed": binary is not None,
+        "path": binary.path if binary else None,
+        "discovered_via": binary.source if binary else None,
+        "sanitized_env": dropped,
+    }
+    if binary is None:
+        block.update(state=STATE_MISSING_CLI, hint=platform_install_hint())
+        return block
+    version = runtime.version()
+    block.update(version=version.raw or None, supported=version.supported)
+    status = runtime.auth_status()
+    block["auth"] = {
+        "logged_in": status.logged_in,
+        "auth_method": status.auth_method,
+        "api_provider": status.api_provider,
+        "subscription_type": status.subscription_type,
+        "safe_for_subscription": status.safe_for_subscription,
+    }
+    block["state"] = status.state if version.supported else "unsupported_cli"
+    if status.detail:
+        block["detail"] = status.detail
+    return block
