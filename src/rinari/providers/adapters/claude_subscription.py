@@ -16,6 +16,7 @@ from collections.abc import Callable
 from typing import Any
 
 from rinari.models.types import (
+    ModelItem,
     ModelRequest,
     ModelResponse,
     ProviderCapabilities,
@@ -29,6 +30,7 @@ from rinari.providers.adapters.base import (
     ProviderHealth,
 )
 from rinari.providers.claude_cli import (
+    CLAUDE_EFFORT_LEVELS,
     STATE_CONNECTED,
     ClaudeCliRuntime,
     ClaudeCliStream,
@@ -40,6 +42,9 @@ from rinari.providers.errors import ProviderError, ProviderErrorCode
 #: Aliases the CLI documents for `--model`. They are a snapshot, not a claim
 #: about the account: availability stays "unknown" until a call resolves one,
 #: because no print-mode command lists the models a plan actually includes.
+#: Re-exported so the model capability matrix and tests name one source.
+SUPPORTED_EFFORT_LEVELS = CLAUDE_EFFORT_LEVELS
+
 PINNED_ALIASES: tuple[tuple[str, str], ...] = (
     ("fable", "Fable"),
     ("opus", "Opus"),
@@ -174,6 +179,8 @@ class ClaudeSubscriptionAdapter(ProviderAdapter):
             tool_calls=False,
             structured_output=False,
             max_context_tokens=None,
+            # The CLI takes five levels; Rinari offers eight. The three it does
+            # not take are dropped rather than sent and silently ignored.
             reasoning_effort=True,
             vision=None,
         )
@@ -225,6 +232,16 @@ class ClaudeSubscriptionAdapter(ProviderAdapter):
             content=result.text,
             usage=_usage(result.usage),
             stop_reason=StopReason.END_TURN,
+            # Every block, thinking included, travels as an item the way the
+            # HTTP adapter sends it, so reasoning renders the same either way.
+            items=tuple(
+                ModelItem(
+                    type=str(block.get("type") or "unknown"),
+                    id=block.get("id") if isinstance(block.get("id"), str) else None,
+                    data={k: v for k, v in block.items() if k not in ("type", "id")},
+                )
+                for block in result.blocks
+            ),
             # The resolved model id travels as transport metadata so history
             # records what actually ran, not just the alias the user picked
             # (plan section 20).

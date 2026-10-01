@@ -22,11 +22,17 @@ ENV_MODE = "FAKE_CLAUDE_MODE"  # ok | double | empty | hang | error | rate_limit
 ENV_TEXT = "FAKE_CLAUDE_TEXT"
 ENV_RECORD = "FAKE_CLAUDE_RECORD"  # path: dump argv + env + stdin for assertions
 ENV_VERSION = "FAKE_CLAUDE_VERSION"
+ENV_THINKING = "FAKE_CLAUDE_THINKING"
 
 
 def _emit(payload: dict) -> None:
     sys.stdout.write(json.dumps(payload) + "\n")
     sys.stdout.flush()
+
+
+def _stream(event: dict) -> None:
+    """One Anthropic stream event, as the CLI wraps it in print mode."""
+    _emit({"type": "stream_event", "event": event})
 
 
 def _auth_payload() -> dict:
@@ -118,14 +124,43 @@ def _print_mode(argv: list[str]) -> int:
         return 1
 
     _emit({"type": "system", "subtype": "init", "model": "claude-sonnet-4-6-20260219"})
-    for chunk in _chunks(text):
-        _emit(
+    if os.environ.get(ENV_THINKING):
+        # Extended thinking arrives as the same Anthropic blocks the HTTP API
+        # sends, only wrapped in `stream_event`.
+        _stream(
             {
-                "type": "stream_event",
-                "event": {
-                    "type": "content_block_delta",
-                    "delta": {"type": "text_delta", "text": chunk},
-                },
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "thinking", "thinking": ""},
+            }
+        )
+        _stream(
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": os.environ[ENV_THINKING]},
+            }
+        )
+        _stream(
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "signature_delta", "signature": "sig-abc"},
+            }
+        )
+    _stream(
+        {
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {"type": "text", "text": ""},
+        }
+    )
+    for chunk in _chunks(text):
+        _stream(
+            {
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {"type": "text_delta", "text": chunk},
             }
         )
     _emit(_assistant(text))

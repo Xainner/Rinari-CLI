@@ -62,6 +62,12 @@ BILLING_ENV_VARS: tuple[str, ...] = (
 
 ENV_COMMAND_OVERRIDE = "RINARI_CLAUDE_COMMAND"
 
+#: Levels `--effort` accepts in 2.1.286. Rinari offers three more (`none`,
+#: `minimal`, `ultra`); the CLI answers an unknown value with a warning on
+#: stderr and silently falls back to the default, which the user never sees.
+#: Sending one anyway would be a setting that looks applied and is not.
+CLAUDE_EFFORT_LEVELS: frozenset[str] = frozenset({"low", "medium", "high", "xhigh", "max"})
+
 #: Prefixes of variables that belong to a vendor session, not to this
 #: transport: identity, tokens, scopes and per-session wiring.
 VENDOR_ENV_PREFIXES: tuple[str, ...] = ("ANTHROPIC_", "CLAUDE_", "CLAUDECODE")
@@ -164,6 +170,9 @@ class ClaudeRunResult:
     model: str | None
     stop_reason: str | None
     raw_result: dict[str, Any] | None
+    #: Content blocks as the model produced them (text, thinking, ...), in
+    #: order, so reasoning survives instead of being thrown away.
+    blocks: tuple[dict[str, Any], ...] = ()
 
 
 def _parse_version(raw: str) -> tuple[int, ...]:
@@ -627,7 +636,7 @@ class ClaudeCliStream:
             prompt_file = cwd / "system.md"
             prompt_file.write_text(request.system, encoding="utf-8")
             args += ["--system-prompt-file", str(prompt_file)]
-        if request.effort:
+        if request.effort in CLAUDE_EFFORT_LEVELS:
             args += ["--effort", request.effort]
 
         try:
@@ -683,6 +692,10 @@ class ClaudeCliStream:
             ) from exc
 
         text_parts: list[str] = []
+        # Thinking blocks arrive as the same Anthropic events the HTTP adapter
+        # parses, just wrapped in `stream_event`. Dropping them lost the
+        # model's reasoning on a transport whose whole point is parity.
+        blocks: dict[int, dict[str, Any]] = {}
         usage: dict[str, Any] | None = None
         resolved_model: str | None = None
         stop_reason: str | None = None
@@ -695,7 +708,9 @@ class ClaudeCliStream:
                 resolved_model = event.get("model") or resolved_model
                 continue
             if kind == "stream_event":
-                delta = _text_delta(event.get("event") or {})
+                inner = event.get("event") or {}
+                _collect_block(inner, blocks)
+                delta = _text_delta(inner)
                 if delta:
                     text_parts.append(delta)
                     if on_delta is not None:
@@ -741,6 +756,7 @@ class ClaudeCliStream:
             model=resolved_model,
             stop_reason=stop_reason,
             raw_result=result_payload,
+            blocks=tuple(blocks[index] for index in sorted(blocks)),
         )
 
 
@@ -903,3 +919,33 @@ def _pumped_events(
             continue
         if isinstance(parsed, dict):
             yield parsed
+
+
+def _collect_block(event: dict[str, Any], blocks: dict[int, dict[str, Any]]) -> None:
+    """Accumulate Anthropic content blocks across start/delta events.
+
+    Mirrors what the HTTP adapter does with the same events, so a thinking
+    block reaches Rinari the same way through either transport.
+    """
+    index = event.get("index")
+    if not isinstance(index, int):
+        return
+    kind = event.get("type")
+    if kind == "content_block_start":
+        block = event.get("content_block")
+        if isinstance(block, dict):
+            blocks[index] = dict(block)
+        return
+    if kind != "content_block_delta":
+        return
+    block = blocks.get(index)
+    if block is None:
+        return
+    delta = event.get("delta") or {}
+    field = {
+        "text_delta": "text",
+        "thinking_delta": "thinking",
+        "signature_delta": "signature",
+    }.get(delta.get("type"))
+    if field and isinstance(delta.get(field), str):
+        block[field] = block.get(field, "") + delta[field]

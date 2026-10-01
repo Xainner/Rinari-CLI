@@ -437,3 +437,64 @@ def test_invoke_builds_history_from_rinari_not_from_claude(tmp_path):
     assert response.provider_state["transport"] == "claude-cli"
     assert response.provider_state["resolved_model"] == "claude-sonnet-4-6-20260219"
     assert response.usage.input_tokens == 11
+
+
+# -- razonamiento ----------------------------------------------------------
+
+
+@pytest.mark.parametrize("level", ["low", "medium", "high", "xhigh", "max"])
+def test_an_effort_the_cli_takes_is_forwarded(tmp_path, level):
+    record = tmp_path / "record.json"
+    ClaudeCliStream(runtime(tmp_path, FAKE_CLAUDE_RECORD=str(record))).run(
+        ClaudeRunRequest(
+            model=None, system=None, messages=({"role": "user", "content": []},), effort=level
+        )
+    )
+    argv = json.loads(record.read_text(encoding="utf-8"))["argv"]
+    assert argv[argv.index("--effort") + 1] == level
+
+
+@pytest.mark.parametrize("level", ["none", "minimal", "ultra"])
+def test_an_effort_the_cli_ignores_is_not_sent(tmp_path, level):
+    """Rinari offers eight levels; `--effort` takes five.
+
+    The CLI answers an unknown value with a warning on stderr and falls back
+    to its default, which nobody sees. Sending it anyway would show the user a
+    setting that looks applied and is not.
+    """
+    record = tmp_path / "record.json"
+    ClaudeCliStream(runtime(tmp_path, FAKE_CLAUDE_RECORD=str(record))).run(
+        ClaudeRunRequest(
+            model=None, system=None, messages=({"role": "user", "content": []},), effort=level
+        )
+    )
+    argv = json.loads(record.read_text(encoding="utf-8"))["argv"]
+    assert "--effort" not in argv
+
+
+def test_thinking_blocks_survive_the_transport(tmp_path):
+    """Reasoning reached Rinari through the HTTP adapter and was dropped here."""
+    result = ClaudeCliStream(
+        runtime(tmp_path, FAKE_CLAUDE_THINKING="estoy pensando", FAKE_CLAUDE_TEXT="respuesta")
+    ).run(ClaudeRunRequest(model=None, system=None, messages=({"role": "user", "content": []},)))
+    kinds = [block.get("type") for block in result.blocks]
+    assert kinds == ["thinking", "text"]
+    thinking = result.blocks[0]
+    assert thinking["thinking"] == "estoy pensando"
+    # The signature travels with it: Anthropic requires it to replay the block.
+    assert thinking["signature"] == "sig-abc"
+    # Thinking is never mixed into the answer.
+    assert result.text == "respuesta"
+
+
+def test_the_adapter_hands_thinking_to_rinari_as_items(tmp_path):
+    from rinari.models.types import ChatMessage, ModelRequest
+
+    response = adapter(tmp_path, FAKE_CLAUDE_THINKING="paso a paso").invoke_stream(
+        ModelRequest(model="sonnet", messages=(ChatMessage.user("hola"),)),
+        None,
+        None,
+        lambda _d: None,
+    )
+    assert [item.type for item in response.items] == ["thinking", "text"]
+    assert response.items[0].data["thinking"] == "paso a paso"

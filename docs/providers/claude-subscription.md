@@ -135,6 +135,16 @@ usage, never converted into a bill.
   tools, so an ordinary text turn completes; the adapter still refuses a
   request that arrives carrying tools, rather than dropping them silently. A
   session that needs the filesystem cannot use this provider yet.
+- **Reasoning effort** is forwarded only for the five levels `--effort` takes
+  (`low`, `medium`, `high`, `xhigh`, `max`). Rinari offers three more
+  (`none`, `minimal`, `ultra`); the CLI answers an unknown value with a
+  warning on stderr and falls back to its default, so Rinari does not send
+  them. Picking one of the three leaves the model on its own default effort.
+- **Thinking** blocks are preserved: they arrive as the same Anthropic content
+  blocks the HTTP adapter parses, only wrapped in `stream_event`, and reach
+  Rinari as items with their signature. Whether a turn produces any is the
+  model's and the CLI's decision, not Rinari's — there is no flag here that
+  turns extended thinking on.
 - **No vision**, no structured output, no continuation reuse.
 - **Concurrency** is not yet limited per account.
 - The CLI has no `--max-turns` in 2.1.286, so a single generation per Rinari
