@@ -191,8 +191,26 @@ def model_metadata(provider, model_id):
         transport = "responses"
     if product == "github-copilot":
         transport = "unsupported-copilot-route"  # discovery supplies supported_endpoints
+    if product == "claude-subscription":
+        # The official CLI owns this route: there is no HTTP wire transport to
+        # infer, and it validates the effort itself.
+        transport = "claude-cli"
     metadata["transport"] = transport
-    if transport == "anthropic":
+    if transport == "claude-cli":
+        from rinari.providers.claude_cli import CLAUDE_EFFORT_LEVELS
+
+        # The five levels `--effort` takes. Rinari offers eight; the CLI
+        # discards the rest with a warning nothing surfaces, so claiming them
+        # would put choices in the composer that silently do nothing.
+        metadata.update(
+            reasoning_effort=True,
+            reasoning_levels=[
+                level
+                for level in ("low", "medium", "high", "xhigh", "max")
+                if level in CLAUDE_EFFORT_LEVELS
+            ],
+        )
+    elif transport == "anthropic":
         mode, levels = claude_reasoning(model_id)
         metadata.update(reasoning_effort=bool(mode), reasoning_mode=mode, reasoning_levels=levels)
     elif product == "gemini":
@@ -229,7 +247,7 @@ def model_metadata(provider, model_id):
     elif product not in ("custom", "chatgpt", "github-copilot") and transport == "chat":
         # Advertising thought generation is not evidence of the OpenAI effort dialect.
         metadata.update(reasoning_effort=False, reasoning_levels=[])
-    metadata["route_supported"] = transport in ("chat", "responses", "anthropic")
+    metadata["route_supported"] = transport in ("chat", "responses", "anthropic", "claude-cli")
     return metadata
 
 

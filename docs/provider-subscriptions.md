@@ -45,3 +45,24 @@ decimal balances, tool signatures and transport selection. A real Go usage
 query succeeded without inference. ChatGPT/Copilot login and paid inference
 were not exercised with real accounts. See the desktop repository's
 `docs/providers-subscriptions-review-plan.md` for the acceptance matrix.
+
+## Claude Subscription (external CLI transport, 2026-09-30)
+
+A third class of subscription integration: the provider has no endpoint and no
+credential, and reaches the vendor through a request-scoped child process of
+the official Claude Code CLI. `auth_method` is `external-cli`, `runtime` is
+`claude-cli` and the endpoint is the identity `process://claude`, which exists
+for routing and diagnostics and is never handed to an HTTP client.
+
+`product_for` grants the product only when endpoint, auth method and transport
+all agree, so a custom provider cannot claim credential-free, process-spawning
+behaviour by setting `product_id` alone. `ProviderService` writes no
+`ProviderCredentialRef` for it and `resolve_secret` returns `None` instead of a
+fabricated empty secret. Creation validates the binary and the authentication
+source and refuses to save a provider that cannot be shown to run on a
+subscription; the same check runs before every request, because an external
+login can change the billing source between two turns.
+Capabilities: `provider_external_cli_v1`, `claude_subscription_v1`.
+
+Full contract, security boundary and limits: `docs/providers/claude-subscription.md`.
+

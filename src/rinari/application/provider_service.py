@@ -118,7 +118,7 @@ class ProviderService:
         if (
             input.secret is None
             and input.secret_env is None
-            and input.auth_method not in ("none", "oauth")
+            and input.auth_method not in ("none", "oauth", "external-cli")
         ):
             raise InvalidUsageError(
                 "A credential is required",
@@ -126,6 +126,16 @@ class ProviderService:
             )
         if input.secret is not None and input.secret_env is not None:
             raise InvalidUsageError("Use either --api-key or --api-key-env, not both")
+        # An external runtime owns its own authentication: a credential here
+        # would be stored for nothing and would suggest Rinari holds the
+        # account (plan sections 27, 28).
+        if input.auth_method == "external-cli" and (
+            input.secret is not None or input.secret_env is not None
+        ):
+            raise InvalidUsageError(
+                "This provider does not take a credential",
+                hint="Authentication belongs to the external CLI.",
+            )
         # F1: validate the env NAME before any write. A rejected reference is
         # never persisted and never echoed back (it may hold a pasted key).
         if input.secret_env is not None:
@@ -167,7 +177,30 @@ class ProviderService:
                     raise InvalidUsageError(
                         "Use interactive login with a supported subscription endpoint."
                     )
-            if record.auth_method not in ("none", "oauth"):
+            if record.auth_method == "external-cli":
+                from rinari.providers.catalog import product_for
+
+                if product_for(record) != "claude-subscription":
+                    raise InvalidUsageError(
+                        "Unsupported external CLI provider.",
+                        hint="Add it from the Claude Subscription catalog entry.",
+                    )
+                from rinari.providers.claude_cli import is_claude_binary
+
+                override = (record.settings or {}).get("command_path")
+                if override is not None and not (
+                    isinstance(override, str) and is_claude_binary(override)
+                ):
+                    raise InvalidUsageError(
+                        "command_path must point at the Claude Code CLI",
+                        hint="Expected an existing file named claude, claude.exe or claude.cmd.",
+                    )
+                # Prove the transport is usable before saving the provider,
+                # without spending an inference call. A provider that cannot
+                # be shown to run on a subscription is never created: a saved
+                # one that merely looks connected is how API billing sneaks in.
+                adapter_for(record).require_subscription()
+            if record.auth_method not in ("none", "oauth", "external-cli"):
                 if input.secret is not None:
                     secret_ref = self._credentials.store_provider_secret(record.id, input.secret)
                 else:
@@ -659,6 +692,10 @@ class ProviderService:
         return credential.secret_ref if credential else None
 
     def resolve_secret(self, record: ProviderRecord) -> str | None:
+        # Never fabricate an empty-string credential for a transport that
+        # authenticates itself: None is the honest answer.
+        if record.auth_method == "external-cli":
+            return None
         if record.auth_method == "oauth":
             from rinari.providers.auth import token_for
 
