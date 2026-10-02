@@ -583,13 +583,36 @@ def _first_json_object(text: str) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def login_command(binary: ClaudeCliBinary | None, *, windows: bool | None = None) -> str:
+    """The sign-in command the user can paste as is, on this machine.
+
+    Two things broke the first hand-run sign-in, and both are fixed here
+    rather than left to the user. The Windows installer writes
+    `~/.local/bin/claude.exe` without adding it to PATH, so a bare `claude`
+    is "not recognized": a binary found outside PATH is named by full path.
+    And PowerShell reads a line that starts with a quoted path as a string,
+    not a command, so on Windows that path needs the `&` call operator.
+    `--claudeai` is spelled out because `--console` would sign Claude Code in
+    for API billing, which this provider refuses.
+    """
+    args = "auth login --claudeai"
+    if binary is None or binary.source == "path":
+        return f"claude {args}"
+    on_windows = _WINDOWS if windows is None else windows
+    if on_windows:
+        return f'& "{binary.path}" {args}'
+    return f'"{binary.path}" {args}'
+
+
+def platform_install_command() -> str:
+    """The official installer, as a command to paste (PowerShell on Windows)."""
+    if platform.system() == "Windows":
+        return "irm https://claude.ai/install.ps1 | iex"
+    return "curl -fsSL https://claude.ai/install.sh | bash"
+
+
 def platform_install_hint() -> str:
-    system = platform.system()
-    if system == "Windows":
-        return "Run: irm https://claude.ai/install.ps1 | iex"
-    if system == "Darwin":
-        return "Run: curl -fsSL https://claude.ai/install.sh | bash"
-    return "Run: curl -fsSL https://claude.ai/install.sh | bash"
+    return f"Run: {platform_install_command()}"
 
 
 def _deadline(seconds: float) -> float:

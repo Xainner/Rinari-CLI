@@ -91,7 +91,52 @@ has changed between CLI versions.
 ## Setup
 
 Desktop: Settings → Providers → Claude Subscription. The card reports the state
-above and only offers **Connect** when the CLI is on a subscription.
+above and only lets the provider be saved when the CLI is on a subscription.
+Until then it shows a step-by-step guide with the command to copy.
+
+### Connecting the account, step by step
+
+1. **Install Claude Code** if the card says it is missing. On Windows, in
+   PowerShell:
+
+   ```powershell
+   irm https://claude.ai/install.ps1 | iex
+   ```
+
+   On macOS or Linux: `curl -fsSL https://claude.ai/install.sh | bash`.
+   If the installer warns that its folder is not on `PATH`, leave it: Rinari
+   finds the binary in the installer's location anyway.
+2. **Sign in, once per computer.** Open a terminal and run the command the
+   card shows. Copy it from there rather than typing it: the Engine builds it
+   for this machine. If `claude` is on `PATH` it is simply:
+
+   ```bash
+   claude auth login --claudeai
+   ```
+
+   If it is not -- the Windows installer's default -- the command names the
+   binary by full path and, in PowerShell, starts with `&`:
+
+   ```powershell
+   & "C:\Users\<you>\.local\bin\claude.exe" auth login --claudeai
+   ```
+
+   Without the `&`, PowerShell reads a line that starts with a quoted path as
+   text and fails with *Unexpected token 'auth'*. Without the full path,
+   `claude` is *not recognized*. Both happened on the first hand-run sign-in.
+3. **Approve in the browser.** It opens on its own; if not, the terminal
+   prints a link. Sign in with the Claude account whose plan should be used.
+4. **Back in Rinari, press "Check again"** once the terminal says
+   *Login successful*. The card turns to Connected, without restarting.
+
+Always `--claudeai`: `--console` signs Claude Code in for API billing, and the
+card then refuses it as a non-subscription source. The sign-in belongs to
+Claude Code on that computer -- the user's terminal and other apps use it too
+-- and Rinari never sees or stores the credential.
+
+`provider.runtime.probe` and `provider.diagnostics.get` carry the commands as
+`install_command` (when the CLI is missing) and `login_command`, so any client
+shows the same ones.
 
 Terminal:
 
@@ -238,7 +283,7 @@ usage, never converted into a bill.
 | Symptom | Cause |
 |---|---|
 | "Claude Code is not installed, or Rinari cannot find it" | Not installed, or in a location not covered; set `RINARI_CLAUDE_COMMAND` |
-| "Claude Code is not signed in" | Run `claude auth login --claudeai` |
+| "Claude Code is not signed in" | Run the sign-in command the card shows (see Setup) |
 | "non-subscription source" | The CLI is on Console/Bedrock/Vertex; sign in again with `--claudeai` |
 | "exited without producing a response" | A print-mode regression in that CLI version; `claude update` |
 | "cannot run tools yet" | Expected: use another provider for tool work |

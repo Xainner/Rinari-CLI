@@ -3433,7 +3433,12 @@ def _runtime_block(runtime: Any) -> dict[str, Any]:
     Never runs inference, and never carries a token, a credential path or the
     child environment: only the names of the billing overrides it strips.
     """
-    from rinari.providers.claude_cli import STATE_MISSING_CLI, platform_install_hint
+    from rinari.providers.claude_cli import (
+        STATE_MISSING_CLI,
+        login_command,
+        platform_install_command,
+        platform_install_hint,
+    )
 
     binary = runtime.resolve()
     _env, dropped = runtime.child_env()
@@ -3444,9 +3449,16 @@ def _runtime_block(runtime: Any) -> dict[str, Any]:
         "path": binary.path if binary else None,
         "discovered_via": binary.source if binary else None,
         "sanitized_env": dropped,
+        # Ready to paste: full path when the CLI is not on PATH, and the `&`
+        # PowerShell needs before a quoted path.
+        "login_command": login_command(binary),
     }
     if binary is None:
-        block.update(state=STATE_MISSING_CLI, hint=platform_install_hint())
+        block.update(
+            state=STATE_MISSING_CLI,
+            hint=platform_install_hint(),
+            install_command=platform_install_command(),
+        )
         return block
     version = runtime.version()
     block.update(version=version.raw or None, supported=version.supported)

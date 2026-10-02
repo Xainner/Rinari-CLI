@@ -221,6 +221,10 @@ def test_the_setup_flow_can_probe_the_runtime_before_a_provider_exists(
     assert runtime["installed"] is True
     assert runtime["state"] == "non_subscription_auth"
     assert runtime["auth"]["safe_for_subscription"] is False
+    # The card shows this to paste: the CLI here is found via the env
+    # override, not PATH, so the command names it by full path.
+    assert runtime["login_command"].endswith("auth login --claudeai")
+    assert str(fake_cli(tmp_path)) in runtime["login_command"]
 
 
 def test_probing_an_unknown_runtime_is_rejected(engine_server):

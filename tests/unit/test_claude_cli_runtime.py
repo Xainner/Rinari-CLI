@@ -676,3 +676,46 @@ def test_one_rinari_turn_is_one_user_message_on_stdin(tmp_path):
     # The whole thread travels, in order, with the new message last.
     assert text.index("primera") < text.index("respuesta") < text.index("segunda")
     assert text.rstrip().endswith("segunda")
+
+
+# -- guia de inicio de sesion ------------------------------------------------
+
+
+def test_the_login_command_is_bare_when_claude_is_on_path():
+    from rinari.providers.claude_cli import ClaudeCliBinary, login_command
+
+    assert login_command(ClaudeCliBinary("/usr/bin/claude", "path")) == (
+        "claude auth login --claudeai"
+    )
+
+
+def test_off_path_on_windows_it_is_a_powershell_call_with_the_full_path():
+    """What the owner had to run by hand, and what failed the first time.
+
+    The Windows installer does not add ~/.local/bin to PATH, so `claude` is
+    not recognized; and PowerShell treats a line that starts with a quoted
+    path as a string unless it is called with `&`.
+    """
+    from rinari.providers.claude_cli import ClaudeCliBinary, login_command
+
+    binary = ClaudeCliBinary(r"C:\Users\x\.local\bin\claude.exe", "well-known")
+    assert login_command(binary, windows=True) == (
+        r'& "C:\Users\x\.local\bin\claude.exe" auth login --claudeai'
+    )
+
+
+def test_off_path_elsewhere_it_is_the_quoted_full_path():
+    from rinari.providers.claude_cli import ClaudeCliBinary, login_command
+
+    binary = ClaudeCliBinary("/Users/x/.local/bin/claude", "well-known")
+    assert login_command(binary, windows=False) == (
+        '"/Users/x/.local/bin/claude" auth login --claudeai'
+    )
+
+
+def test_the_login_command_always_asks_for_the_subscription():
+    """`--console` would sign Claude Code in for API billing."""
+    from rinari.providers.claude_cli import ClaudeCliBinary, login_command
+
+    for binary in (None, ClaudeCliBinary("C:/x/claude.cmd", "env")):
+        assert login_command(binary).endswith("auth login --claudeai")
