@@ -104,13 +104,29 @@ than a silently ignored argument.
 
 ## Models
 
-Claude Code offers no print-mode command that lists the models a plan
-includes, so Rinari exposes the aliases the CLI documents for `--model`
-(`fable`, `opus`, `sonnet`, `haiku`) with availability **unknown**, and records
-the concrete model the CLI resolved (for example
-`claude-sonnet-4-6-20260219`) from the response. Nothing claims the account has
-a model until a call proves it, and no context window is invented: it stays
-`null` until a source states one.
+Discovery asks the CLI for the account's own model picker, without spending an
+inference call: the SDK control request `initialize` is answered before any
+user message exists, and the process exits when stdin closes (about two
+seconds, no `result`, no usage -- verified against 2.1.286). Each entry gives:
+
+| Field | Used for |
+|---|---|
+| `value` | What `--model` receives, and the model id Rinari saves |
+| `displayName` | The name the desktop shows (`Opus 5.5`) |
+| `resolvedModel` | The concrete model an alias runs (`claude-opus-5-5`), kept so history can say what actually ran (plan section 20) |
+| `supportedEffortLevels` | The effort levels of **that** model |
+
+Effort levels are per model because they differ: Haiku 4.5 carries no
+`supportsEffort` field and takes none, and the 4.6 models stop at `max`
+without `xhigh`. Inside the live picker every effort-capable model says
+`supportsEffort: true`, so a missing field means none rather than unknown.
+Picker data is live, so it outranks the product default in
+`providers/metadata.py`. The `default` entry is left out: it points at another
+entry of the same list.
+
+If the CLI does not answer `initialize` (an older version), Rinari falls back
+to the aliases `--model` documents (`fable`, `opus`, `sonnet`, `haiku`) with
+availability **unknown** and the product default of five effort levels.
 
 Models of this product are listed separately from Anthropic API models. They
 may be the same model, but they are different auth and billing routes, so
@@ -133,20 +149,28 @@ does. Each point below changed the implementation.
   `api_error_status: 429`. `is_error` is the verdict, and assistant-message
   text is held back until the `result` confirms it was an answer, so a notice
   is never streamed to the user as the model's reply.
+- **`initialize` lists the account's models for free.** See Models.
 - **The billing risk is real, and `auth status` does not see it.** With
   `ANTHROPIC_API_KEY` reaching the child, the CLI reports
   `apiKeySource: "ANTHROPIC_API_KEY"` and bills the API, while
   `claude auth status` still says `claude.ai`. With the transport's
   sanitized environment the same call reports `apiKeySource: "none"` and runs
   on the subscription. The environment sweep is what protects the user; the
-  auth check alone would not.
+  auth check alone would not. Every run also reads `apiKeySource` from the
+  init event and stops before the model answers if it is anything but
+  `none`, which covers what the sweep cannot see (a managed `apiKeyHelper`,
+  for one). Verified: with a key forced past the sweep, the run ends in about
+  a second with an authentication error and nothing streamed. A CLI that
+  sends no such field is left to the sweep and the auth check rather than
+  blocking every turn.
 - **Isolation holds.** The init event shows no tools, no MCP servers and no
   slash commands, and the user's own `~/.claude/CLAUDE.md` does not reach the
   child. Auto-memory points at an empty directory derived from the temporary
   working directory, and no folder is left behind in `~/.claude/projects`.
 - **Aliases resolve.** `opus`, `sonnet` and `haiku` resolve to concrete
-  models (for example `claude-opus-5-5`); `fable` may need usage credits a
-  plan does not include, and fails with the 429 above.
+  models (for example `claude-opus-5-5`). A model the plan covers only with
+  usage credits (Fable on Pro) answers with the 429 above when there are none
+  left; with credits it runs. Rinari keeps offering it either way.
 - **`ultracode` is not an effort level.** `--effort ultracode` is accepted
   without a warning, but in the CLI it is a mode that runs dynamic workflows
   and agents of its own while the effort stays as it was. That would turn

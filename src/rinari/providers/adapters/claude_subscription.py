@@ -34,7 +34,9 @@ from rinari.providers.claude_cli import (
     STATE_CONNECTED,
     ClaudeCliRuntime,
     ClaudeCliStream,
+    ClaudeModel,
     ClaudeRunRequest,
+    discover_models,
     platform_install_hint,
 )
 from rinari.providers.errors import ProviderError, ProviderErrorCode
@@ -142,25 +144,20 @@ class ClaudeSubscriptionAdapter(ProviderAdapter):
                 code=ProviderErrorCode.SERVER_ERROR,
                 hint="Run `claude update` and check again.",
             )
+        try:
+            live = discover_models(self._runtime)
+        except ProviderError:
+            live = []
+        if live:
+            return [_discovered(model) for model in live]
+        # Plan section 19, last resort: the aliases the CLI documents, with
+        # availability unknown and no reasoning levels claimed -- metadata.py
+        # supplies the product default for those.
         return [
             DiscoveredModel(
                 provider_model_id=alias,
                 availability="unknown",
-                capabilities={
-                    "label": label,
-                    "source": "claude-cli-aliases",
-                    "transport": "claude-cli",
-                    # Unverified capabilities stay unknown, never a guessed
-                    # False (plan section 30).
-                    "tools": False,
-                    "streaming": True,
-                    "vision": None,
-                    # Reasoning levels are not published here on purpose:
-                    # `providers/metadata.py` owns that for every product, and
-                    # per-model capabilities are merged last, so a second copy
-                    # here would quietly win if the two ever disagreed.
-                    "max_context_window": None,
-                },
+                capabilities={**_BASE_CAPABILITIES, "label": label, "source": "claude-cli-aliases"},
             )
             for alias, label in PINNED_ALIASES
         ]
@@ -258,6 +255,45 @@ class ClaudeSubscriptionAdapter(ProviderAdapter):
                 else {"transport": "claude-cli"}
             ),
         )
+
+
+#: What every model of this transport shares. Unverified capabilities stay
+#: unknown, never a guessed False (plan section 30).
+_BASE_CAPABILITIES: dict[str, Any] = {
+    "transport": "claude-cli",
+    "tools": False,
+    "streaming": True,
+    "vision": None,
+    "max_context_window": None,
+}
+
+
+def _discovered(model: ClaudeModel) -> DiscoveredModel:
+    """A picker entry as a Rinari model.
+
+    The account's own picker is live data, so it outranks the product default
+    in metadata.py (plan section 19): per-model capabilities merge last. That
+    is what makes Haiku -- which takes no effort level -- offer none, and the
+    4.6 models stop at `max` without `xhigh`.
+    """
+    capabilities: dict[str, Any] = {
+        **_BASE_CAPABILITIES,
+        "source": "claude-cli-picker",
+        "label": model.label,
+        "description": model.description,
+        # Persisted so history can say which model actually ran, not only the
+        # alias the user picked (plan section 20).
+        "resolved_model": model.resolved_model,
+        "adaptive_thinking": model.adaptive_thinking,
+    }
+    if model.effort_levels is not None:
+        capabilities["reasoning_effort"] = bool(model.effort_levels)
+        capabilities["reasoning_levels"] = list(model.effort_levels)
+    return DiscoveredModel(
+        provider_model_id=model.provider_model_id,
+        availability="available",
+        capabilities=capabilities,
+    )
 
 
 def _split_history(request: ModelRequest) -> tuple[str | None, tuple[dict[str, Any], ...]]:

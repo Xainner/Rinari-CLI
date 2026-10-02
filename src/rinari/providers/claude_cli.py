@@ -19,6 +19,7 @@ Three invariants hold here (plan section 95):
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import platform
@@ -169,10 +170,16 @@ class ClaudeAuthStatus:
 
 @dataclass(frozen=True, slots=True)
 class ClaudeModel:
+    """One entry of the account's model picker, as the CLI reports it."""
+
     provider_model_id: str
     label: str | None = None
-    source: str = "claude-cli"
-    pinned: bool = True
+    description: str | None = None
+    resolved_model: str | None = None
+    #: None when the CLI did not say; [] when it says the model takes none.
+    effort_levels: tuple[str, ...] | None = None
+    supports_effort: bool | None = None
+    adaptive_thinking: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -424,6 +431,119 @@ class ClaudeCliRuntime:
         )
 
 
+def discover_models(runtime: ClaudeCliRuntime) -> list[ClaudeModel]:
+    """The account's live model picker, without spending an inference call.
+
+    The CLI answers the SDK control request `initialize` with the models the
+    signed-in account offers -- display name, the concrete model an alias
+    resolves to, and the effort levels each one takes -- and exits when stdin
+    closes, before any user message exists (plan section 19). Verified
+    against 2.1.286: no `result`, no usage, about two seconds.
+    """
+    import tempfile
+
+    binary = runtime.require_binary()
+    env, _ = runtime.child_env()
+    cwd = Path(tempfile.mkdtemp(prefix="rinari-claude-models-"))
+    request = {
+        "type": "control_request",
+        "request_id": "rinari-models",
+        "request": {"subtype": "initialize"},
+    }
+    try:
+        process = subprocess.Popen(  # argv list, never a shell string
+            [binary.path, *_isolation_args()],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=str(cwd),
+            env=env,
+            shell=False,
+            **_popen_kwargs(),
+        )
+    except OSError as exc:
+        shutil.rmtree(cwd, ignore_errors=True)
+        raise ProviderError(
+            f"Could not start Claude Code: {exc}", code=ProviderErrorCode.SERVER_ERROR
+        ) from exc
+    try:
+        out, _err = process.communicate(json.dumps(request) + "\n", timeout=TIMEOUT_DISCOVERY_S)
+    except subprocess.TimeoutExpired as exc:
+        terminate_tree(process)
+        raise ProviderError(
+            "Claude Code did not list its models in time.",
+            code=ProviderErrorCode.TIMEOUT,
+            retryable=True,
+        ) from exc
+    finally:
+        terminate_tree(process)
+        shutil.rmtree(cwd, ignore_errors=True)
+
+    for line in (out or "").splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict) or event.get("type") != "control_response":
+            continue
+        response = event.get("response") or {}
+        body = response.get("response") if isinstance(response.get("response"), dict) else response
+        entries = body.get("models")
+        if isinstance(entries, list):
+            return [model for model in map(_picker_model, entries) if model is not None]
+    raise ProviderError(
+        "Claude Code did not report its models.",
+        code=ProviderErrorCode.SERVER_ERROR,
+        hint="This Claude Code version may not support model discovery.",
+    )
+
+
+def _picker_model(entry: Any) -> ClaudeModel | None:
+    if not isinstance(entry, dict):
+        return None
+    value = entry.get("value")
+    # "default" is a moving pointer to another entry of the same list, and
+    # Rinari has its own notion of a default model: listing it twice would
+    # only offer the same model under two names.
+    if not isinstance(value, str) or not value or value == "default":
+        return None
+    supports = entry.get("supportsEffort")
+    levels = entry.get("supportedEffortLevels")
+    effort_levels: tuple[str, ...] | None
+    if isinstance(levels, list):
+        # Only levels `--effort` really takes: anything else would be a
+        # choice the composer offers and the CLI then ignores.
+        effort_levels = tuple(
+            level for level in levels if isinstance(level, str) and level in CLAUDE_EFFORT_LEVELS
+        )
+    elif supports is True:
+        # Takes effort, levels unstated: the product default applies.
+        effort_levels = None
+    else:
+        # In the live picker every effort-capable model says
+        # `supportsEffort: true`; Haiku 4.5 carries no such field at all.
+        # Absent here means none, not unknown.
+        effort_levels = ()
+    return ClaudeModel(
+        provider_model_id=value,
+        label=_str(entry.get("displayName")),
+        description=_str(entry.get("description")),
+        resolved_model=_str(entry.get("resolvedModel")),
+        effort_levels=effort_levels,
+        supports_effort=supports if isinstance(supports, bool) else None,
+        adaptive_thinking=entry.get("supportsAdaptiveThinking")
+        if isinstance(entry.get("supportsAdaptiveThinking"), bool)
+        else None,
+    )
+
+
+def _str(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
 def _account_hint(payload: dict[str, Any]) -> str | None:
     """A label for the signed-in account, never an identifier we store."""
     for key in ("email", "accountEmail", "organizationName", "organization"):
@@ -470,19 +590,6 @@ def platform_install_hint() -> str:
     if system == "Darwin":
         return "Run: curl -fsSL https://claude.ai/install.sh | bash"
     return "Run: curl -fsSL https://claude.ai/install.sh | bash"
-
-
-def _iter_json_lines(stream: Iterator[str]) -> Iterator[dict[str, Any]]:
-    for line in stream:
-        text = line.strip()
-        if not text:
-            continue
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            yield parsed
 
 
 def _deadline(seconds: float) -> float:
@@ -569,9 +676,7 @@ class ClaudeCliRun:
     def cleanup(self) -> None:
         terminate_tree(self._process)
         if self._workdir is not None:
-            import shutil as _shutil
-
-            _shutil.rmtree(self._workdir, ignore_errors=True)
+            shutil.rmtree(self._workdir, ignore_errors=True)
 
 
 def terminate_tree(process: subprocess.Popen) -> None:
@@ -593,18 +698,10 @@ def terminate_tree(process: subprocess.Popen) -> None:
     try:
         process.wait(timeout=TERMINATE_GRACE_S)
     except subprocess.TimeoutExpired:
-        with _suppress_os_error():
+        with contextlib.suppress(OSError):
             process.kill()
     except OSError:
         pass
-
-
-class _suppress_os_error:
-    def __enter__(self) -> None:
-        return None
-
-    def __exit__(self, exc_type, exc, tb) -> bool:
-        return exc_type is not None and issubclass(exc_type, OSError)
 
 
 @dataclass(frozen=True, slots=True)
@@ -728,6 +825,7 @@ class ClaudeCliStream:
             kind = event.get("type")
             if kind == "system" and event.get("subtype") == "init":
                 resolved_model = event.get("model") or resolved_model
+                _require_subscription_source(event, run)
                 continue
             if kind == "stream_event":
                 inner = event.get("event") or {}
@@ -990,3 +1088,27 @@ def _collect_block(event: dict[str, Any], blocks: dict[int, dict[str, Any]]) -> 
     }.get(delta.get("type"))
     if field and isinstance(delta.get(field), str):
         block[field] = block.get(field, "") + delta[field]
+
+
+def _require_subscription_source(init: dict[str, Any], run: ClaudeCliRun) -> None:
+    """Stop a run that is about to bill an API key instead of the subscription.
+
+    The init event names the credential the child actually picked. The
+    environment sweep is the main defence, but it only sees variables: an
+    `apiKeyHelper` in managed settings, for one, would not show there, and
+    `claude auth status` keeps reporting the claude.ai login either way
+    (verified against 2.1.286). So every run checks the real answer and ends
+    before the model replies if it is not the subscription. A field the CLI
+    does not send is left to the other two layers rather than blocking every
+    turn of a version that renamed it.
+    """
+    source = init.get("apiKeySource")
+    if source is None or source == "none":
+        return
+    run.cancel()
+    raise ProviderError(
+        f"Claude Code was about to bill {source}, not the Claude subscription.",
+        code=ProviderErrorCode.AUTH,
+        hint="Remove that credential from the environment or settings that Claude Code "
+        "reads, then try again.",
+    )

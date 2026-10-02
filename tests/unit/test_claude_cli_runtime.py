@@ -385,23 +385,51 @@ def test_the_adapter_never_accepts_a_credential(tmp_path):
         adapter(tmp_path).validate_credential("sk-anything")
 
 
-def test_models_are_offered_without_claiming_the_account_has_them(tmp_path):
-    models = adapter(tmp_path).list_models(None)
+def test_models_come_from_the_account_picker(tmp_path):
+    """Plan section 19: the live picker of the account, not a static list.
+
+    The CLI answers an `initialize` control request with the models the
+    signed-in account offers, before any user message exists, so discovery
+    spends no inference call.
+    """
+    record = tmp_path / "record.json"
+    models = {
+        m.provider_model_id: m
+        for m in adapter(tmp_path, FAKE_CLAUDE_RECORD=str(record)).list_models(None)
+    }
+    # `default` is a pointer to another entry: offering it would list Opus twice.
+    assert set(models) == {"opus", "claude-opus-4-6", "haiku"}
+    assert {m.availability for m in models.values()} == {"available"}
+    opus = models["opus"].capabilities
+    assert opus["label"] == "Opus 5.5"
+    assert opus["resolved_model"] == "claude-opus-5-5"
+    assert opus["source"] == "claude-cli-picker"
+    assert opus["max_context_window"] is None
+    # No print-mode request reached the CLI: nothing was generated.
+    assert not record.exists()
+
+
+def test_each_model_offers_only_the_effort_levels_it_takes(tmp_path):
+    """Levels come per model from the picker, not one list for the product.
+
+    Haiku 4.5 carries no `supportsEffort` field and takes no effort; the 4.6
+    models stop at `max`. One list for every model put choices in the
+    composer that the CLI would then ignore.
+    """
+    models = {m.provider_model_id: m.capabilities for m in adapter(tmp_path).list_models(None)}
+    assert models["opus"]["reasoning_levels"] == ["low", "medium", "high", "xhigh", "max"]
+    assert models["claude-opus-4-6"]["reasoning_levels"] == ["low", "medium", "high", "max"]
+    assert models["haiku"]["reasoning_effort"] is False
+    assert models["haiku"]["reasoning_levels"] == []
+
+
+def test_without_a_picker_the_documented_aliases_are_the_fallback(tmp_path):
+    """An older CLI that does not answer `initialize` still offers models."""
+    models = adapter(tmp_path, FAKE_CLAUDE_NO_PICKER="1").list_models(None)
     assert [m.provider_model_id for m in models] == ["fable", "opus", "sonnet", "haiku"]
     assert {m.availability for m in models} == {"unknown"}
-    assert all(m.capabilities["max_context_window"] is None for m in models)
-
-
-def test_effort_levels_have_one_source_and_it_is_not_the_adapter(tmp_path):
-    """`providers/metadata.py` declares reasoning levels for every product.
-
-    Per-model capabilities are merged last, so a copy published here would
-    quietly win if the two ever disagreed. The router-level test in
-    test_claude_subscription_provider.py checks what the desktop receives.
-    """
-    caps = adapter(tmp_path).list_models(None)[0].capabilities
-    assert "reasoning_levels" not in caps
-    assert "reasoning" not in caps
+    # Nothing is claimed about effort: the product default in metadata.py applies.
+    assert all("reasoning_levels" not in m.capabilities for m in models)
 
 
 def test_capabilities_do_not_promise_tools_before_the_bridge_exists(tmp_path):
@@ -556,3 +584,35 @@ def test_an_error_reported_as_success_is_an_error(tmp_path):
     assert exc.value.retryable is False
     # Nothing of the notice was streamed as if the model had said it.
     assert deltas == []
+
+
+# -- origen de la credencial en cada turno -------------------------------------
+
+
+def test_a_run_that_would_bill_an_api_key_is_stopped(tmp_path):
+    """The init event names the credential the child picked; check it every run.
+
+    Verified against 2.1.286: with an API key reaching the child the init
+    event says `apiKeySource: "ANTHROPIC_API_KEY"` while `claude auth status`
+    keeps saying claude.ai. The environment sweep stops the known variables;
+    this stops whatever it cannot see, such as a managed `apiKeyHelper`.
+    """
+    deltas: list[str] = []
+    with pytest.raises(ProviderError) as exc:
+        ClaudeCliStream(runtime(tmp_path, FAKE_CLAUDE_API_KEY_SOURCE="apiKeyHelper")).run(
+            ClaudeRunRequest(model=None, system=None, messages=({"role": "user", "content": []},)),
+            on_delta=deltas.append,
+        )
+    assert exc.value.error_code == ProviderErrorCode.AUTH
+    assert "apiKeyHelper" in str(exc.value)
+    assert deltas == []
+
+
+@pytest.mark.parametrize("source", ["none", "<absent>"])
+def test_the_subscription_or_an_unreported_source_runs(tmp_path, source):
+    """`none` is the subscription; a field the CLI does not send is left to
+    the environment sweep and the auth check instead of blocking every turn."""
+    result = ClaudeCliStream(runtime(tmp_path, FAKE_CLAUDE_API_KEY_SOURCE=source)).run(
+        ClaudeRunRequest(model=None, system=None, messages=({"role": "user", "content": []},))
+    )
+    assert result.text

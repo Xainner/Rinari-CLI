@@ -123,8 +123,74 @@ def _assistant(text: str, message_id: str = MESSAGE_ID, *, block: str = "text") 
     }
 
 
+# The account picker the real CLI answers `initialize` with (2.1.286), cut to
+# the cases that matter: a model with every level, one without `xhigh`, Haiku
+# with no `supportsEffort` field at all, and the `default` pointer.
+PICKER = [
+    {
+        "value": "default",
+        "resolvedModel": "claude-opus-5-5",
+        "displayName": "Default (recommended)",
+        "supportsEffort": True,
+        "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"],
+    },
+    {
+        "value": "opus",
+        "resolvedModel": "claude-opus-5-5",
+        "displayName": "Opus 5.5",
+        "description": "For complex work and everyday tasks",
+        "supportsEffort": True,
+        "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"],
+        "supportsAdaptiveThinking": True,
+    },
+    {
+        "value": "claude-opus-4-6",
+        "resolvedModel": "claude-opus-4-6",
+        "displayName": "Opus 4.6",
+        "supportsEffort": True,
+        "supportedEffortLevels": ["low", "medium", "high", "max"],
+    },
+    {
+        "value": "haiku",
+        "resolvedModel": "claude-haiku-4-5-20251001",
+        "displayName": "Haiku 4.5",
+        "description": "Fastest for quick answers",
+    },
+]
+ENV_NO_PICKER = "FAKE_CLAUDE_NO_PICKER"
+ENV_API_KEY_SOURCE = "FAKE_CLAUDE_API_KEY_SOURCE"
+
+
+def _control_initialize(stdin_text: str) -> bool:
+    """Answer an SDK `initialize` without generating anything, like the real CLI."""
+    for line in stdin_text.splitlines():
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if message.get("type") == "control_request" and (
+            (message.get("request") or {}).get("subtype") == "initialize"
+        ):
+            if os.environ.get(ENV_NO_PICKER):
+                return True  # an older CLI: no answer, just exit
+            _emit(
+                {
+                    "type": "control_response",
+                    "response": {
+                        "subtype": "success",
+                        "request_id": message.get("request_id"),
+                        "response": {"models": PICKER, "account": {"email": "x@example.com"}},
+                    },
+                }
+            )
+            return True
+    return False
+
+
 def _print_mode(argv: list[str]) -> int:
     stdin_text = "" if sys.stdin is None else sys.stdin.read()
+    if _control_initialize(stdin_text):
+        return 0
     _record(argv, stdin_text)
     mode = os.environ.get(ENV_MODE, "ok")
     text = os.environ.get(ENV_TEXT, "Hola desde el CLI falso.")
@@ -155,7 +221,20 @@ def _print_mode(argv: list[str]) -> int:
         _emit({"type": "result", "subtype": "error_during_execution", "result": "boom"})
         return 1
 
-    _emit({"type": "system", "subtype": "init", "model": "claude-sonnet-4-6-20260219"})
+    _emit(
+        {
+            "type": "system",
+            "subtype": "init",
+            "model": "claude-sonnet-4-6-20260219",
+            # "none" means OAuth: the subscription. Anything else names the
+            # API credential the real CLI picked.
+            **(
+                {}
+                if os.environ.get(ENV_API_KEY_SOURCE) == "<absent>"
+                else {"apiKeySource": os.environ.get(ENV_API_KEY_SOURCE, "none")}
+            ),
+        }
+    )
     if os.environ.get(ENV_THINKING):
         # Extended thinking arrives as the same Anthropic blocks the HTTP API
         # sends, only wrapped in `stream_event`.
