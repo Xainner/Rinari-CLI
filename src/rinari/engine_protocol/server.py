@@ -2865,25 +2865,82 @@ class EngineServer:
         self._turns.emit_external(event("provider.auth.updated", result))
         return result
 
+    def _external_cli_provider(self, ref: str) -> Any | None:
+        provider = self._services.providers.get(ref)
+        return provider if provider.auth_method == "external-cli" else None
+
     def _provider_auth_start(self, params):
-        return self._auth_event(
-            self._auth_service().start(
-                self._need_str(params, "ref"), params.get("method", "browser")
+        ref = self._need_str(params, "ref")
+        if self._external_cli_provider(ref) is not None:
+            # Rinari runs no login for a CLI that owns its authentication; a
+            # flow here would either be fake or take the account away from it.
+            raise InvalidUsageError(
+                "Sign-in for this provider belongs to the Claude Code CLI.",
+                hint="Run `claude auth login --claudeai`, then check again.",
             )
-        )
+        return self._auth_event(self._auth_service().start(ref, params.get("method", "browser")))
 
     def _provider_auth_get(self, params):
+        ref = self._need_str(params, "ref")
+        provider = self._external_cli_provider(ref)
+        if provider is not None:
+            return self._auth_event(self._external_auth_snapshot(provider))
         return self._auth_event(
-            self._auth_service().get(
-                self._need_str(params, "ref"), self._opt_str(params, "operation_id")
-            )
+            self._auth_service().get(ref, self._opt_str(params, "operation_id"))
         )
 
     def _provider_auth_cancel(self, params):
-        return self._auth_event(self._auth_service().cancel(self._need_str(params, "ref")))
+        ref = self._need_str(params, "ref")
+        provider = self._external_cli_provider(ref)
+        if provider is not None:
+            # Nothing is in flight to cancel: answer with the live state.
+            return self._auth_event(self._external_auth_snapshot(provider))
+        return self._auth_event(self._auth_service().cancel(ref))
 
     def _provider_auth_logout(self, params):
-        return self._auth_event(self._auth_service().logout(self._need_str(params, "ref")))
+        ref = self._need_str(params, "ref")
+        if self._external_cli_provider(ref) is not None:
+            # `claude auth logout` would sign the user out of Claude Code
+            # everywhere -- their terminal and every other app included -- so
+            # Rinari never runs it on their behalf (plan section 26).
+            raise InvalidUsageError(
+                "Signing out would sign Claude Code out everywhere, not just in Rinari.",
+                hint="Remove the provider to disconnect it from Rinari; run "
+                "`claude auth logout` yourself if you want to sign Claude Code out.",
+            )
+        return self._auth_event(self._auth_service().logout(ref))
+
+    def _external_auth_snapshot(self, provider: Any) -> dict[str, Any]:
+        """`provider.auth.get` for a CLI-owned login (plan section 26).
+
+        Read live from the CLI on every call, so an external sign-out or a
+        switch to API billing shows here instead of a stale "connected".
+        """
+        from rinari.providers.claude_cli import (
+            STATE_CONNECTED,
+            STATE_LOGGED_OUT,
+            STATE_MISSING_CLI,
+        )
+        from rinari.providers.registry import adapter_for
+
+        status = adapter_for(provider).runtime.auth_status()
+        state = {
+            STATE_CONNECTED: "connected",
+            STATE_LOGGED_OUT: "needs_auth",
+            STATE_MISSING_CLI: "disconnected",
+        }.get(status.state, "error")
+        plan = f" ({status.subscription_type})" if status.subscription_type else ""
+        return {
+            "operation_id": None,
+            "provider_id": provider.id,
+            "status": state,
+            "authorization_url": None,
+            "user_code": None,
+            "expires_at": None,
+            "detail": status.detail or f"Claude subscription{plan}",
+            "auth_kind": "external-cli",
+            "managed_by": "claude-cli",
+        }
 
     def _provider_usage(self, params):
         from rinari.providers.usage import ProviderUsageService
@@ -2941,8 +2998,10 @@ class EngineServer:
             raise EngineProtocolError(INVALID_PARAMS, f"Unknown runtime: {runtime_id}")
         from rinari.providers.adapters.claude_subscription import ClaudeSubscriptionAdapter
 
-        command_path = self._opt_str(params, "command_path")
-        adapter = ClaudeSubscriptionAdapter(runtime=_claude_probe_runtime(command_path))
+        # No path parameter on purpose: the probe runs before any provider
+        # exists, and taking a path from the desktop would let it make the
+        # Engine execute any program. It uses the normal discovery only.
+        adapter = ClaudeSubscriptionAdapter(runtime=_claude_probe_runtime())
         return {"runtime": _runtime_block(adapter.runtime)}
 
     def _external_runtime_diagnostics(self, provider: Any) -> dict[str, Any]:
@@ -3360,10 +3419,10 @@ class EngineServer:
         return path.resolve()
 
 
-def _claude_probe_runtime(command_path: str | None):
+def _claude_probe_runtime():
     from rinari.providers.claude_cli import ClaudeCliRuntime
 
-    return ClaudeCliRuntime(command_override=command_path)
+    return ClaudeCliRuntime()
 
 
 def _runtime_block(runtime: Any) -> dict[str, Any]:

@@ -62,6 +62,18 @@ BILLING_ENV_VARS: tuple[str, ...] = (
 
 ENV_COMMAND_OVERRIDE = "RINARI_CLAUDE_COMMAND"
 
+#: File names a saved override may point at. The override is stored in
+#: provider settings, which the desktop can write, so without this a renderer
+#: could make the Engine execute any program on disk.
+CLAUDE_BINARY_NAMES: frozenset[str] = frozenset({"claude", "claude.exe", "claude.cmd"})
+
+
+def is_claude_binary(path: str) -> bool:
+    """True only for an existing file named like the official CLI."""
+    candidate = Path(path)
+    return candidate.name.lower() in CLAUDE_BINARY_NAMES and candidate.is_file()
+
+
 #: Levels `--effort` accepts in 2.1.286. Rinari offers three more (`none`,
 #: `minimal`, `ultra`); the CLI answers an unknown value with a warning on
 #: stderr and silently falls back to the default, which the user never sees.
@@ -482,20 +494,29 @@ class _Admission:
     """Single-request admission (plan section 13/36).
 
     The CLI of 2.1.286 has no `--max-turns`, so nothing upstream guarantees a
-    single generation. Rinari admits the first assistant generation of a run
-    and rejects every later one locally, which is what keeps one Rinari turn
-    from becoming several subscription calls.
+    single generation. Rinari admits the first generation of a run and
+    rejects any later one locally, which keeps one Rinari turn from becoming
+    several subscription calls.
+
+    A generation is a message id, not an `assistant` event: the real CLI
+    emits one `assistant` event per content block, so a reply with thinking
+    and text arrives as two events sharing one id. Counting events cut every
+    such reply short before its `result`, which is where the usage lives --
+    verified against 2.1.286, where Haiku with no effort set already thinks.
     """
 
-    admitted: int = 0
+    admitted_id: str | None = None
     rejected: int = 0
 
-    def admit(self) -> bool:
-        self.admitted += 1
-        if self.admitted > 1:
-            self.rejected += 1
-            return False
-        return True
+    def admit(self, message_id: str | None) -> bool:
+        if self.admitted_id is None:
+            # The first generation claims the run, with or without an id.
+            self.admitted_id = message_id or "<first>"
+            return True
+        if message_id is None or message_id == self.admitted_id:
+            return True
+        self.rejected += 1
+        return False
 
 
 def _isolation_args() -> list[str]:
@@ -692,6 +713,7 @@ class ClaudeCliStream:
             ) from exc
 
         text_parts: list[str] = []
+        fallback_parts: list[str] = []
         # Thinking blocks arrive as the same Anthropic events the HTTP adapter
         # parses, just wrapped in `stream_event`. Dropping them lost the
         # model's reasoning on a transport whose whole point is parity.
@@ -717,29 +739,39 @@ class ClaudeCliStream:
                         on_delta(delta)
                 continue
             if kind == "assistant":
-                if not admission.admit():
+                message = event.get("message") or {}
+                if not admission.admit(message.get("id")):
                     # A second generation would be a second subscription call
                     # for one Rinari turn: stop the child, keep the first.
                     run.cancel()
                     break
-                message = event.get("message") or {}
                 resolved_model = message.get("model") or resolved_model
                 stop_reason = message.get("stop_reason") or stop_reason
-                if not text_parts:
-                    whole = _message_text(message)
-                    if whole:
-                        text_parts.append(whole)
-                        if on_delta is not None:
-                            on_delta(whole)
+                # Held back, not streamed: the CLI also delivers its own error
+                # notices (an out-of-credits message, for one) as an assistant
+                # message, and only the `result` that follows says whether it
+                # was an answer. Real answers arrive as stream deltas anyway.
+                fallback_parts.append(_message_text(message))
                 continue
             if kind == "result":
                 result_payload = event
                 if isinstance(event.get("usage"), dict):
                     usage = event["usage"]
-                if event.get("subtype") not in (None, "success"):
+                # `is_error` is the verdict. The CLI reports a rejected call
+                # (a 429 for a model the plan does not cover) with
+                # `subtype: "success"`, so the subtype alone would hand an
+                # error notice to the user as the model's answer.
+                if event.get("is_error") or event.get("subtype") not in (None, "success"):
                     raise _result_error(event)
-                if not text_parts and isinstance(event.get("result"), str):
-                    text_parts.append(event["result"])
+                if not text_parts:
+                    held = "".join(fallback_parts)
+                    whole = held or (
+                        event["result"] if isinstance(event.get("result"), str) else ""
+                    )
+                    if whole:
+                        text_parts.append(whole)
+                        if on_delta is not None:
+                            on_delta(whole)
                 break
 
         if process.poll() is None:
@@ -801,17 +833,26 @@ def _result_error(event: dict[str, Any]) -> ProviderError:
     subtype = str(event.get("subtype") or "error")
     detail = event.get("result") if isinstance(event.get("result"), str) else subtype
     lowered = f"{subtype} {detail}".lower()
-    if "rate" in lowered or "429" in lowered:
+    status = event.get("api_error_status")
+    # Usage first: the CLI answers both "out of credits" and plain throttling
+    # with a 429, and only the first one is not worth retrying.
+    if "usage limit" in lowered or "usage credits" in lowered or "quota" in lowered:
+        return ProviderError(
+            "The Claude subscription has no usage left for this model.",
+            code=ProviderErrorCode.RATE_LIMIT,
+            hint="Pick another model, or check your plan at claude.ai/settings/usage.",
+        )
+    if status == 429 or "rate" in lowered or "429" in lowered:
         return ProviderError(
             "Claude rate-limited this request.",
             code=ProviderErrorCode.RATE_LIMIT,
             retryable=True,
         )
-    if "usage limit" in lowered or "quota" in lowered:
+    if status in (401, 403):
         return ProviderError(
-            "The Claude subscription reached its usage limit.",
-            code=ProviderErrorCode.RATE_LIMIT,
-            hint="Subscription limits are managed by Claude.",
+            "Claude rejected the authentication of this request.",
+            code=ProviderErrorCode.AUTH,
+            hint="Run `claude auth status` and sign in again if needed.",
         )
     if "context" in lowered and ("long" in lowered or "exceed" in lowered):
         return ProviderError(

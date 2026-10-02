@@ -392,6 +392,18 @@ def test_models_are_offered_without_claiming_the_account_has_them(tmp_path):
     assert all(m.capabilities["max_context_window"] is None for m in models)
 
 
+def test_effort_levels_have_one_source_and_it_is_not_the_adapter(tmp_path):
+    """`providers/metadata.py` declares reasoning levels for every product.
+
+    Per-model capabilities are merged last, so a copy published here would
+    quietly win if the two ever disagreed. The router-level test in
+    test_claude_subscription_provider.py checks what the desktop receives.
+    """
+    caps = adapter(tmp_path).list_models(None)[0].capabilities
+    assert "reasoning_levels" not in caps
+    assert "reasoning" not in caps
+
+
 def test_capabilities_do_not_promise_tools_before_the_bridge_exists(tmp_path):
     caps = adapter(tmp_path).capabilities()
     assert caps.streaming is True
@@ -498,3 +510,49 @@ def test_the_adapter_hands_thinking_to_rinari_as_items(tmp_path):
     )
     assert [item.type for item in response.items] == ["thinking", "text"]
     assert response.items[0].data["thinking"] == "paso a paso"
+
+
+# -- forma real del stream (verificada contra 2.1.286) ----------------------
+
+
+def test_thinking_and_text_of_one_generation_are_not_a_second_generation(tmp_path):
+    """The real CLI emits one assistant event per content block, same id.
+
+    Counting events killed every reply with thinking before its `result`, so
+    the provider-reported usage never arrived. Haiku with no effort set
+    already thinks, so this was every turn, not an edge case.
+    """
+    result = ClaudeCliStream(
+        runtime(tmp_path, FAKE_CLAUDE_THINKING="pienso", FAKE_CLAUDE_TEXT="respuesta")
+    ).run(ClaudeRunRequest(model=None, system=None, messages=({"role": "user", "content": []},)))
+    assert result.text == "respuesta"
+    # The `result` event was read: that is the only place usage comes from.
+    assert result.raw_result is not None
+    assert result.usage == {"input_tokens": 11, "output_tokens": 7, "cache_read_input_tokens": 3}
+
+
+def test_a_different_message_id_is_still_a_second_generation(tmp_path):
+    result = ClaudeCliStream(
+        runtime(tmp_path, FAKE_CLAUDE_MODE="double", FAKE_CLAUDE_TEXT="primera")
+    ).run(ClaudeRunRequest(model=None, system=None, messages=({"role": "user", "content": []},)))
+    assert result.text == "primera"
+    assert "SEGUNDA" not in result.text
+
+
+def test_an_error_reported_as_success_is_an_error(tmp_path):
+    """The CLI marks a rejected call `subtype: success` with `is_error: true`.
+
+    Seen for real with a model the plan does not cover: an out-of-credits
+    notice arrived as an assistant message and the subtype said success, so
+    it would have been shown to the user as the model's answer.
+    """
+    deltas: list[str] = []
+    with pytest.raises(ProviderError) as exc:
+        ClaudeCliStream(runtime(tmp_path, FAKE_CLAUDE_MODE="usage_credits")).run(
+            ClaudeRunRequest(model=None, system=None, messages=({"role": "user", "content": []},)),
+            on_delta=deltas.append,
+        )
+    assert exc.value.error_code == ProviderErrorCode.RATE_LIMIT
+    assert exc.value.retryable is False
+    # Nothing of the notice was streamed as if the model had said it.
+    assert deltas == []

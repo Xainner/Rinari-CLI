@@ -42,8 +42,12 @@ from rinari.providers.errors import ProviderError, ProviderErrorCode
 #: Aliases the CLI documents for `--model`. They are a snapshot, not a claim
 #: about the account: availability stays "unknown" until a call resolves one,
 #: because no print-mode command lists the models a plan actually includes.
-#: Re-exported so the model capability matrix and tests name one source.
-SUPPORTED_EFFORT_LEVELS = CLAUDE_EFFORT_LEVELS
+#: The levels the CLI accepts, in the order Rinari shows them. Published per
+#: model so the composer enables exactly these and greys out the three Rinari
+#: offers that `--effort` would discard: a level the user can pick and that
+#: does nothing is worse than one that is visibly unavailable.
+SUPPORTED_EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
+assert set(SUPPORTED_EFFORT_LEVELS) == set(CLAUDE_EFFORT_LEVELS)
 
 PINNED_ALIASES: tuple[tuple[str, str], ...] = (
     ("fable", "Fable"),
@@ -151,7 +155,10 @@ class ClaudeSubscriptionAdapter(ProviderAdapter):
                     "tools": False,
                     "streaming": True,
                     "vision": None,
-                    "reasoning": None,
+                    # Reasoning levels are not published here on purpose:
+                    # `providers/metadata.py` owns that for every product, and
+                    # per-model capabilities are merged last, so a second copy
+                    # here would quietly win if the two ever disagreed.
                     "max_context_window": None,
                 },
             )

@@ -117,6 +117,57 @@ may be the same model, but they are different auth and billing routes, so
 Rinari persists `provider_id`, `product_id`, `provider_model_id` and
 `transport` rather than a name.
 
+## How the real CLI behaves (verified against 2.1.286)
+
+Checked with a real subscription, launching the CLI exactly as the transport
+does. Each point below changed the implementation.
+
+- **One `assistant` event per content block.** A reply with thinking and text
+  arrives as two `assistant` events sharing one message id; Haiku with no
+  effort set already thinks. Single-request admission therefore counts
+  message ids, not events -- counting events cut every such reply off before
+  its `result`, which is the only place the reported usage comes from.
+- **Errors can say `subtype: "success"`.** A model the plan does not cover
+  answers with an out-of-credits notice as an assistant message, then a
+  `result` with `subtype: "success"`, `is_error: true` and
+  `api_error_status: 429`. `is_error` is the verdict, and assistant-message
+  text is held back until the `result` confirms it was an answer, so a notice
+  is never streamed to the user as the model's reply.
+- **The billing risk is real, and `auth status` does not see it.** With
+  `ANTHROPIC_API_KEY` reaching the child, the CLI reports
+  `apiKeySource: "ANTHROPIC_API_KEY"` and bills the API, while
+  `claude auth status` still says `claude.ai`. With the transport's
+  sanitized environment the same call reports `apiKeySource: "none"` and runs
+  on the subscription. The environment sweep is what protects the user; the
+  auth check alone would not.
+- **Isolation holds.** The init event shows no tools, no MCP servers and no
+  slash commands, and the user's own `~/.claude/CLAUDE.md` does not reach the
+  child. Auto-memory points at an empty directory derived from the temporary
+  working directory, and no folder is left behind in `~/.claude/projects`.
+- **Aliases resolve.** `opus`, `sonnet` and `haiku` resolve to concrete
+  models (for example `claude-opus-5-5`); `fable` may need usage credits a
+  plan does not include, and fails with the 429 above.
+- **`ultracode` is not an effort level.** `--effort ultracode` is accepted
+  without a warning, but in the CLI it is a mode that runs dynamic workflows
+  and agents of its own while the effort stays as it was. That would turn
+  Claude Code into a second agent inside Rinari (plan sections 3.1 and 13),
+  so Rinari does not offer it. `max` is the highest level.
+
+## Authentication from Rinari
+
+`provider.auth.get` reads the CLI live and answers `connected`,
+`needs_auth` (signed out) or `error` (any other source), with
+`auth_kind: "external-cli"` and `managed_by: "claude-cli"`. Rinari runs no
+login of its own: `provider.auth.start` answers with the command to run, and
+`provider.auth.logout` refuses, because `claude auth logout` would sign the
+user out of Claude Code everywhere. Disconnecting from Rinari is removing the
+provider.
+
+A binary override saved in provider settings (`command_path`) must be an
+existing file named `claude`, `claude.exe` or `claude.cmd`. Provider settings
+are writable from the desktop, so anything else is refused when saved and
+ignored if it appears later; `provider.runtime.probe` takes no path at all.
+
 ## Usage and limits
 
 `provider.usage.get` reports `supported: false` for this product: there is no
@@ -140,11 +191,11 @@ usage, never converted into a bill.
   (`none`, `minimal`, `ultra`); the CLI answers an unknown value with a
   warning on stderr and falls back to its default, so Rinari does not send
   them. Picking one of the three leaves the model on its own default effort.
-- **Thinking** blocks are preserved: they arrive as the same Anthropic content
-  blocks the HTTP adapter parses, only wrapped in `stream_event`, and reach
-  Rinari as items with their signature. Whether a turn produces any is the
-  model's and the CLI's decision, not Rinari's — there is no flag here that
-  turns extended thinking on.
+- **Thinking** blocks are kept on the response as items with their
+  signature, the same way the HTTP adapter keeps them. Nothing renders them:
+  Rinari does not display a model's private reasoning (AGENTS.md), so what the
+  user controls and sees is the effort level, not the thinking. Whether a turn
+  produces any is the model's and the CLI's decision.
 - **No vision**, no structured output, no continuation reuse.
 - **Concurrency** is not yet limited per account.
 - The CLI has no `--max-turns` in 2.1.286, so a single generation per Rinari

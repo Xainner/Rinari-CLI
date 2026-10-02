@@ -3334,6 +3334,28 @@
         },
         "detail": {
           "type": "string"
+        },
+        "auth_kind": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Who runs the login: absent for Rinari-managed OAuth, 'external-cli' when an external CLI owns the authentication."
+        },
+        "managed_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Runtime that owns the login when auth_kind is 'external-cli'."
         }
       }
     },

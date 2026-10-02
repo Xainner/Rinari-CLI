@@ -120,8 +120,15 @@ def validate_provider_type(
 
 
 def _claude_runtime(settings: dict[str, Any]):
-    """Runtime for a saved provider, honouring a user-set binary override."""
-    from rinari.providers.claude_cli import ClaudeCliRuntime
+    """Runtime for a saved provider, honouring a valid binary override.
+
+    The override lives in provider settings, which the desktop can write, so
+    a path that is not the Claude CLI is never executed: it is ignored and the
+    normal discovery runs instead. `ProviderService` already refuses to save
+    one; this is the guard for every other way settings can change.
+    """
+    from rinari.providers.claude_cli import ClaudeCliRuntime, is_claude_binary
 
     override = settings.get("command_path")
-    return ClaudeCliRuntime(command_override=override if isinstance(override, str) else None)
+    valid = isinstance(override, str) and is_claude_binary(override)
+    return ClaudeCliRuntime(command_override=override if valid else None)

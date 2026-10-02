@@ -326,7 +326,16 @@ class ModelRouter:
             return base
         if model.provider_id != provider.id:
             return base
-        if _resolve_transport(provider, model) not in ("chat", "responses", "anthropic"):
+        # A provider served by an external runtime routes itself: its adapter
+        # is the transport, so the "unknown wire transport" guard below does
+        # not apply. Flattening it here told the desktop that a model with no
+        # HTTP transport also had no streaming and no configurable reasoning,
+        # which greyed out the whole effort selector.
+        if provider.auth_method != "external-cli" and _resolve_transport(provider, model) not in (
+            "chat",
+            "responses",
+            "anthropic",
+        ):
             return replace(
                 base,
                 streaming=False,
@@ -335,6 +344,8 @@ class ModelRouter:
                 reasoning_effort=False,
                 vision=False,
             )
+        if provider.auth_method == "external-cli":
+            return _merge_capabilities(base, effective_metadata(provider, model))
         if _resolve_transport(provider, model) == "anthropic":
             from rinari.providers.adapters.anthropic import AnthropicAdapter
 
@@ -438,6 +449,11 @@ class ModelRouter:
         return response
 
     def _transport_adapter(self, provider, transport):
+        # An external runtime is its own transport: the adapter owns the
+        # process and there is no wire API to pick. The guard below is about
+        # HTTP transports Rinari cannot speak, and must not swallow this one.
+        if provider.auth_method == "external-cli":
+            return self.adapter(provider), transport
         if transport == "anthropic":
             from rinari.providers.adapters.anthropic import AnthropicAdapter
 

@@ -206,12 +206,13 @@ def test_the_setup_flow_can_probe_the_runtime_before_a_provider_exists(
 ):
     """The card must tell "not installed" from "wrong account" before saving."""
     monkeypatch.setenv("FAKE_CLAUDE_AUTH", "console")
+    monkeypatch.setenv("RINARI_CLAUDE_COMMAND", str(fake_cli(tmp_path)))
     response = engine_server.handle_line(
         json.dumps(
             {
                 "id": "p1",
                 "method": "provider.runtime.probe",
-                "params": {"runtime": "claude-cli", "command_path": str(fake_cli(tmp_path))},
+                "params": {"runtime": "claude-cli"},
             }
         )
     )
@@ -240,3 +241,166 @@ def test_the_probe_is_declared_in_the_protocol_schema():
     )
     methods = schema["$defs"]["method"]["enum"]
     assert "provider.runtime.probe" in methods
+
+
+# -- enrutado del transporte externo ---------------------------------------
+
+
+def _saved_model(services, tmp_path, monkeypatch, alias="sonnet"):
+    monkeypatch.setenv("RINARI_CLAUDE_COMMAND", str(fake_cli(tmp_path)))
+    provider = services.providers.add(
+        AddProviderInput(
+            alias="claude-sub",
+            provider_type="custom",
+            auth_method="external-cli",
+            endpoint=CLAUDE_CLI_ENDPOINT,
+            settings=dict(SETTINGS),
+        )
+    )
+    return provider, services.models.add(provider.id, alias, alias)
+
+
+def test_the_router_routes_an_external_runtime_instead_of_rejecting_it(
+    services, tmp_path, monkeypatch
+):
+    """Declaring the product's transport must not make its turns unroutable.
+
+    `claude-cli` is a real route owned by the adapter, but the router's guards
+    only knew the HTTP wire transports: one flattened every capability to
+    false (the composer greyed out the whole effort selector) and the other
+    refused the call outright with "a transport not yet implemented". Both
+    were found by the owner, one after the other, on a real turn.
+    """
+    from rinari.models.router import ModelRouter
+    from rinari.models.types import ChatMessage, ModelRequest
+
+    provider, model = _saved_model(services, tmp_path, monkeypatch)
+    router = ModelRouter(services.providers, services.models)
+
+    caps = router.capabilities(provider, model.id)
+    assert caps.reasoning_effort is True
+    assert caps.streaming is True
+    matrix = router.capability_matrix(provider, model.id)
+    assert matrix["capabilities"]["reasoning_levels"] == ["low", "medium", "high", "xhigh", "max"]
+    assert matrix["metadata"]["route_supported"] is True
+
+    response = router.invoke(
+        provider, model.id, ModelRequest(model=model.alias, messages=(ChatMessage.user("hola"),))
+    )
+    assert response.content
+
+
+def test_a_level_the_cli_rejects_is_refused_before_spending_a_call(services, tmp_path, monkeypatch):
+    """The engine validates the effort against the published levels."""
+    from rinari.models.router import ModelRouter
+    from rinari.models.types import ChatMessage, ModelRequest
+
+    provider, model = _saved_model(services, tmp_path, monkeypatch)
+    router = ModelRouter(services.providers, services.models)
+    request = ModelRequest(
+        model=model.alias, messages=(ChatMessage.user("hola"),), reasoning_effort="ultra"
+    )
+    with pytest.raises(InvalidUsageError):
+        router.invoke(provider, model.id, request)
+
+
+# -- auth del proveedor (seccion 26) ---------------------------------------
+
+
+def _rpc(engine_server, method, params):
+    return engine_server.handle_line(json.dumps({"id": method, "method": method, "params": params}))
+
+
+@pytest.mark.parametrize(
+    ("auth", "expected"),
+    [("subscription", "connected"), ("logged_out", "needs_auth"), ("console", "error")],
+)
+def test_auth_get_reads_the_cli_instead_of_the_oauth_store(
+    engine_server, services, tmp_path, monkeypatch, auth, expected
+):
+    """The generic OAuth service answered "disconnected" for a working provider."""
+    provider, _ = _saved_model(services, tmp_path, monkeypatch)
+    monkeypatch.setenv("FAKE_CLAUDE_AUTH", auth)
+    response = _rpc(engine_server, "provider.auth.get", {"ref": provider.id})
+    assert response["ok"] is True
+    snapshot = response["result"]
+    assert snapshot["status"] == expected
+    assert snapshot["auth_kind"] == "external-cli"
+    assert snapshot["managed_by"] == "claude-cli"
+    assert snapshot["authorization_url"] is None
+
+
+def test_auth_logout_never_signs_claude_code_out(engine_server, services, tmp_path, monkeypatch):
+    """`claude auth logout` would sign the user out of Claude Code everywhere."""
+    provider, _ = _saved_model(services, tmp_path, monkeypatch)
+    record = tmp_path / "logout.json"
+    monkeypatch.setenv("FAKE_CLAUDE_RECORD", str(record))
+    response = _rpc(engine_server, "provider.auth.logout", {"ref": provider.id})
+    assert response["ok"] is False
+    assert not record.exists()
+    # The provider is still there: disconnecting from Rinari is removing it.
+    assert services.providers.get(provider.id).id == provider.id
+
+
+def test_auth_start_points_at_the_cli_instead_of_faking_a_login(
+    engine_server, services, tmp_path, monkeypatch
+):
+    provider, _ = _saved_model(services, tmp_path, monkeypatch)
+    response = _rpc(engine_server, "provider.auth.start", {"ref": provider.id, "method": "browser"})
+    assert response["ok"] is False
+    assert "claude auth login" in json.dumps(response["error"])
+
+
+# -- nunca ejecutar un binario ajeno ----------------------------------------
+
+
+def _impostor(tmp_path: Path) -> tuple[Path, Path]:
+    """A program that is not the Claude CLI and leaves a mark if it runs."""
+    marker = tmp_path / "IMPOSTOR_RAN"
+    if WINDOWS:
+        path = tmp_path / "evil.cmd"
+        path.write_text(f'@echo off\r\necho ran> "{marker}"\r\n', encoding="utf-8")
+    else:
+        path = tmp_path / "evil"
+        path.write_text(f'#!/bin/sh\necho ran > "{marker}"\n', encoding="utf-8")
+        path.chmod(path.stat().st_mode | stat.S_IEXEC)
+    return path, marker
+
+
+def test_the_probe_does_not_take_a_path_from_the_desktop(engine_server, tmp_path, monkeypatch):
+    """A probe that took a path let the renderer run any program on disk."""
+    impostor, marker = _impostor(tmp_path)
+    monkeypatch.setenv("RINARI_CLAUDE_COMMAND", str(fake_cli(tmp_path)))
+    _rpc(
+        engine_server,
+        "provider.runtime.probe",
+        {"runtime": "claude-cli", "command_path": str(impostor)},
+    )
+    assert not marker.exists()
+
+
+def test_a_saved_override_that_is_not_the_cli_is_refused(services, tmp_path, monkeypatch):
+    impostor, marker = _impostor(tmp_path)
+    monkeypatch.setenv("RINARI_CLAUDE_COMMAND", str(fake_cli(tmp_path)))
+    with pytest.raises(InvalidUsageError):
+        services.providers.add(
+            AddProviderInput(
+                alias="claude-sub",
+                provider_type="custom",
+                auth_method="external-cli",
+                endpoint=CLAUDE_CLI_ENDPOINT,
+                settings={**SETTINGS, "command_path": str(impostor)},
+            )
+        )
+    assert not marker.exists()
+    assert services.providers.list() == []
+
+
+def test_an_override_changed_later_is_still_never_executed(tmp_path):
+    """Settings can change after creation; the registry guards that path."""
+    impostor, marker = _impostor(tmp_path)
+    adapter = adapter_for(record(settings={**SETTINGS, "command_path": str(impostor)}))
+    adapter.runtime.auth_status()
+    assert not marker.exists()
+    found = adapter.runtime.resolve()
+    assert found is None or Path(found.path) != impostor

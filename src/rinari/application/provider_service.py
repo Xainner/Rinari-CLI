@@ -185,6 +185,16 @@ class ProviderService:
                         "Unsupported external CLI provider.",
                         hint="Add it from the Claude Subscription catalog entry.",
                     )
+                from rinari.providers.claude_cli import is_claude_binary
+
+                override = (record.settings or {}).get("command_path")
+                if override is not None and not (
+                    isinstance(override, str) and is_claude_binary(override)
+                ):
+                    raise InvalidUsageError(
+                        "command_path must point at the Claude Code CLI",
+                        hint="Expected an existing file named claude, claude.exe or claude.cmd.",
+                    )
                 # Prove the transport is usable before saving the provider,
                 # without spending an inference call. A provider that cannot
                 # be shown to run on a subscription is never created: a saved

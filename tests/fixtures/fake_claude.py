@@ -96,14 +96,29 @@ def _record(argv: list[str], stdin_text: str) -> None:
         )
 
 
-def _assistant(text: str) -> dict:
+MESSAGE_ID = "msg_fake_first_generation"
+
+
+def _assistant(text: str, message_id: str = MESSAGE_ID, *, block: str = "text") -> dict:
+    """One assistant event carries ONE content block, like the real CLI.
+
+    Verified against 2.1.286: a reply with thinking and text arrives as two
+    `assistant` events that share one message id. A second generation is a
+    different id.
+    """
+    content = (
+        {"type": "thinking", "thinking": text, "signature": "sig-abc"}
+        if block == "thinking"
+        else {"type": "text", "text": text}
+    )
     return {
         "type": "assistant",
         "message": {
+            "id": message_id,
             "role": "assistant",
             "model": "claude-sonnet-4-6-20260219",
-            "stop_reason": "end_turn",
-            "content": [{"type": "text", "text": text}],
+            "stop_reason": None,
+            "content": [content],
         },
     }
 
@@ -119,6 +134,23 @@ def _print_mode(argv: list[str]) -> int:
         return 0
     if mode == "empty":
         return 0  # exit 0 with no output: the print-mode regression of section 53
+    if mode == "usage_credits":
+        # Verified against 2.1.286 with a model the plan does not cover: a
+        # synthetic assistant notice, then a result whose subtype says
+        # success while is_error and api_error_status say otherwise.
+        notice = "You are out of usage credits. Switch to another model."
+        _emit(_assistant(notice, "4b6f0a1e-synthetic"))
+        _emit(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": True,
+                "api_error_status": 429,
+                "result": notice,
+                "usage": {"input_tokens": 0, "output_tokens": 0},
+            }
+        )
+        return 1
     if mode == "error":
         _emit({"type": "result", "subtype": "error_during_execution", "result": "boom"})
         return 1
@@ -163,10 +195,13 @@ def _print_mode(argv: list[str]) -> int:
                 "delta": {"type": "text_delta", "text": chunk},
             }
         )
+    if os.environ.get(ENV_THINKING):
+        # Thinking first, as its own event, with the same id as the text.
+        _emit(_assistant(os.environ[ENV_THINKING], block="thinking"))
     _emit(_assistant(text))
     if mode == "double":
         # A second generation for one request: Rinari must reject it locally.
-        _emit(_assistant("SEGUNDA GENERACION"))
+        _emit(_assistant("SEGUNDA GENERACION", "msg_fake_second_generation"))
     if mode == "rate_limit":
         _emit({"type": "result", "subtype": "error_rate_limit", "result": "rate limit reached"})
         return 1
