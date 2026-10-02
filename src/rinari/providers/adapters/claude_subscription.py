@@ -297,38 +297,50 @@ def _discovered(model: ClaudeModel) -> DiscoveredModel:
 
 
 def _split_history(request: ModelRequest) -> tuple[str | None, tuple[dict[str, Any], ...]]:
-    """Rinari history -> Claude stream-json input.
+    """Rinari history -> Claude stream-json input, as ONE user message.
 
-    The system prompt travels as `--system-prompt`, which replaces Claude
-    Code's own agentic prompt instead of stacking on top of it (plan section
-    35). Everything else is replayed from the Rinari session, which stays the
-    only source of truth (plan section 16).
+    The CLI answers every `user` line on stdin as a turn of its own (verified
+    against 2.1.286: two lines, two generations, two results). Sending one
+    line per history message therefore made each Rinari turn answer the
+    first message of the conversation, with the admission guard cutting the
+    rest; without the guard it would have been one subscription call per
+    message. The whole thread goes in a single message instead: the earlier
+    turns as a transcript block, the newest user message as the last block,
+    where the model reads it as the thing to answer.
+
+    The system prompt travels as `--system-prompt-file`, replacing Claude
+    Code's own (plan section 35). The Rinari session stays the only source of
+    truth for history (plan section 16).
     """
     system_parts = [m.content or "" for m in request.messages if m.role == "system" and m.content]
-    messages: list[dict[str, Any]] = []
-    for message in request.messages:
-        if message.role == "system":
-            continue
-        text = message.content or ""
-        if message.role == "assistant":
-            # Replayed as context for the next generation; the CLI accepts a
-            # user turn per line, so prior answers are labelled inline.
-            if text:
-                messages.append(_user_block(f"[assistant]\n{text}"))
-            continue
-        if message.role == "tool":
-            if text:
-                messages.append(_user_block(f"[tool result: {message.name or 'tool'}]\n{text}"))
-            continue
-        if text:
-            messages.append(_user_block(text))
-    if not messages:
-        messages.append(_user_block(""))
-    return ("\n\n".join(system_parts) or None), tuple(messages)
+    turns = [m for m in request.messages if m.role != "system"]
+    # The newest user message is what this generation answers; anything that
+    # came after it in the same turn (a runtime note) stays with it.
+    last_user = max((i for i, m in enumerate(turns) if m.role == "user"), default=None)
+    earlier = turns if last_user is None else turns[:last_user]
+    current = [] if last_user is None else turns[last_user:]
+
+    blocks: list[dict[str, Any]] = []
+    transcript = "\n".join(_transcript_entry(m) for m in earlier if m.content)
+    if transcript:
+        blocks.append(_text_block(f"<conversation_history>\n{transcript}\n</conversation_history>"))
+    for message in current:
+        if message.content:
+            entry = message.content if message.role == "user" else _transcript_entry(message)
+            blocks.append(_text_block(entry))
+    if not blocks:
+        blocks.append(_text_block(""))
+    return ("\n\n".join(system_parts) or None), ({"role": "user", "content": blocks},)
 
 
-def _user_block(text: str) -> dict[str, Any]:
-    return {"role": "user", "content": [{"type": "text", "text": text}]}
+def _transcript_entry(message: Any) -> str:
+    if message.role == "tool":
+        return f'<turn role="tool" name="{message.name or "tool"}">\n{message.content}\n</turn>'
+    return f'<turn role="{message.role}">\n{message.content}\n</turn>'
+
+
+def _text_block(text: str) -> dict[str, Any]:
+    return {"type": "text", "text": text}
 
 
 def _usage(payload: dict[str, Any] | None) -> Usage:

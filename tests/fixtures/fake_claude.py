@@ -23,6 +23,7 @@ ENV_TEXT = "FAKE_CLAUDE_TEXT"
 ENV_RECORD = "FAKE_CLAUDE_RECORD"  # path: dump argv + env + stdin for assertions
 ENV_VERSION = "FAKE_CLAUDE_VERSION"
 ENV_THINKING = "FAKE_CLAUDE_THINKING"
+ENV_ECHO = "FAKE_CLAUDE_ECHO"  # reply names the line it answers
 
 
 def _emit(payload: dict) -> None:
@@ -235,6 +236,36 @@ def _print_mode(argv: list[str]) -> int:
             ),
         }
     )
+    turns = _user_turns(stdin_text) or [""]
+    for number, turn_text in enumerate(turns):
+        message_id = MESSAGE_ID if number == 0 else f"msg_fake_turn_{number}"
+        reply = f"respuesta a: {turn_text[-60:]}" if os.environ.get(ENV_ECHO) else text
+        status = _generation(reply, message_id, mode)
+        if status is not None:
+            return status
+    return 0
+
+
+def _user_turns(stdin_text: str) -> list[str]:
+    """The text of each `user` line, which the real CLI answers one by one."""
+    turns = []
+    for line in stdin_text.splitlines():
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if message.get("type") != "user":
+            continue
+        content = (message.get("message") or {}).get("content")
+        if isinstance(content, str):
+            turns.append(content)
+        elif isinstance(content, list):
+            turns.append("".join(b.get("text", "") for b in content if isinstance(b, dict)))
+    return turns
+
+
+def _generation(text: str, message_id: str, mode: str) -> int | None:
+    """One generation with its own `result`, as the real CLI emits per turn."""
     if os.environ.get(ENV_THINKING):
         # Extended thinking arrives as the same Anthropic blocks the HTTP API
         # sends, only wrapped in `stream_event`.
@@ -276,8 +307,8 @@ def _print_mode(argv: list[str]) -> int:
         )
     if os.environ.get(ENV_THINKING):
         # Thinking first, as its own event, with the same id as the text.
-        _emit(_assistant(os.environ[ENV_THINKING], block="thinking"))
-    _emit(_assistant(text))
+        _emit(_assistant(os.environ[ENV_THINKING], message_id, block="thinking"))
+    _emit(_assistant(text, message_id))
     if mode == "double":
         # A second generation for one request: Rinari must reject it locally.
         _emit(_assistant("SEGUNDA GENERACION", "msg_fake_second_generation"))
@@ -292,7 +323,7 @@ def _print_mode(argv: list[str]) -> int:
             "usage": {"input_tokens": 11, "output_tokens": 7, "cache_read_input_tokens": 3},
         }
     )
-    return 0
+    return None
 
 
 def _chunks(text: str) -> list[str]:

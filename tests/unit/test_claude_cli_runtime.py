@@ -470,10 +470,16 @@ def test_invoke_builds_history_from_rinari_not_from_claude(tmp_path):
     )
     seen = json.loads(record.read_text(encoding="utf-8"))
     lines = [json.loads(line) for line in seen["stdin"].splitlines() if line.strip()]
-    texts = [block["text"] for line in lines for block in line["message"]["content"]]
-    assert texts == ["primera", "[assistant]\nrespuesta", "segunda"]
+    # One user message: the earlier turns as a transcript, the new one last.
+    # (This test used to assert one line per message -- the shape that made
+    # every turn answer the first message of the conversation.)
+    assert len(lines) == 1
+    texts = [block["text"] for block in lines[0]["message"]["content"]]
+    assert texts[-1] == "segunda"
+    assert '<turn role="user">\nprimera\n</turn>' in texts[0]
+    assert '<turn role="assistant">\nrespuesta\n</turn>' in texts[0]
     # The system prompt replaces Claude Code's own, it is not a user turn.
-    assert "Sos Rinari." not in texts
+    assert not any("Sos Rinari." in text for text in texts)
     assert response.provider_state["transport"] == "claude-cli"
     assert response.provider_state["resolved_model"] == "claude-sonnet-4-6-20260219"
     assert response.usage.input_tokens == 11
@@ -616,3 +622,57 @@ def test_the_subscription_or_an_unreported_source_runs(tmp_path, source):
         ClaudeRunRequest(model=None, system=None, messages=({"role": "user", "content": []},))
     )
     assert result.text
+
+
+# -- el hilo de la conversacion ----------------------------------------------
+
+
+def test_the_reply_answers_the_latest_message_not_the_first(tmp_path):
+    """The real CLI answers each stdin `user` line as its own turn.
+
+    Verified against 2.1.286: two lines give two generations and two results.
+    Sending one line per history message made every Rinari turn answer the
+    FIRST message of the conversation -- the admission guard then cut the
+    rest -- so a chat lost its thread from the second turn on. The owner saw
+    "which model am I using?" answered with a greeting.
+    """
+    from rinari.models.types import ChatMessage, ModelRequest
+
+    request = ModelRequest(
+        model="sonnet",
+        messages=(
+            ChatMessage.system("Sos Rinari."),
+            ChatMessage.user("Hola Rinari"),
+            ChatMessage.assistant("Hola, en que andamos?"),
+            ChatMessage.user("que modelo estoy usando?"),
+        ),
+    )
+    response = adapter(tmp_path, FAKE_CLAUDE_ECHO="1").invoke_stream(
+        request, None, None, lambda _d: None
+    )
+    assert response.content.endswith("que modelo estoy usando?")
+
+
+def test_one_rinari_turn_is_one_user_message_on_stdin(tmp_path):
+    """One line, so one generation: never one subscription call per message."""
+    from rinari.models.types import ChatMessage, ModelRequest
+
+    record = tmp_path / "record.json"
+    request = ModelRequest(
+        model="sonnet",
+        messages=(
+            ChatMessage.user("primera"),
+            ChatMessage.assistant("respuesta"),
+            ChatMessage.user("segunda"),
+        ),
+    )
+    adapter(tmp_path, FAKE_CLAUDE_RECORD=str(record)).invoke_stream(
+        request, None, None, lambda _d: None
+    )
+    seen = json.loads(record.read_text(encoding="utf-8"))
+    lines = [line for line in seen["stdin"].splitlines() if line.strip()]
+    assert len(lines) == 1
+    text = "".join(b["text"] for b in json.loads(lines[0])["message"]["content"])
+    # The whole thread travels, in order, with the new message last.
+    assert text.index("primera") < text.index("respuesta") < text.index("segunda")
+    assert text.rstrip().endswith("segunda")

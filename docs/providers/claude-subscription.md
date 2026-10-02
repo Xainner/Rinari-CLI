@@ -138,6 +138,13 @@ Rinari persists `provider_id`, `product_id`, `provider_model_id` and
 Checked with a real subscription, launching the CLI exactly as the transport
 does. Each point below changed the implementation.
 
+- **Each `user` line on stdin is a turn of its own.** Two lines produce two
+  generations and two results. The whole conversation therefore travels as
+  ONE user message per run -- earlier turns as a `<conversation_history>`
+  transcript, the newest message as the last block. Sending one line per
+  history message made every turn answer the first message of the
+  conversation (the admission guard cut the rest), and without the guard it
+  would have been one subscription call per message.
 - **One `assistant` event per content block.** A reply with thinking and text
   arrives as two `assistant` events sharing one message id; Haiku with no
   effort set already thinks. Single-request admission therefore counts
