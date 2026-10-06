@@ -302,7 +302,7 @@ def test_plan_tool_asks_and_resumes_real_agent_loop(desktop, monkeypatch):
             self.requests.append(request)
             if len(self.requests) == 1:
                 return ModelResponse(
-                    content="",
+                    content="Voy a ello.",
                     tool_calls=(
                         ToolCall(
                             id="ask-1",

@@ -67,7 +67,7 @@ def _start_chat(s, cwd: Path, user_home: Path):
 
 def _tool_call_response() -> ModelResponse:
     return ModelResponse(
-        content="",
+        content="Voy a ello.",
         tool_calls=(ToolCall(id="tc1", name="shell.exec", arguments={"command": "git init"}),),
         stop_reason=StopReason.TOOL_CALLS,
     )

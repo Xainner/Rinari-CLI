@@ -193,7 +193,7 @@ def test_declared_visual_attachments_and_tool_need_no_consent(
     fake.scripted.extend(
         [
             ModelResponse(
-                content="",
+                content="Voy a ello.",
                 tool_calls=(ToolCall("view-again", "fs.read_image", {"path": original.uri}),),
             ),
             _answer(),
@@ -246,7 +246,8 @@ def test_local_image_turn_persists_pixels_and_large_preview(
     fake = VisionModel(
         [
             ModelResponse(
-                content="", tool_calls=(ToolCall("view", "fs.read_image", {"path": str(path)}),)
+                content="Voy a ello.",
+                tool_calls=(ToolCall("view", "fs.read_image", {"path": str(path)}),),
             ),
             _answer(),
         ]
@@ -1048,7 +1049,7 @@ def test_owner_memory_tool_receives_persisted_source_before_loop(
     fake = FakeModel(
         scripted=[
             ModelResponse(
-                content="",
+                content="Voy a ello.",
                 tool_calls=(
                     ToolCall(
                         id="remember",
@@ -1094,7 +1095,7 @@ def test_owner_turn_keeps_a_memory_in_the_models_own_words(server, services, tmp
     fake = FakeModel(
         scripted=[
             ModelResponse(
-                content="",
+                content="Voy a ello.",
                 tool_calls=(
                     ToolCall(
                         id="remember",
@@ -1794,3 +1795,62 @@ def test_plain_compaction_does_not_continue(server, tmp_path, monkeypatch) -> No
     completed = _collect_until(server, session_id)[-1]
     assert completed["payload"]["kind"] == "compaction"
     assert len(model.requests) == 1
+
+
+def test_model_changed_notice_follows_the_models_that_wrote(
+    server, services, tmp_path, monkeypatch
+):
+    """A writes, B fails without writing, C writes: one notice "A → C", after C's first text."""
+    two = services.models.add("fake", "fake-model-2", "fake-two").id
+    three = services.models.add("fake", "fake-model-3", "fake-three").id
+    session_id = _create_chat(server, tmp_path, tag="mc")
+    services.sessions.rename(session_id, "Cambio de modelo")
+
+    class Failing(FakeModel):
+        def invoke(self, request):
+            raise RuntimeError("provider down")
+
+    callers = {
+        "fake-model-1": FakeModel(scripted=[_answer(), _answer()]),
+        "fake-model-2": Failing(scripted=[]),
+        "fake-model-3": FakeModel(scripted=[_answer(), _answer()]),
+    }
+    monkeypatch.setattr(
+        agent_runtime,
+        "_caller_for",
+        lambda services, rec: callers[services.ctx.model_repo.get(rec.model_id).provider_model_id],
+    )
+
+    def turn(tag, model_alias):
+        if model_alias is not None:
+            response = server.handle_line(
+                _req(f"{tag}-m", "session.model.set", {"ref": session_id, "model": model_alias})
+            )
+            assert response is not None and response["ok"] is True, response
+        started = server.handle_line(
+            _req(tag, "session.turn.start", {"session_id": session_id, "message": "hola"})
+        )
+        assert started is not None and started["ok"] is True, started
+        return _collect_until(server, session_id)
+
+    first = turn("mc1", None)
+    assert not [e for e in first if e["event"] == "model.changed"]
+    failed = turn("mc2", two)
+    assert failed[-1]["event"] == "turn.failed"
+    assert not [e for e in failed if e["event"] == "model.changed"]
+    written = turn("mc3", three)
+    names = [e["event"] for e in written]
+    notices = [e["payload"] for e in written if e["event"] == "model.changed"]
+    assert len(notices) == 1
+    notice = notices[0]
+    assert notice["previous"]["alias"] == "fake-one"
+    assert notice["next"]["alias"] == "fake-three"
+    assert notice["next"]["provider_alias"] == "fake"
+    assert names.index("model.changed") == names.index("model.content.completed") + 1
+    completed = next(e["payload"] for e in written if e["event"] == "model.content.completed")
+    assert notice["after_model_call_id"] == completed["model_call_id"]
+    # Persisted with the turn, so a reload rebuilds it in place.
+    stored = [e for e in services.ctx.event_repo.list(session_id) if e.type == "model.changed"]
+    assert len(stored) == 1 and stored[0].turn_id == notice["turn_id"]
+    again = turn("mc4", None)
+    assert not [e for e in again if e["event"] == "model.changed"]

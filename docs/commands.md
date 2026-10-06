@@ -858,6 +858,18 @@ Slice 5a adds `session.mode.set` (`ref`, `mode` plan/build/review):
 PLAN/REVIEW turns run under a READ_ONLY policy profile, BUILD under
 WORKSPACE; legacy modes keep workspace behavior. Emits
 `session.mode.changed`; the mode switch keeps session, tasks and context.
+Every stored title emits `session.renamed` (`session_id`, `title`,
+`source`: `manual`, `generated` or `fallback`). The first message names the
+session through the model; when no usable title comes back, the trimmed
+message is a provisional `fallback` and later turns retry from that same
+message (three failures at most, each a `SessionTitleFailed` event with only
+its reason). A manual rename ends the retries.
+The first text of a turn written by a different model than the last one that
+wrote in the session is followed by `model.changed` (`after_model_call_id`,
+`previous`, `next`, each with `model_id`, `alias`, `provider_model_id`,
+`provider_alias` as named at that moment). A model that was selected but failed
+before writing does not count. The event is persisted with the turn, so
+`session.timeline` rebuilds it in place.
 Slice 6a adds project workspace reads: `task.tree/get`,
 `verification.latest/plan`, `checkpoint.list/show/restore`,
 `project.changes` (porcelain files + branch/head/dirty, `available:false`

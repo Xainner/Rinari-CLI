@@ -389,7 +389,7 @@ class ProposingModel:
         self.requests.append(request)
         if self.validate_first and len(self.requests) == 1:
             return ModelResponse(
-                content="",
+                content="Voy a ello.",
                 stop_reason=StopReason.TOOL_CALLS,
                 tool_calls=(
                     ToolCall(
@@ -415,7 +415,7 @@ class ProposingModel:
             if self.before_save is not None:
                 self.before_save()
             return ModelResponse(
-                content="",
+                content="Voy a ello.",
                 stop_reason=StopReason.TOOL_CALLS,
                 tool_calls=(
                     ToolCall(
@@ -524,7 +524,7 @@ class UpdatingModel:
                 "version: 1.0.0", "version: 1.1.0"
             )
             return ModelResponse(
-                content="",
+                content="Voy a ello.",
                 stop_reason=StopReason.TOOL_CALLS,
                 tool_calls=(
                     ToolCall(

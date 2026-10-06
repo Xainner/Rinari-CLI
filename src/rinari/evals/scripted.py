@@ -41,13 +41,16 @@ def calls(
     *tool_calls: tuple[str, dict[str, Any]],
     id_prefix: str = "t",
     usage: Usage | None = None,
+    say: str = "On it.",
 ) -> ModelResponse:
+    """Tool calls with a line for the user, as the runtime expects before a
+    task's first batch (an empty `say` scripts a silent batch)."""
     calls_ = tuple(
         ToolCall(id=f"{id_prefix}{i}-{name}", name=name, arguments=args)
         for i, (name, args) in enumerate(tool_calls)
     )
     return ModelResponse(
-        content="",
+        content=say,
         tool_calls=calls_,
         stop_reason=StopReason.TOOL_CALLS,
         usage=usage or UsageStub().output,
