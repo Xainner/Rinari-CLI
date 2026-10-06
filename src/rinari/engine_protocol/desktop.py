@@ -43,6 +43,52 @@ class _Watch:
     revision: int = 0
 
 
+# Formats recognized by their first bytes: (signature, offset, kind, mime).
+_SIGNATURES: tuple[tuple[bytes, int, str, str], ...] = (
+    (b"\x89PNG\r\n\x1a\n", 0, "image", "image/png"),
+    (b"\xff\xd8\xff", 0, "image", "image/jpeg"),
+    (b"GIF87a", 0, "image", "image/gif"),
+    (b"GIF89a", 0, "image", "image/gif"),
+    (b"%PDF-", 0, "pdf", "application/pdf"),
+    (b"\x1a\x45\xdf\xa3", 0, "video", "video/webm"),
+    (b"OggS", 0, "audio", "audio/ogg"),
+    (b"fLaC", 0, "audio", "audio/flac"),
+    (b"ID3", 0, "audio", "audio/mpeg"),
+    (b"ftyp", 4, "video", "video/mp4"),
+)
+_RIFF = {
+    b"WEBP": ("image", "image/webp"),
+    b"WAVE": ("audio", "audio/wav"),
+    b"AVI ": ("video", "video/x-msvideo"),
+}
+_AUDIO_FTYP = {b"M4A ", b"M4B "}
+
+
+def _file_kind(path: Path, head: bytes) -> tuple[str, str]:
+    """`image`, `video`, `audio`, `pdf`, `text` or `binary`, plus a MIME type."""
+    import mimetypes
+
+    if head[:4] == b"RIFF" and head[8:12] in _RIFF:
+        return _RIFF[head[8:12]]
+    for signature, offset, kind, mime in _SIGNATURES:
+        if head[offset : offset + len(signature)] == signature:
+            if signature == b"ftyp":
+                brand = head[8:12]
+                if brand in _AUDIO_FTYP:
+                    return "audio", "audio/mp4"
+                if brand == b"qt  ":
+                    return "video", "video/quicktime"
+            return kind, mime
+    if len(head) >= 2 and head[0] == 0xFF and head[1] & 0xE0 == 0xE0:
+        return "audio", "audio/mpeg"
+    guessed = mimetypes.guess_type(path.name)[0] or ""
+    if guessed == "image/svg+xml":
+        return "image", guessed
+    if b"\0" in head:
+        return "binary", guessed or "application/octet-stream"
+    return "text", guessed or "text/plain"
+
+
 def _same_path(left: Path, right: Path) -> bool:
     """Compare stored provenance with the currently resolved target.
 
@@ -410,6 +456,33 @@ class DesktopWorkspace:
 
     def read(self, params):
         return self._preview(self.resolve_file(params))
+
+    def resolve(self, params):
+        """The authorized file and what it is, without reading it as text.
+
+        Same session/turn provenance as `read`, but the content never travels:
+        the desktop opens a video, reveals a file in its folder or opens it
+        with the system app from the approved path, at any size. `kind` comes
+        from the file's first bytes when they identify a format.
+        """
+        resolved = self.resolve_file(params)
+        try:
+            size = resolved.path.stat().st_size
+            with resolved.path.open("rb") as stream:
+                head = stream.read(64)
+        except OSError as exc:
+            raise EngineProtocolError("NOT_FOUND", "File no longer exists.") from exc
+        kind, mime = _file_kind(resolved.path, head)
+        return {
+            "path": str(resolved.path),
+            "name": resolved.path.name,
+            "size": size,
+            "kind": kind,
+            "mime": mime,
+            "provenance": resolved.provenance,
+            "sensitive": resolved.sensitive,
+            "preview_limit": PREVIEW_LIMIT,
+        }
 
     def watch(self, params):
         resolved = self.resolve_file(params)
