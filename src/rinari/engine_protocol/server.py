@@ -767,6 +767,16 @@ class EngineServer:
             "session": session_to_dict(record),
             "created": started.created,
             "warnings": list(started.warnings),
+            # The branch change behind a [git-branch] warning, so a client
+            # can word it in its own language: from, to, since, reference.
+            "branch_change": next(
+                (
+                    finding.data
+                    for finding in started.findings
+                    if finding.subsystem == "git-branch" and finding.data
+                ),
+                None,
+            ),
             # Structured, so a client can tell "never trusted" from "the
             # project's identity changed since the grant" (a new Git remote,
             # a re-created repository) without parsing the warning text.

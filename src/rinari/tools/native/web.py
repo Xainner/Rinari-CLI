@@ -578,6 +578,10 @@ def web_tools() -> list[ToolDefinition]:
                         "description": "Stable source_id; reuses its exact snapshot.",
                     },
                     "pattern": {"type": "string"},
+                    "refresh": {
+                        "type": "boolean",
+                        "description": "Bypass the 30-second session snapshot cache.",
+                    },
                 },
                 "required": ["pattern"],
                 "anyOf": [{"required": ["url"]}, {"required": ["source_id"]}],
@@ -643,7 +647,13 @@ def web_tools() -> list[ToolDefinition]:
             description="Build citation records for up to 10 URLs; per-URL failures included.",
             input_schema={
                 "type": "object",
-                "properties": {"urls": {"type": "array", "items": {"type": "string"}}},
+                "properties": {
+                    "urls": {"type": "array", "items": {"type": "string"}},
+                    "refresh": {
+                        "type": "boolean",
+                        "description": "Bypass the 30-second session snapshot cache.",
+                    },
+                },
             },
             risk=RISK_LOW,
             side_effects=SIDE_EFFECT_NONE,

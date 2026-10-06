@@ -14,6 +14,7 @@ BUNDLED_0001 = REPO_ROOT / "src/rinari/storage/migrations/0001_initial.sql"
 
 TABLES_AFTER_MIGRATIONS = {
     "schema_migrations",
+    "worktree_branches",
     "skill_records",
     "scheduled_tasks",
     "scheduled_runs",
@@ -118,6 +119,7 @@ def test_migrate_fresh_database_applies_all(db):
         39,
         40,
         41,
+        42,
     ]
     assert _table_names(db) == TABLES_AFTER_MIGRATIONS
 
@@ -126,7 +128,7 @@ def test_migrate_is_idempotent(db):
     runner = MigrationRunner(db, FakeClock())
     runner.migrate()
     assert runner.migrate() == []
-    assert runner.current_version() == 41
+    assert runner.current_version() == 42
 
 
 def _previous_home_migrations(tmp_path: Path, upto: int) -> Path:
@@ -278,7 +280,7 @@ def test_a_home_migrated_by_the_voice_branch_gets_the_missing_migrations(db, tmp
         },
     )
     MigrationRunner(db, FakeClock(), directory=voice).migrate()
-    assert MigrationRunner(db, FakeClock()).migrate() == [38, 39, 40, 41]
+    assert MigrationRunner(db, FakeClock()).migrate() == [38, 39, 40, 41, 42]
     columns = {row["name"] for row in db.query("PRAGMA table_info(sessions)")}
     assert "pinned_at" in columns
     assert {"skill_records", "scheduled_tasks", "scheduled_runs"} <= _table_names(db)
@@ -296,7 +298,7 @@ def test_a_home_that_applied_the_old_numbers_is_not_migrated_twice(db, tmp_path)
     MigrationRunner(db, FakeClock(), directory=old).migrate()
     runner = MigrationRunner(db, FakeClock())
     # No duplicate pinned_at column and nothing re-run: only what came after.
-    assert runner.migrate() == [41]
+    assert runner.migrate() == [41, 42]
     recorded = {row["version"]: row["name"] for row in db.query("SELECT * FROM schema_migrations")}
     assert recorded[38] == "0038_session_pins" and recorded[40] == "0040_scheduled_tasks"
     # The old numbers are free again for the migrations that own them.
@@ -336,7 +338,7 @@ def test_stored_runtime_notes_are_marked_as_harness_not_as_the_owner(db, tmp_pat
             (message_id, "ses_h", seq, "user", content, "t0"),
         )
 
-    assert MigrationRunner(db, FakeClock()).migrate() == [41]
+    assert MigrationRunner(db, FakeClock()).migrate() == [41, 42]
     origins = {m.id: m.origin for m in SessionMessageRepository(db).list("ses_h")}
     assert origins == {
         "m1": None,

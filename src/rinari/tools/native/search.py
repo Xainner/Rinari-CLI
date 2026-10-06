@@ -139,6 +139,8 @@ def search_tools() -> list[ToolDefinition]:
                 "properties": {
                     "pattern": {"type": "string"},
                     "path": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 500},
+                    "offset": {"type": "integer", "minimum": 0},
                 },
                 "required": ["pattern"],
             },

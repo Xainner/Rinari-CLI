@@ -793,6 +793,7 @@ class TurnManager:
                         "details": {
                             "content": result.content,
                             "governor": result.governor,
+                            "stop": result.stop_detail,
                         },
                         "usage": result.budget,
                     },

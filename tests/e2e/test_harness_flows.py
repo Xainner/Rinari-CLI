@@ -257,7 +257,7 @@ def test_e2e_large_output_spills_and_stays_bounded(tmp_path) -> None:
     tool = ToolDefinition(
         name="test.big",
         description="big output",
-        input_schema={"type": "object", "properties": {}},
+        input_schema={"type": "object", "properties": {"path": {"type": "string"}}},
         classify=lambda args: ClassifiedAction("fs.read", str(args.get("path") or "")),
         handler=lambda args, ctx: big,
     )

@@ -867,6 +867,26 @@ with the system app or reveal it in its folder, at any size.
 `artifact.resolve` (`uri`) does the same for an artifact: `path` of its stored
 bytes, `name`, `size`, `kind` and `mime`, so an audio or video artifact plays
 in the desktop instead of being read as text.
+`session.open` also returns `branch_change` (`from`, `to`, `since`,
+`reference`, `session_id`) when a `[git-branch]` warning was produced. The
+reference is the branch last observed while Rinari worked in that git worktree
+(`reference: last_work`, written at the start and end of every turn, from any
+conversation), or the checkout the first time a worktree is seen
+(`first_seen`; that first sight is recorded silently). Each change is reported
+once. `sessions.git_branch` keeps the historical branch a conversation started on.
+Attachment references carry `coverage` for PDFs (`total_pages`,
+`prepared_pages`, `text_pages`, `ocr_pages`, `empty_pages`,
+`unprocessed_pages`, `failed_pages`, and `pages[]` with each page's `method`
+and `reason`) and accept `keep_image` with `ocr` on images: the OCR text and
+the pixels both reach the model (capability `reading_coverage_v1`). Every
+attachment, images included, is listed for the model with its artifact URI and
+sha256, so tools can reuse the original.
+`turn.stopped.details.stop` names a loop stop (`loop`: the detector kind,
+`subject`: what repeated), so clients word it in their language.
+A stream that ends without its terminal event fails with
+`STREAM_INTERRUPTED` and `close` (`eof` or `done_marker`), `transport`,
+`endpoint` (no query or credentials), `http_status`, `request_id`,
+`bytes_received`, `elapsed_s`, `idle_s` and `partial_tool_calls`.
 Every stored title emits `session.renamed` (`session_id`, `title`,
 `source`: `manual`, `generated` or `fallback`). The first message names the
 session through the model; when no usable title comes back, the trimmed

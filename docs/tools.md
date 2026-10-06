@@ -23,6 +23,18 @@ aviso para revisarla y deshacerla; una skill nueva fuera de `/learn`, una skill
 instalada o creada por el dueño y cualquier contenido peligroso esperan
 aprobación. Reenviar el mismo contenido devuelve `status: unchanged`.
 
+## Parámetros desconocidos (2026-10-06)
+
+Una herramienta nativa rechaza, antes de ejecutar nada, cualquier parámetro que su
+schema no declare (`INVALID_ARGUMENT`, `details.unknown_arguments` y `accepted`). El
+mensaje nombra el parámetro parecido y su significado: `timeout_ms` en `shell.exec`
+sugiere `timeout_s` (segundos). Antes se aceptaba y se ignoraba, y el comando moría
+a los 60 s por defecto. Las herramientas de MCP, plugins y OpenAPI conservan su
+propio schema. `shell.exec` y `process.wait` devuelven `timeout`
+(`requested_s`, `effective_s`, `source`: `argument`, `default` o `deadline`); el
+límite de la herramienta (600 s) acota la espera, y para trabajos más largos se
+usa `background=true` con `process.wait`.
+
 ## Contexto de imágenes (Hermes, 2026-09-12)
 
 `fs.read_image` carga la referencia solicitada mediante la política visual del
@@ -103,6 +115,9 @@ PTY (Windows) `pty.start` devuelve `DEPENDENCY_ERROR` señalando `process.*`
 - `fs.read_image` — view local PNG/JPEG/WebP pixels through the session's vision adapter;
   preserves an immutable artifact for history and the desktop image viewer. List folders
   first, then inspect up to four images per batch. Filesystem permissions apply.
+- `fs.read_pdf_pages` — show pages of a PDF (local path or attached `artifact://`) as
+  images, up to four per call, for charts, tables, layout, scans or pages beyond the
+  20 prepared with the attachment. Renders are cached as derived artifacts.
 - `fs.read_lines`
 - `fs.read_binary`
 - `fs.head`
@@ -201,6 +216,7 @@ PTY (Windows) `pty.start` devuelve `DEPENDENCY_ERROR` señalando `process.*`
 - `artifact.delete`
 - `artifact.list`
 - `artifact.metadata`
+- `artifact.export`: copia los bytes originales de un artefacto de la sesión (por ejemplo, un adjunto) a un archivo real, para programas o subidas que necesitan una ruta. Pasa por la política de escritura y nunca sobrescribe.
 
 ### Artifact Search
 - `artifact.search`
