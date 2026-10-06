@@ -875,7 +875,7 @@ def test_cli_session_wires_agent_tools_end_to_end(app_ctx, git_repo, monkeypatch
     main = _MainModel(
         scripted=[
             ModelResponse(
-                content="",
+                content="Voy a ello.",
                 stop_reason=StopReason.TOOL_CALLS,
                 tool_calls=(
                     ToolCall(

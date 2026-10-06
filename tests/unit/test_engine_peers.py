@@ -46,7 +46,7 @@ def _answer(text: str = "hola") -> ModelResponse:
 
 def _tool(call_id: str, name: str, arguments: dict) -> ModelResponse:
     return ModelResponse(
-        content="",
+        content="Voy a ello.",
         tool_calls=(ToolCall(call_id, name, arguments),),
         stop_reason=StopReason.TOOL_CALLS,
     )

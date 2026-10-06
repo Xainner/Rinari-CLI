@@ -218,3 +218,19 @@ def test_runtime_preserves_read_scope_without_enabling_execution(
     assert ctx.read_profile.value == permission
     assert ctx.sandbox.unrestricted_reads is True  # reads are free in every profile
     assert not ctx.sandbox.write_roots
+
+
+def test_rename_publishes_session_renamed(server, tmp_path) -> None:
+    session_id = _create_chat(server, tmp_path)
+    server.drain_events()
+    response = server.handle_line(
+        _req("r1", "session.rename", {"ref": session_id, "title": "Mi nombre"})
+    )
+    assert response is not None and response["ok"] is True
+    events = server.drain_events()
+    assert [e["event"] for e in events] == ["session.renamed"]
+    assert events[0]["payload"] == {
+        "session_id": session_id,
+        "title": "Mi nombre",
+        "source": "manual",
+    }

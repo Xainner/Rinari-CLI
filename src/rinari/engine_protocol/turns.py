@@ -103,6 +103,8 @@ class _ActiveTurn:
     # Slash command that started the turn (`learn`…); becomes turn_command.
     command: str = ""
     activity_lock: Any = field(default_factory=threading.RLock)
+    # The first visible text of the turn decides `model.changed`, once.
+    model_notice_checked: bool = False
     terminal_emitted: bool = False
     preparation_stage: str | None = None
     activities: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -1414,6 +1416,20 @@ class TurnManager:
             ):
                 self._persist_activity(event_name, safe)
             self._emit(event(event_name, safe))
+            if (
+                event_name == "model.content.completed"
+                and not turn.model_notice_checked
+                and str(safe.get("content") or "").strip()
+            ):
+                turn.model_notice_checked = True
+                try:
+                    notice = self._model_change_notice(turn, safe)
+                except Exception:
+                    # A notice is presentation; it never breaks the turn.
+                    logger.exception("model change notice failed")
+                    notice = None
+                if notice is not None:
+                    _on_activity("model.changed", notice)
 
         def _serialized(event_name: str, payload: dict[str, Any]) -> None:
             # Preparation and cancellation can race on separate workers. Keep
@@ -1432,6 +1448,72 @@ class TurnManager:
                     turn.terminal_event = event_name
 
         return _serialized
+
+    def _model_change_notice(
+        self, turn: _ActiveTurn, completed: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """`model.changed` when this turn's first text comes from another model.
+
+        It compares the model that writes now with the last one that wrote
+        text in the session: a model that was selected but failed before
+        writing never counts, so A, then B failing, then C writing reads
+        "A → C". Both sides are stored as they are named today, so the notice
+        keeps its names after a model is renamed or removed.
+        """
+        call_id = completed.get("model_call_id")
+        with self._lock:
+            current = (turn.activities.get(f"model:{call_id}") or {}).get("model")
+        if not isinstance(current, str) or not current:
+            return None
+        db = self._services.ctx.db
+        last = db.query_one(
+            "SELECT turn_id, payload_json FROM session_events WHERE session_id = ? "
+            "AND type = 'model.content.completed' AND turn_id IS NOT NULL AND turn_id != ? "
+            "ORDER BY seq DESC LIMIT 1",
+            (turn.session_id, turn.turn_id),
+        )
+        if last is None:
+            return None
+        previous_call = _json_payload(last["payload_json"]).get("model_call_id")
+        previous = None
+        for row in db.query(
+            "SELECT payload_json FROM session_events WHERE session_id = ? AND turn_id = ? "
+            "AND type = 'model.started' ORDER BY seq",
+            (turn.session_id, last["turn_id"]),
+        ):
+            started = _json_payload(row["payload_json"])
+            if started.get("model_call_id") == previous_call:
+                previous = started.get("model")
+        if not isinstance(previous, str) or not previous or previous == current:
+            return None
+        return {
+            "after_model_call_id": call_id,
+            "previous": self._model_snapshot(turn.session_id, previous),
+            "next": self._model_snapshot(turn.session_id, current),
+        }
+
+    def _model_snapshot(self, session_id: str, model_id: str) -> dict[str, Any]:
+        ctx = self._services.ctx
+        model = ctx.model_repo.get(model_id)
+        if model is None:
+            # Gone from the catalog: the last notice that named it, if any.
+            row = ctx.db.query_one(
+                "SELECT payload_json FROM session_events WHERE session_id = ? "
+                "AND type = 'model.changed' ORDER BY seq DESC LIMIT 1",
+                (session_id,),
+            )
+            named = _json_payload(row["payload_json"]).get("next") if row else None
+            if isinstance(named, dict) and named.get("model_id") == model_id:
+                return named
+            return {"model_id": model_id}
+        provider = ctx.provider_repo.get(model.provider_id)
+        return {
+            "model_id": model.id,
+            "alias": model.alias,
+            "provider_model_id": model.provider_model_id,
+            "provider_id": model.provider_id,
+            "provider_alias": provider.alias if provider is not None else None,
+        }
 
     def _activity_key(self, turn: _ActiveTurn, event_name: str, payload: dict[str, Any]) -> str:
         if event_name == "usage.updated":
@@ -1700,3 +1782,11 @@ class TurnManager:
             pending.decision = decision
             pending.decided.set()
         return {"status": "resolved", "approval_id": approval_id, "decision": decision}
+
+
+def _json_payload(raw: Any) -> dict[str, Any]:
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}

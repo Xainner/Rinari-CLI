@@ -244,6 +244,17 @@ def _exposure_for(services: ServiceContainer, record: SessionRecord, root: Path 
 # The skill catalog rides on every turn: full lines up to this many skills,
 # names only past it, and descriptions clipped to this many characters.
 _CATALOG_FULL_LIMIT = 40
+# The conversation title is a few words, but models that reason first spend
+# part of the limit before writing any text.
+TITLE_MAX_TOKENS = 1024
+
+
+class TitleIncomplete(Exception):
+    """The model ran out of tokens before finishing the title."""
+
+    title_failure = "max_tokens"
+
+
 _CATALOG_DESCRIPTION_CHARS = 160
 
 
@@ -652,6 +663,7 @@ def build_agent_session(
         activity_sink=context_activity,
         reasoning_effort=reasoning_effort,
         prepare_context=lambda *args: services.context.prepare(*args),
+        require_opening=True,
     )
     if hook_engine is not None:
         hook_engine.emit(
@@ -1845,7 +1857,7 @@ def _run_turn_unlocked(
     validation_before = _validation_ids(session)
 
     def generate_title(first_message: str) -> str:
-        from rinari.models.types import ChatMessage, ModelRequest
+        from rinari.models.types import ChatMessage, ModelRequest, StopReason
 
         session.token.throw_if_cancelled()
         if budget.exhausted():
@@ -1863,10 +1875,16 @@ def _run_turn_unlocked(
                     ),
                     ChatMessage.user(first_message[:4000]),
                 ),
-                max_tokens=96,
+                # Room for models that reason before answering: with 96
+                # tokens a reasoning model could spend them all and return
+                # no text, leaving the trimmed first message as the title.
+                max_tokens=TITLE_MAX_TOKENS,
             )
         )
         budget.note_usage(response.usage)
+        if response.stop_reason == StopReason.MAX_TOKENS:
+            # A cut-off title is not a title: keep the provisional one.
+            raise TitleIncomplete()
         return response.content or ""
 
     session.record = services.sessions.name_from_first_message(

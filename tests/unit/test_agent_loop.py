@@ -763,3 +763,78 @@ def test_final_projection_failure_keeps_completed_observation(env, monkeypatch):
     tools = [message for message in env["ctx"].history if message.role == "tool"]
     assert len(tools) == 1 and "Verified original" in tools[0].content
     assert len(model.requests) == 1
+
+
+def _opening_loop(env, scripted):
+    model = FakeModel(scripted=scripted)
+    activity: list[tuple[str, dict]] = []
+    events: list[str] = []
+    loop = AgentLoop(
+        model,
+        env["runtime"],
+        env["assembler"],
+        event_sink=lambda sid, t, p: events.append(t),
+        activity_sink=lambda name, payload: activity.append((name, payload)),
+        require_opening=True,
+    )
+    return model, loop, activity, events
+
+
+def test_first_tool_batch_waits_for_an_opening_sentence(env) -> None:
+    listing = {"path": str(env["root"])}
+    model, loop, activity, events = _opening_loop(
+        env,
+        [
+            ModelResponse(content="", tool_calls=(ToolCall("l1", "fs.list", listing),)),
+            ModelResponse(
+                content="Voy a revisar la estructura del proyecto.",
+                tool_calls=(ToolCall("l2", "fs.list", listing),),
+            ),
+            ModelResponse(content="Tiene una carpeta src."),
+        ],
+    )
+    result = loop.turn(env["ctx"], "Revisa el proyecto")
+    assert result.content == "Tiene una carpeta src."
+    # The silent batch never ran; the announced one did, after its text.
+    requested = [p["tool_call_id"] for name, p in activity if name == "tool.requested"]
+    assert requested == ["l2"]
+    order = [name for name, _ in activity if name in {"model.content.completed", "tool.requested"}]
+    assert order[:2] == ["model.content.completed", "tool.requested"]
+    reminder = model.requests[1].messages[-1]
+    assert reminder.origin == {"kind": "harness", "source": "opening"}
+    assert "none of those calls ran" in reminder.content
+    assert events.count("OpeningRequested") == 1
+
+
+def test_the_opening_is_asked_for_only_once(env) -> None:
+    listing = {"path": str(env["root"])}
+    model, loop, activity, _ = _opening_loop(
+        env,
+        [
+            ModelResponse(content="", tool_calls=(ToolCall("l1", "fs.list", listing),)),
+            ModelResponse(content="", tool_calls=(ToolCall("l2", "fs.list", listing),)),
+            ModelResponse(content="", tool_calls=(ToolCall("l3", "fs.list", listing),)),
+            ModelResponse(content="Listo."),
+        ],
+    )
+    loop.turn(env["ctx"], "Revisa el proyecto")
+    assert [p["tool_call_id"] for name, p in activity if name == "tool.requested"] == ["l2", "l3"]
+    assert len(model.requests) == 4
+
+
+def test_direct_answers_and_announced_work_need_no_extra_call(env) -> None:
+    listing = {"path": str(env["root"])}
+    model, loop, activity, events = _opening_loop(
+        env,
+        [
+            ModelResponse(
+                content="Primero miro src.", tool_calls=(ToolCall("l1", "fs.list", listing),)
+            ),
+            ModelResponse(content="", tool_calls=(ToolCall("l2", "fs.list", listing),)),
+            ModelResponse(content="Hecho."),
+        ],
+    )
+    loop.turn(env["ctx"], "Revisa el proyecto")
+    assert [p["tool_call_id"] for name, p in activity if name == "tool.requested"] == ["l1", "l2"]
+    assert "OpeningRequested" not in events
+    assert len(model.requests) == 3

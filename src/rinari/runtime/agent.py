@@ -70,6 +70,14 @@ def last_own_model_call(event_repo, session_id: str):
 EVENT_TOOL_COMPLETED = "ToolCompleted"
 EVENT_TURN_COMPLETED = "AgentTurnCompleted"
 EVENT_LOOP_DETECTED = "LoopDetected"
+EVENT_OPENING_REQUESTED = "OpeningRequested"
+# Sent when a task's first response calls tools without a word to the user.
+_OPENING_REMINDER = (
+    "Runtime: your last response called tools without telling the user what you are "
+    "about to do, so none of those calls ran. Write one or two sentences, in the user's "
+    "language, saying what you understood and what you will do first, and make the tool "
+    "calls you need in that same response. State intent, not findings you do not have yet."
+)
 
 DEFAULT_MAX_MODEL_CALLS = 500
 DEFAULT_MAX_TOOL_CALLS = 5000
@@ -160,6 +168,7 @@ class AgentLoop:
         activity_sink: ActivityHook | None = None,
         reasoning_effort: str | None = None,
         prepare_context: Callable | None = None,
+        require_opening: bool = False,
     ) -> None:
         self._provider = model_provider
         self._tools = tool_runtime
@@ -172,6 +181,9 @@ class AgentLoop:
         self._activity_sink = activity_sink
         self._reasoning_effort = reasoning_effort
         self._prepare_context = prepare_context
+        # The user-facing loop opens each task with a sentence of intent
+        # before its first tool call (see `_OPENING_REMINDER`).
+        self._require_opening = require_opening
 
     @property
     def tool_registry(self):
@@ -236,6 +248,11 @@ class AgentLoop:
         tool_calls_rejected = 0
         tool_seq = 0
         total_usage: Usage | None = None
+        # Has the user seen any text from this turn? The first tool batch
+        # waits for it, once: a response with only tool calls is set aside
+        # and the model is asked for the opening.
+        opened = False
+        opening_asked = False
         circuit_breaker = EmergencyCircuitBreaker(budget) if budget is not None else None
 
         # A present meter is authoritative for model-call iterations; the
@@ -454,6 +471,25 @@ class AgentLoop:
             )
             if self._prepare_context is None:
                 self._check_pressure(ctx, response, governor)
+
+            if (response.content or "").strip():
+                opened = True
+            elif (
+                self._require_opening
+                and response.has_tool_calls
+                and not opened
+                and not opening_asked
+            ):
+                # None of these calls ran: they are dropped with the response
+                # and the model asks for them again after the opening.
+                opening_asked = True
+                self._emit(
+                    ctx.session_id,
+                    EVENT_OPENING_REQUESTED,
+                    {"model_call_id": model_call_id, "tool_calls": len(response.tool_calls)},
+                )
+                ctx.history.append(ChatMessage.harness(_OPENING_REMINDER, "opening"))
+                continue
 
             if not response.has_tool_calls:
                 ctx.history.append(

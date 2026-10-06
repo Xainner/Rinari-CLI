@@ -198,6 +198,11 @@ class EngineServer:
         self._services.schedules.on_proposed = lambda payload: self._turns.emit_external(
             event("schedule.proposed", payload)
         )
+        # Automatic titles land mid-turn (or on a later turn, when the first
+        # attempt failed): clients learn the new title as soon as it is stored.
+        self._services.sessions.on_renamed = lambda payload: self._turns.emit_external(
+            event("session.renamed", payload)
+        )
         self._dispatcher.register("schedule.list", self._schedule.list)
         self._dispatcher.register("schedule.get", self._schedule.get)
         self._dispatcher.register("schedule.create", self._schedule.create)
