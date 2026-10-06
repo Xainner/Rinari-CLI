@@ -268,10 +268,9 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                         break
                     chunk = _parse_sse_payload(data, url)
                     if chunk.get("error"):
-                        raise NetworkError(
-                            "Provider reported stream failure",
-                            details={"provider_error": chunk["error"]},
-                        )
+                        from rinari.providers.errors import classify_stream_error
+
+                        raise classify_stream_error(chunk["error"], model=request.model)
                     if isinstance(chunk.get("usage"), dict):
                         stream_usage = chunk["usage"]
                     choice = (chunk.get("choices") or [{}])[0]

@@ -73,6 +73,17 @@ _REFERENCE_SUFFIXES = (
 _REFERENCE_LINES = 400
 _REFERENCE_MAX_BYTES = 512 * 1024
 _EDITABLE_ORIGINS = ("installed", "learned")
+# A quote shorter than this could match almost any message by accident.
+MIN_OWNER_QUOTE = 12
+# Spaces and the quotation marks a model may wrap a quote in (ASCII,
+# guillemets and curly quotes, written as escapes).
+_QUOTE_MARKS = " \"'\u00ab\u00bb\u201c\u201d\u2018\u2019"
+
+
+def _normalized_quote(text: str) -> str:
+    """Compare quotes on words: case, spacing and wrapping quotes do not matter."""
+    return " ".join(text.split()).strip(_QUOTE_MARKS).casefold()
+
 
 # Injected in front of a standard skill's body: it was written for another
 # agent, so its tool names and "run this script" steps need Rinari's mapping.
@@ -655,6 +666,30 @@ class SkillService:
             ConfigValue(key=AUTO_LEARN_KEY, value=mode, updated_at=self._now())
         )
         return mode
+
+    def owner_message_quoting(self, session_id: str, quote: str) -> str | None:
+        """ID of an owner message in this conversation that contains `quote`.
+
+        Owner means what the person wrote: a user-role message whose origin is
+        absent or `user`. Runtime notes, returned subagent work, peer agents
+        and scheduled runs travel as user messages too, but they do not
+        count; neither do files or tool output, which are never user
+        messages. A subagent looks in the conversation that spawned it.
+        """
+        needle = _normalized_quote(quote)
+        if len(needle) < MIN_OWNER_QUOTE:
+            return None
+        root = session_id.split("-agt_", 1)[0]
+        with contextlib.suppress(Exception):
+            for message in reversed(self._ctx.message_repo.list(root)):
+                if message.role != "user":
+                    continue
+                if (message.origin or {}).get("kind", "user") != "user":
+                    continue
+                for text in (message.display_content, message.content):
+                    if text and needle in _normalized_quote(text):
+                        return message.id
+        return None
 
     def notify_learned(self, payload: dict) -> None:
         if self.on_learned is not None:

@@ -341,6 +341,7 @@ class EngineServer:
         self._dispatcher.register("artifact.list", self._artifact_list)
         self._dispatcher.register("artifact.read", self._artifact_read)
         self._dispatcher.register("artifact.export", self._artifact_export)
+        self._dispatcher.register("artifact.resolve", self._artifact_resolve)
         self._dispatcher.register("context.get", self._context_get)
         self._dispatcher.register("memory.list", self._memory_list)
         self._dispatcher.register("memory.search", self._memory_search)
@@ -2396,6 +2397,40 @@ class EngineServer:
             "text": text,
             "truncated": truncated,
             "max_bytes": max_bytes,
+        }
+
+    def _artifact_resolve(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Where an artifact's bytes are and what they are, without reading them.
+
+        For the desktop's media player: the host serves the approved file by
+        ranges, so an audio or video artifact plays at any size. `kind` comes
+        from the first bytes, like `workspace.file.resolve`.
+        """
+        from rinari.engine_protocol.desktop import _file_kind
+
+        params = params or {}
+        uri = params.get("uri", "")
+        if not isinstance(uri, str) or not uri:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'uri' is required.")
+        try:
+            record = self._services.artifacts.meta(uri)
+        except NotFoundError as exc:
+            raise NotFoundError(f"Artifact not found: {uri}") from exc
+        path = self._services.artifacts._storage_path(record.storage_path)
+        try:
+            size = path.stat().st_size
+            with path.open("rb") as stream:
+                head = stream.read(64)
+        except OSError as exc:
+            raise NotFoundError(f"Artifact not found: {uri}") from exc
+        kind, mime = _file_kind(Path(record.name), head)
+        return {
+            "uri": uri,
+            "path": str(path),
+            "name": Path(record.name).name or record.id,
+            "size": size,
+            "kind": kind,
+            "mime": mime,
         }
 
     def _artifact_export(self, params: dict[str, Any]) -> dict[str, Any]:
