@@ -32,6 +32,47 @@ class ProviderErrorCode(StrEnum):
     STREAM_INTERRUPTED = "STREAM_INTERRUPTED"
     TIMEOUT = "TIMEOUT"
     VISION_UNSUPPORTED = "VISION_UNSUPPORTED"
+    # The account cannot keep spending: plan quota used up, no credits or a
+    # spend cap. Waiting a few seconds does not fix it.
+    QUOTA_EXHAUSTED = "QUOTA_EXHAUSTED"
+
+
+# What the provider's own error fields (code, type, status) say about a
+# limit. These are protocol values the providers document, never words read
+# out of the human-readable message. Anything else keeps HTTP semantics.
+_QUOTA_CODES = frozenset(
+    {
+        "insufficient_quota",
+        "billing_hard_limit_reached",
+        "billing_not_active",
+        "insufficient_balance",
+        "insufficient_credits",
+        "credit_balance_too_low",
+        "quota_exceeded",
+        "usage_limit_reached",
+        "spend_limit_reached",
+        "payment_required",
+    }
+)
+_RATE_CODES = frozenset(
+    {"rate_limit_exceeded", "rate_limit_error", "rate_limited", "too_many_requests"}
+)
+_CONTEXT_CODES = frozenset(
+    {"context_length_exceeded", "context_window_exceeded", "max_context_length_exceeded"}
+)
+_OVERLOAD_CODES = frozenset(
+    {"server_error", "overloaded_error", "api_error", "service_unavailable", "timeout"}
+)
+
+
+def _limit_kind(*fields: str | None) -> str | None:
+    """`quota`, `rate` or None, from the provider's structured error fields."""
+    values = {str(f).lower() for f in fields if f}
+    if values & _QUOTA_CODES:
+        return "quota"
+    if values & _RATE_CODES:
+        return "rate"
+    return None
 
 
 class ProviderError(ProviderModelError):
@@ -56,6 +97,9 @@ class ProviderError(ProviderModelError):
             details["provider"] = provider
         if model:
             details["model"] = model
+        if retry_after is not None:
+            # The wait the provider asked for this request; not a quota reset.
+            details["retry_after_s"] = retry_after
         super().__init__(message, hint=hint, details=details)
         # NOTE: RinariError.code stays the ExitCode property; the taxonomy
         # code lives here so exit-code mapping never breaks.
@@ -72,13 +116,23 @@ class ProviderError(ProviderModelError):
 
 
 def _retry_after(response: httpx.Response) -> float | None:
+    """Seconds from `Retry-After`, given as a number or as an HTTP date."""
     raw = response.headers.get("retry-after")
     if raw is None:
         return None
     try:
         return max(0.0, float(raw))
     except (TypeError, ValueError):
+        pass
+    from email.utils import parsedate_to_datetime
+
+    try:
+        when = parsedate_to_datetime(raw)
+    except (TypeError, ValueError, IndexError):
         return None
+    if when is None:
+        return None
+    return max(0.0, round(when.timestamp() - time.time(), 3))
 
 
 def _request_id(response: httpx.Response, payload: Any = None) -> str | None:
@@ -115,17 +169,22 @@ def _safe_error_fields(payload: dict[str, Any] | None) -> tuple[str, str | None,
     if not payload:
         return "", None, None
     error = payload.get("error")
-    if isinstance(error, dict):
-        raw_message = error.get("message")
-        message = str(raw_message)[:300] if isinstance(raw_message, str) else ""
-        raw_type = error.get("type")
-        error_type = str(raw_type)[:100] if isinstance(raw_type, str) else None
-        raw_code = error.get("code")
-        error_code = str(raw_code)[:100] if isinstance(raw_code, (str, int)) else None
-        return message, error_type, error_code
     if isinstance(error, str):
         return error[:300], None, None
-    return "", None, None
+    # `{"error": {...}}` is the common envelope; some providers put the same
+    # fields at the top level. Google calls its type `status`.
+    source = error if isinstance(error, dict) else payload
+    raw_message = source.get("message")
+    message = str(raw_message)[:300] if isinstance(raw_message, str) else ""
+    raw_type = source.get("type") or source.get("status")
+    error_type = str(raw_type)[:100] if isinstance(raw_type, str) else None
+    raw_code = source.get("code")
+    error_code = (
+        str(raw_code)[:100]
+        if isinstance(raw_code, (str, int)) and not isinstance(raw_code, bool)
+        else None
+    )
+    return message, error_type, error_code
 
 
 def provider_error_message(response: httpx.Response, url: str) -> str:
@@ -143,7 +202,29 @@ def classify_http_error(
     provider: str | None = None,
     model: str | None = None,
 ) -> ProviderError:
-    """Map an HTTP failure to the taxonomy, preserving legacy messages."""
+    """Map an HTTP failure to the taxonomy, preserving legacy messages.
+
+    The provider's own code/type decides before the HTTP status: a quota
+    code on a 403 is still a quota. Every result carries the fields the UI
+    needs to explain it (status, provider code/type, retry wait).
+    """
+    error = _classify_http_error(response, url, provider=provider, model=model)
+    _, provider_error_type, provider_error_code = _safe_error_fields(_error_payload(response))
+    if provider_error_type:
+        error.details.setdefault("provider_error_type", provider_error_type)
+    if provider_error_code:
+        error.details.setdefault("provider_response_code", provider_error_code)
+    error.details.setdefault("http_status", response.status_code)
+    return error
+
+
+def _classify_http_error(
+    response: httpx.Response,
+    url: str,
+    *,
+    provider: str | None = None,
+    model: str | None = None,
+) -> ProviderError:
     status = response.status_code
     payload = _error_payload(response)
     error_message, provider_error_type, provider_error_code = _safe_error_fields(payload)
@@ -155,12 +236,28 @@ def classify_http_error(
         "provider": provider,
         "model": model,
     }
+    limit = _limit_kind(provider_error_code, provider_error_type)
+    if limit == "quota" or status == 402:
+        result = ProviderError(
+            message,
+            code=ProviderErrorCode.QUOTA_EXHAUSTED,
+            retryable=False,
+            hint="The provider account has no quota or credits left for this request.",
+            **common,
+        )
+        result.details["limit_kind"] = "quota"
+        return result
     if status in (401, 403):
         return ProviderError(
             message,
             code=ProviderErrorCode.AUTH,
             retryable=False,
-            hint="Check the provider credential: `rinari providers auth <alias>`.",
+            hint=(
+                "Check the provider credential: `rinari providers auth <alias>`."
+                if status == 401
+                else "The provider refused this request: check the credential and that "
+                "it may use this model."
+            ),
             **common,
         )
     if status == 404:
@@ -170,13 +267,8 @@ def classify_http_error(
     # Only an explicit modality rejection authorizes visual fallback. A generic
     # 400, bad image encoding, quota or authentication failure does not.
     if status in (400, 422):
-        error = payload.get("error", {}) if isinstance(payload, dict) else {}
-        code = str(error.get("code", "")) if isinstance(error, dict) else ""
-        if code in {
-            "context_length_exceeded",
-            "context_window_exceeded",
-            "max_context_length_exceeded",
-        }:
+        code = (provider_error_code or "").lower()
+        if code in _CONTEXT_CODES:
             return ProviderError(message, code=ProviderErrorCode.CONTEXT_OVERFLOW, **common)
         text = detail.lower()
         explicit = code in {
@@ -198,7 +290,7 @@ def classify_http_error(
         )
         if explicit:
             return ProviderError(message, code=ProviderErrorCode.VISION_UNSUPPORTED, **common)
-        schema_signal = (provider_error_code or "").lower() in {
+        schema_signal = code in {
             "invalid_tool_schema",
             "invalid_function_parameters",
         } or any(
@@ -209,22 +301,62 @@ def classify_http_error(
             return ProviderError(message, code=ProviderErrorCode.INVALID_TOOL_SCHEMA, **common)
     if status == 422:
         return ProviderError(message, code=ProviderErrorCode.INVALID_TOOL_ARGUMENTS, **common)
-    if status == 429:
-        return ProviderError(
+    if status == 429 or limit == "rate":
+        result = ProviderError(
             message,
             code=ProviderErrorCode.RATE_LIMIT,
             retryable=True,
             retry_after=_retry_after(response),
             **common,
         )
+        # Without a code the provider did not say whether it is a rate or a
+        # quota: the UI says so instead of guessing.
+        result.details["limit_kind"] = limit or "unknown"
+        return result
     if status >= 500 or status in (408, 409, 425, 502, 503, 504):
         return ProviderError(message, code=ProviderErrorCode.SERVER_ERROR, retryable=True, **common)
-    result = ProviderError(message, code=ProviderErrorCode.SERVER_ERROR, **common)
-    if provider_error_type:
-        result.details["provider_error_type"] = provider_error_type
-    if provider_error_code:
-        result.details["provider_response_code"] = provider_error_code
-    result.details["http_status"] = status
+    return ProviderError(message, code=ProviderErrorCode.SERVER_ERROR, **common)
+
+
+def classify_stream_error(raw: Any, *, model: str | None = None) -> ProviderError:
+    """An error the provider sent inside an SSE stream, on the same taxonomy.
+
+    The provider's message becomes the error's message (it used to stay
+    nested under a generic "stream failure"), and its code/type pick the
+    category like an HTTP error would. `details.provider_error` keeps the
+    original object for diagnostics.
+    """
+    if isinstance(raw, dict):
+        fields = raw
+    elif isinstance(raw, str):
+        fields = {"message": raw}
+    else:
+        fields = {}
+    message, error_type, error_code = _safe_error_fields({"error": fields} if fields else None)
+    limit = _limit_kind(error_code, error_type)
+    values = {str(v).lower() for v in (error_code, error_type) if v}
+    if limit == "quota":
+        code, retryable = ProviderErrorCode.QUOTA_EXHAUSTED, False
+    elif limit == "rate":
+        code, retryable = ProviderErrorCode.RATE_LIMIT, True
+    elif values & _CONTEXT_CODES:
+        code, retryable = ProviderErrorCode.CONTEXT_OVERFLOW, False
+    elif values & _OVERLOAD_CODES:
+        code, retryable = ProviderErrorCode.SERVER_ERROR, True
+    else:
+        code, retryable = ProviderErrorCode.STREAM_INTERRUPTED, False
+    if message:
+        text = f"Provider reported a stream failure: {message}"
+    else:
+        text = "Provider reported stream failure"
+    result = ProviderError(text, code=code, retryable=retryable, model=model)
+    result.details["provider_error"] = raw
+    if error_type:
+        result.details["provider_error_type"] = error_type
+    if error_code:
+        result.details["provider_response_code"] = error_code
+    if limit:
+        result.details["limit_kind"] = limit
     return result
 
 

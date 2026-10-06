@@ -453,12 +453,20 @@ class ModelRouter:
 
     def _authenticated_call(self, provider, call, *, output_started=lambda: False):
         from rinari.providers.errors import ProviderError, ProviderErrorCode
+        from rinari.shared.errors import ProviderModelError
 
         secret = self._providers.resolve_secret(provider)
         try:
             return call(secret)
-        except ProviderError as exc:
-            if exc.error_code == ProviderErrorCode.RATE_LIMIT:
+        except ProviderModelError as exc:
+            # Which configured provider failed, recorded when it fails: a
+            # notice read later must not point at whatever is selected then.
+            if isinstance(getattr(exc, "details", None), dict):
+                exc.details.setdefault("provider_id", provider.id)
+                exc.details.setdefault("provider_alias", provider.alias)
+            if not isinstance(exc, ProviderError):
+                raise
+            if exc.error_code in (ProviderErrorCode.RATE_LIMIT, ProviderErrorCode.QUOTA_EXHAUSTED):
                 import contextlib
                 import time
 

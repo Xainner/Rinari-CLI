@@ -111,6 +111,13 @@ rinari context settings --model saved-model-alias --window 0
 rinari context compact --session SESSION_ID
 ```
 
+A manual compaction (`/compact`, `context.compact`) summarizes everything before the
+owner's latest message even when the history would still fit the retained tail: the
+owner asked. It is skipped only when there is nothing older (`skip_reason`
+`empty_history` or `only_latest_exchange`, with `history_messages` and
+`history_tokens`) or when the summary would not be smaller than what it replaces
+(`summary_not_smaller`, with `after_tokens`); nothing is published then.
+
 Agent renders one compact activity, including failure/cancellation and an explicit
 compaction retry. CLI progress stays out of JSON/protocol stdout. Gateway presents the
 same engine event instead of maintaining its own compressor.

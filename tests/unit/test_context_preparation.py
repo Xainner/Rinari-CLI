@@ -332,3 +332,70 @@ def test_changed_durable_history_invalidates_inflight_summary(app_ctx):
         prepare(service, ctx, rebuild(ctx), caller, rebuild, lambda *_: None, CancellationToken())
     assert ctx.history == original
     assert not app_ctx.session_repo.get(ctx.session_id).compact_state
+
+
+def _manual(ctx):
+    ctx.force_compaction = True
+    ctx.compaction_reason = "manual"
+    return ctx
+
+
+def _run(service, ctx, caller, rebuild):
+    events = []
+    result = prepare(
+        service,
+        ctx,
+        rebuild(ctx),
+        caller,
+        rebuild,
+        lambda _, payload: events.append(payload),
+        CancellationToken(),
+    )
+    return result, events
+
+
+def test_manual_compaction_summarizes_all_but_the_latest_exchange(app_ctx):
+    """/compact used to answer «not needed» when the history still fit the
+    retained tail; the owner asked, so everything older is summarized."""
+    service, ctx, caller, calls, rebuild = setup(app_ctx)
+    caller.capabilities = lambda: ProviderCapabilities(max_context_tokens=1_000_000)
+    _manual(ctx)
+    harness = ChatMessage.harness("Runtime: delegated work has returned. x", "subagents")
+    ctx.history.extend([ChatMessage.assistant("working"), harness])
+    _result, events = _run(service, ctx, caller, rebuild)
+    assert [e["status"] for e in events] == ["started", "completed"]
+    assert len(calls) == 1
+    # The latest exchange starts at the owner's message, not at the runtime note.
+    assert [m.content for m in ctx.history] == ["continue", "working", harness.content]
+    assert events[-1]["dropped_messages"] == 60
+
+
+def test_manual_compaction_with_nothing_older_says_why(app_ctx):
+    service, ctx, caller, calls, rebuild = setup(app_ctx)
+    caller.capabilities = lambda: ProviderCapabilities(max_context_tokens=1_000_000)
+    _manual(ctx)
+    del ctx.history[:-1]
+    _result, events = _run(service, ctx, caller, rebuild)
+    assert [e["status"] for e in events] == ["started", "skipped"]
+    assert events[-1]["skip_reason"] == "only_latest_exchange"
+    assert events[-1]["history_messages"] == 1
+    assert events[-1]["history_tokens"] > 0
+    ctx.history.clear()
+    _result, events = _run(service, ctx, caller, rebuild)
+    assert events[-1]["skip_reason"] == "empty_history"
+    assert calls == []
+    assert not app_ctx.session_repo.get(ctx.session_id).compact_state
+
+
+def test_manual_compaction_does_not_publish_a_summary_that_is_not_smaller(app_ctx):
+    service, ctx, caller, _calls, rebuild = setup(app_ctx)
+    caller.capabilities = lambda: ProviderCapabilities(max_context_tokens=1_000_000)
+    _manual(ctx)
+    ctx.history[:] = [ChatMessage.user("hola"), ChatMessage.assistant("hola"), ctx.history[-1]]
+    caller.invoke = lambda request: ModelResponse(content="Summary: " + "long " * 400)
+    original = list(ctx.history)
+    _result, events = _run(service, ctx, caller, rebuild)
+    assert events[-1]["status"] == "skipped"
+    assert events[-1]["skip_reason"] == "summary_not_smaller"
+    assert ctx.history == original
+    assert not app_ctx.session_repo.get(ctx.session_id).compact_state

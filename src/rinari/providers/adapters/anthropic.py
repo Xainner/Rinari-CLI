@@ -205,10 +205,9 @@ class AnthropicAdapter(ProviderAdapter):
                         terminal_seen = True
                         break
                     elif event_type == "error":
-                        raise NetworkError(
-                            "Provider reported stream failure",
-                            details={"provider_error": event.get("error")},
-                        )
+                        from rinari.providers.errors import classify_stream_error
+
+                        raise classify_stream_error(event.get("error"), model=request.model)
                     elif event_type == "message_start":
                         usage = _usage_from_anthropic(_event_message(event).get("usage"))
                     elif event_type == "content_block_start":

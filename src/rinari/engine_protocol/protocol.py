@@ -58,6 +58,7 @@ CAPABILITIES: dict[str, bool] = {
     # `workspace.file.resolve`: the authorized path, size and kind of a file
     # without reading it, so media and binaries open at any size.
     "workspace_file_resolve_v1": True,
+    "artifact_resolve_v1": True,
     "interactive_questions_v1": True,
     "chat": True,
     "projects": True,

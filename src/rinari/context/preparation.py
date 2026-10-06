@@ -16,10 +16,15 @@ from rinari.context.compact_state import (
     merge_evidence,
 )
 from rinari.context.continuity import contradictions, repair_request
-from rinari.context.projection import ContextPreparationError, render, select_tail
+from rinari.context.projection import (
+    ContextPreparationError,
+    latest_exchange,
+    render,
+    select_tail,
+)
 from rinari.context.settings import input_budget, summarizer
 from rinari.context.settings import window as resolve_window
-from rinari.context.tokens import estimate_tokens
+from rinari.context.tokens import estimate_message_tokens, estimate_tokens
 from rinari.models.types import ChatMessage, ModelRequest, StopReason
 from rinari.shared.errors import CancelledError
 
@@ -131,10 +136,21 @@ def prepare(service, ctx, request, caller, rebuild, emit, cancel):
         # Reserve part of the target for the cumulative summary, then verify the
         # fully assembled replacement; never silently clip a generated summary.
         cut, tail = select_tail(history, target - overhead - target // 4)
-        if not cut:
-            if ctx.compaction_reason == "manual":
-                status("skipped")
+        if not cut and ctx.compaction_reason == "manual":
+            # The owner asked to compact: everything before the latest
+            # exchange is summarized even when it would still fit. Only an
+            # empty history, or one that is just that exchange, is a no-op,
+            # and the event says which, with the numbers behind it.
+            cut, tail = latest_exchange(history)
+            if not cut:
+                status(
+                    "skipped",
+                    skip_reason="empty_history" if not history else "only_latest_exchange",
+                    history_messages=len(history),
+                    history_tokens=sum(estimate_message_tokens(m) for m in history),
+                )
                 return request
+        if not cut:
             raise ContextPreparationError(
                 "Compaction cannot reduce this request without discarding required context."
             )
@@ -291,6 +307,17 @@ def prepare(service, ctx, request, caller, rebuild, emit, cancel):
         projected = dataclasses.replace(ctx, history=tail, compact_state_text=render(state))
         replacement = rebuild(projected)
         after = request_size(replacement)
+        if ctx.compaction_reason == "manual" and after >= used:
+            # A short history can summarize into as much text as it had:
+            # nothing is published, and the owner sees why.
+            status(
+                "skipped",
+                skip_reason="summary_not_smaller",
+                history_messages=len(history),
+                after_tokens=after,
+                checks=checks,
+            )
+            return request
         if after > target or after >= used:
             checks["reduction"] = "failed"
             raise ContextPreparationError(

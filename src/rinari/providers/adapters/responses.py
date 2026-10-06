@@ -430,16 +430,22 @@ def _response_from_responses(data: Any, url: str) -> ModelResponse:
     status = data.get("status")
     incomplete = data.get("incomplete_details") or {}
     if status in {"failed", "cancelled"}:
-        raise ProviderModelError(
-            "Provider response " + status,
-            details={
-                "kind": "RESPONSE_" + status.upper(),
-                "response_id": data.get("id"),
-                "partial_text": "".join(content_parts),
-                "provider_error": data.get("error"),
-                "partial": bool(content_parts),
-            },
-        )
+        details = {
+            "kind": "RESPONSE_" + status.upper(),
+            "response_id": data.get("id"),
+            "partial_text": "".join(content_parts),
+            "provider_error": data.get("error"),
+            "partial": bool(content_parts),
+        }
+        if status == "failed" and data.get("error"):
+            # Same taxonomy as an HTTP error: the provider's code decides
+            # whether this was a quota, a rate limit or an outage.
+            from rinari.providers.errors import classify_stream_error
+
+            error = classify_stream_error(data["error"])
+            error.details.update(details)
+            raise error
+        raise ProviderModelError("Provider response " + status, details=details)
     if status == "incomplete":
         # Never execute tools from an incomplete response, even syntactically valid ones.
         if incomplete.get("reason") != "max_output_tokens":
@@ -504,16 +510,21 @@ class _ResponsesStreamAccumulator:
         if self._completed is not None:
             return
         if event_type == "error":
-            raise ProviderModelError(
-                "Provider stream error",
-                details={
+            from rinari.providers.errors import classify_stream_error
+
+            error = classify_stream_error(
+                {k: event.get(k) for k in ("message", "code", "type") if event.get(k)}
+            )
+            error.details.update(
+                {
                     "kind": "RESPONSE_FAILED",
                     "provider_error": event.get("message"),
                     "partial_text": "".join(self._text_parts),
                     "response_id": self.response_id,
                     "partial": bool(self._text_parts),
-                },
+                }
             )
+            raise error
         if event_type == "response.output_text.delta":
             delta = event.get("delta")
             if isinstance(delta, str) and delta:

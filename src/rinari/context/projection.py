@@ -49,3 +49,19 @@ def select_tail(history, budget):
         "The latest user message and its tool results do not fit the context budget.",
         hint="Reduce the input or choose a model with a larger context window.",
     )
+
+
+def latest_exchange(history):
+    """Cut before the owner's latest message: what a manual compaction keeps.
+
+    Runtime notes travel as user messages too (`origin.kind` harness, peer…);
+    the exchange starts at the last message the owner wrote. A cut of 0 means
+    there is nothing older to summarize.
+    """
+    owner = [
+        i
+        for i, m in enumerate(history)
+        if m.role == "user" and (getattr(m, "origin", None) or {}).get("kind", "user") == "user"
+    ]
+    cut = owner[-1] if owner else 0
+    return cut, history[cut:]

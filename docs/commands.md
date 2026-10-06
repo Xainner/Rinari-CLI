@@ -864,6 +864,9 @@ paths) but never reads it as text: it returns `path`, `name`, `size`, `kind`
 (`image`, `video`, `audio`, `pdf`, `text` or `binary`, from the first bytes),
 `mime` and `preview_limit`. The desktop uses it to play media, open a file
 with the system app or reveal it in its folder, at any size.
+`artifact.resolve` (`uri`) does the same for an artifact: `path` of its stored
+bytes, `name`, `size`, `kind` and `mime`, so an audio or video artifact plays
+in the desktop instead of being read as text.
 Every stored title emits `session.renamed` (`session_id`, `title`,
 `source`: `manual`, `generated` or `fallback`). The first message names the
 session through the model; when no usable title comes back, the trimmed
@@ -2515,7 +2518,14 @@ shows it and asks once, and `--yes` accepts exactly the reviewed content.
 
 Learned skills: `/learn [focus]` (terminal or desktop) pins the packaged
 `skill-author` skill and marks that turn as the owner's request; the skill it
-proposes with `skills.propose` is saved active. An update of a learned skill is
+proposes with `skills.propose` is saved active. Asking in plain words works too
+("crea una skill por cada una"): the model passes the owner's words in
+`owner_request`, and the Engine saves the skill active only when those words
+are in a message the owner wrote in that conversation (a subagent looks in the
+conversation that spawned it). Files, tool output, runtime notes, other agents
+and scheduled runs never count, and a turn another agent started cannot borrow
+them. A pending result says why in `pending_reason` (`needs_owner_approval`,
+`owner_request_not_found` or `review_flagged`). An update of a learned skill is
 also saved active in any turn: the owner is notified to review it, not to
 approve it. A new skill Rinari proposes on its own (setting
 `skills.auto_learn`, default `propose`), a change to an installed or

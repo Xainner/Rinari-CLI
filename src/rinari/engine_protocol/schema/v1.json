@@ -402,6 +402,7 @@
         "artifact.list",
         "artifact.read",
         "artifact.export",
+        "artifact.resolve",
         "context.get",
         "memory.list",
         "memory.search",
