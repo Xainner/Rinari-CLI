@@ -55,6 +55,9 @@ CAPABILITIES: dict[str, bool] = {
     # Exact turn provenance authorizes external previews; a bounded Engine
     # watcher invalidates open tabs without sending file bytes in events.
     "workspace_file_watch_v1": True,
+    # `workspace.file.resolve`: the authorized path, size and kind of a file
+    # without reading it, so media and binaries open at any size.
+    "workspace_file_resolve_v1": True,
     "interactive_questions_v1": True,
     "chat": True,
     "projects": True,

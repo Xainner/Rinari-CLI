@@ -219,6 +219,7 @@ class EngineServer:
         self._dispatcher.register("workspace.preview.stop", self._previews.stop)
         self._dispatcher.register("session.move", self._desktop.move)
         self._dispatcher.register("workspace.file.read", self._desktop.read)
+        self._dispatcher.register("workspace.file.resolve", self._desktop.resolve)
         self._dispatcher.register("workspace.file.watch", self._desktop.watch)
         self._dispatcher.register("workspace.file.unwatch", self._desktop.unwatch)
         self._dispatcher.register("question.list", self._question_list)
