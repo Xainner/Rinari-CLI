@@ -858,6 +858,12 @@ Slice 5a adds `session.mode.set` (`ref`, `mode` plan/build/review):
 PLAN/REVIEW turns run under a READ_ONLY policy profile, BUILD under
 WORKSPACE; legacy modes keep workspace behavior. Emits
 `session.mode.changed`; the mode switch keeps session, tasks and context.
+`workspace.file.resolve` (`session_id`, `path`, `turn_id`) authorizes a file
+exactly like `workspace.file.read` (session root, turn provenance, private
+paths) but never reads it as text: it returns `path`, `name`, `size`, `kind`
+(`image`, `video`, `audio`, `pdf`, `text` or `binary`, from the first bytes),
+`mime` and `preview_limit`. The desktop uses it to play media, open a file
+with the system app or reveal it in its folder, at any size.
 Every stored title emits `session.renamed` (`session_id`, `title`,
 `source`: `manual`, `generated` or `fallback`). The first message names the
 session through the model; when no usable title comes back, the trimmed
