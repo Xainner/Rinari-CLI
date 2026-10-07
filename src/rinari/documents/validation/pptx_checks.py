@@ -9,6 +9,7 @@ gráficos. La revisión visual de verdad es otra dimensión: la registra
 from __future__ import annotations
 
 import posixpath
+import re
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -135,7 +136,7 @@ def layout(path: Path) -> Check:
                 findings.extend(_chart_findings(index, shape))
             if not getattr(shape, "has_text_frame", False) or not shape.text_frame.text.strip():
                 continue
-            if shape.rotation == 0:
+            if shape.rotation == 0 and not _decorative(shape):
                 texts.append((shape, box))
             sizes = [
                 run.font.size.pt
@@ -202,6 +203,14 @@ def _finding(code: str, severity: str, slide: int, shape, **extra: Any) -> dict[
         "name": shape.name,
         **extra,
     }
+
+
+def _decorative(shape) -> bool:
+    """Un adorno declarado por el layout (comillas grandes): su solape es intencional."""
+    return bool(_DECORATIVE.match(shape.name or ""))
+
+
+_DECORATIVE = re.compile(r"^rinari:[^:]+:(mark|deco-[\w-]+)$")
 
 
 def _font(shape) -> str | None:

@@ -122,6 +122,48 @@ def test_every_theme_builds_a_deck_without_static_findings(theme_id, tmp_path):
     assert layout.status == "passed", layout.findings
 
 
+@pytest.mark.parametrize("theme_id", sorted(THEMES))
+def test_every_layout_fits_in_every_theme(theme_id, tmp_path):
+    from PIL import Image
+
+    from tests.unit.documents import decks
+
+    image = tmp_path / "mapa.png"
+    Image.new("RGB", (1200, 700), (40, 90, 160)).save(image)
+    for spec in (decks.EXECUTIVE, decks.EXTRA):
+        data, plans = pptx_build.build({**spec, "theme": theme_id}, {"mapa": str(image)})
+        path = tmp_path / "deck.pptx"
+        path.write_bytes(data)
+        assert pptx_build.plan_findings(plans) == [], theme_id
+        layout = pptx_checks.layout(path)
+        assert [f for f in layout.findings if f["severity"] == "error"] == [], layout.findings
+    assert {s["layout"] for s in (*decks.EXECUTIVE["slides"], *decks.EXTRA["slides"])} == set(
+        pptx_build.LAYOUTS
+    )
+
+
+def test_horizontal_bars_read_top_down_in_data_order():
+    import io
+    import zipfile
+
+    spec = {
+        "slides": [
+            {
+                "layout": "chart",
+                "title": "x",
+                "chart": {
+                    "type": "bar",
+                    "categories": ["a", "b"],
+                    "series": [{"name": "s", "values": [1, 2]}],
+                },
+            }
+        ]
+    }
+    data, _ = pptx_build.build(spec)
+    xml = zipfile.ZipFile(io.BytesIO(data)).read("ppt/charts/chart1.xml").decode()
+    assert 'orientation val="maxMin"' in xml and 'crosses val="max"' in xml
+
+
 def test_specs_are_closed_and_layouts_named(tmp_path):
     with pytest.raises(DocumentError) as err:
         pptx_build.build({**DECK, "colour": "red"})

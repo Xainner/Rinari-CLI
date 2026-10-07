@@ -424,10 +424,11 @@ class _Builder:
                 plan,
                 "number",
                 str(spec["number"]),
-                (x, 170, 200, 60),
+                (x, 160, 200, 70),
                 size=44,
                 bold=True,
                 color=t.accent_text,
+                spacing=1.0,
             )
         self._text(
             slide,
@@ -774,6 +775,15 @@ class _Builder:
             from pptx.enum.chart import XL_TICK_LABEL_POSITION
 
             category_axis.tick_label_position = XL_TICK_LABEL_POSITION.LOW
+            if kind in ("bar", "stacked_bar"):
+                # Las barras horizontales se leen de arriba abajo en el orden dado;
+                # el eje de valores cruza en la última categoría: sigue abajo.
+                from pptx.oxml.ns import qn
+
+                category_axis.reverse_order = True
+                crosses = value_axis._element.find(qn("c:crosses"))
+                if crosses is not None:
+                    crosses.set("val", "max")
         small = len(categories) <= 8 and (not many or circular)
         if small or chart.get("data_labels"):
             plot.has_data_labels = True
@@ -889,6 +899,7 @@ class _Builder:
                 size=11,
                 color=t.muted,
                 align="center",
+                spacing=1.0,
             )
         if spec.get("y_axis"):
             box = self._text(
@@ -900,6 +911,7 @@ class _Builder:
                 size=11,
                 color=t.muted,
                 align="center",
+                spacing=1.0,
             )
             box.rotation = -90
             plan.elements[-1].overlap_ok = True
@@ -1154,6 +1166,7 @@ class _Builder:
             bold=True,
             color=t.ink,
             font="Georgia",
+            spacing=0.8,
         )
         self._text(
             slide,
