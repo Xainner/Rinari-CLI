@@ -375,10 +375,7 @@ def shell_tools() -> list[ToolDefinition]:
                     "timeout_s": {
                         "type": "number",
                         "minimum": 1,
-                        "description": (
-                            "Seconds before the command is terminated; default 60, at most "
-                            "600. For longer work use background=true and process.wait."
-                        ),
+                        "description": "Seconds; default 60, max 600 (longer: background=true).",
                     },
                     "env": {"type": "object"},
                 },

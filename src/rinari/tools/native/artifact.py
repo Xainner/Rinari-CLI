@@ -263,20 +263,15 @@ def artifact_tools() -> list[ToolDefinition]:
         ToolDefinition(
             name="artifact.export",
             description=(
-                "Copy the original bytes of an artifact:// URI from this session (for example "
-                "an attached image or document) to a real file, for programs, uploads or "
-                "scripts that need a path. path is a file or folder; without it the copy goes "
-                "to the working directory. Never overwrites: a taken name gets a suffix. "
-                "Returns the path and sha256 of the copy."
+                "Copy an artifact:// original of this session (e.g. an attachment) to a file "
+                "for programs or uploads. path: file or folder (default: working directory). "
+                "Never overwrites."
             ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "uri": {"type": "string"},
-                    "path": {
-                        "type": "string",
-                        "description": "Destination file or existing folder.",
-                    },
+                    "path": {"type": "string"},
                 },
                 "required": ["uri"],
             },

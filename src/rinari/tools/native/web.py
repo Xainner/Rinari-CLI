@@ -578,10 +578,7 @@ def web_tools() -> list[ToolDefinition]:
                         "description": "Stable source_id; reuses its exact snapshot.",
                     },
                     "pattern": {"type": "string"},
-                    "refresh": {
-                        "type": "boolean",
-                        "description": "Bypass the 30-second session snapshot cache.",
-                    },
+                    "refresh": {"type": "boolean"},
                 },
                 "required": ["pattern"],
                 "anyOf": [{"required": ["url"]}, {"required": ["source_id"]}],
@@ -649,10 +646,7 @@ def web_tools() -> list[ToolDefinition]:
                 "type": "object",
                 "properties": {
                     "urls": {"type": "array", "items": {"type": "string"}},
-                    "refresh": {
-                        "type": "boolean",
-                        "description": "Bypass the 30-second session snapshot cache.",
-                    },
+                    "refresh": {"type": "boolean"},
                 },
             },
             risk=RISK_LOW,

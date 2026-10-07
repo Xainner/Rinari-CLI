@@ -453,18 +453,14 @@ def process_tools() -> list[ToolDefinition]:
         ToolDefinition(
             name="process.wait",
             description=(
-                "Wait for a started process to exit, for up to timeout_s seconds (default 60). "
-                "On timed_out=true the process is still running; wait again or signal it."
+                "Wait up to timeout_s seconds (default 60) for a started process to exit; "
+                "timed_out=true means it still runs."
             ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "handle": {"type": "string"},
-                    "timeout_s": {
-                        "type": "number",
-                        "minimum": 0,
-                        "description": "Seconds to wait; default 60, at most 600 per call.",
-                    },
+                    "timeout_s": {"type": "number", "minimum": 0},
                 },
                 "required": ["handle"],
             },
@@ -479,9 +475,8 @@ def process_tools() -> list[ToolDefinition]:
         ToolDefinition(
             name="process.output",
             description=(
-                "Read the output a started process has produced so far; returns at once. "
-                "Pass the returned cursor to receive only new output. To wait for it to "
-                "finish use process.wait."
+                "Read output produced so far, without waiting. Pass the returned cursor to "
+                "receive only new output."
             ),
             input_schema={
                 "type": "object",
