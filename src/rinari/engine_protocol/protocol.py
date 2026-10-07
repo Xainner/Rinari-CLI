@@ -62,6 +62,12 @@ CAPABILITIES: dict[str, bool] = {
     # Attachment preparation reports per-page coverage and accepts
     # keep_image (OCR text plus the pixels of the same image).
     "reading_coverage_v1": True,
+    # Servicio documental: trabajos (render…), revisiones inmutables,
+    # previews por revisión y lectura acotada; PPTX como adjunto.
+    "document_jobs_v1": True,
+    "document_revisions_v1": True,
+    "document_preview_v1": True,
+    "pptx_attachment_v1": True,
     "interactive_questions_v1": True,
     "chat": True,
     "projects": True,

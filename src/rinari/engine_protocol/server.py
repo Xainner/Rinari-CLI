@@ -342,6 +342,13 @@ class EngineServer:
         self._dispatcher.register("artifact.read", self._artifact_read)
         self._dispatcher.register("artifact.export", self._artifact_export)
         self._dispatcher.register("artifact.resolve", self._artifact_resolve)
+        from rinari.engine_protocol.documents import register_documents
+
+        register_documents(
+            self._dispatcher,
+            self._services,
+            lambda job: self._turns.emit_external(event("document.job.updated", job)),
+        )
         self._dispatcher.register("context.get", self._context_get)
         self._dispatcher.register("memory.list", self._memory_list)
         self._dispatcher.register("memory.search", self._memory_search)
