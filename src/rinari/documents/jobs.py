@@ -74,9 +74,18 @@ class JobHandle:
         self._manager._update(self.id, progress_done=done, progress_total=total)
 
     def run_worker(
-        self, operation: str, request: dict[str, Any], *, timeout_s: float | None = None
+        self,
+        operation: str,
+        request: dict[str, Any],
+        *,
+        timeout_s: float | None = None,
+        consume: Callable[[dict[str, Path], dict[str, Any]], Any] | None = None,
     ) -> dict[str, Any]:
-        """Corre `operation` en un proceso hijo y devuelve su resultado JSON."""
+        """Corre `operation` en un proceso hijo y devuelve su resultado JSON.
+
+        Con `consume`, los archivos producidos se entregan como rutas (válidas
+        solo durante la llamada) en vez de leerse a memoria.
+        """
         self.check()
         with tempfile.TemporaryDirectory(prefix="rinari-doc-") as tmp:
             workdir = Path(tmp)
@@ -111,9 +120,11 @@ class JobHandle:
                     except subprocess.TimeoutExpired:
                         if self.cancelled:
                             _kill(process)
+                            _kill_owned(workdir)
                             raise JobCancelled() from None
                         if time.monotonic() > deadline:
                             _kill(process)
+                            _kill_owned(workdir)
                             raise DocumentError(
                                 DocumentErrorCode.RENDER_FAILED
                                 if operation.startswith("render")
@@ -143,6 +154,10 @@ class JobHandle:
                     action=error.get("action"),
                     details=error.get("details"),
                 )
+            if consume is not None:
+                paths = {key: workdir / rel for key, rel in (payload.get("files") or {}).items()}
+                result = payload.get("result", {})
+                return {**result, "_files": {}, "_consumed": consume(paths, result)}
             files = {}
             for key, rel in (payload.get("files") or {}).items():
                 files[key] = (workdir / rel).read_bytes()
@@ -156,10 +171,24 @@ class JobHandle:
 
 
 def run_inline(
-    operation: str, request: dict[str, Any], *, timeout_s: float = 120.0
+    operation: str,
+    request: dict[str, Any],
+    *,
+    timeout_s: float = 120.0,
+    consume: Callable[[dict[str, Path], dict[str, Any]], Any] | None = None,
 ) -> dict[str, Any]:
     """Una operación corta en proceso hijo sin fila de trabajo (validar, comparar)."""
-    return JobHandle(None, "inline", "").run_worker(operation, request, timeout_s=timeout_s)
+    return JobHandle(None, "inline", "").run_worker(
+        operation, request, timeout_s=timeout_s, consume=consume
+    )
+
+
+def _kill_owned(workdir: Path) -> None:
+    """Procesos externos que el trabajo apuntó como suyos (p. ej. su Excel)."""
+    from rinari.documents.adapters.excel_calc import kill_owned
+
+    with contextlib.suppress(Exception):
+        kill_owned(workdir)
 
 
 def _kill(process: subprocess.Popen) -> None:

@@ -272,6 +272,7 @@ def documents_create(arguments: dict, ctx: ToolContext) -> ToolResult:
         service = _service(ctx)
         job = service.create(
             _spec(arguments, ctx),
+            kind=arguments.get("kind"),
             output_name=arguments.get("output_name"),
             resources=_resources(service, ctx, arguments.get("resources")),
             render=arguments.get("render", True) is not False,
@@ -394,6 +395,90 @@ def documents_finalize(arguments: dict, ctx: ToolContext) -> ToolResult:
         data={**data, "saved_to": str(dest)},
         artifacts=(ArtifactRef(revision["uri"], revision["name"], "document"),),
     )
+
+
+def _local_artifact(service, ctx: ToolContext, ref: Any) -> str:
+    """Un archivo de datos: `artifact://` de la sesión o una ruta legible que se importa."""
+    from rinari.artifacts.transfer import import_file
+    from rinari.documents.contracts import DocumentError, DocumentErrorCode
+
+    if isinstance(ref, str) and ref.startswith("artifact://"):
+        return ref
+    if not isinstance(ref, str) or not ref.strip():
+        raise DocumentError(DocumentErrorCode.INVALID_SPEC, "source is a path or artifact://")
+    try:
+        path = ctx.sandbox.resolve(ref, base=ctx.cwd)
+        ctx.sandbox.assert_readable(path)
+    except Exception as exc:
+        raise DocumentError(
+            DocumentErrorCode.UNSAFE_EXTERNAL_RESOURCE, getattr(exc, "message", str(exc))
+        ) from exc
+    if not Path(path).is_file():
+        raise DocumentError(DocumentErrorCode.NOT_FOUND, f"No such file: {ref}")
+    record = import_file(
+        service.artifacts,
+        service.session_id,
+        Path(path),
+        cancellation=ctx.cancellation,
+        provenance=f"spreadsheets.query:{Path(path).name}",
+    )
+    return record.uri()
+
+
+def spreadsheets_query(arguments: dict, ctx: ToolContext) -> ToolResult:
+    try:
+        service = _service(ctx)
+        refs = [str(r) for r in arguments.get("datasets") or []]
+        imported = None
+        if arguments.get("source"):
+            options = {k: arguments[k] for k in ("types", "sheet", "delimiter") if arguments.get(k)}
+            job = service.import_dataset(
+                _local_artifact(service, ctx, arguments["source"]),
+                name=arguments.get("source_name"),
+                source_format=arguments.get("format"),
+                options=options or None,
+            )
+            if job.get("job_id"):
+                job = service.wait(job, _wait(arguments, MAX_WAIT_S), ctx.cancellation)
+            if job["status"] != "succeeded":
+                return ToolResult(ok=True, data=job)
+            imported = job["result"]["dataset"]
+            refs.append(imported["id"])
+        if not arguments.get("sql"):
+            if not refs:
+                return ToolResult(ok=True, data={"datasets": service.list_datasets()})
+            return ToolResult(ok=True, data={"datasets": [service.dataset(r) for r in refs]})
+        job = service.query(
+            refs,
+            str(arguments["sql"]),
+            limit=arguments.get("limit"),
+            into=arguments.get("into"),
+            name=arguments.get("name"),
+        )
+        job = service.wait(job, _wait(arguments, MAX_WAIT_S), ctx.cancellation)
+        if imported is not None:
+            job = {**job, "imported": imported}
+    except Exception as exc:
+        return _fail(exc)
+    return ToolResult(ok=True, data=job)
+
+
+def spreadsheets_recalculate(arguments: dict, ctx: ToolContext) -> ToolResult:
+    try:
+        service = _service(ctx)
+        ref = _reference(service, ctx, arguments.get("document"))
+        job = service.calculate(ref, render=bool(arguments.get("render")))
+        job = service.wait(job, _wait(arguments), ctx.cancellation)
+    except Exception as exc:
+        return _fail(exc)
+    return ToolResult(ok=True, data=job)
+
+
+def _source_target(arguments: dict) -> ClassifiedAction:
+    source = str(arguments.get("source") or "")
+    if source and not source.startswith("artifact://"):
+        return ClassifiedAction("fs.read", source)
+    return ClassifiedAction("state.read")
 
 
 def _write_target(arguments: dict) -> ClassifiedAction:
@@ -520,7 +605,7 @@ def document_tools() -> list[ToolDefinition]:
             ),
             input_schema={
                 "type": "object",
-                "properties": {"kind": {"type": "string", "enum": ["pptx"]}},
+                "properties": {"kind": {"type": "string", "enum": ["pptx", "xlsx"]}},
             },
             risk=RISK_LOW,
             side_effects=SIDE_EFFECT_NONE,
@@ -531,13 +616,14 @@ def document_tools() -> list[ToolDefinition]:
         ToolDefinition(
             name="documents.create",
             description=(
-                "Build a new editable document from a spec (pptx: DeckSpec with theme and "
-                "slides). Returns a draft revision, static checks and renders; show attaches "
-                "pages. Nothing is written to the project."
+                "Build a new editable document from a spec (pptx: DeckSpec; xlsx: WorkbookSpec, "
+                "see documents.templates). Returns a draft revision, static checks and "
+                "renders; show attaches pages. Nothing is written to the project."
             ),
             input_schema={
                 "type": "object",
                 "properties": {
+                    "kind": {"type": "string", "enum": ["pptx", "xlsx"]},
                     "spec": {"type": "object"},
                     "spec_uri": {"type": "string"},
                     "output_name": {"type": "string"},
@@ -667,6 +753,61 @@ def document_tools() -> list[ToolDefinition]:
             handler=documents_finalize,
             classify=_write_target,
             **common,
+        ),
+        ToolDefinition(
+            name="spreadsheets.query",
+            description=(
+                "SQL over large data without loading it into context. source (CSV/TSV/"
+                "Parquet/JSON/XLSX path) is imported once as a dataset; without sql it "
+                "describes schema, row count and sample. One SELECT over table data (or "
+                "alias.data); into dataset|csv keeps big results as artifacts."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "source": {"type": "string"},
+                    "format": {"type": "string"},
+                    "types": {"type": "object", "additionalProperties": {"type": "string"}},
+                    "sheet": {"type": "string"},
+                    "delimiter": {"type": "string"},
+                    "source_name": {"type": "string"},
+                    "datasets": {"type": "array", "items": {"type": "string"}},
+                    "sql": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 2000},
+                    "into": {"type": "string", "enum": ["dataset", "csv"]},
+                    "name": {"type": "string"},
+                    "wait_s": _WAIT,
+                },
+            },
+            risk=RISK_LOW,
+            side_effects=SIDE_EFFECT_LOCAL_REVERSIBLE,
+            timeout_ms=MAX_WAIT_S * 1000 + 30_000,
+            handler=spreadsheets_query,
+            classify=_source_target,
+            **{**common, "namespace": "spreadsheets"},
+        ),
+        ToolDefinition(
+            name="spreadsheets.recalculate",
+            description=(
+                "Recalculate a workbook with the installed Excel (isolated, macros off). "
+                "Produces a revision with fresh formula results and reports formula errors; "
+                "without Excel it says so and results stay pending."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "document": _DOCUMENT,
+                    "render": {"type": "boolean"},
+                    "wait_s": _WAIT,
+                },
+                "required": ["document"],
+            },
+            risk=RISK_MEDIUM,
+            side_effects=SIDE_EFFECT_LOCAL_REVERSIBLE,
+            timeout_ms=MAX_WAIT_S * 1000 + 30_000,
+            handler=spreadsheets_recalculate,
+            classify=_read_target,
+            **{**common, "namespace": "spreadsheets"},
         ),
         ToolDefinition(
             name="documents.job.get",

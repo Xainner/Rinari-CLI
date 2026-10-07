@@ -15,7 +15,7 @@ from typing import Any
 from rinari.documents import capabilities
 from rinari.documents.contracts import DocumentError, DocumentErrorCode
 
-Files = dict[str, bytes]
+Files = dict[str, bytes | Path]
 
 
 def _render(request: dict[str, Any], out: Path) -> tuple[dict[str, Any], Files]:
@@ -110,11 +110,144 @@ def _diff(request: dict[str, Any], out: Path) -> tuple[dict[str, Any], Files]:
     return result, {}
 
 
+# -- hojas de cálculo --------------------------------------------------------------------
+def _xlsx_checks(path: Path, expected: list[str] | None, *, calculated_by: str | None = None):
+    from rinari.documents.adapters import xlsx_edit
+    from rinari.documents.validation import xlsx_checks
+
+    inventory = xlsx_edit.formulas(path, calculated=calculated_by is not None)
+    return {
+        "structure": xlsx_checks.structure(path).to_dict(),
+        "content": xlsx_checks.content(path, expected).to_dict(),
+        "formulas": xlsx_checks.formulas_check(inventory, calculated_by=calculated_by).to_dict(),
+    }, inventory
+
+
+def _xlsx_create(request: dict[str, Any], out: Path) -> tuple[dict[str, Any], Files]:
+    import copy
+
+    from rinari.documents.adapters import data_engine, xlsx_build
+
+    spec = copy.deepcopy(request["spec"])
+    datasets: dict[str, str] = request.get("datasets") or {}
+    sources: dict[str, Any] = {}
+    for sheet in spec.get("sheets") or []:
+        data = sheet.get("data") if isinstance(sheet, dict) else None
+        if not isinstance(data, dict):
+            continue
+        alias = str(data.get("dataset") or "")
+        if alias not in datasets:
+            raise DocumentError(DocumentErrorCode.NOT_FOUND, f"Unknown dataset {alias!r}")
+        columns, rows = data_engine.rows({alias: datasets[alias]}, str(data.get("sql") or ""))
+        if not sheet.get("columns"):
+            sheet["columns"] = [
+                {"header": c["name"], "type": data_engine.column_type(c["type"])} for c in columns
+            ]
+        sources[sheet["name"]] = rows
+    data, plans = xlsx_build.build(spec, {"__rows__": sources})
+    target = out / "book.xlsx"
+    target.write_bytes(data)
+    checks, inventory = _xlsx_checks(target, request.get("expected_text"))
+    return {
+        "sheets": [plan.to_dict() for plan in plans],
+        "plan_findings": [f for plan in plans for f in plan.findings],
+        "checks": checks,
+        "formulas": inventory,
+    }, {"document": target}
+
+
+def _xlsx_edit(request: dict[str, Any], out: Path) -> tuple[dict[str, Any], Files]:
+    from rinari.documents import preservation
+    from rinari.documents.adapters import xlsx_edit
+
+    source = Path(request["path"])
+    target = out / "edited.xlsx"
+    policy = request.get("preservation") or preservation.PRESERVE_STRICT
+    state = xlsx_edit.apply(
+        source,
+        target,
+        request["operations"],
+        rebuild_allowed=policy != preservation.PRESERVE_STRICT,
+    )
+    diff = preservation.diff_packages(source, target)
+    verdict = preservation.evaluate(
+        diff, state.allowed, policy, allow_new=tuple(sorted(state.allow_new))
+    )
+    if verdict["status"] == "failed":
+        raise DocumentError(
+            DocumentErrorCode.PRESERVATION_RISK,
+            "The edit would change or drop parts it did not declare",
+            details={"preservation": verdict},
+            action="Use set_cells only, or accept the reported loss with rebuild",
+        )
+    checks, inventory = _xlsx_checks(target, request.get("expected_text"))
+    backend = "openpyxl" if state.structural else "ooxml-patch"
+    return {
+        "changes": state.changes,
+        "preservation": {**verdict, "diff": diff, "backend": backend},
+        "checks": checks,
+        "formulas": inventory,
+    }, {"document": target}
+
+
+def _xlsx_validate(request: dict[str, Any], out: Path) -> tuple[dict[str, Any], Files]:
+    checks, inventory = _xlsx_checks(
+        Path(request["path"]),
+        request.get("expected_text"),
+        calculated_by=request.get("calculated_by"),
+    )
+    return {"checks": checks, "formulas": inventory}, {}
+
+
+def _xlsx_calculate(request: dict[str, Any], out: Path) -> tuple[dict[str, Any], Files]:
+    from rinari.documents.adapters import excel_calc
+
+    target = excel_calc.calculate(Path(request["path"]), out)
+    checks, inventory = _xlsx_checks(
+        target, request.get("expected_text"), calculated_by="excel-com"
+    )
+    return {"checks": checks, "formulas": inventory, "backend": "excel-com"}, {"document": target}
+
+
+def _dataset_import(request: dict[str, Any], out: Path) -> tuple[dict[str, Any], Files]:
+    from rinari.documents.adapters import data_engine
+
+    target = out / "dataset.duckdb"
+    profile = data_engine.import_source(
+        Path(request["path"]), request["kind"], request.get("options") or {}, target
+    )
+    return profile, {"dataset": target}
+
+
+def _dataset_query(request: dict[str, Any], out: Path) -> tuple[dict[str, Any], Files]:
+    from rinari.documents.adapters import data_engine
+
+    result = data_engine.query(
+        request["datasets"],
+        request["sql"],
+        limit=int(request.get("limit") or data_engine.DEFAULT_LIMIT),
+        into=request.get("into"),
+        out_dir=out,
+        csv_safe=request.get("csv_safe", True) is not False,
+    )
+    files: Files = {}
+    if result.get("path"):
+        key = "dataset" if result.get("into") == "dataset" else "csv"
+        files[key] = out / result.pop("path")
+    return result, files
+
+
 REGISTRY: dict[str, Any] = {
     "render": _render,
     "pptx.create": _pptx_create,
     "pptx.edit": _pptx_edit,
     "pptx.validate": _pptx_validate,
+    "xlsx.create": _xlsx_create,
+    "xlsx.edit": _xlsx_edit,
+    "xlsx.validate": _xlsx_validate,
+    "xlsx.calculate": _xlsx_calculate,
+    "dataset.import": _dataset_import,
+    "dataset.query": _dataset_query,
     "diff": _diff,
 }
 
@@ -160,6 +293,10 @@ for _kind in READ:
 capabilities.enable("pdf", "render")
 capabilities.enable("pptx", "create")
 capabilities.enable("pptx", "edit")
+capabilities.enable("xlsx", "create")
+capabilities.enable("xlsx", "edit")
+capabilities.enable("xlsx", "query")
+capabilities.enable("xlsx", "calculate")
 
 
 def register(name: str, function: Any, *, kind: str | None = None, operation: str | None = None):

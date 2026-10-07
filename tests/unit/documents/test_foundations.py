@@ -271,7 +271,7 @@ def test_pdf_docx_and_xlsx_are_inspected_and_read_in_bounds(store, tmp_path):
     sheet = service.inspect(xlsx_uri)["inspection"]["sheets"][0]
     assert (sheet["name"], sheet["values"], sheet["formulas"]) == ("Datos", 2, 1)
     rows = service.read(xlsx_uri, "Datos!A1:A2")["rows"]
-    assert rows[1]["cells"][0] == {"cell": "A2", "value": "=A1*2"}
+    assert rows[1]["cells"][0] == {"cell": "A2", "value": "=A1*2", "formula": True, "cached": None}
     with pytest.raises(DocumentError) as err:
         service.read(xlsx_uri, "Datos!A1:ZZ9999")
     assert err.value.code is DocumentErrorCode.DOCUMENT_LIMIT_EXCEEDED

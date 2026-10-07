@@ -242,19 +242,31 @@ def inspect_xlsx(path: Path) -> dict[str, Any]:
 
 
 def read_xlsx(path: Path, selection: str | None, cursor: int | None) -> dict[str, Any]:
-    """Un rango concreto (`Hoja!A1:F40`, por defecto el principio de la primera hoja)."""
+    """Un rango concreto (`Hoja!A1:F40`, por defecto el principio de la primera hoja).
+
+    Una celda con fórmula trae la fórmula y, aparte, su resultado en caché
+    (`cached`), que puede faltar o estar desfasado: no se confunden.
+    """
+    import warnings
+
     import openpyxl
     from openpyxl.utils import range_boundaries
 
+    warnings.filterwarnings("ignore", module="openpyxl")
     workbook = openpyxl.load_workbook(str(path), read_only=True, data_only=False, keep_links=False)
+    values = openpyxl.load_workbook(str(path), read_only=True, data_only=True, keep_links=False)
     try:
         sheet_name, _, ref = (selection or "").rpartition("!")
+        sheet_name = sheet_name.strip("'")
+        if sheet_name and sheet_name not in workbook.sheetnames:
+            raise DocumentError(DocumentErrorCode.NOT_FOUND, f"No sheet named {sheet_name!r}")
         sheet = workbook[sheet_name] if sheet_name else workbook.worksheets[0]
+        cached_sheet = values[sheet.title]
         if not ref:
             ref = "A1:Z60"
         try:
             min_col, min_row, max_col, max_row = range_boundaries(ref)
-        except ValueError as exc:
+        except (ValueError, TypeError) as exc:
             raise DocumentError(DocumentErrorCode.INVALID_SPEC, f"Bad range {ref!r}") from exc
         if (max_row - min_row + 1) * (max_col - min_col + 1) > 20_000:
             raise DocumentError(
@@ -265,20 +277,32 @@ def read_xlsx(path: Path, selection: str | None, cursor: int | None) -> dict[str
         rows = []
         used = 0
         next_cursor = None
-        for index, cells in enumerate(
-            sheet.iter_rows(min_row=min_row, max_row=max_row, min_col=min_col, max_col=max_col),
-            start=min_row,
-        ):
-            row = [{"cell": c.coordinate, "value": c.value} for c in cells if c.value is not None]
-            size = sum(len(str(c["value"])) for c in row)
+        bounds = {"min_row": min_row, "max_row": max_row, "min_col": min_col, "max_col": max_col}
+        pairs = zip(sheet.iter_rows(**bounds), cached_sheet.iter_rows(**bounds), strict=False)
+        for index, (cells, cached_cells) in enumerate(pairs, start=min_row):
+            row = []
+            for cell, cached in zip(cells, cached_cells, strict=False):
+                if cell.value is None:
+                    continue
+                entry: dict[str, Any] = {"cell": cell.coordinate, "value": _cell_value(cell.value)}
+                if getattr(cell, "data_type", None) == "f":
+                    entry["formula"] = True
+                    entry["cached"] = _cell_value(cached.value)
+                if getattr(cell, "number_format", "General") not in ("General", None):
+                    entry["format"] = cell.number_format
+                row.append(entry)
+            size = sum(len(str(c["value"])) + len(str(c.get("cached", ""))) for c in row)
             if rows and used + size > READ_CHAR_BUDGET:
                 next_cursor = index
                 break
             rows.append({"row": index, "cells": row})
             used += size
+        dimension = sheet.calculate_dimension() if hasattr(sheet, "calculate_dimension") else None
         return {
             "kind": "xlsx",
             "sheet": sheet.title,
+            "sheets": workbook.sheetnames,
+            "dimension": dimension,
             "range": ref,
             "rows": rows,
             "truncated": next_cursor is not None,
@@ -286,3 +310,14 @@ def read_xlsx(path: Path, selection: str | None, cursor: int | None) -> dict[str
         }
     finally:
         workbook.close()
+        values.close()
+
+
+def _cell_value(value: Any) -> Any:
+    import datetime as dt
+
+    if isinstance(value, (dt.datetime, dt.date, dt.time)):
+        return value.isoformat()
+    if isinstance(value, float) and value != value:
+        return None
+    return value

@@ -26,34 +26,40 @@ MIN_FONT_PT = 10
 TOLERANCE_PT = 1.5
 
 
-def structure(path: Path) -> Check:
+def relationship_findings(archive: zipfile.ZipFile) -> list[dict[str, Any]]:
+    """Relaciones internas que apuntan a partes inexistentes (un paquete roto)."""
+    from defusedxml import ElementTree
+
     findings: list[dict[str, Any]] = []
+    names = set(archive.namelist())
+    for rels in [n for n in names if n.endswith(".rels")]:
+        base = posixpath.dirname(posixpath.dirname(rels))
+        root = ElementTree.fromstring(archive.read(rels))
+        for node in root:
+            if node.attrib.get("TargetMode") == "External":
+                continue
+            target = node.attrib.get("Target", "")
+            resolved = (
+                target.lstrip("/")
+                if target.startswith("/")
+                else posixpath.normpath(posixpath.join(base, target))
+            )
+            if resolved not in names:
+                findings.append(
+                    {
+                        "code": "BROKEN_RELATIONSHIP",
+                        "severity": "error",
+                        "part": rels,
+                        "target": target,
+                    }
+                )
+    return findings
+
+
+def structure(path: Path) -> Check:
     try:
         with zipfile.ZipFile(path) as archive:
-            names = set(archive.namelist())
-            from defusedxml import ElementTree
-
-            for rels in [n for n in names if n.endswith(".rels")]:
-                base = posixpath.dirname(posixpath.dirname(rels))
-                root = ElementTree.fromstring(archive.read(rels))
-                for node in root:
-                    if node.attrib.get("TargetMode") == "External":
-                        continue
-                    target = node.attrib.get("Target", "")
-                    resolved = (
-                        target.lstrip("/")
-                        if target.startswith("/")
-                        else posixpath.normpath(posixpath.join(base, target))
-                    )
-                    if resolved not in names:
-                        findings.append(
-                            {
-                                "code": "BROKEN_RELATIONSHIP",
-                                "severity": "error",
-                                "part": rels,
-                                "target": target,
-                            }
-                        )
+            findings = relationship_findings(archive)
         from pptx import Presentation
 
         presentation = Presentation(str(path))

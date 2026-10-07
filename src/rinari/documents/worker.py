@@ -38,6 +38,10 @@ def run(workdir: Path) -> int:
         result, files = operation(request.get("request") or {}, out)
         written: dict[str, str] = {}
         for index, (key, data) in enumerate(files.items()):
+            if isinstance(data, Path):
+                # Salidas grandes (un dataset, un CSV) ya están en `out`: no pasan por memoria.
+                written[key] = str(data.resolve().relative_to(workdir.resolve()))
+                continue
             target = out / f"file-{index}"
             target.write_bytes(data)
             written[key] = str(target.relative_to(workdir))

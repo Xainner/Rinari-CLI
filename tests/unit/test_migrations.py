@@ -16,6 +16,7 @@ TABLES_AFTER_MIGRATIONS = {
     "schema_migrations",
     "document_revisions",
     "document_jobs",
+    "document_datasets",
     "worktree_branches",
     "skill_records",
     "scheduled_tasks",

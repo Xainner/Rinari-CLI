@@ -241,13 +241,18 @@ class DocumentService:
 
     # -- autoría ----------------------------------------------------------------------
     def templates(self, kind: str | None = None) -> dict[str, Any]:
-        from rinari.documents.adapters import pptx_build
+        from rinari.documents.adapters import pptx_build, xlsx_build
 
         catalog: dict[str, Any] = {}
         if kind in (None, "pptx"):
             catalog["pptx"] = {
                 **pptx_build.template_catalog(),
                 "edit_operations": _edit_catalog(),
+            }
+        if kind in (None, "xlsx"):
+            catalog["xlsx"] = {
+                **xlsx_build.template_catalog(),
+                "edit_operations": _xlsx_edit_catalog(),
             }
         return catalog
 
@@ -316,12 +321,14 @@ class DocumentService:
         resources: Any = None,
         render: bool = True,
         expected_text: list[str] | None = None,
+        kind: str | None = None,
     ) -> dict[str, Any]:
         if not isinstance(spec, dict):
             raise DocumentError(DocumentErrorCode.INVALID_SPEC, "spec must be an object")
-        kind = str(spec.get("kind") or "pptx")
+        kind = str(kind or spec.get("kind") or "pptx")
         spec = {k: v for k, v in spec.items() if k != "kind"}
-        name = safe_name(output_name or f"{spec.get('title') or 'Presentacion'}.{kind}")
+        default = "Libro" if kind == "xlsx" else "Presentacion"
+        name = safe_name(output_name or f"{spec.get('title') or default}.{kind}")
         if kind_of_name(name) != kind:
             name = f"{name.rsplit('.', 1)[0]}.{kind}"
         caps.require(kind, "create")
@@ -329,6 +336,7 @@ class DocumentService:
         if operation not in operations.REGISTRY:
             raise DocumentError(DocumentErrorCode.UNSUPPORTED_FEATURE, f"Cannot create {kind} yet")
         request = {"kind": kind, "output_name": name, "render": render}
+        spec, datasets = self._dataset_sources(spec) if kind == "xlsx" else (spec, {})
 
         def runner(handle: JobHandle) -> dict[str, Any]:
             handle.phase("build")
@@ -337,7 +345,13 @@ class DocumentService:
                 files = self.resources(resources, Path(tmp))
                 result = handle.run_worker(
                     operation,
-                    {"spec": spec, "resources": files, "expected_text": expected_text},
+                    {
+                        "spec": spec,
+                        "resources": files,
+                        "datasets": datasets,
+                        "expected_text": expected_text,
+                    },
+                    timeout_s=900,
                 )
             handle.phase("publish")
             data = result.pop("_files")["document"]
@@ -346,7 +360,7 @@ class DocumentService:
                 session_id=self.session_id,
                 name=name,
                 operation="create",
-                backend="python-pptx",
+                backend=_BUILDERS.get(kind, kind),
                 spec_uri=spec_uri,
                 provenance={"spec_uri": spec_uri, "resources": sorted((resources or {}).values())},
             )
@@ -390,6 +404,10 @@ class DocumentService:
             from rinari.documents.adapters import pptx_edit
 
             pptx_edit.validate(operations_)
+        elif kind == "xlsx":
+            from rinari.documents.adapters import xlsx_edit
+
+            xlsx_edit.validate(operations_)
         name = safe_name(output_name or revision.name)
         if kind_of_name(name) != kind:
             raise DocumentError(DocumentErrorCode.INVALID_SPEC, f"output_name must end in .{kind}")
@@ -422,7 +440,7 @@ class DocumentService:
                 session_id=self.session_id,
                 name=name,
                 operation="edit",
-                backend="python-pptx",
+                backend=(result.get("preservation") or {}).get("backend") or _BUILDERS[kind],
                 parent=revision,
                 provenance={
                     "parent": revision.id,
@@ -442,7 +460,7 @@ class DocumentService:
         """Informe estático de la revisión nueva y, si se pidió y se puede, su render."""
         extra = {
             key: result[key]
-            for key in ("changes", "semantic_diff", "plan_findings", "slides")
+            for key in ("changes", "semantic_diff", "plan_findings", "slides", "sheets", "formulas")
             if key in result
         }
         checks = dict(result.get("checks") or {})
@@ -547,7 +565,15 @@ class DocumentService:
             },
         ).to_dict()
         report["deliverable_state"] = revision.state
-        for key in ("changes", "semantic_diff", "plan_findings", "slides", "visual_review"):
+        for key in (
+            "changes",
+            "semantic_diff",
+            "plan_findings",
+            "slides",
+            "sheets",
+            "formulas",
+            "visual_review",
+        ):
             if extra and key in extra:
                 report[key] = extra[key]
             elif key in previous:
@@ -568,6 +594,22 @@ class DocumentService:
         """Estructura, composición y contenido de una revisión, con evidencia."""
         revision = self.resolve(ref)
         path = self.revisions.path(revision)
+        if revision.kind == "xlsx":
+            with tempfile.TemporaryDirectory(prefix="rinari-doc-val-") as tmp:
+                source = Path(tmp) / "source.xlsx"
+                shutil.copyfile(path, source)
+                result = run_inline(
+                    "xlsx.validate",
+                    {
+                        "path": str(source),
+                        "expected_text": expected_text,
+                        "calculated_by": revision.backend
+                        if revision.operation == "calculate"
+                        else None,
+                    },
+                )
+            result.pop("_files", None)
+            return self._report(revision, result["checks"], {"formulas": result["formulas"]})
         if revision.kind != "pptx":
             container = inspect_container(path)
             checks = {
@@ -685,6 +727,7 @@ class DocumentService:
                 "layout",
                 "visual",
                 "preservation",
+                "formulas",
             ):
                 partial.append({"check": name, "status": status, "reason": check.get("reason")})
         if blocked or (partial and not accept_partial):
@@ -709,6 +752,211 @@ class DocumentService:
 
     def deliverable_path(self, revision: Revision) -> Path:
         return self.revisions.path(revision)
+
+    # -- cálculo -------------------------------------------------------------------
+    def calculate(self, ref: str, *, render: bool = False) -> dict[str, Any]:
+        """Recalcula con el backend certificado: revisión nueva con cachés frescas."""
+        revision = self.resolve(ref)
+        if revision.kind != "xlsx":
+            raise DocumentError(
+                DocumentErrorCode.CALCULATION_UNSUPPORTED, "Only workbooks are calculated"
+            )
+        caps.require("xlsx", "calculate")
+        request = {"revision_id": revision.id}
+
+        def runner(handle: JobHandle) -> dict[str, Any]:
+            handle.phase("calculate")
+            with tempfile.TemporaryDirectory(prefix="rinari-doc-calc-") as tmp:
+                source = Path(tmp) / "source.xlsx"
+                shutil.copyfile(self.revisions.path(revision), source)
+                result = handle.run_worker("xlsx.calculate", {"path": str(source)}, timeout_s=600)
+            handle.phase("publish")
+            data = result.pop("_files")["document"]
+            child = self.revisions.create(
+                data,
+                session_id=self.session_id,
+                name=revision.name,
+                operation="calculate",
+                backend=result.get("backend") or "excel-com",
+                parent=revision,
+                provenance={"parent": revision.id, "parent_sha256": revision.sha256},
+            )
+            checks = dict(result["checks"])
+            # Excel guarda el paquete entero: no es una edición puntual que comparar.
+            checks["preservation"] = Check(
+                CHECK_NOT_APPLICABLE, reason="SAVED_BY_CALCULATION_BACKEND"
+            ).to_dict()
+            return self._after_build(
+                handle, child, {"checks": checks, "formulas": result["formulas"]}, render
+            )
+
+        return self.jobs.start(
+            session_id=self.session_id, operation="calculate", request=request, runner=runner
+        )
+
+    # -- datasets ------------------------------------------------------------------
+    @property
+    def datasets(self):
+        from rinari.documents.datasets import DatasetStore
+
+        return DatasetStore(self.artifacts)
+
+    def _dataset_sources(self, spec: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
+        """Las hojas con `data` apuntan a datasets de la sesión: alias → ruta de solo lectura."""
+        import copy
+
+        spec = copy.deepcopy(spec)
+        sources: dict[str, str] = {}
+        for sheet in spec.get("sheets") or []:
+            data = sheet.get("data") if isinstance(sheet, dict) else None
+            if not isinstance(data, dict):
+                continue
+            dataset = self.datasets.get(str(data.get("dataset") or ""), session_id=self.session_id)
+            sources[dataset.alias] = str(self.datasets.path(dataset))
+            data["dataset"] = dataset.alias
+        return spec, sources
+
+    def list_datasets(self) -> list[dict[str, Any]]:
+        return [d.to_dict() for d in self.datasets.list(session_id=self.session_id)]
+
+    def dataset(self, ref: str) -> dict[str, Any]:
+        return self.datasets.get(ref, session_id=self.session_id).to_dict()
+
+    def import_dataset(
+        self,
+        uri: str,
+        *,
+        name: str | None = None,
+        source_format: str | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Importa un CSV/TSV/Parquet/JSON/XLSX de la sesión como dataset.
+
+        El mismo archivo, sin opciones nuevas, devuelve el dataset ya importado.
+        """
+        from rinari.documents.adapters.data_engine import SOURCE_KINDS
+
+        if not isinstance(uri, str) or not uri.startswith(f"artifact://{self.session_id}/"):
+            raise DocumentError(
+                DocumentErrorCode.UNSAFE_EXTERNAL_RESOURCE,
+                "source must be an artifact of this session",
+            )
+        try:
+            record = self.artifacts.meta(uri)
+        except Exception as exc:
+            raise DocumentError(DocumentErrorCode.NOT_FOUND, f"Unknown {uri}") from exc
+        display = _display(record.name)
+        kind = (source_format or display.rsplit(".", 1)[-1]).lower()
+        if kind not in SOURCE_KINDS:
+            raise DocumentError(
+                DocumentErrorCode.UNSUPPORTED_FORMAT,
+                f"Datasets import {', '.join(SOURCE_KINDS)}; pass format for other names",
+            )
+        existing = self.datasets.by_source(record.sha256, session_id=self.session_id)
+        if existing is not None and not options:
+            return {
+                "job_id": None,
+                "status": "succeeded",
+                "result": {"dataset": existing.to_dict(), "reused": True},
+                "error": None,
+            }
+        label = (name or Path(display).stem or "dataset")[:60]
+        request = {"source": uri, "kind": kind}
+
+        def runner(handle: JobHandle) -> dict[str, Any]:
+            handle.phase("import")
+            path = self.artifacts._storage_path(record.storage_path)
+
+            def adopt(files: dict[str, Path], profile: dict[str, Any]) -> dict[str, Any]:
+                # El archivo se adopta antes de que se borre el directorio del trabajo.
+                return self.datasets.create(
+                    files["dataset"],
+                    session_id=self.session_id,
+                    name=label,
+                    profile=profile,
+                    source_uri=uri,
+                    source_sha256=record.sha256,
+                ).to_dict()
+
+            result = handle.run_worker(
+                "dataset.import",
+                {"path": str(path), "kind": kind, "options": options or {}},
+                timeout_s=1800,
+                consume=adopt,
+            )
+            return {"dataset": result["_consumed"]}
+
+        return self.jobs.start(
+            session_id=self.session_id, operation="dataset.import", request=request, runner=runner
+        )
+
+    def query(
+        self,
+        datasets: list[str],
+        sql: str,
+        *,
+        limit: int | None = None,
+        into: str | None = None,
+        name: str | None = None,
+    ) -> dict[str, Any]:
+        """Una consulta SELECT sobre datasets de la sesión, en un proceso hijo bloqueado."""
+        from rinari.documents.adapters.data_engine import check_sql
+
+        check_sql(sql)
+        if into not in (None, "dataset", "csv"):
+            raise DocumentError(DocumentErrorCode.INVALID_SPEC, "into is dataset or csv")
+        if not isinstance(datasets, list) or not datasets:
+            raise DocumentError(DocumentErrorCode.INVALID_SPEC, "datasets is required")
+        resolved = [self.datasets.get(str(ref), session_id=self.session_id) for ref in datasets]
+        sources = {d.alias: str(self.datasets.path(d)) for d in resolved}
+        if len(sources) != len(resolved):
+            raise DocumentError(DocumentErrorCode.INVALID_SPEC, "Two datasets share an alias")
+        request = {"datasets": [d.id for d in resolved], "sql": sql[:2000], "into": into}
+        label = (name or "consulta")[:60]
+
+        def runner(handle: JobHandle) -> dict[str, Any]:
+            handle.phase("query")
+
+            def adopt(files: dict[str, Path], result: dict[str, Any]) -> dict[str, Any]:
+                if "dataset" in files:
+                    dataset = self.datasets.create(
+                        files["dataset"],
+                        session_id=self.session_id,
+                        name=label,
+                        profile=result,
+                        parent_id=resolved[0].id,
+                        query=sql,
+                    )
+                    return {"dataset": dataset.to_dict()}
+                if "csv" in files:
+                    record = self.artifacts.create_from_file(
+                        self.session_id,
+                        "derived",
+                        f"{Path(safe_name(label + '.csv')).stem}-"
+                        f"{self.artifacts._ctx.ids.new('q')}.csv",
+                        files["csv"],
+                        content_type="text/csv",
+                        summary=f"Query result: {sql[:120]}",
+                        provenance=f"spreadsheets.query:{','.join(d.id for d in resolved)}",
+                    )
+                    return {"uri": record.uri()}
+                return {}
+
+            result = handle.run_worker(
+                "dataset.query",
+                {"datasets": sources, "sql": sql, "limit": limit, "into": into},
+                timeout_s=1800,
+                consume=adopt,
+            )
+            consumed = result.pop("_consumed") or {}
+            result.pop("_files", None)
+            if into == "dataset":
+                return {"into": "dataset", **consumed}
+            return {**result, **consumed}
+
+        return self.jobs.start(
+            session_id=self.session_id, operation="query", request=request, runner=runner
+        )
 
     # -- trabajos ------------------------------------------------------------------
     def job(self, job_id: str) -> dict[str, Any]:
@@ -743,4 +991,30 @@ def _edit_catalog() -> dict[str, str]:
         "pptx.delete_slide": "slide, expected_title?",
         "pptx.move_slide": "slide, to",
         "pptx.add_slide": "after (0 = first), spec (a DeckSpec slide), theme?",
+    }
+
+
+_BUILDERS = {"pptx": "python-pptx", "xlsx": "xlsxwriter", "docx": "python-docx", "pdf": "reportlab"}
+
+
+def _display(stored: str) -> str:
+    """El nombre original de un archivo importado (sin el hash delante)."""
+    head, sep, rest = stored.partition("-")
+    if sep and rest and len(head) == 64:
+        return rest
+    return stored
+
+
+def _xlsx_edit_catalog() -> dict[str, str]:
+    return {
+        "xlsx.set_cells": (
+            "sheet, cells[{cell, value|formula, expected?}] — strict-safe OOXML patch; "
+            "value null clears; text starting with = stays text"
+        ),
+        "xlsx.add_sheet": "name, rows? — needs preserve_best_effort or rebuild",
+        "xlsx.set_format": "sheet, range, number_format?, bold?, fill?, font_color? — best effort",
+        "xlsx.set_column_width": "sheet, widths {A: 20} — best effort",
+        "xlsx.add_validation": "sheet, range, list | between + type — best effort",
+        "xlsx.add_conditional_format": "sheet, range, rule — best effort",
+        "xlsx.freeze": "sheet, cell — best effort",
     }

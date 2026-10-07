@@ -41,3 +41,22 @@ CREATE TABLE IF NOT EXISTS document_jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_document_jobs_session
     ON document_jobs (session_id, created_at);
+
+-- Datasets de la sesión para consultas fuera del contexto del modelo: una base
+-- DuckDB por dataset, guardada como artefacto (namespace datasets), de solo
+-- lectura una vez importada. Las consultas nunca leen otros archivos.
+CREATE TABLE IF NOT EXISTS document_datasets (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    source_uri TEXT,
+    source_sha256 TEXT,
+    parent_id TEXT,
+    query TEXT,
+    artifact_uri TEXT NOT NULL,
+    row_count INTEGER NOT NULL,
+    schema_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_document_datasets_session
+    ON document_datasets (session_id, created_at);

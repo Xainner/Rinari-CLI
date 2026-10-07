@@ -47,9 +47,23 @@ _CATEGORIES = (
     (re.compile(r"^word/document\.xml$"), "body"),
     (re.compile(r"^word/(header|footer)\d*\.xml$"), "header_footer"),
     (re.compile(r"^word/comments"), "comments"),
+    (re.compile(r"^xl/drawings/"), "drawing"),
+    (re.compile(r"^xl/(pivotTables|pivotCache)/"), "pivot"),
+    (re.compile(r"^xl/tables/"), "table"),
+    (re.compile(r"^xl/externalLinks/"), "external_link"),
+    (re.compile(r"^xl/slicers?/|^xl/slicerCaches/"), "slicer"),
+    (re.compile(r"^xl/calcChain\.xml$"), "calc_chain"),
     (re.compile(r"vbaProject\.bin$"), "macros"),
     (re.compile(r"\.rels$"), "relationships"),
     (re.compile(r"^docProps/"), "properties"),
+)
+
+
+# Cambios que nunca son «compatibles»: identidad del documento y contenido activo.
+_RISKY = frozenset({"smartart", "embedding", "macros", "master", "layout", "theme"})
+# Y pérdidas de objetos que el usuario vería desaparecer.
+_RISKY_LOSS = frozenset(
+    {"chart", "media", "drawing", "pivot", "table", "external_link", "slicer", "comments"}
 )
 
 
@@ -141,7 +155,8 @@ def evaluate(
     risky = [
         row
         for row in unexpected
-        if row["category"] in ("smartart", "embedding", "macros", "master", "layout", "theme")
+        if row["category"] in _RISKY
+        or (row["change"] == "removed" and row["category"] in _RISKY_LOSS)
     ]
     if not unexpected or policy == REBUILD:
         status = "passed"
