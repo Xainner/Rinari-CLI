@@ -768,3 +768,20 @@ def test_file_kind_signatures() -> None:
     for head, kind in cases.items():
         assert _file_kind(Path("file.bin"), head)[0] == kind, head
     assert _file_kind(Path("logo.svg"), b"<svg xmlns")[0] == "image"
+
+
+def test_artifacts_open_as_a_copy_and_only_from_their_session(desktop_runtime) -> None:
+    from rinari.engine_protocol.errors import EngineProtocolError
+
+    services, server, primary, other, _workspace, _tmp = desktop_runtime
+    uri = services.artifacts.create(
+        primary.id, "previews", "rev_1-office-render.pdf", b"%PDF-1.7 demo"
+    ).uri()
+    resolved = server._desktop.resolve_file({"session_id": primary.id, "path": uri})
+    assert resolved.provenance == "artifact"
+    assert resolved.path.read_bytes() == b"%PDF-1.7 demo"
+    stored = services.artifacts._storage_path(services.artifacts.meta(uri).storage_path)
+    assert resolved.path != stored
+    with pytest.raises(EngineProtocolError) as err:
+        server._desktop.resolve_file({"session_id": other.id, "path": uri})
+    assert err.value.code == "PERMISSION_DENIED"
