@@ -48,7 +48,11 @@ from rinari.tools.definition import (
     ToolResult,
 )
 from rinari.tools.registry import ToolRegistry
-from rinari.tools.schema import validate_against
+from rinari.tools.schema import (
+    declared_properties,
+    unknown_arguments_message,
+    validate_against,
+)
 
 EventSink = Callable[[str, dict], None]
 # Network audit hook: (session_id, tool, host, action, reason) per gate
@@ -107,6 +111,10 @@ def _external_source(action, tool) -> str | None:
         if host and not is_local_host(host):
             return host
     return None
+
+
+# Tools whose schema comes from outside Rinari keep their own contract.
+_DYNAMIC_SOURCES = frozenset({"plugin", "mcp", "openapi"})
 
 
 class ToolRuntime:
@@ -250,6 +258,22 @@ class ToolRuntime:
                 )
             arguments = {**arguments, "url": snapshot.url}
 
+        if tool.manifest.get("source") not in _DYNAMIC_SOURCES:
+            # A native tool ignores keys it does not declare. Running anyway
+            # hides a wrong call: timeout_ms instead of timeout_s ran with the
+            # 60 s default and the model blamed a fixed cap. Reject before any
+            # side effect and name the accepted keys so one retry fixes it.
+            declared = declared_properties(tool.input_schema)
+            unknown = (
+                [key for key in arguments if key not in declared] if declared is not None else []
+            )
+            if unknown:
+                return self._error(
+                    ctx,
+                    ToolErrorCode.INVALID_ARGUMENT,
+                    unknown_arguments_message(tool.name, tool.input_schema, unknown),
+                    details={"unknown_arguments": unknown, "accepted": sorted(declared or ())},
+                )
         errors = validate_against(tool.input_schema, arguments)
         if errors:
             return self._error(ctx, ToolErrorCode.INVALID_ARGUMENT, "; ".join(errors[:5]))

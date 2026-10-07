@@ -683,6 +683,19 @@
             "string",
             "null"
           ]
+        },
+        "keep_image": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "coverage": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": true
         }
       },
       "additionalProperties": false

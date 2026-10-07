@@ -12,8 +12,10 @@ FIELDS = {
         "uri:s text:s start_byte:i end_byte:i size_bytes:i next_start_byte:i? truncated:b"
     ),
     "artifact.metadata": "uri:s name:s size_bytes:i mime_type:s modified_ns:i",
+    "artifact.export": "uri:s path:s name:s size_bytes:i mime_type:s sha256:s",
     "fs.read": "path:s text:s size_bytes:i sha256:s? truncated:b",
     "fs.read_image": "uri:s sha256:s name:s path:s width:i height:i mime_type:s size_bytes:i",
+    "fs.read_pdf_pages": "uri:s name:s page_count:i pages:a",
     "fs.read_lines": "path:s lines:a total_lines:i? next_line:i?",
     "fs.write": "path:s bytes_written:i sha256:s",
     "fs.patch": "path:s replacements:i sha256:s",

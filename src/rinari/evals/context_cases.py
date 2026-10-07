@@ -21,10 +21,13 @@ from pathlib import Path
 from rinari.evals.scripted import answer, calls
 from rinari.evals.spec import AssertionOutcome, AssertionResult, EvalCase
 
-# The eval harness's base request (instructions and ~75 tool schemas) is about
-# 11k tokens. A window of 40k leaves the compaction target (60 %) above that
-# fixed part with room for the tail and the summary.
-WINDOW = 40_000
+# The eval harness's base request (instructions and ~77 tool schemas) is about
+# 11.5k tokens. A window of 42k leaves the compaction target (60 %) above that
+# fixed part with room for the tail and the summary. Size it from the base
+# request when tools are added: with 40k, two new tools left Linux without
+# room for the heavy last turn (each case measures continuity, not how tight
+# the budget is).
+WINDOW = 42_000
 GOAL = "implementar la exportación CSV de informes"
 RULE = "Nunca cambies el esquema de la base de datos."
 NEW_GOAL = "migrar los informes a PDF"

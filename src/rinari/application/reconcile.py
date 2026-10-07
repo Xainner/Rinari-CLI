@@ -4,7 +4,7 @@ Before a session is continued, re-verify the durable facts it assumes and,
 where safe, re-establish them. Subsystems checked:
 
     identity       project identity row vs disk (re-registered when missing)
-    git-branch     branch at session start vs currently checked out
+    git-branch     branch of the last work in this worktree vs checked out now
     working-tree   session-start worktree baseline vs current dirty state
     permissions    active permission profile vs the session's recorded one
     provider       provider row still exists
@@ -23,10 +23,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
 
 from rinari.application.context import AppContext
 from rinari.application.project_service import ProjectService
-from rinari.projects.git import git_state
+from rinari.projects.branch_tracking import BranchTracker
 from rinari.projects.worktree import snapshot_worktree
 from rinari.skills.manifest import SkillManifest
 from rinari.skills.service import SkillService
@@ -47,6 +48,7 @@ class Finding:
     state: str
     detail: str
     action: str = "none"
+    data: dict[str, Any] | None = None
 
     @property
     def warning(self) -> str | None:
@@ -164,19 +166,21 @@ class ResumeReconciler:
     def _git_branch(self, record: SessionRecord, root: Path | None, root_exists: bool) -> Finding:
         if record.kind != _KIND_PROJECT or root is None or not root_exists:
             return Finding("git-branch", OK, "no project root to compare")
-        if record.git_branch is None:
-            return Finding("git-branch", OK, "no session-start branch recorded")
-        state = git_state(root)
-        if not state.available or state.branch is None:
-            return Finding("git-branch", OK, "git state unavailable")
-        if state.branch != record.git_branch:
-            return Finding(
-                "git-branch",
-                CHANGED,
-                f"branch changed since session start: {record.git_branch} -> {state.branch}",
-                "warned",
-            )
-        return Finding("git-branch", OK, f"branch {state.branch}")
+        change = BranchTracker(self._ctx.db, self._ctx.clock).transition(root)
+        if change is None:
+            return Finding("git-branch", OK, "branch unchanged since the last work here")
+        reference = (
+            "since the last work here"
+            if change["reference"] == "last_work"
+            else "since Rinari first saw this checkout"
+        )
+        return Finding(
+            "git-branch",
+            CHANGED,
+            f"branch changed {reference} ({change['since']}): {change['from']} -> {change['to']}",
+            "warned",
+            data=change,
+        )
 
     def _working_tree(self, record: SessionRecord, root: Path | None, root_exists: bool) -> Finding:
         if (

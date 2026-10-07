@@ -315,15 +315,16 @@ def process_wait(input: dict, ctx: ToolContext) -> ToolResult:
     assert registry is not None
     # Never block indefinitely: cap an explicit/unset wait so a hung
     # process cannot stall the agent turn forever.
-    timeout = input.get("timeout_s")
-    try:
-        timeout = float(timeout) if timeout is not None else DEFAULT_WAIT_TIMEOUT_S
-    except (TypeError, ValueError):
-        timeout = DEFAULT_WAIT_TIMEOUT_S
-    timeout = min(max(timeout, 0.0), MAX_WAIT_TIMEOUT_S)
-    exited = registry.wait(handle, timeout)
+    from rinari.tools.native.shell import effective_timeout
+
+    requested = input.get("timeout_s")
+    if isinstance(requested, (int, float)) and not isinstance(requested, bool):
+        requested = min(max(float(requested), 0.0), MAX_WAIT_TIMEOUT_S)
+    timeout = effective_timeout(requested, DEFAULT_WAIT_TIMEOUT_S, ctx)
+    exited = registry.wait(handle, timeout["effective_s"])
     if not exited:
-        return _ok({"handle": handle.id, "exit_code": None, "timed_out": True})
+        # The process keeps running; only this wait ended.
+        return _ok({"handle": handle.id, "exit_code": None, "timed_out": True, "timeout": timeout})
     return _ok({"handle": handle.id, "exit_code": handle.exit_code, "timed_out": False})
 
 
@@ -451,7 +452,10 @@ def process_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="process.wait",
-            description="Wait for a started process to exit (optionally for up to timeout_s).",
+            description=(
+                "Wait up to timeout_s seconds (default 60) for a started process to exit; "
+                "timed_out=true means it still runs."
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -471,7 +475,8 @@ def process_tools() -> list[ToolDefinition]:
         ToolDefinition(
             name="process.output",
             description=(
-                "Read bounded stdout/stderr. Pass the returned cursor to receive only new output."
+                "Read output produced so far, without waiting. Pass the returned cursor to "
+                "receive only new output."
             ),
             input_schema={
                 "type": "object",

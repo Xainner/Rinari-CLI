@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from typing import Any
 
 from rinari.tools.definition import (
@@ -168,6 +169,42 @@ class _BoundedBuffer:
         )
 
 
+def effective_timeout(requested: Any, default: float, ctx: ToolContext) -> dict[str, Any]:
+    """Seconds a wait may last and where that number came from.
+
+    The tool's own deadline (its timeout_ms metadata, narrowed by the turn)
+    caps the request: a handler that waits past it would outlive the limit
+    the runtime promised. ``source`` lets the model and the UI say why a
+    command stopped instead of guessing at a fixed cap.
+    """
+    try:
+        value = float(requested) if requested is not None else default
+        source = "argument" if requested is not None else "default"
+    except (TypeError, ValueError):
+        value, source = default, "default"
+    if ctx.deadline_at is not None:
+        remaining = max(0.0, ctx.deadline_at - time.time())
+        if remaining < value:
+            value, source = remaining, "deadline"
+    return {
+        "requested_s": requested if isinstance(requested, (int, float)) else None,
+        "effective_s": round(value, 3),
+        "source": source,
+    }
+
+
+def timeout_message(timeout: dict[str, Any]) -> str:
+    seconds = f"{timeout['effective_s']:.0f}s"
+    if timeout["source"] == "default":
+        return f"Command exceeded the default {seconds} (timeout_s was not set) and was terminated"
+    if timeout["source"] == "deadline":
+        return (
+            f"Command reached the tool's execution limit after {seconds} and was terminated; "
+            "use background=true and process.wait for longer work"
+        )
+    return f"Command exceeded timeout_s={seconds} and was terminated"
+
+
 def shell_exec(input: dict, ctx: ToolContext) -> ToolResult:
     command = input.get("argv") if "argv" in input else input.get("command")
     if isinstance(command, list):
@@ -186,11 +223,8 @@ def shell_exec(input: dict, ctx: ToolContext) -> ToolResult:
     if ctx.cancellation is not None:
         ctx.cancellation.throw_if_cancelled()
 
-    timeout_s = input.get("timeout_s", DEFAULT_TIMEOUT_S)
-    try:
-        timeout_s = float(timeout_s)
-    except (TypeError, ValueError):
-        timeout_s = DEFAULT_TIMEOUT_S
+    timeout = effective_timeout(input.get("timeout_s"), DEFAULT_TIMEOUT_S, ctx)
+    timeout_s = timeout["effective_s"]
     env = dict(os.environ)
     if isinstance(input.get("env"), dict):
         env.update({str(k): str(v) for k, v in input["env"].items()})
@@ -294,13 +328,14 @@ def shell_exec(input: dict, ctx: ToolContext) -> ToolResult:
         "stdout": stdout.text(),
         "stderr": stderr.text(),
         "truncated": stdout.truncated or stderr.truncated,
+        "timeout": timeout,
     }
     if cancelled:
         result = _fail(ToolErrorCode.CANCELLED, "Command cancelled", data=data)
     elif timed_out:
         result = _fail(
             ToolErrorCode.TIMEOUT,
-            f"Command exceeded {timeout_s:.0f}s and was terminated",
+            timeout_message(timeout),
             retryable=True,
             data=data,
         )
@@ -337,7 +372,11 @@ def shell_tools() -> list[ToolDefinition]:
                     },
                     "background": {"type": "boolean", "default": False},
                     "cwd": {"type": "string"},
-                    "timeout_s": {"type": "number", "minimum": 1},
+                    "timeout_s": {
+                        "type": "number",
+                        "minimum": 1,
+                        "description": "Seconds; default 60, max 600 (longer: background=true).",
+                    },
                     "env": {"type": "object"},
                 },
                 "oneOf": [{"required": ["command"]}, {"required": ["argv"]}],

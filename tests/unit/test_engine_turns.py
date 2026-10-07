@@ -431,7 +431,9 @@ def test_image_protocol_preserves_reference_and_reaches_model(
     assert any(e["event"] == "turn.completed" for e in events)
     user = next(m for m in fake.requests[0].messages if m.images)
     assert user.images[0].uri == attachment["uri"]
-    assert user.content == "Describe"
+    # The model also gets a handle to reuse the image, not only its pixels.
+    assert user.content.endswith("User request:\nDescribe")
+    assert attachment["uri"] in user.content
     listed = server.handle_line(
         _req("image-list", "artifact.media_list", {"session_id": session_id})
     )

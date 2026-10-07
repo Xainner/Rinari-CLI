@@ -453,11 +453,17 @@ class ModelRouter:
 
     def _authenticated_call(self, provider, call, *, output_started=lambda: False):
         from rinari.providers.errors import ProviderError, ProviderErrorCode
-        from rinari.shared.errors import ProviderModelError
+        from rinari.shared.errors import NetworkError, ProviderModelError
 
         secret = self._providers.resolve_secret(provider)
         try:
             return call(secret)
+        except NetworkError as exc:
+            # A cut stream or a timeout names its provider too.
+            if isinstance(getattr(exc, "details", None), dict):
+                exc.details.setdefault("provider_id", provider.id)
+                exc.details.setdefault("provider_alias", provider.alias)
+            raise
         except ProviderModelError as exc:
             # Which configured provider failed, recorded when it fails: a
             # notice read later must not point at whatever is selected then.

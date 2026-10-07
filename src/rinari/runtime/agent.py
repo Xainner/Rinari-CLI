@@ -101,6 +101,9 @@ class TurnResult:
     governor: dict | None = None
     stop_reason: str | None = None
     recoverable: bool = False
+    # Machine-readable cause of a stop (e.g. the loop kind and its subject),
+    # so clients word it in their own language instead of showing `content`.
+    stop_detail: dict | None = None
 
 
 # `model_provider` exposes: capabilities() -> ProviderCapabilities,
@@ -809,6 +812,7 @@ class AgentLoop:
                                 requested=tool_calls_requested,
                                 rejected=tool_calls_rejected,
                                 governor=governor,
+                                stop_detail={"loop": signal.kind, "subject": signal.detail},
                             )
                         else:
                             self._emit_activity(
@@ -1130,6 +1134,7 @@ class AgentLoop:
         requested: int = 0,
         rejected: int = 0,
         governor: TurnGovernor | None = None,
+        stop_detail: dict | None = None,
     ) -> TurnResult:
         self._emit(
             session_id,
@@ -1147,6 +1152,7 @@ class AgentLoop:
             governor=governor.snapshot() if governor is not None else None,
             stop_reason=("emergency_limit" if kind == "budget" else kind),
             recoverable=kind in ("budget", "loop", "stagnation"),
+            stop_detail=stop_detail,
         )
 
     def _emit(self, session_id: str, event_type: str, payload: dict) -> None:

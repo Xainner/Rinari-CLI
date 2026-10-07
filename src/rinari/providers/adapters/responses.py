@@ -46,6 +46,7 @@ from rinari.providers.adapters.http import (
     sanitize_tool_name,
     send_request,
     session_affinity_headers,
+    stream_close_details,
     stream_timeout_error,
 )
 from rinari.shared.errors import NetworkError, ProviderModelError
@@ -176,6 +177,8 @@ class OpenAIResponsesAdapter(ProviderAdapter):
             **session_affinity_headers(url, request.session_id),
         }
         acc = _ResponsesStreamAccumulator()
+        stream_stats: dict[str, Any] = {}
+        done_seen = False
         headers_received = False
         saw_payload = False
         stream_started_at = time.monotonic()
@@ -200,17 +203,33 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                     raise auth_failure(response, url, model=request.model)
                 if response.status_code >= 400:
                     raise provider_error(response, url, model=request.model)
-                for line in iter_model_lines(response, request, stream_started_at):
+                for line in iter_model_lines(response, request, stream_started_at, stream_stats):
                     if not line or not line.startswith("data:"):
                         continue
                     saw_payload = True
                     last_activity_at = time.monotonic()
                     data = line[5:].strip()
                     if data == "[DONE]":
+                        done_seen = True
                         break
                     acc.update(_parse_sse_payload(data, url), on_delta)
                     if acc._completed is not None:
                         break
+                if acc._completed is None:
+                    raise NetworkError(
+                        "Response stream closed without a terminal event",
+                        details={
+                            "kind": "STREAM_INTERRUPTED",
+                            **stream_close_details(
+                                response,
+                                stream_stats,
+                                transport="responses",
+                                url=url,
+                                started_at=stream_started_at,
+                                done_seen=done_seen,
+                            ),
+                        },
+                    )
         except (NetworkError, ProviderModelError) as exc:
             exc.details.update(
                 {

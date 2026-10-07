@@ -59,6 +59,9 @@ CAPABILITIES: dict[str, bool] = {
     # without reading it, so media and binaries open at any size.
     "workspace_file_resolve_v1": True,
     "artifact_resolve_v1": True,
+    # Attachment preparation reports per-page coverage and accepts
+    # keep_image (OCR text plus the pixels of the same image).
+    "reading_coverage_v1": True,
     "interactive_questions_v1": True,
     "chat": True,
     "projects": True,

@@ -489,6 +489,9 @@ def test_loop_nudge_then_stop_in_real_turn(env) -> None:
     result = loop.turn(env["ctx"], "Read a.txt", budget=meter, loop=LoopDetector())
     assert result.kind == "loop"
     assert result.tool_calls == 4  # check runs after each execution
+    # Machine-readable cause, so a client does not show the English content.
+    assert result.stop_detail["loop"] == "same-tool-args"
+    assert result.stop_detail["subject"]
     assert len(model.requests) == 4
     # the nudge reached the model conversation before the 4th call
     joined = " ".join(m.content for m in model.requests[3].messages)

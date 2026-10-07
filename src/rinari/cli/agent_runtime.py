@@ -1765,14 +1765,39 @@ def run_turn(
             raise ConflictError(
                 "Session workspace changed in another client. Resume the session before continuing."
             )
-        return _run_turn_unlocked(
-            session,
-            message,
-            on_delta=on_delta,
-            on_tool=on_tool,
-            turn_id=turn_id,
-            memory_origin=memory_origin,
+        _record_branch(session, turn_id, "turn.start")
+        try:
+            return _run_turn_unlocked(
+                session,
+                message,
+                on_delta=on_delta,
+                on_tool=on_tool,
+                turn_id=turn_id,
+                memory_origin=memory_origin,
+            )
+        finally:
+            # Also after a failure or a cancel: a checkout the turn made
+            # is where the next work starts, whatever the outcome.
+            _record_branch(session, turn_id, "turn.end")
+
+
+def _record_branch(session: AgentSession, turn_id: str, source: str) -> None:
+    """Remember the branch this work happened on (branch_tracking)."""
+    record = session.record
+    if record.kind != "PROJECT" or not record.project_root_snapshot:
+        return
+    root = Path(record.project_root_snapshot)
+    if not root.is_dir():
+        return
+    from rinari.projects.branch_tracking import BranchTracker
+
+    try:
+        BranchTracker(session.services.ctx.db, session.services.ctx.clock).record_work(
+            root, session_id=record.id, turn_id=turn_id, source=source
         )
+    except Exception:
+        # Observability only; a turn never fails because of it.
+        return
 
 
 def _run_turn_unlocked(

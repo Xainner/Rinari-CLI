@@ -340,7 +340,7 @@ def open_model_stream(client, request, started_at, *args, **kwargs):
             context.__exit__(None, None, None)
 
 
-def iter_model_lines(response, request, started_at):
+def iter_model_lines(response, request, started_at, stats: dict | None = None):
     """Bound silence/total wait independently; bytes and heartbeats are not reasoning progress.
 
     A reader touches only the HTTP response, never application/session storage.
@@ -362,7 +362,8 @@ def iter_model_lines(response, request, started_at):
     )
     channel = queue.Queue(maxsize=64)
     stopped = threading.Event()
-    received = {"bytes": 0, "last": started_at}
+    received = stats if stats is not None else {}
+    received.update({"bytes": 0, "last": started_at, "eof": False})
 
     def put(value):
         while not stopped.is_set():
@@ -425,6 +426,7 @@ def iter_model_lines(response, request, started_at):
             except queue.Empty:
                 continue
             if kind == "done":
+                received["eof"] = True
                 return
             if kind == "error":
                 raise value
@@ -432,3 +434,42 @@ def iter_model_lines(response, request, started_at):
     finally:
         stopped.set()
         response.close()
+
+
+def stream_close_details(
+    response,
+    stats: dict,
+    *,
+    transport: str,
+    url: str,
+    started_at: float,
+    done_seen: bool = False,
+    partial_tool_calls: bool = False,
+) -> dict:
+    """How a provider stream ended without its terminal event.
+
+    "eof" (the connection closed) and "done_marker" ([DONE] with no
+    finish_reason) look the same to the user but point at different
+    culprits; both are recorded with what is needed to ask the provider
+    about it. No prompt or stream content is kept.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    now = time.monotonic()
+    last = stats.get("last", started_at)
+    headers = getattr(response, "headers", {}) or {}
+    return {
+        "close": "done_marker" if done_seen else ("eof" if stats.get("eof") else "stopped"),
+        "transport": transport,
+        "endpoint": urlunsplit((parts.scheme, host, parts.path, "", "")),
+        "http_status": getattr(response, "status_code", None),
+        "request_id": headers.get("x-request-id") or headers.get("request-id"),
+        "bytes_received": stats.get("bytes", 0),
+        "elapsed_s": round(now - started_at, 3),
+        "idle_s": round(now - last, 3),
+        "partial_tool_calls": partial_tool_calls,
+    }

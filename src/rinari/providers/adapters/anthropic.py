@@ -33,6 +33,7 @@ from rinari.providers.adapters.http import (
     sanitize_tool_name,
     send_request,
     session_affinity_headers,
+    stream_close_details,
     stream_timeout_error,
 )
 from rinari.providers.urls import api_url
@@ -166,6 +167,7 @@ class AnthropicAdapter(ProviderAdapter):
         usage = Usage()
         stop_reason = StopReason.END_TURN
         terminal_seen = False
+        stream_stats: dict[str, Any] = {}
         headers_received = False
         saw_payload = False
         stream_started_at = time.monotonic()
@@ -194,7 +196,7 @@ class AnthropicAdapter(ProviderAdapter):
                     raise auth_failure(response, url, model=request.model)
                 if response.status_code >= 400:
                     raise provider_error(response, url, model=request.model)
-                for line in iter_model_lines(response, request, stream_started_at):
+                for line in iter_model_lines(response, request, stream_started_at, stream_stats):
                     if not line:
                         continue
                     saw_payload = True
@@ -248,6 +250,23 @@ class AnthropicAdapter(ProviderAdapter):
                             output_tokens=output_tokens,
                             cached_input_tokens=usage.cached_input_tokens,
                         )
+                if not terminal_seen:
+                    raise NetworkError(
+                        "Response stream closed without a terminal event",
+                        details={
+                            "kind": "STREAM_INTERRUPTED",
+                            **stream_close_details(
+                                response,
+                                stream_stats,
+                                transport="anthropic",
+                                url=url,
+                                started_at=stream_started_at,
+                                partial_tool_calls=any(
+                                    block.get("type") == "tool_use" for block in blocks.values()
+                                ),
+                            ),
+                        },
+                    )
         except (NetworkError, ProviderModelError) as exc:
             exc.details.update(
                 {"partial_text": "".join(content_parts), "partial": bool(content_parts)}
@@ -279,15 +298,6 @@ class AnthropicAdapter(ProviderAdapter):
                     "partial": bool(content_parts),
                 },
             ) from exc
-        if not terminal_seen:
-            raise NetworkError(
-                "Response stream closed without a terminal event",
-                details={
-                    "kind": "STREAM_INTERRUPTED",
-                    "partial_text": "".join(content_parts),
-                    "partial": bool(content_parts),
-                },
-            )
         tool_calls = () if stop_reason is StopReason.MAX_TOKENS else calls.finalize()
         if tool_calls and stop_reason is not StopReason.MAX_TOKENS:
             stop_reason = StopReason.TOOL_CALLS
