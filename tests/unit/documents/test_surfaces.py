@@ -26,9 +26,7 @@ project = base.project
 @pytest.fixture(autouse=True)
 def _jobs_drained(app_ctx):
     yield
-    manager = JobManager.for_context(app_ctx)
-    manager._pool.shutdown(wait=True, cancel_futures=True)
-    JobManager._instances.clear()
+    JobManager.close_for(app_ctx)
 
 
 def _tool_runtime(app_ctx, tmp_path):
@@ -186,3 +184,25 @@ def test_xlsx_cell_limit_is_declared(app_ctx, tmp_path, monkeypatch):
 
     assert item.truncated is True
     assert "Only the first 30 cells were read" in item.warning
+
+
+def test_desktop_imports_a_workspace_file_as_a_revision(server, tmp_path):
+    _, engine = server
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    builders.deck(workspace / "ventas.pptx", slides=1)
+    session = _call(engine, "session.create", {"cwd": str(workspace)})["result"]["session"]["id"]
+
+    first = _call(engine, "documents.import", {"session_id": session, "path": "ventas.pptx"})
+    again = _call(engine, "documents.import", {"session_id": session, "path": "ventas.pptx"})
+    outside = _call(
+        engine, "documents.import", {"session_id": session, "path": str(tmp_path / "x.pptx")}
+    )
+
+    assert first["ok"], first
+    revision = first["result"]["revision"]
+    assert revision["name"] == "ventas.pptx" and revision["kind"] == "pptx"
+    assert again["result"]["revision"]["id"] == revision["id"]
+    assert outside["ok"] is False
+    inspected = _call(engine, "documents.inspect", {"session_id": session, "ref": revision["id"]})
+    assert inspected["result"]["inspection"]["slide_count"] == 1

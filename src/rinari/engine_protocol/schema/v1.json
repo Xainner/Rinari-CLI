@@ -404,6 +404,7 @@
         "artifact.export",
         "artifact.resolve",
         "documents.capabilities.get",
+        "documents.import",
         "documents.inspect",
         "documents.job.start",
         "documents.job.get",

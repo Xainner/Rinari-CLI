@@ -179,6 +179,24 @@ class JobManager:
                 cls._instances[key] = manager
             return manager
 
+    @classmethod
+    def close_for(cls, ctx) -> None:
+        """Cierre del Engine: se cancelan los trabajos vivos y se esperan sus hilos.
+
+        Un hilo que siguiera escribiendo en una base ya cerrada tumba el proceso.
+        """
+        key = str(getattr(ctx.db, "path", id(ctx.db)))
+        with cls._instances_lock:
+            manager = cls._instances.pop(key, None)
+        if manager is None:
+            return
+        with manager._lock:
+            handles = list(manager._handles.values())
+        for handle in handles:
+            handle.cancel_event.set()
+            handle.kill()
+        manager._pool.shutdown(wait=True, cancel_futures=True)
+
     def __init__(self, ctx) -> None:
         self._ctx = ctx
         self._db = ctx.db

@@ -348,6 +348,7 @@ class EngineServer:
             self._dispatcher,
             self._services,
             lambda job: self._turns.emit_external(event("document.job.updated", job)),
+            resolve_file=self._desktop.resolve_file,
         )
         self._dispatcher.register("context.get", self._context_get)
         self._dispatcher.register("memory.list", self._memory_list)
@@ -434,6 +435,9 @@ class EngineServer:
         if hasattr(self, "_provider_auth_service"):
             self._provider_auth_service.close()
         self._attachment_jobs.close()
+        from rinari.documents.jobs import JobManager
+
+        JobManager.close_for(self._services.ctx)
         self._previews.close()
         self._desktop.close()
         self._pty.shutdown()

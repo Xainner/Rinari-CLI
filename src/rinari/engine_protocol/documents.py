@@ -34,7 +34,7 @@ def _pages(params: dict[str, Any]) -> list[int] | None:
     return value[:200]
 
 
-def register_documents(dispatcher, services, emit) -> None:
+def register_documents(dispatcher, services, emit, resolve_file=None) -> None:
     from rinari.documents.contracts import DocumentError
     from rinari.documents.jobs import JobManager
     from rinari.documents.service import DocumentService
@@ -57,6 +57,18 @@ def register_documents(dispatcher, services, emit) -> None:
                 ) from exc
 
         return call
+
+    def import_file(params):
+        """Un archivo del workspace, con la misma autorización que `workspace.file.*`.
+
+        Se copia al Artifact Store y pasa a ser la revisión 0; el mismo
+        contenido vuelve a la misma revisión, uno cambiado es otra.
+        """
+        if resolve_file is None:
+            raise EngineProtocolError(INVALID_PARAMS, "Workspace files are not available here.")
+        resolved = resolve_file(params)
+        documents = service(params)
+        return {"revision": documents.import_path(resolved.path).to_dict()}
 
     def capabilities(params):
         from rinari.documents.capabilities import capabilities as caps
@@ -106,6 +118,7 @@ def register_documents(dispatcher, services, emit) -> None:
         return {"revisions": documents.list_revisions(_text(params, "document_id", optional=True))}
 
     dispatcher.register("documents.capabilities.get", guarded(capabilities))
+    dispatcher.register("documents.import", guarded(import_file))
     dispatcher.register("documents.inspect", guarded(inspect))
     dispatcher.register("documents.job.start", guarded(job_start))
     dispatcher.register("documents.job.get", guarded(job_get))

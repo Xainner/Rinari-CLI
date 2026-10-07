@@ -26,9 +26,7 @@ SESSION = "ses_docs"
 def store(app_ctx):
     yield ArtifactStore(app_ctx)
     # Ningún hilo de trabajo debe seguir usando la base al cerrarla.
-    manager = JobManager.for_context(app_ctx)
-    manager._pool.shutdown(wait=True, cancel_futures=True)
-    JobManager._instances.clear()
+    JobManager.close_for(app_ctx)
 
 
 def _artifact(store, path, name=None):
