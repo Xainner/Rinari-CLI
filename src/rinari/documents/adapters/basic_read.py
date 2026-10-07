@@ -29,9 +29,10 @@ def _selection(selection: str | None, count: int) -> list[int]:
 def inspect_pdf(path: Path) -> dict[str, Any]:
     from pypdf import PdfReader
 
+    from rinari.documents.adapters.pdf_edit import form_fields
+
     reader = PdfReader(str(path), strict=False)
     pages = len(reader.pages)
-    fields = reader.get_fields() or {}
     metadata = {k.lstrip("/"): str(v)[:200] for k, v in (reader.metadata or {}).items()}
     sizes = set()
     for page in reader.pages[:50]:
@@ -42,8 +43,7 @@ def inspect_pdf(path: Path) -> dict[str, Any]:
         "page_count": pages,
         "page_sizes_pt": [{"width": w, "height": h} for w, h in sorted(sizes)],
         "form_fields": [
-            {"name": name, "type": str(field.get("/FT", "")).lstrip("/")}
-            for name, field in list(fields.items())[:200]
+            {"name": name, **info} for name, info in list(form_fields(reader).items())[:200]
         ],
         "metadata": metadata,
         "outline": bool(reader.outline),

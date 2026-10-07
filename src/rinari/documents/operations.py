@@ -237,7 +237,145 @@ def _dataset_query(request: dict[str, Any], out: Path) -> tuple[dict[str, Any], 
     return result, files
 
 
+# -- Word y PDF ---------------------------------------------------------------------------
+def _update_fields(target: Path, out: Path, request: dict[str, Any]) -> tuple[Path, str | None]:
+    """Si el documento tiene índice y Word está disponible, Word lo pagina."""
+    import zipfile
+
+    from rinari.documents.adapters import word_fields
+
+    with zipfile.ZipFile(target) as archive:
+        has_toc = " TOC " in archive.read("word/document.xml").decode("utf-8", "replace")
+    if not has_toc or request.get("update_fields") is False or not word_fields.available():
+        return target, None
+    return word_fields.update(target, out), "word-com"
+
+
+def _docx_create(request: dict[str, Any], out: Path) -> tuple[dict[str, Any], Files]:
+    from rinari.documents.adapters import docx_build, docx_edit
+    from rinari.documents.validation import report_checks
+
+    target = out / "document.docx"
+    result: dict[str, Any] = {}
+    if request.get("template"):
+        variables = docx_edit.render_template(
+            Path(request["template"]), target, request.get("context") or {}
+        )
+        result["template_variables"] = variables
+    else:
+        data, plan = docx_build.build(request["spec"], request.get("resources") or {})
+        target.write_bytes(data)
+        result["plan"] = {
+            "headings": plan.headings,
+            "tables": plan.tables,
+            "figures": plan.figures,
+            "toc": plan.toc,
+        }
+    final, updated_by = _update_fields(target, out, request)
+    result["checks"] = report_checks.docx_checks(
+        final, request.get("expected_text"), fields_updated_by=updated_by
+    )
+    result["fields_backend"] = updated_by
+    return result, {"document": final}
+
+
+def _docx_edit(request: dict[str, Any], out: Path) -> tuple[dict[str, Any], Files]:
+    from rinari.documents import preservation
+    from rinari.documents.adapters import docx_edit
+    from rinari.documents.validation import report_checks
+
+    source = Path(request["path"])
+    target = out / "edited.docx"
+    state = docx_edit.apply(source, target, request["operations"])
+    diff = preservation.diff_packages(source, target)
+    verdict = preservation.evaluate(
+        diff,
+        state.allowed,
+        request.get("preservation") or preservation.PRESERVE_STRICT,
+        allow_new=tuple(sorted(state.allow_new)),
+    )
+    if verdict["status"] == "failed":
+        raise DocumentError(
+            DocumentErrorCode.PRESERVATION_RISK,
+            "The edit would change parts it did not declare",
+            details={"preservation": verdict},
+        )
+    return {
+        "changes": state.changes,
+        "preservation": {**verdict, "diff": diff, "backend": "python-docx"},
+        "semantic_diff": report_checks.docx_semantic_diff(source, target),
+        "checks": report_checks.docx_checks(target, request.get("expected_text")),
+    }, {"document": target}
+
+
+def _docx_validate(request: dict[str, Any], out: Path) -> tuple[dict[str, Any], Files]:
+    from rinari.documents.validation import report_checks
+
+    return {
+        "checks": report_checks.docx_checks(
+            Path(request["path"]),
+            request.get("expected_text"),
+            fields_updated_by=request.get("fields_updated_by"),
+        )
+    }, {}
+
+
+def _pdf_create(request: dict[str, Any], out: Path) -> tuple[dict[str, Any], Files]:
+    from rinari.documents.adapters import pdf_build
+    from rinari.documents.validation import report_checks
+
+    data, plan = pdf_build.build(request["spec"], request.get("resources") or {})
+    target = out / "document.pdf"
+    target.write_bytes(data)
+    return {
+        "plan": {
+            "pages": plan.pages,
+            "headings": plan.headings,
+            "tables": plan.tables,
+            "figures": plan.figures,
+            "toc": plan.toc,
+            "fonts": plan.fonts,
+        },
+        "checks": report_checks.pdf_checks(target, request.get("expected_text")),
+    }, {"document": target}
+
+
+def _pdf_edit(request: dict[str, Any], out: Path) -> tuple[dict[str, Any], Files]:
+    from rinari.documents.adapters import pdf_edit
+    from rinari.documents.validation import report_checks
+
+    source = Path(request["path"])
+    target = out / "edited.pdf"
+    state = pdf_edit.apply(source, target, request["operations"], request.get("inputs") or {})
+    checks = report_checks.pdf_checks(
+        target, request.get("expected_text"), filled=state.filled or None
+    )
+    return {
+        "changes": state.changes,
+        "filled": state.filled,
+        "flattened": state.flattened,
+        "semantic_diff": report_checks.pdf_semantic_diff(source, target),
+        "checks": checks,
+    }, {"document": target}
+
+
+def _pdf_validate(request: dict[str, Any], out: Path) -> tuple[dict[str, Any], Files]:
+    from rinari.documents.validation import report_checks
+
+    return {
+        "checks": report_checks.pdf_checks(
+            Path(request["path"]), request.get("expected_text"), filled=request.get("filled")
+        )
+    }, {}
+
+
 REGISTRY: dict[str, Any] = {
+    "docx.create": _docx_create,
+    "docx.edit": _docx_edit,
+    "docx.validate": _docx_validate,
+    "pdf.create": _pdf_create,
+    "pdf.edit": _pdf_edit,
+    "pdf.validate": _pdf_validate,
     "render": _render,
     "pptx.create": _pptx_create,
     "pptx.edit": _pptx_edit,
@@ -297,6 +435,10 @@ capabilities.enable("xlsx", "create")
 capabilities.enable("xlsx", "edit")
 capabilities.enable("xlsx", "query")
 capabilities.enable("xlsx", "calculate")
+capabilities.enable("docx", "create")
+capabilities.enable("docx", "edit")
+capabilities.enable("pdf", "create")
+capabilities.enable("pdf", "edit")
 
 
 def register(name: str, function: Any, *, kind: str | None = None, operation: str | None = None):

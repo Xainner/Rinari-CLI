@@ -270,9 +270,12 @@ def _built(service, job: dict[str, Any], show: list[int] | None) -> ToolResult:
 def documents_create(arguments: dict, ctx: ToolContext) -> ToolResult:
     try:
         service = _service(ctx)
+        template = arguments.get("template")
         job = service.create(
-            _spec(arguments, ctx),
+            _spec(arguments, ctx) if not template or arguments.get("spec") else {},
             kind=arguments.get("kind"),
+            template=_reference(service, ctx, template) if template else None,
+            context=arguments.get("context"),
             output_name=arguments.get("output_name"),
             resources=_resources(service, ctx, arguments.get("resources")),
             render=arguments.get("render", True) is not False,
@@ -605,7 +608,7 @@ def document_tools() -> list[ToolDefinition]:
             ),
             input_schema={
                 "type": "object",
-                "properties": {"kind": {"type": "string", "enum": ["pptx", "xlsx"]}},
+                "properties": {"kind": {"type": "string", "enum": ["pptx", "xlsx", "docx", "pdf"]}},
             },
             risk=RISK_LOW,
             side_effects=SIDE_EFFECT_NONE,
@@ -616,15 +619,18 @@ def document_tools() -> list[ToolDefinition]:
         ToolDefinition(
             name="documents.create",
             description=(
-                "Build a new editable document from a spec (pptx: DeckSpec; xlsx: WorkbookSpec, "
-                "see documents.templates). Returns a draft revision, static checks and "
-                "renders; show attaches pages. Nothing is written to the project."
+                "Build a new document from a spec (pptx DeckSpec, xlsx WorkbookSpec, docx/pdf "
+                "ReportSpec; see documents.templates) or a Word template + context. Returns a "
+                "draft revision, checks and renders; show attaches pages. Nothing is written "
+                "to the project."
             ),
             input_schema={
                 "type": "object",
                 "properties": {
-                    "kind": {"type": "string", "enum": ["pptx", "xlsx"]},
+                    "kind": {"type": "string", "enum": ["pptx", "xlsx", "docx", "pdf"]},
                     "spec": {"type": "object"},
+                    "template": _DOCUMENT,
+                    "context": {"type": "object"},
                     "spec_uri": {"type": "string"},
                     "output_name": {"type": "string"},
                     "resources": _RESOURCES,

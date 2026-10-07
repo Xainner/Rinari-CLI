@@ -254,6 +254,21 @@ class DocumentService:
                 **xlsx_build.template_catalog(),
                 "edit_operations": _xlsx_edit_catalog(),
             }
+        if kind in (None, "docx", "pdf"):
+            from rinari.documents.adapters import docx_build
+
+            report = docx_build.template_catalog()
+            if kind in (None, "docx"):
+                catalog["docx"] = {
+                    **report,
+                    "templates": (
+                        "template (a .docx with {{ variables }}, {% for %} loops) + context "
+                        "object; unknown variables are errors, values are escaped"
+                    ),
+                    "edit_operations": _docx_edit_catalog(),
+                }
+            if kind in (None, "pdf"):
+                catalog["pdf"] = {**report, "edit_operations": _pdf_edit_catalog()}
         return catalog
 
     def resources(self, refs: Any, workdir: Path) -> dict[str, str]:
@@ -322,12 +337,26 @@ class DocumentService:
         render: bool = True,
         expected_text: list[str] | None = None,
         kind: str | None = None,
+        template: str | None = None,
+        context: dict[str, Any] | None = None,
+        update_fields: bool = True,
     ) -> dict[str, Any]:
+        if template:
+            # Una plantilla Word con variables: el spec es el contexto de datos.
+            spec = spec if isinstance(spec, dict) else {}
+            kind = "docx"
         if not isinstance(spec, dict):
             raise DocumentError(DocumentErrorCode.INVALID_SPEC, "spec must be an object")
         kind = str(kind or spec.get("kind") or "pptx")
         spec = {k: v for k, v in spec.items() if k != "kind"}
-        default = "Libro" if kind == "xlsx" else "Presentacion"
+        if kind in ("docx", "pdf") and not template:
+            from rinari.documents.adapters import report_spec
+
+            report_spec.validate(spec)
+        template_revision = self.resolve(template) if template else None
+        if template_revision is not None and template_revision.kind != "docx":
+            raise DocumentError(DocumentErrorCode.INVALID_SPEC, "template must be a .docx")
+        default = {"xlsx": "Libro", "docx": "Informe", "pdf": "Informe"}.get(kind, "Presentacion")
         name = safe_name(output_name or f"{spec.get('title') or default}.{kind}")
         if kind_of_name(name) != kind:
             name = f"{name.rsplit('.', 1)[0]}.{kind}"
@@ -343,6 +372,10 @@ class DocumentService:
             spec_uri = self._store_spec(spec)
             with tempfile.TemporaryDirectory(prefix="rinari-doc-res-") as tmp:
                 files = self.resources(resources, Path(tmp))
+                template_path = None
+                if template_revision is not None:
+                    template_path = Path(tmp) / "template.docx"
+                    shutil.copyfile(self.revisions.path(template_revision), template_path)
                 result = handle.run_worker(
                     operation,
                     {
@@ -350,6 +383,9 @@ class DocumentService:
                         "resources": files,
                         "datasets": datasets,
                         "expected_text": expected_text,
+                        "template": str(template_path) if template_path else None,
+                        "context": context if context is not None else spec,
+                        "update_fields": update_fields,
                     },
                     timeout_s=900,
                 )
@@ -360,9 +396,14 @@ class DocumentService:
                 session_id=self.session_id,
                 name=name,
                 operation="create",
-                backend=_BUILDERS.get(kind, kind),
+                backend=_BUILDERS.get(kind, kind)
+                + (f"+{result['fields_backend']}" if result.get("fields_backend") else ""),
                 spec_uri=spec_uri,
-                provenance={"spec_uri": spec_uri, "resources": sorted((resources or {}).values())},
+                provenance={
+                    "spec_uri": spec_uri,
+                    "resources": sorted((resources or {}).values()),
+                    "template": template_revision.id if template_revision else None,
+                },
             )
             return self._after_build(handle, revision, result, render)
 
@@ -408,6 +449,15 @@ class DocumentService:
             from rinari.documents.adapters import xlsx_edit
 
             xlsx_edit.validate(operations_)
+        elif kind == "docx":
+            from rinari.documents.adapters import docx_edit
+
+            docx_edit.validate(operations_)
+        elif kind == "pdf":
+            from rinari.documents.adapters import pdf_edit
+
+            pdf_edit.validate(operations_)
+        inputs = self._edit_inputs(operations_) if kind == "pdf" else {}
         name = safe_name(output_name or revision.name)
         if kind_of_name(name) != kind:
             raise DocumentError(DocumentErrorCode.INVALID_SPEC, f"output_name must end in .{kind}")
@@ -423,11 +473,17 @@ class DocumentService:
                 source = Path(tmp) / f"source.{kind}"
                 shutil.copyfile(self.revisions.path(revision), source)
                 files = self.resources(resources, Path(tmp))
+                copies = {}
+                for index, (ref, other) in enumerate(inputs.items()):
+                    copy_path = Path(tmp) / f"input-{index}.pdf"
+                    shutil.copyfile(self.revisions.path(other), copy_path)
+                    copies[ref] = str(copy_path)
                 result = handle.run_worker(
                     operation,
                     {
                         "path": str(source),
                         "operations": operations_,
+                        "inputs": copies,
                         "resources": files,
                         "preservation": preservation,
                         "expected_text": expected_text,
@@ -460,7 +516,17 @@ class DocumentService:
         """Informe estático de la revisión nueva y, si se pidió y se puede, su render."""
         extra = {
             key: result[key]
-            for key in ("changes", "semantic_diff", "plan_findings", "slides", "sheets", "formulas")
+            for key in (
+                "changes",
+                "semantic_diff",
+                "plan_findings",
+                "slides",
+                "sheets",
+                "formulas",
+                "plan",
+                "template_variables",
+                "filled",
+            )
             if key in result
         }
         checks = dict(result.get("checks") or {})
@@ -547,7 +613,7 @@ class DocumentService:
         review = previous.get("visual_review")
         merged = {**{k: v for k, v in (previous.get("checks") or {}).items()}, **checks}
         merged["visual"] = self._visual(revision, review)
-        if revision.kind == "pptx":
+        if revision.kind != "xlsx":
             merged.setdefault("formulas", Check(CHECK_NOT_APPLICABLE).to_dict())
         if revision.parent_id is None:
             merged.setdefault("preservation", Check(CHECK_NOT_APPLICABLE).to_dict())
@@ -572,6 +638,9 @@ class DocumentService:
             "slides",
             "sheets",
             "formulas",
+            "plan",
+            "template_variables",
+            "filled",
             "visual_review",
         ):
             if extra and key in extra:
@@ -610,6 +679,19 @@ class DocumentService:
                 )
             result.pop("_files", None)
             return self._report(revision, result["checks"], {"formulas": result["formulas"]})
+        if revision.kind in ("docx", "pdf"):
+            with tempfile.TemporaryDirectory(prefix="rinari-doc-val-") as tmp:
+                source = Path(tmp) / f"source.{revision.kind}"
+                shutil.copyfile(path, source)
+                request: dict[str, Any] = {"path": str(source), "expected_text": expected_text}
+                if revision.kind == "docx":
+                    request["fields_updated_by"] = (
+                        "word-com" if "word-com" in (revision.backend or "") else None
+                    )
+                else:
+                    request["filled"] = _filled(revision)
+                result = run_inline(f"{revision.kind}.validate", request)
+            return self._report(revision, result["checks"])
         if revision.kind != "pptx":
             container = inspect_container(path)
             checks = {
@@ -728,6 +810,8 @@ class DocumentService:
                 "visual",
                 "preservation",
                 "formulas",
+                "fields",
+                "forms",
             ):
                 partial.append({"check": name, "status": status, "reason": check.get("reason")})
         if blocked or (partial and not accept_partial):
@@ -752,6 +836,19 @@ class DocumentService:
 
     def deliverable_path(self, revision: Revision) -> Path:
         return self.revisions.path(revision)
+
+    def _edit_inputs(self, operations_: list[dict[str, Any]]) -> dict[str, Revision]:
+        """Los PDF que una operación une al documento: revisiones de esta sesión."""
+        inputs: dict[str, Revision] = {}
+        for op in operations_:
+            if op.get("op") != "pdf.merge":
+                continue
+            for ref in op.get("documents") or []:
+                revision = self.resolve(str(ref))
+                if revision.kind != "pdf":
+                    raise DocumentError(DocumentErrorCode.INVALID_SPEC, f"{ref} is not a PDF")
+                inputs[str(ref)] = revision
+        return inputs
 
     # -- cálculo -------------------------------------------------------------------
     def calculate(self, ref: str, *, render: bool = False) -> dict[str, Any]:
@@ -1017,4 +1114,40 @@ def _xlsx_edit_catalog() -> dict[str, str]:
         "xlsx.add_validation": "sheet, range, list | between + type — best effort",
         "xlsx.add_conditional_format": "sheet, range, rule — best effort",
         "xlsx.freeze": "sheet, cell — best effort",
+    }
+
+
+def _filled(revision: Revision) -> dict[str, str] | None:
+    """Los campos que la cadena de ediciones de esta revisión rellenó."""
+    operations_ = (revision.provenance or {}).get("operations") or []
+    filled: dict[str, str] = {}
+    for op in operations_:
+        if isinstance(op, dict) and op.get("op") == "pdf.fill_form":
+            filled.update({str(k): str(v) for k, v in (op.get("fields") or {}).items()})
+    return filled or None
+
+
+def _docx_edit_catalog() -> dict[str, str]:
+    return {
+        "docx.replace_text": (
+            "find, replace, expected_count?, include_headers? (keeps run formatting)"
+        ),
+        "docx.set_paragraph": "block, text, expected_text? (keeps style and first-run format)",
+        "docx.insert_paragraph": "after (block, 0 = start), text, style?",
+        "docx.insert_table": "after, columns[], rows[[...]], style?",
+        "docx.delete_block": "block, expected_text?",
+        "docx.set_cell": "block (a table), row, col (0-based), text, expected_text?",
+        "docx.add_comment": "block, text, author?",
+    }
+
+
+def _pdf_edit_catalog() -> dict[str, str]:
+    return {
+        "pdf.merge": "documents[] (PDF revisions/artifacts), position?",
+        "pdf.select_pages": "pages ('1-3,7')",
+        "pdf.delete_pages": "pages, expected_count?",
+        "pdf.reorder": "order (a permutation of 1..n)",
+        "pdf.rotate": "pages, degrees 90|180|270",
+        "pdf.fill_form": "fields {name: value}, flatten? (default false: stays editable)",
+        "pdf.set_metadata": "title?, author?, subject?, keywords?",
     }

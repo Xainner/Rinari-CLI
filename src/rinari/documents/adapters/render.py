@@ -57,9 +57,9 @@ try {
   $app.DisplayAlerts = 0
   $app.AutomationSecurity = 3
   $d = $app.Documents.Open($In, $false, $true, $false)
-  try { $d.ExportAsFixedFormat($Out, 17) } finally { $d.Close(0) }
+  try { $d.ExportAsFixedFormat($Out, 17) } finally { $d.Close([ref]0) }
 } finally {
-  if ($before -eq 0 -and $app.Documents.Count -eq 0) { $app.Quit(0) }
+  if ($before -eq 0 -and $app.Documents.Count -eq 0) { $app.Quit([ref]0) }
   [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($app)
 }
 """,
