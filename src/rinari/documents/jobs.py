@@ -48,7 +48,7 @@ class JobCancelled(Exception):
 class JobHandle:
     """Lo que un trabajo puede hacer: fases, progreso medible y su proceso hijo."""
 
-    def __init__(self, manager: JobManager, job_id: str, session_id: str) -> None:
+    def __init__(self, manager: JobManager | None, job_id: str, session_id: str) -> None:
         self._manager = manager
         self.id = job_id
         self.session_id = session_id
@@ -153,6 +153,13 @@ class JobHandle:
             process = self._process
         if process is not None and process.poll() is None:
             _kill(process)
+
+
+def run_inline(
+    operation: str, request: dict[str, Any], *, timeout_s: float = 120.0
+) -> dict[str, Any]:
+    """Una operación corta en proceso hijo sin fila de trabajo (validar, comparar)."""
+    return JobHandle(None, "inline", "").run_worker(operation, request, timeout_s=timeout_s)
 
 
 def _kill(process: subprocess.Popen) -> None:

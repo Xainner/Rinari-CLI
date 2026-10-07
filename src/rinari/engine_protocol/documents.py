@@ -107,11 +107,22 @@ def register_documents(dispatcher, services, emit, resolve_file=None) -> None:
         )
 
     def report_get(params):
+        """El informe vigente (el visual se recalcula con los renders que hay).
+
+        Una revisión sin informe solo se valida si se pide (`validate`): es
+        un proceso hijo, no una lectura.
+        """
         documents = service(params)
         revision = documents.revisions.get(
             _text(params, "revision_id"), session_id=documents.session_id
         )
-        return {"revision_id": revision.id, "report": revision.report}
+        if revision.report:
+            report = documents.report(revision.id)
+        elif params.get("validate") is True:
+            report = documents.validate(revision.id)
+        else:
+            report = None
+        return {"revision_id": revision.id, "report": report}
 
     def revisions_list(params):
         documents = service(params)

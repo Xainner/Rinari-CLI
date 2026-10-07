@@ -136,7 +136,9 @@ def register_media(dispatcher, services):
         if not isinstance(uri, str) or not uri:
             raise EngineProtocolError(INVALID_PARAMS, "Param 'uri' must be a non-empty string.")
         record = services.artifacts.meta(uri)
-        if record.namespace not in {"media", "derived"}:
+        # `previews`: las capturas que el render documental hizo de un archivo
+        # de la sesión; son derivados, como `derived`.
+        if record.namespace not in {"media", "derived", "previews"}:
             raise EngineProtocolError(INVALID_PARAMS, "Only attachment artifacts can be previewed")
         max_bytes = params.get("max_bytes") or 512 * 1024
         if type(max_bytes) is not int or max_bytes < 1:

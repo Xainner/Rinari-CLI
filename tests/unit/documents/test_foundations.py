@@ -237,3 +237,41 @@ def test_capabilities_never_claim_what_is_missing():
     assert rows[("pptx", "inspect")]["available"] is True
     assert rows[("pdf", "redact")]["available"] is False
     assert rows[("docx", "calculate")]["available"] is False
+
+
+def test_pdf_docx_and_xlsx_are_inspected_and_read_in_bounds(store, tmp_path):
+    from docx import Document
+    from openpyxl import Workbook
+
+    service = DocumentService(store, SESSION)
+    pdf = builders.pdf(tmp_path / "a.pdf", pages=3)
+    pdf_uri = store.create(SESSION, "media", "a.pdf", pdf.read_bytes()).uri()
+    assert service.inspect(pdf_uri)["inspection"]["page_count"] == 3
+    page = service.read(pdf_uri, "2")["pages"][0]
+    assert page["page"] == 2 and page["has_text"] and "informe" in page["text"]
+
+    document = Document()
+    document.add_heading("Informe anual", 1)
+    document.add_paragraph("Primer párrafo")
+    document.add_table(2, 2).cell(0, 0).text = "celda"
+    document.save(tmp_path / "a.docx")
+    docx_uri = store.create(SESSION, "media", "a.docx", (tmp_path / "a.docx").read_bytes()).uri()
+    inspected = service.inspect(docx_uri)["inspection"]
+    assert (inspected["paragraphs"], inspected["tables"]) == (2, 1)
+    heading = inspected["headings"][0]
+    blocks = service.read(docx_uri, str(heading["block"]))["blocks"]
+    assert blocks[0]["text"] == "Informe anual"
+
+    workbook = Workbook()
+    workbook.active.title = "Datos"
+    workbook.active["A1"] = 10
+    workbook.active["A2"] = "=A1*2"
+    workbook.save(tmp_path / "a.xlsx")
+    xlsx_uri = store.create(SESSION, "media", "a.xlsx", (tmp_path / "a.xlsx").read_bytes()).uri()
+    sheet = service.inspect(xlsx_uri)["inspection"]["sheets"][0]
+    assert (sheet["name"], sheet["values"], sheet["formulas"]) == ("Datos", 2, 1)
+    rows = service.read(xlsx_uri, "Datos!A1:A2")["rows"]
+    assert rows[1]["cells"][0] == {"cell": "A2", "value": "=A1*2"}
+    with pytest.raises(DocumentError) as err:
+        service.read(xlsx_uri, "Datos!A1:ZZ9999")
+    assert err.value.code is DocumentErrorCode.DOCUMENT_LIMIT_EXCEEDED
