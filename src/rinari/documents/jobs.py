@@ -12,12 +12,13 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, ClassVar
@@ -88,7 +89,7 @@ class JobHandle:
         solo durante la llamada) en vez de leerse a memoria.
         """
         self.check()
-        with tempfile.TemporaryDirectory(prefix="rinari-doc-") as tmp:
+        with _job_workdir() as tmp:
             workdir = Path(tmp)
             (workdir / "request.json").write_text(
                 json.dumps({"operation": operation, "request": request}, ensure_ascii=False),
@@ -178,6 +179,31 @@ class JobHandle:
         # Lo que el trabajo arrancó fuera de su árbol (Office por COM) también.
         if workdir is not None:
             _kill_owned(workdir)
+
+
+@contextlib.contextmanager
+def _job_workdir() -> Iterator[str]:
+    """Directorio del trabajo que se borra sin cambiar su resultado.
+
+    Un Office terminado por cancelación tarda unos instantes en soltar sus
+    archivos: con `TemporaryDirectory` el `PermissionError` (WinError 32) de
+    la limpieza sustituía al `JobCancelled` y la cancelación acababa como
+    fallo. Se reintenta un momento y, si aun así no se puede, se deja.
+    """
+    path = tempfile.mkdtemp(prefix="rinari-doc-")
+    try:
+        yield path
+    finally:
+        for attempt in range(25):
+            try:
+                shutil.rmtree(path)
+                break
+            except FileNotFoundError:
+                break
+            except OSError:
+                if attempt == 24:
+                    break
+                time.sleep(0.2)
 
 
 def run_inline(
