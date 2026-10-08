@@ -32,6 +32,7 @@ from rinari.engine_protocol.errors import (
     EngineProtocolError,
 )
 from rinari.engine_protocol.flow import collect_flow
+from rinari.engine_protocol.frames import newest_within
 from rinari.engine_protocol.messages import event, hello
 from rinari.engine_protocol.observability import (
     clamp_read_bytes,
@@ -818,11 +819,14 @@ class EngineServer:
         total = len(stored)
         stored, redacted = self._services.memory.redact_history(stored)
         window = stored[-limit:] if total > limit else stored
+        # A page is bounded by bytes too: a few huge tool outputs must not
+        # produce a line the desktop drops, taking the whole connection with it.
+        messages = newest_within([message_to_dict(item) for item in window])
         return {
             "session_id": record.id,
-            "messages": [message_to_dict(item) for item in window],
+            "messages": messages,
             "total": total,
-            "has_more": total > len(window),
+            "has_more": total > len(messages),
             "redacted": redacted,
         }
 
@@ -1243,6 +1247,9 @@ class EngineServer:
             selected = [item for item in selected if item["turn_index"] < before]
         has_more = len(selected) > limit
         selected = selected[-limit:]
+        bounded = newest_within(selected)
+        has_more = has_more or len(bounded) < len(selected)
+        selected = bounded
         return {
             "session_id": record.id,
             "turns": selected,

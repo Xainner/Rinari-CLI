@@ -19,6 +19,8 @@ import threading
 import time
 from typing import Any, TextIO
 
+from rinari.engine_protocol.errors import RESPONSE_TOO_LARGE
+from rinari.engine_protocol.frames import MAX_FRAME_BYTES, fit
 from rinari.engine_protocol.server import EngineServer
 
 EVENT_POLL_S = 0.05
@@ -41,9 +43,64 @@ def _reader(inp: TextIO, requests: queue.Queue) -> None:
         requests.put(_EOF)
 
 
-def _emit(out: TextIO, payload: dict[str, Any]) -> bool:
+def _method_of(request_line: str | None) -> str:
     try:
-        out.write(json.dumps(payload) + "\n")
+        method = json.loads(request_line or "").get("method")
+    except (ValueError, AttributeError):
+        return "unknown"
+    return method if isinstance(method, str) else "unknown"
+
+
+def _bounded(
+    payload: dict[str, Any], line: str, err: TextIO, request_line: str | None
+) -> str | None:
+    """A line the desktop can read, or None when an event cannot be reduced.
+
+    The desktop drops the whole connection on a longer line, so one oversized
+    answer would fail every later request until a restart.
+    """
+    size = len(line)
+    if "ok" in payload and "id" in payload:
+        method = _method_of(request_line)
+        print(f"engine: response to {method} is {size} bytes; sent as an error", file=err)
+        return json.dumps(
+            {
+                "id": payload["id"],
+                "ok": False,
+                "error": {
+                    "code": RESPONSE_TOO_LARGE,
+                    "message": (
+                        f"The response to {method} is {size} bytes, over the "
+                        f"{MAX_FRAME_BYTES}-byte protocol limit."
+                    ),
+                    "retryable": False,
+                    "details": {"method": method, "bytes": size, "limit": MAX_FRAME_BYTES},
+                },
+            }
+        )
+    name = payload.get("event", "unknown")
+    reduced = json.dumps(fit(payload, MAX_FRAME_BYTES))
+    if len(reduced) <= MAX_FRAME_BYTES:
+        print(f"engine: event {name} was {size} bytes; long strings shortened", file=err)
+        return reduced
+    print(f"engine: event {name} is {size} bytes; dropped", file=err)
+    return None
+
+
+def _emit(
+    out: TextIO,
+    payload: dict[str, Any],
+    err: TextIO | None = None,
+    request_line: str | None = None,
+) -> bool:
+    line = json.dumps(payload)
+    if len(line) > MAX_FRAME_BYTES:
+        bounded = _bounded(payload, line, err or sys.stderr, request_line)
+        if bounded is None:
+            return True
+        line = bounded
+    try:
+        out.write(line + "\n")
         out.flush()
     except BrokenPipeError:
         return False
@@ -65,7 +122,7 @@ def run_stdio(
     inp = stdin or sys.stdin
     out = stdout or sys.stdout
     err = stderr or sys.stderr
-    if not _emit(out, server.hello()):
+    if not _emit(out, server.hello(), err):
         return 0
     requests: queue.Queue = queue.Queue()
     thread = threading.Thread(target=_reader, args=(inp, requests), daemon=True)
@@ -97,12 +154,12 @@ def run_stdio(
                         f"engine: slow request {elapsed:.1f}s: {item[:120]}",
                         file=err,
                     )
-                if response is not None and not _emit(out, response):
+                if response is not None and not _emit(out, response, err, item):
                     return 0
         drained_any = False
         for pending in server.drain_events():
             drained_any = True
-            if not _emit(out, pending):
+            if not _emit(out, pending, err):
                 return 0
         if eof:
             # Stdin closed: wait for in-flight turns to settle so the desktop
@@ -116,7 +173,7 @@ def run_stdio(
                 if not late and not server.has_active_turns():
                     return 0
                 for pending in late:
-                    if not _emit(out, pending):
+                    if not _emit(out, pending, err):
                         return 0
             if time.monotonic() - eof_since > EOF_DRAIN_WAIT_S:
                 return 0
