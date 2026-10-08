@@ -564,6 +564,7 @@ class AgentLoop:
                 )
             )
             looping_detected = False
+            loop.begin_response()
             round_tool_seq = tool_seq
 
             def prepare_call(

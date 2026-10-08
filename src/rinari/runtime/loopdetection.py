@@ -120,13 +120,21 @@ class LoopDetector:
         self._rewrites: dict[tuple[str, str], int] = {}
         self._last_rewrite: tuple[str, str] | None = None
         self._subagents: list[str] = []
-        self._nudged: set[tuple[str, object]] = set()
+        # Identity -> the model response whose calls earned the nudge. A stop
+        # needs the model to have read it, so never in that same response.
+        # Without begin_response() (direct callers) every check stands alone.
+        self._nudged: dict[tuple[str, object], int | None] = {}
+        self._response: int | None = None
         self._action_serial = 0
         self._error_serial = 0
         self._subagent_serial = 0
         self._reported: dict[tuple[str, object], object] = {}
 
     # -- recorders -----------------------------------------------------------
+
+    def begin_response(self) -> None:
+        """The calls that follow come from a new model response."""
+        self._response = (self._response or 0) + 1
 
     def record_tool(self, name: str, arguments: object) -> None:
         self._action_serial += 1
@@ -186,10 +194,27 @@ class LoopDetector:
             )
             if self._reported.get(identity) == evidence:
                 continue
+            nudged = identity in self._nudged
+            nudged_in = self._nudged.get(identity)
+            if nudged and self._response is not None and nudged_in == self._response:
+                # Repeated inside the response that was just nudged (a model
+                # can emit four identical calls at once): the nudge has not
+                # reached it yet, so this is not a second offence.
+                continue
+            if (
+                not nudged
+                and self._response is not None
+                and self._response in self._nudged.values()
+            ):
+                # One nudge per response: the same repetition also trips
+                # same-error, and one note covers both.
+                self._reported[identity] = evidence
+                self._nudged[identity] = self._response
+                continue
             self._reported[identity] = evidence
-            action = STOP if identity in self._nudged else NUDGE
+            action = STOP if nudged else NUDGE
             if action == NUDGE:
-                self._nudged.add(identity)
+                self._nudged[identity] = self._response
             return LoopSignal(kind=kind, detail=detail, action=action)
         return None
 

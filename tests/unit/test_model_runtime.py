@@ -1495,3 +1495,54 @@ def test_router_stream_repeats_without_a_refused_reasoning_control(monkeypatch, 
         assert "provider.reasoning.dropped" in events
     finally:
         ctx.close()
+
+
+def test_every_provider_receives_projected_combinators_and_validation_keeps_them() -> None:
+    """llama.cpp drops sibling properties when a root oneOf is present."""
+    from rinari.tools.schema import validate_against, wire_input_schema
+
+    original = {
+        "type": "object",
+        "properties": {
+            "command": {"type": "string"},
+            "argv": {"type": "array", "items": {"type": "string"}},
+            "options": {
+                "type": "object",
+                "properties": {"a": {"type": "string"}, "b": {"type": "string"}},
+                "anyOf": [{"required": ["a"]}, {"required": ["b"]}],
+            },
+            "value": {"oneOf": [{"type": "string"}, {"type": "integer"}]},
+        },
+        "oneOf": [{"required": ["command"]}, {"required": ["argv"]}],
+    }
+    wire = wire_input_schema(original)
+    assert "oneOf" not in wire and "Provide exactly one of: command; argv." in wire["description"]
+    assert set(wire["properties"]) == {"command", "argv", "options", "value"}
+    assert "anyOf" not in wire["properties"]["options"]
+    # A plain type union has no sibling properties to lose: kept.
+    assert wire["properties"]["value"] == {"oneOf": [{"type": "string"}, {"type": "integer"}]}
+    assert "oneOf" in original and "anyOf" in original["properties"]["options"]
+    assert validate_against(original, {}) == [
+        "$: provide exactly one of: command | argv (got none)"
+    ]
+    assert validate_against(original, {"command": "x", "argv": ["x"]}) == [
+        "$: provide exactly one of: command | argv (got more than one)"
+    ]
+    assert validate_against(original, {"command": "npm test"}) == []
+
+
+def test_openai_compatible_payload_sends_the_projected_schema() -> None:
+    from rinari.providers.adapters.openai_compatible import OpenAICompatibleAdapter
+
+    schema = {
+        "type": "object",
+        "properties": {"command": {"type": "string"}, "argv": {"type": "array"}},
+        "oneOf": [{"required": ["command"]}, {"required": ["argv"]}],
+    }
+    request = _request(
+        tools=(ToolSchema(name="process.start", description="start", parameters=schema),)
+    )
+    payload = OpenAICompatibleAdapter()._payload(request, stream=False)
+    sent = payload["tools"][0]["function"]["parameters"]
+    assert "oneOf" not in sent and set(sent["properties"]) == {"command", "argv"}
+    assert "oneOf" in schema

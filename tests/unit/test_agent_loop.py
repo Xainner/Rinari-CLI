@@ -963,3 +963,45 @@ def test_a_budget_stop_says_which_limit_and_its_value(env) -> None:
     result = loop.turn(env["ctx"], "list", budget=budget)
     assert result.kind == "budget" and result.recoverable
     assert result.stop_detail == {"budget": "model-calls", "limit": 2}
+
+
+# -- custom model with empty arguments (ses_01M4E01RQQCNMQMDGZ0FCHAVTY) --------
+
+
+def test_identical_calls_in_one_response_are_nudged_not_stopped(env) -> None:
+    """llama.cpp sent four process.start calls with {} in a single response.
+
+    The detector nudged on the third and stopped on the fourth, before the
+    model could read the nudge. Now the model gets its next response.
+    """
+    empty = tuple(ToolCall(id=f"e{i}", name="process.start", arguments={}) for i in range(4))
+    fixed = ToolCall(id="ok", name="fs.list", arguments={"path": "."})
+    model = FakeModel(
+        scripted=[
+            ModelResponse(content="", stop_reason=StopReason.TOOL_CALLS, tool_calls=empty),
+            ModelResponse(content="", stop_reason=StopReason.TOOL_CALLS, tool_calls=(fixed,)),
+            ModelResponse(content="recovered"),
+        ]
+    )
+    loop = AgentLoop(model, env["runtime"], env["assembler"])
+    result = loop.turn(env["ctx"], "render it")
+    assert result.kind == "answer" and result.content == "recovered"
+    notes = [m for m in env["ctx"].history if (m.origin or {}).get("source") == "loop-detector"]
+    assert len(notes) == 1
+    errors = [m.content for m in env["ctx"].history if m.role == "tool"][:4]
+    assert all("provide exactly one of: command | argv" in text for text in errors)
+
+
+def test_repeating_after_the_nudge_still_stops(env) -> None:
+    empty = tuple(ToolCall(id=f"e{i}", name="process.start", arguments={}) for i in range(4))
+    again = (ToolCall(id="again", name="process.start", arguments={}),)
+    model = FakeModel(
+        scripted=[
+            ModelResponse(content="", stop_reason=StopReason.TOOL_CALLS, tool_calls=empty),
+            ModelResponse(content="", stop_reason=StopReason.TOOL_CALLS, tool_calls=again),
+            ModelResponse(content="never"),
+        ]
+    )
+    loop = AgentLoop(model, env["runtime"], env["assembler"])
+    result = loop.turn(env["ctx"], "render it")
+    assert result.kind == "loop"
