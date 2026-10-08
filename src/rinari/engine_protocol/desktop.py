@@ -338,6 +338,8 @@ class DesktopWorkspace:
         turn_id = params.get("turn_id")
         if turn_id is not None and (not isinstance(turn_id, str) or not turn_id):
             raise EngineProtocolError(INVALID_PARAMS, "Invalid turn_id.")
+        if supplied.startswith("artifact://"):
+            return self._artifact_file(record.id, supplied)
 
         root = Path(record.current_cwd)
         turn_found = turn_id is None
@@ -412,6 +414,48 @@ class DesktopWorkspace:
         if not path.is_file():
             raise EngineProtocolError("NOT_FOUND", "File no longer exists.")
         return resolved
+
+    def _artifact_file(self, session_id: str, uri: str) -> ResolvedFile:
+        """Un artefacto de esta sesión, como copia temporal que una app puede abrir.
+
+        Se abre una copia, no el original del almacén: lo que la aplicación
+        guarde no altera una revisión inmutable.
+        """
+        import hashlib
+        import shutil
+        import tempfile
+
+        from rinari.artifacts.store import parse_uri
+
+        try:
+            owner, _, name = parse_uri(uri)
+            record = self.services.artifacts.meta(uri)
+        except Exception as exc:
+            raise EngineProtocolError("NOT_FOUND", "Unknown artifact.") from exc
+        if owner != session_id:
+            raise EngineProtocolError("PERMISSION_DENIED", "The artifact is from another session.")
+        source = self.services.artifacts._storage_path(record.storage_path)
+        if not source.is_file():
+            raise EngineProtocolError("NOT_FOUND", "File no longer exists.")
+        display = (
+            name.split("-", 1)[1] if len(name.split("-", 1)[0]) == 64 and "-" in name else name
+        )
+        folder = (
+            Path(tempfile.gettempdir())
+            / "rinari-open"
+            / hashlib.sha256(uri.encode()).hexdigest()[:16]
+        )
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / display
+        if not target.is_file() or target.stat().st_size != record.byte_count:
+            shutil.copyfile(source, target)
+        return ResolvedFile(
+            path=target,
+            observed_path=target,
+            workspace=folder,
+            provenance="artifact",
+            after_hash=record.sha256,
+        )
 
     @staticmethod
     def _external_change(changeset: dict[str, Any] | None, path: Path) -> dict[str, Any] | None:

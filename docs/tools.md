@@ -23,6 +23,43 @@ aviso para revisarla y deshacerla; una skill nueva fuera de `/learn`, una skill
 instalada o creada por el dueño y cualquier contenido peligroso esperan
 aprobación. Reenviar el mismo contenido devuelve `status: unchanged`.
 
+## Documentos de oficina (2026-10-07)
+
+Servicio documental del Engine (`src/rinari/documents`) para PPTX, XLSX, DOCX y
+PDF. Las herramientas son perezosas: las activan las skills `rinari-presentations`,
+`rinari-spreadsheets`, `rinari-documents`, `rinari-pdf` y `rinari-artifact-review`.
+
+- Todo archivo es una **revisión inmutable** en el Artifact Store (`documents`);
+  crear o editar produce otra con su padre. El original nunca se toca y solo
+  `documents.finalize` con `save_to` escribe en el proyecto, sin sobrescribir.
+- `documents.capabilities` dice qué se puede hacer aquí y por qué no: render con
+  Office local (COM, instancia propia, macros fuera) o LibreOffice; recálculo
+  solo con Excel; redacción con `raster-pdfium`.
+- `documents.inspect` / `documents.read`: inventario y contenido acotado con
+  identificadores estables (diapositiva y `shape_id`, bloque de Word, rango de
+  hoja con fórmula y caché por separado, página de PDF y campos de formulario).
+- `documents.templates` y `documents.create`: DeckSpec (pptx), WorkbookSpec
+  (xlsx), ReportSpec (docx y pdf desde el mismo spec) o plantilla Word con
+  contexto (sandbox Jinja, variables estrictas). Esquemas cerrados.
+- `documents.edit`: operaciones tipadas `pptx.*`, `xlsx.*`, `docx.*`, `pdf.*` con
+  precondiciones (`expected_*`, `REVISION_CONFLICT`) y diff de preservación por
+  partes OOXML (`preserve_strict` por defecto).
+- `documents.render`, `documents.review`, `documents.validate`, `documents.diff`,
+  `documents.finalize`: el informe va por dimensión (`structure`, `layout`,
+  `content`, `preservation`, `formulas`, `fields`, `forms`, `text_layer`,
+  `visual`, `redaction`) con evidencia; lo visual solo pasa si `documents.review`
+  cubrió cada página renderizada de esa revisión exacta.
+- `spreadsheets.query`: datasets DuckDB (CSV, TSV, Parquet, JSON, XLSX) y una
+  sola `SELECT` con el acceso externo desactivado; resultados grandes como
+  dataset derivado o CSV protegido contra inyección de fórmulas.
+- `spreadsheets.recalculate`: recálculo certificado con Excel; sin Excel, las
+  fórmulas quedan con su resultado pendiente (nunca un 0 inventado).
+- `pdf.redact`: rasteriza solo las páginas afectadas, reescribe el archivo y
+  verifica con otra librería que nada se recupera; si algo se recupera, falla.
+- Trabajos (`documents.job.get` / `.cancel`): proceso hijo cancelable; un
+  reinicio deja los activos como `interrupted`; cancelar termina solo el proceso
+  de Office que arrancó el trabajo.
+
 ## Parámetros desconocidos (2026-10-06)
 
 Una herramienta nativa rechaza, antes de ejecutar nada, cualquier parámetro que su

@@ -6,6 +6,7 @@ from rinari.tools.definition import ToolDefinition
 from rinari.tools.native.artifact import artifact_tools
 from rinari.tools.native.browse import browse_tools
 from rinari.tools.native.context import context_tools
+from rinari.tools.native.documents import document_tools
 from rinari.tools.native.fs import filesystem_tools
 from rinari.tools.native.git import git_tools
 from rinari.tools.native.http import http_tools
@@ -42,4 +43,5 @@ def all_native_tools() -> list[ToolDefinition]:
         *web_tools(),
         *http_tools(),
         *browse_tools(),
+        *document_tools(),
     ]

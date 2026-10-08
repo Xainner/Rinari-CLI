@@ -37,6 +37,7 @@ MAX_OCR_PAGES = 20
 MAX_OCR_TOTAL_SECONDS = 120.0
 MAX_PDF_RENDER_PIXELS = 40_000_000
 MAX_PDF_RENDER_DIMENSION = 4096
+MAX_XLSX_CELLS = 250_000
 MAX_CONTEXT_CHARS = 64_000  # conservative ~16k token initial context
 EXTRACTOR_VERSION = "attachments-v2"
 
@@ -91,6 +92,7 @@ DOCUMENT_TYPES = {
     "application/pdf": "pdf",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
 }
 
 
@@ -461,7 +463,9 @@ def prepare_attachments(
                 elif kind == "docx":
                     extracted = _extract_docx(path, cancellation=cancellation)
                 elif kind == "xlsx":
-                    extracted = _extract_xlsx(path, cancellation=cancellation)
+                    extracted, warning = _extract_xlsx(path, cancellation=cancellation)
+                elif kind == "pptx":
+                    extracted, warning = _extract_pptx(path, budget=MAX_CONTEXT_CHARS)
                 if extracted:
                     provenance = f"{EXTRACTOR_VERSION}:{'ocr' if ocr else 'parser'}"
                     if warning:
@@ -620,6 +624,8 @@ def classify(path: Path) -> tuple[str, str]:
         return "docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     if suffix == ".xlsx":
         return "xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    if suffix == ".pptx":
+        return "pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"
     if suffix in TEXT_EXTENSIONS or path.name.lower() in {
         "dockerfile",
         "makefile",
@@ -671,7 +677,21 @@ def _extract_docx(path: Path, *, cancellation=None) -> str:
     return "\n".join(parts)
 
 
-def _extract_xlsx(path: Path, *, cancellation=None) -> str:
+def _extract_pptx(path: Path, *, budget: int) -> tuple[str, str | None]:
+    """Texto por diapositiva (títulos, cuadros, tablas, notas) con recorte explícito.
+
+    Es contenido, no apariencia: ver las diapositivas pide un render
+    (documents.render).
+    """
+    _validate_zip_container(path)
+    from rinari.documents.adapters.pptx_read import text_outline
+
+    text, truncated = text_outline(path, budget=budget)
+    warning = "Only the first slides fit; read the rest with documents.read." if truncated else None
+    return text, warning
+
+
+def _extract_xlsx(path: Path, *, cancellation=None) -> tuple[str, str | None]:
     try:
         import openpyxl
     except ImportError as exc:
@@ -680,7 +700,7 @@ def _extract_xlsx(path: Path, *, cancellation=None) -> str:
     workbook = openpyxl.load_workbook(str(path), read_only=True, data_only=False, keep_links=False)
     parts: list[str] = []
     cells_read = 0
-    max_cells = 250_000
+    max_cells = MAX_XLSX_CELLS
     try:
         for sheet in workbook.worksheets:
             _check_cancel(cancellation)
@@ -691,13 +711,18 @@ def _extract_xlsx(path: Path, *, cancellation=None) -> str:
                     cells_read += 1
                     if cells_read > max_cells:
                         parts.append("[cell limit reached; remaining cells omitted]")
-                        return "\n".join(parts)
+                        # El recorte se declara: antes solo estaba en el texto
+                        # y el adjunto parecía completo (truncated=false).
+                        return "\n".join(parts), (
+                            f"Only the first {max_cells} cells were read; "
+                            f"stopped in sheet {sheet.title}."
+                        )
                     value = cell.value
                     if value is not None:
                         parts.append(f"{sheet.title}!{cell.coordinate}: {value}")
     finally:
         workbook.close()
-    return "\n".join(parts)
+    return "\n".join(parts), None
 
 
 def _validate_pdf_options(options):
