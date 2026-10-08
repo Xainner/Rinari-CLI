@@ -85,7 +85,12 @@ class Database:
                 self._tx_depth_local.depth = depth - 1
 
     def close(self) -> None:
-        self._conn.close()
+        # Under the same lock as every statement: closing while a worker thread
+        # (a document job, a subagent) is inside `execute` crashed the process
+        # in sqlite3's C code. Afterwards a late statement raises a normal
+        # `sqlite3.ProgrammingError` instead.
+        with self._lock:
+            self._conn.close()
 
     def __enter__(self) -> Database:
         return self

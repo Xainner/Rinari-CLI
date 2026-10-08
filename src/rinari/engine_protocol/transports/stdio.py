@@ -151,7 +151,8 @@ def run_stdio(
                 elapsed = time.monotonic() - started
                 if elapsed > SLOW_REQUEST_S:
                     print(
-                        f"engine: slow request {elapsed:.1f}s: {item[:120]}",
+                        # The method only: parameters can carry paths or text.
+                        f"engine: slow request {elapsed:.1f}s: {_method_of(item)}",
                         file=err,
                     )
                 if response is not None and not _emit(out, response, err, item):

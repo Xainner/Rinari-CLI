@@ -23,6 +23,8 @@ from rinari.application.session_service import (
 )
 from rinari.cli.serializers import model_dict
 from rinari.engine_protocol import protocol
+from rinari.engine_protocol.diagnostics import RequestLog
+from rinari.engine_protocol.diagnostics import collect as collect_diagnostics
 from rinari.engine_protocol.dispatcher import EngineDispatcher
 from rinari.engine_protocol.ecosystem import mcp_row_view, plugin_row_view, tool_row_view
 from rinari.engine_protocol.errors import (
@@ -146,6 +148,7 @@ class EngineServer:
         # Fresh per boot: sequential process ids may repeat after a
         # restart, so desktops must scope destructive preconditions to it.
         self._engine_instance_id = secrets.token_hex(16)
+        self._requests = RequestLog()
         self._home_id = protocol.home_id(services.ctx.home)
         home = Path(user_home) if user_home is not None else None
         self._user_home = home
@@ -169,6 +172,7 @@ class EngineServer:
         self._turns.set_browser_registry(self._browser_registry)
 
         self._dispatcher.register("engine.info", self._engine_info)
+        self._dispatcher.register("engine.diagnostics", self._engine_diagnostics)
         self._dispatcher.register("browser.view.get", self._turns.browser_view)
         # `host.browser.*` no está en la allowlist del preload: sólo el
         # supervisor de main puede emitirlos (§5.2).
@@ -416,7 +420,10 @@ class EngineServer:
         return hello(self._engine_instance_id, home_id=self._home_id)
 
     def handle_line(self, line: str) -> dict[str, Any] | None:
-        return self._dispatcher.dispatch(line)
+        started = time.monotonic()
+        response = self._dispatcher.dispatch(line)
+        self._requests.record(line, response, int((time.monotonic() - started) * 1000))
+        return response
 
     def drain_events(self) -> list[dict[str, Any]]:
         return self._turns.drain_events()
@@ -455,6 +462,19 @@ class EngineServer:
             "engine_instance_id": self._engine_instance_id,
             "home_id": self._home_id,
             "capabilities": dict(protocol.CAPABILITIES),
+        }
+
+    def _engine_diagnostics(self, params: dict[str, Any]) -> dict[str, Any]:
+        _ = params
+        info = self._engine_info({})
+        return {
+            "diagnostics": collect_diagnostics(
+                self._services,
+                engine={k: info[k] for k in ("protocol_version", "engine_version", "home_id")},
+                requests=self._requests,
+                connected=self._mcp_connected,
+                active_turns=len(self._turns.runtime_state().get("active_turns", [])),
+            )
         }
 
     def _browser_context_get(self, params: dict[str, Any]) -> dict[str, Any]:
