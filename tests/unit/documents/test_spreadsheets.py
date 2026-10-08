@@ -567,7 +567,8 @@ def test_cancelling_while_excel_starts_leaves_no_orphan(app_ctx):
             job = service.calculate(parent["result"]["revision"]["id"])
             time.sleep(delay)
             service.cancel(job["job_id"])
-            assert service.wait(job, 30)["status"] in ("cancelled", "succeeded")
+            final = service.wait(job, 30)
+            assert final["status"] in ("cancelled", "succeeded"), (delay, final["error"])
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline and excel_calc.automation_pids() - before:
             time.sleep(0.5)

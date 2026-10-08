@@ -23,7 +23,13 @@ _SCRIPT = r"""
 param([string]$In, [string]$Out, [string]$Pids)
 $ErrorActionPreference = 'Stop'
 $known = @(Get-Process EXCEL -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
-$app = New-Object -ComObject Excel.Application
+$app = $null
+# Tras cancelar otro trabajo, COM puede tardar en aceptar un Office nuevo.
+for ($try = 0; $try -lt 4 -and -not $app; $try++) {
+  try { $app = New-Object -ComObject Excel.Application
+  } catch { Start-Sleep -Milliseconds 750 }
+}
+if (-not $app) { throw 'COM_UNAVAILABLE' }
 # Solo es nuestro el proceso que no existía antes: el del usuario nunca se apunta.
 Get-Process EXCEL -ErrorAction SilentlyContinue | Where-Object { $known -notcontains $_.Id } |
   ForEach-Object { if ($Pids) { Add-Content -Path $Pids -Value $_.Id } }
