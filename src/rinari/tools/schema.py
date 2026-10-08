@@ -25,6 +25,65 @@ _TYPE_NAMES = {
 }
 
 
+_COMBINATOR_LABELS = {
+    "oneOf": "Provide exactly one of",
+    "anyOf": "Provide at least one of",
+    "allOf": "Satisfy all of",
+}
+
+
+def wire_input_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """The schema sent to a model provider, without weakening Rinari.
+
+    Combinators next to `properties` do not survive every backend: Anthropic
+    rejects them at the root, and llama.cpp's grammar builder handles them
+    before their sibling properties, so the model can only emit `{}`. The
+    wire copy drops them and says the requirement in the description;
+    ToolRuntime still validates arguments against the original schema.
+    Nested object nodes with their own properties get the same treatment;
+    a plain type union (`oneOf` of types, no properties) is kept.
+    """
+    return _project(schema, root=True)
+
+
+def _project(schema: Any, *, root: bool = False) -> Any:
+    if not isinstance(schema, dict):
+        return schema
+    wire = dict(schema)
+    if isinstance(wire.get("properties"), dict):
+        wire["properties"] = {key: _project(sub) for key, sub in wire["properties"].items()}
+    if isinstance(wire.get("items"), dict):
+        wire["items"] = _project(wire["items"])
+    if not (root or isinstance(wire.get("properties"), dict)):
+        return wire
+    notes: list[str] = []
+    for keyword, label in _COMBINATOR_LABELS.items():
+        clauses = wire.pop(keyword, None)
+        if not isinstance(clauses, list):
+            continue
+        alternatives = _required_alternatives(clauses)
+        if alternatives is not None:
+            notes.append(f"{label}: " + "; ".join(alternatives) + ".")
+        else:
+            notes.append(f"{label} the alternatives defined by Rinari validation.")
+    if notes:
+        existing = wire.get("description")
+        prefix = f"{existing.strip()} " if isinstance(existing, str) and existing.strip() else ""
+        wire["description"] = prefix + " ".join(notes)
+    return wire
+
+
+def _required_alternatives(clauses: list[Any]) -> list[str] | None:
+    """`["command", "argv"]` for clauses that only list required keys."""
+    alternatives: list[str] = []
+    for clause in clauses:
+        required = clause.get("required") if isinstance(clause, dict) else None
+        if not (isinstance(required, list) and all(isinstance(i, str) for i in required)):
+            return None
+        alternatives.append(" + ".join(required))
+    return alternatives
+
+
 def validate_against(schema: dict[str, Any], value: Any) -> list[str]:
     """Return a list of human-readable violations (empty list = valid)."""
     errors: list[str] = []
@@ -39,7 +98,17 @@ def _validate(schema: dict[str, Any], value: Any, path: str, errors: list[str]) 
         if keyword in schema:
             matches = sum(not validate_against(branch, value) for branch in schema[keyword])
             if matches == 0 or (keyword == "oneOf" and matches != 1):
-                errors.append(f"{path}: does not match {keyword}")
+                alternatives = _required_alternatives(schema[keyword])
+                if alternatives is None:
+                    errors.append(f"{path}: does not match {keyword}")
+                else:
+                    # Say what to send: "does not match oneOf" taught a
+                    # model nothing it could correct.
+                    which = "exactly one" if keyword == "oneOf" else "at least one"
+                    got = "more than one" if matches > 1 else "none"
+                    errors.append(
+                        f"{path}: provide {which} of: {' | '.join(alternatives)} (got {got})"
+                    )
                 return
     for branch in schema.get("allOf", []):
         _validate(branch, value, path, errors)

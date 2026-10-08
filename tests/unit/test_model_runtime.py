@@ -1252,6 +1252,67 @@ def test_stream_timeout_policy_precedence_is_transport_only(monkeypatch, tmp_pat
         ctx.close()
 
 
+def test_self_hosted_endpoints_wait_longer_for_a_slow_model(monkeypatch, tmp_path):
+    """ses_01M3TRACMVFCZZ5JT9C87K39VM: a self-hosted model timed out before its first byte."""
+    from rinari.providers.adapters.http import is_local_endpoint
+
+    for url in (
+        "http://localhost:11434/v1",
+        "http://127.0.0.1:1234/v1",
+        "http://[::1]:8080",
+        "http://192.168.1.20:11434",
+        "http://gpu-box.local:8000/v1",
+    ):
+        assert is_local_endpoint(url), url
+    for url in ("https://api.openai.com/v1", "https://8.8.8.8/v1", "", None, "not a url"):
+        assert not is_local_endpoint(url), url
+
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(
+            200,
+            content=(
+                b'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\n'
+                b"data: [DONE]\n"
+            ),
+        )
+
+    ctx, services = _app_and_services(handler, monkeypatch, tmp_path)
+    try:
+        provider = services.providers.add(
+            _add_input(services, "openai", "http://localhost:11434/v1")
+        )
+        model = services.models.add(provider.alias, "qwen-local", "local")
+        router = ModelRouter(services.providers, services.models, http_client=_client(handler))
+        router.invoke_stream(provider, model.id, _request(), lambda _: None)
+        assert seen[-1].extensions["timeout"]["read"] == 600
+        # What the owner configures still wins over the local default.
+        (ctx.home / "model-execution.json").write_text(
+            json.dumps({"provider_timeouts": {provider.id: {"first_byte": 42, "idle": 50}}}),
+            encoding="utf-8",
+        )
+        router.invoke_stream(provider, model.id, _request(), lambda _: None)
+        assert seen[-1].extensions["timeout"]["read"] == 50
+
+        # A model the owner serves behind their own domain is just as slow.
+        hosted = services.providers.add(
+            _add_input(services, "mine", "https://llm.example-owner.dev/v1")
+        )
+        hosted_model = services.models.add(hosted.alias, "qwen-hosted", "hosted")
+        router.invoke_stream(hosted, hosted_model.id, _request(), lambda _: None)
+        assert seen[-1].extensions["timeout"]["read"] == 600
+
+        # A known cloud API keeps the ordinary bound.
+        cloud = services.providers.add(_add_input(services, "cloud", "https://api.openai.com/v1"))
+        cloud_model = services.models.add(cloud.alias, "gpt-cloud", "cloud")
+        router.invoke_stream(cloud, cloud_model.id, _request(), lambda _: None)
+        assert seen[-1].extensions["timeout"]["read"] == 120
+    finally:
+        ctx.close()
+
+
 # -- F3: wire tool names conform to the official contracts everywhere ----------
 
 
@@ -1434,3 +1495,54 @@ def test_router_stream_repeats_without_a_refused_reasoning_control(monkeypatch, 
         assert "provider.reasoning.dropped" in events
     finally:
         ctx.close()
+
+
+def test_every_provider_receives_projected_combinators_and_validation_keeps_them() -> None:
+    """llama.cpp drops sibling properties when a root oneOf is present."""
+    from rinari.tools.schema import validate_against, wire_input_schema
+
+    original = {
+        "type": "object",
+        "properties": {
+            "command": {"type": "string"},
+            "argv": {"type": "array", "items": {"type": "string"}},
+            "options": {
+                "type": "object",
+                "properties": {"a": {"type": "string"}, "b": {"type": "string"}},
+                "anyOf": [{"required": ["a"]}, {"required": ["b"]}],
+            },
+            "value": {"oneOf": [{"type": "string"}, {"type": "integer"}]},
+        },
+        "oneOf": [{"required": ["command"]}, {"required": ["argv"]}],
+    }
+    wire = wire_input_schema(original)
+    assert "oneOf" not in wire and "Provide exactly one of: command; argv." in wire["description"]
+    assert set(wire["properties"]) == {"command", "argv", "options", "value"}
+    assert "anyOf" not in wire["properties"]["options"]
+    # A plain type union has no sibling properties to lose: kept.
+    assert wire["properties"]["value"] == {"oneOf": [{"type": "string"}, {"type": "integer"}]}
+    assert "oneOf" in original and "anyOf" in original["properties"]["options"]
+    assert validate_against(original, {}) == [
+        "$: provide exactly one of: command | argv (got none)"
+    ]
+    assert validate_against(original, {"command": "x", "argv": ["x"]}) == [
+        "$: provide exactly one of: command | argv (got more than one)"
+    ]
+    assert validate_against(original, {"command": "npm test"}) == []
+
+
+def test_openai_compatible_payload_sends_the_projected_schema() -> None:
+    from rinari.providers.adapters.openai_compatible import OpenAICompatibleAdapter
+
+    schema = {
+        "type": "object",
+        "properties": {"command": {"type": "string"}, "argv": {"type": "array"}},
+        "oneOf": [{"required": ["command"]}, {"required": ["argv"]}],
+    }
+    request = _request(
+        tools=(ToolSchema(name="process.start", description="start", parameters=schema),)
+    )
+    payload = OpenAICompatibleAdapter()._payload(request, stream=False)
+    sent = payload["tools"][0]["function"]["parameters"]
+    assert "oneOf" not in sent and set(sent["properties"]) == {"command", "argv"}
+    assert "oneOf" in schema

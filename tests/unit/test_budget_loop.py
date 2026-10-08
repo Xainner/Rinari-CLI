@@ -314,6 +314,26 @@ def test_spawn_child_ledger() -> None:
     assert parent.tool_calls == 4
 
 
+def test_child_calls_do_not_use_up_the_parent_ceilings() -> None:
+    parent = BudgetMeter(TurnBudgetLimits(max_model_calls=3, max_tool_calls=3), FakeClock())
+    child = parent.spawn_child()
+    for _ in range(5):
+        child.note_model_call()
+        child.note_tool_call("fs.read")
+    assert parent.model_calls == 5 and parent.tool_calls == 5
+    assert parent.own_model_calls == 0 and parent.own_tool_calls == 0
+    assert parent.first_exhausted() is None
+    assert parent.allows_tool("fs.read")
+    parent.reserve_model_call(model_only=True)
+    # The child stops at its own ceiling, not because of the parent's spend.
+    assert child.first_exhausted() == "model-calls"
+    with pytest.raises(ValueError):
+        child.reserve_model_call(model_only=True)
+    sibling = parent.spawn_child()
+    sibling.reserve_model_call(model_only=True)
+    assert sibling.first_exhausted_in_chain() is None
+
+
 def test_spawn_child_depth_relativized() -> None:
     parent = BudgetMeter(TurnBudgetLimits(), FakeClock())
     child = parent.spawn_child(depth=2)

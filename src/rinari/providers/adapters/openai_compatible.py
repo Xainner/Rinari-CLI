@@ -37,6 +37,7 @@ from rinari.providers.adapters.http import (
     stream_timeout_error,
 )
 from rinari.shared.errors import InvalidUsageError, NetworkError, ProviderModelError
+from rinari.tools.schema import wire_input_schema
 
 
 class OpenAICompatibleAdapter(ProviderAdapter):
@@ -153,7 +154,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                     "function": {
                         "name": _wire_tool_name(tool.name, tool_aliases),
                         "description": tool.description,
-                        "parameters": tool.parameters,
+                        "parameters": wire_input_schema(tool.parameters),
                     },
                 }
                 for tool in request.tools

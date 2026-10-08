@@ -99,7 +99,7 @@ FIELDS = {
     "agent.spawn": "agent_id:s agent:s state:s limits:o",
     "agent.wait": "agent_id:s state:s status:s timed_out:b",
     "agent.result": "agent_id:s state:s",
-    "agent.message": "agent_id:s accepted:b",
+    "agent.message": "agent_id:s accepted:b delivery:s note:s",
     "agent.cancel": "agent_id:s cancelled:b",
     "agent.synthesize": "conflicts:a",
     "user.ask": "request_id:s status:s answers:o",

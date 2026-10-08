@@ -221,18 +221,22 @@ class _SubagentRunner:
             ),
             tool_ctx=tool_ctx,
             assembler_base=base,
+            # agent.message: what the coordinator sends while this agent
+            # works is read before its next step (it was queued, never read).
+            collect_steering=lambda: _coordinator_messages(spec),
         )
         parent_budget = getattr(spec, "parent_budget", None)
         own = definition.budget
         if parent_budget is not None:
             # Hierarchical ledger (P0.10): the child's spend forwards to
             # the spawning turn; the spawn itself is counted with depth. A
-            # limit the agent does not set is the parent's: the ledger checks
-            # every ancestor before each call.
+            # call ceiling the agent does not set is the parent's, applied to
+            # the child's own calls: neither one uses up the other's.
+            inherited = parent_budget.limits
             budget = parent_budget.spawn_child(
                 TurnBudgetLimits(
-                    max_model_calls=own.max_model_calls,
-                    max_tool_calls=own.max_tool_calls,
+                    max_model_calls=own.max_model_calls or inherited.max_model_calls,
+                    max_tool_calls=own.max_tool_calls or inherited.max_tool_calls,
                     max_network_calls=own.max_tool_calls,
                     max_wall_time_s=own.max_wall_time_s,
                 ),
@@ -527,3 +531,24 @@ def make_subagent_runner(config: SubagentRuntimeConfig) -> _SubagentRunner:
 
 
 __all__ = ["SubagentRuntimeConfig", "_LinkedToken", "make_subagent_runner"]
+
+
+def _coordinator_messages(spec: SubagentRunSpec) -> list:
+    import queue
+
+    from rinari.models.types import ChatMessage
+
+    messages = []
+    while True:
+        try:
+            text = spec.messages.get_nowait()
+        except queue.Empty:
+            return messages
+        messages.append(
+            ChatMessage(
+                role="user",
+                content=f"Instruction from the main agent (coordinator):\n{text}",
+                display_content=text,
+                origin={"kind": "coordinator"},
+            )
+        )

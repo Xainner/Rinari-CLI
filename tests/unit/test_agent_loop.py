@@ -838,3 +838,170 @@ def test_direct_answers_and_announced_work_need_no_extra_call(env) -> None:
     assert [p["tool_call_id"] for name, p in activity if name == "tool.requested"] == ["l1", "l2"]
     assert "OpeningRequested" not in events
     assert len(model.requests) == 3
+
+
+# -- transient model failures are retried (usage report 2026-10-08) -----------
+
+
+@dataclass
+class FlakyStreamModel(FakeModel):
+    """Fails its first calls with the given errors, streaming a bit first."""
+
+    failures: list[BaseException] = field(default_factory=list)
+
+    def invoke_stream(self, request: ModelRequest, on_delta) -> ModelResponse:
+        if self.failures:
+            self.requests.append(request)
+            on_delta("partial answer that ")
+            raise self.failures.pop(0)
+        return super().invoke_stream(request, on_delta)
+
+
+def _activity_loop(env, model):
+    activity: list[tuple[str, dict]] = []
+    loop = AgentLoop(
+        model,
+        env["runtime"],
+        env["assembler"],
+        activity_sink=lambda event, payload: activity.append((event, payload)),
+    )
+    return loop, activity
+
+
+def test_a_cut_stream_is_retried_and_the_partial_text_is_dropped(env) -> None:
+    from rinari.providers.errors import ProviderError, ProviderErrorCode
+
+    model = FlakyStreamModel(
+        scripted=[ModelResponse(content="done")],
+        streaming=True,
+        failures=[
+            NetworkError(
+                "Response stream closed without a terminal event",
+                details={"kind": "STREAM_INTERRUPTED"},
+            ),
+            ProviderError("server error", code=ProviderErrorCode.SERVER_ERROR, retryable=True),
+        ],
+    )
+    loop, activity = _activity_loop(env, model)
+    budget = BudgetMeter(TurnBudgetLimits(), env["clock"])
+    streamed: list[str] = []
+    result = loop.turn(env["ctx"], "hello", on_delta=streamed.append, budget=budget)
+    assert result.kind == "answer" and result.content == "done"
+    assert len(model.requests) == 3
+    retries = [payload for event, payload in activity if event == "model.retrying"]
+    assert [(r["attempt"], r["max_attempts"], r["reason"]) for r in retries] == [
+        (2, 3, "STREAM_INTERRUPTED"),
+        (3, 3, "SERVER_ERROR"),
+    ]
+    assert {r["model_call_id"] for r in retries} == {"model_1"}
+    assert not any(event == "model.failed" for event, _ in activity)
+    # Each retry is a model call for the budget.
+    assert budget.own_model_calls == 3
+
+
+def test_a_timeout_gets_a_single_retry(env) -> None:
+    failure = NetworkError("Timed out", details={"kind": "TIMEOUT", "phase": "first_byte"})
+    model = FlakyStreamModel(
+        scripted=[],
+        streaming=True,
+        failures=[failure, NetworkError("Timed out", details={"kind": "TIMEOUT"})],
+    )
+    loop, activity = _activity_loop(env, model)
+    with pytest.raises(NetworkError):
+        loop.turn(env["ctx"], "hello", on_delta=lambda _t: None)
+    assert len(model.requests) == 2
+    assert sum(event == "model.retrying" for event, _ in activity) == 1
+    assert sum(event == "model.failed" for event, _ in activity) == 1
+
+
+def test_an_auth_or_quota_failure_is_not_retried(env) -> None:
+    from rinari.providers.errors import ProviderError, ProviderErrorCode
+
+    for code in (ProviderErrorCode.AUTH, ProviderErrorCode.QUOTA_EXHAUSTED):
+        model = FlakyStreamModel(
+            scripted=[], streaming=True, failures=[ProviderError("no", code=code)]
+        )
+        loop, activity = _activity_loop(env, model)
+        with pytest.raises(ProviderError):
+            loop.turn(env["ctx"], "hello", on_delta=lambda _t: None)
+        assert len(model.requests) == 1
+        assert not any(event == "model.retrying" for event, _ in activity)
+
+
+def test_cancelling_during_the_retry_wait_stops_promptly(env, monkeypatch) -> None:
+    monkeypatch.setattr("rinari.runtime.agent.MODEL_RETRY_DELAYS_S", (30.0, 30.0))
+    from rinari.providers.errors import ProviderError, ProviderErrorCode
+
+    token = CancellationToken()
+    model = FlakyStreamModel(
+        scripted=[ModelResponse(content="never")],
+        streaming=True,
+        failures=[ProviderError("busy", code=ProviderErrorCode.SERVER_ERROR, retryable=True)],
+    )
+    loop, _activity = _activity_loop(env, model)
+    timer = threading.Timer(0.2, token.cancel)
+    timer.start()
+    with pytest.raises(CancelledError):
+        loop.turn(env["ctx"], "hello", on_delta=lambda _t: None, cancel=token)
+    timer.cancel()
+    assert len(model.requests) == 1
+
+
+def test_a_budget_stop_says_which_limit_and_its_value(env) -> None:
+    model = FakeModel(
+        scripted=[
+            ModelResponse(
+                content="",
+                stop_reason=StopReason.TOOL_CALLS,
+                tool_calls=(ToolCall(id=f"c{i}", name="fs.list", arguments={"path": "."}),),
+            )
+            for i in range(3)
+        ]
+    )
+    loop = AgentLoop(model, env["runtime"], env["assembler"])
+    budget = BudgetMeter(TurnBudgetLimits(max_model_calls=2), env["clock"])
+    result = loop.turn(env["ctx"], "list", budget=budget)
+    assert result.kind == "budget" and result.recoverable
+    assert result.stop_detail == {"budget": "model-calls", "limit": 2}
+
+
+# -- custom model with empty arguments (ses_01M4E01RQQCNMQMDGZ0FCHAVTY) --------
+
+
+def test_identical_calls_in_one_response_are_nudged_not_stopped(env) -> None:
+    """llama.cpp sent four process.start calls with {} in a single response.
+
+    The detector nudged on the third and stopped on the fourth, before the
+    model could read the nudge. Now the model gets its next response.
+    """
+    empty = tuple(ToolCall(id=f"e{i}", name="process.start", arguments={}) for i in range(4))
+    fixed = ToolCall(id="ok", name="fs.list", arguments={"path": "."})
+    model = FakeModel(
+        scripted=[
+            ModelResponse(content="", stop_reason=StopReason.TOOL_CALLS, tool_calls=empty),
+            ModelResponse(content="", stop_reason=StopReason.TOOL_CALLS, tool_calls=(fixed,)),
+            ModelResponse(content="recovered"),
+        ]
+    )
+    loop = AgentLoop(model, env["runtime"], env["assembler"])
+    result = loop.turn(env["ctx"], "render it")
+    assert result.kind == "answer" and result.content == "recovered"
+    notes = [m for m in env["ctx"].history if (m.origin or {}).get("source") == "loop-detector"]
+    assert len(notes) == 1
+    errors = [m.content for m in env["ctx"].history if m.role == "tool"][:4]
+    assert all("provide exactly one of: command | argv" in text for text in errors)
+
+
+def test_repeating_after_the_nudge_still_stops(env) -> None:
+    empty = tuple(ToolCall(id=f"e{i}", name="process.start", arguments={}) for i in range(4))
+    again = (ToolCall(id="again", name="process.start", arguments={}),)
+    model = FakeModel(
+        scripted=[
+            ModelResponse(content="", stop_reason=StopReason.TOOL_CALLS, tool_calls=empty),
+            ModelResponse(content="", stop_reason=StopReason.TOOL_CALLS, tool_calls=again),
+            ModelResponse(content="never"),
+        ]
+    )
+    loop = AgentLoop(model, env["runtime"], env["assembler"])
+    result = loop.turn(env["ctx"], "render it")
+    assert result.kind == "loop"

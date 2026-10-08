@@ -1385,6 +1385,9 @@ class TurnManager:
                     current = {**current, "content": str(current.get("content") or "") + delta}
                 elif effective_event == "model.content.completed":
                     current = {**current, "content": str(safe.get("content") or "")}
+                elif effective_event == "model.retrying":
+                    # The retry streams its answer again from the start.
+                    current = {**current, "content": ""}
                 elif effective_event == "tool.output.delta":
                     stream = safe.get("stream")
                     delta = str(safe.get("delta") or "")
