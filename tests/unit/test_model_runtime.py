@@ -1252,8 +1252,8 @@ def test_stream_timeout_policy_precedence_is_transport_only(monkeypatch, tmp_pat
         ctx.close()
 
 
-def test_local_endpoints_wait_longer_for_a_slow_model(monkeypatch, tmp_path):
-    """ses_01M3TRACMVFCZZ5JT9C87K39VM: a local model timed out before its first byte."""
+def test_self_hosted_endpoints_wait_longer_for_a_slow_model(monkeypatch, tmp_path):
+    """ses_01M3TRACMVFCZZ5JT9C87K39VM: a self-hosted model timed out before its first byte."""
     from rinari.providers.adapters.http import is_local_endpoint
 
     for url in (
@@ -1295,6 +1295,20 @@ def test_local_endpoints_wait_longer_for_a_slow_model(monkeypatch, tmp_path):
         )
         router.invoke_stream(provider, model.id, _request(), lambda _: None)
         assert seen[-1].extensions["timeout"]["read"] == 50
+
+        # A model the owner serves behind their own domain is just as slow.
+        hosted = services.providers.add(
+            _add_input(services, "mine", "https://llm.example-owner.dev/v1")
+        )
+        hosted_model = services.models.add(hosted.alias, "qwen-hosted", "hosted")
+        router.invoke_stream(hosted, hosted_model.id, _request(), lambda _: None)
+        assert seen[-1].extensions["timeout"]["read"] == 600
+
+        # A known cloud API keeps the ordinary bound.
+        cloud = services.providers.add(_add_input(services, "cloud", "https://api.openai.com/v1"))
+        cloud_model = services.models.add(cloud.alias, "gpt-cloud", "cloud")
+        router.invoke_stream(cloud, cloud_model.id, _request(), lambda _: None)
+        assert seen[-1].extensions["timeout"]["read"] == 120
     finally:
         ctx.close()
 

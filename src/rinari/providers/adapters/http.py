@@ -234,10 +234,11 @@ def decode_json(response: httpx.Response, url: str):
 
 
 STREAM_DEFAULTS = {"connect": 15.0, "first_byte": 120.0, "idle": 120.0, "total": 900.0}
-# A model served from this machine or the local network (Ollama, LM Studio,
-# llama.cpp…) can spend minutes reading a long prompt before its first byte;
-# a dead local server fails at connect, which keeps its short bound.
-LOCAL_STREAM_DEFAULTS = {"first_byte": 600.0, "idle": 300.0, "total": 3600.0}
+# A model the owner serves (Ollama, LM Studio, llama.cpp, vLLM… on this
+# machine, the network or behind a custom endpoint) can spend minutes reading
+# a long prompt before its first byte; a dead server fails at connect, which
+# keeps its short bound. Known cloud APIs keep STREAM_DEFAULTS.
+SELF_HOSTED_STREAM_DEFAULTS = {"first_byte": 600.0, "idle": 300.0, "total": 3600.0}
 
 
 def is_local_endpoint(endpoint: str | None) -> bool:

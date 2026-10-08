@@ -1649,10 +1649,12 @@ fallback `RINARI_MODEL_STREAM_READ_TIMEOUT_SECONDS`, remain compatible and fill
 first-byte/inactivity values not specified by the new policy. Direct adapter
 callers without a policy retain the legacy 30-second read default.
 
-A provider on this machine or the local network (localhost, a private address,
-`.local`) starts from longer defaults — first byte 600 s, inactivity 300 s,
-total 3600 s — because a local model can read a long prompt for minutes before
-answering; anything configured above still wins.
+A self-hosted provider — any custom endpoint, whatever its domain, or one on
+this machine or the local network (localhost, a private address, `.local`) —
+starts from longer defaults: first byte 600 s, inactivity 300 s, total 3600 s,
+because a model the owner serves can read a long prompt for minutes before
+answering. Known cloud APIs from the provider catalog keep the ordinary
+defaults. Anything configured above still wins.
 
 First-byte includes waiting for response headers; inactivity measures raw bytes,
 including heartbeat traffic. The total bound also limits streams that send only

@@ -127,6 +127,23 @@ def _merge_capabilities(
     return replace(base, **changes) if changes else base
 
 
+def _self_hosted(provider: ProviderRecord) -> bool:
+    """Not a known cloud API: a local endpoint or any custom one.
+
+    A custom endpoint is often a model the owner serves themselves behind a
+    domain or a tunnel, as slow to start answering as one on localhost.
+    """
+    from rinari.providers.adapters.http import is_local_endpoint
+    from rinari.providers.catalog import product_for
+
+    if is_local_endpoint(provider.endpoint):
+        return True
+    try:
+        return product_for(provider) == "custom"
+    except Exception:
+        return False
+
+
 def _stream_read_timeout_s(
     provider_settings: dict[str, Any], model_settings: dict[str, Any]
 ) -> float:
@@ -545,15 +562,14 @@ class ModelRouter:
         request = self.generation_request(provider, model, request)
         from rinari.models.execution import policy
         from rinari.providers.adapters.http import (
-            LOCAL_STREAM_DEFAULTS,
-            is_local_endpoint,
+            SELF_HOSTED_STREAM_DEFAULTS,
             validate_stream_timeouts,
         )
 
         config = policy(getattr(getattr(self._providers, "_ctx", None), "home", None))
         limits = {
-            # Local models read long prompts slowly; anything configured wins.
-            **(LOCAL_STREAM_DEFAULTS if is_local_endpoint(provider.endpoint) else {}),
+            # Self-hosted models read long prompts slowly; anything configured wins.
+            **(SELF_HOSTED_STREAM_DEFAULTS if _self_hosted(provider) else {}),
             **config.get("timeouts", {}),
             **config.get("provider_timeouts", {}).get(provider.id, {}),
             **(provider.settings or {}).get("stream_timeouts", {}),
