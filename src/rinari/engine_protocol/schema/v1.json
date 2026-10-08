@@ -250,6 +250,7 @@
       "type": "string",
       "enum": [
         "engine.info",
+        "engine.diagnostics",
         "runtime.snapshot.get",
         "session.move",
         "workspace.file.read",

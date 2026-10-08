@@ -829,6 +829,7 @@ rinari engine --stdio
 - The first stdout line is the `hello` handshake (`rinari-engine`, protocol version, engine version, capabilities).
 - Every request carries an `id`; every response echoes it.
 - Unknown methods, duplicate request ids, malformed input, and broken frames return stable error envelopes without breaking the stream.
+- `engine.diagnostics` returns what a problem report needs, and never message or file contents, credentials, private endpoints, MCP commands or request parameters. It covers versions and platform, data sizes (session, message and event counts, the five largest sessions by id and bytes, database and artifact sizes), providers by product/type with the endpoint classified as `known`/`local`/`custom`, MCP and plugin state, and the latest 50 failed or slow (≥ 2 s) requests by method, code and duration. Each section degrades on its own. The desktop bundles it into "Exportar diagnóstico".
 - No stdout line exceeds 16 MiB, the desktop's line limit. `session.history` and `session.timeline` pages also stop at 8 MiB: older rows are left for `has_more`/`next_before_turn_index`, and a single row that is still too large has its long strings shortened (data URLs omitted). The stored data stays intact. A larger response becomes `RESPONSE_TOO_LARGE` for that request only. A larger event has its strings shortened, or is dropped if that is not enough. Each case is reported on stderr.
 
 Slice 1 methods: `engine.info`, `session.list`, `session.get`,
