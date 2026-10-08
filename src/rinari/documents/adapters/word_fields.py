@@ -62,6 +62,9 @@ def update(source: Path, out_dir: Path, *, timeout_s: float = 300.0) -> Path:
     script = out_dir / "fields.ps1"
     script.write_text(_SCRIPT, encoding="utf-8-sig")
     target = out_dir / "fields.docx"
+    from rinari.documents.adapters.excel_calc import mark_before
+
+    mark_before(out_dir.parent)
     kwargs: dict[str, Any] = {"creationflags": subprocess.CREATE_NO_WINDOW}
     process = subprocess.Popen(
         [

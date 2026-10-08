@@ -54,6 +54,7 @@ class JobHandle:
         self.session_id = session_id
         self.cancel_event = threading.Event()
         self._process: subprocess.Popen | None = None
+        self._workdir: Path | None = None
         self._lock = threading.Lock()
 
     @property
@@ -111,6 +112,7 @@ class JobHandle:
             )
             with self._lock:
                 self._process = process
+                self._workdir = workdir
             try:
                 deadline = time.monotonic() + (timeout_s or DEFAULT_WORKER_TIMEOUT_S)
                 while True:
@@ -134,6 +136,10 @@ class JobHandle:
             finally:
                 with self._lock:
                     self._process = None
+            if self.cancelled:
+                # Cancelado desde fuera (kill): sus procesos, antes de borrar el directorio.
+                _kill_owned(workdir)
+                raise JobCancelled()
             result_path = workdir / "result.json"
             if not result_path.is_file():
                 tail = (stderr or b"").decode("utf-8", "replace")[-800:]
@@ -166,8 +172,12 @@ class JobHandle:
     def kill(self) -> None:
         with self._lock:
             process = self._process
+            workdir = self._workdir
         if process is not None and process.poll() is None:
             _kill(process)
+        # Lo que el trabajo arrancó fuera de su árbol (Office por COM) también.
+        if workdir is not None:
+            _kill_owned(workdir)
 
 
 def run_inline(

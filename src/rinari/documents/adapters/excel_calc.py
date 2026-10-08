@@ -67,6 +67,7 @@ def calculate(source: Path, out_dir: Path, *, timeout_s: float = 300.0) -> Path:
     script.write_text(_SCRIPT, encoding="utf-8-sig")
     target = out_dir / "calculated.xlsx"
     pids = out_dir.parent / OWNED
+    mark_before(out_dir.parent)
     kwargs: dict[str, Any] = {"creationflags": subprocess.CREATE_NO_WINDOW}
     process = subprocess.Popen(
         [
@@ -111,15 +112,65 @@ def calculate(source: Path, out_dir: Path, *, timeout_s: float = 300.0) -> Path:
     return target
 
 
-def kill_owned(workdir: Path) -> None:
-    """Termina solo los procesos que este trabajo apuntó como suyos."""
-    path = workdir / OWNED
-    if sys.platform != "win32" or not path.is_file():
+BEFORE = "office.before"
+_AUTOMATION_QUERY = (
+    "Get-CimInstance Win32_Process -Filter \"Name='EXCEL.EXE' OR Name='WINWORD.EXE' OR "
+    "Name='POWERPNT.EXE'\" | Where-Object { $_.CommandLine -match 'automation|Embedding' } | "
+    "ForEach-Object { $_.ProcessId }"
+)
+
+
+def automation_pids() -> set[int]:
+    """Procesos de Office abiertos por COM (`/automation -Embedding`), nunca los del usuario."""
+    if sys.platform != "win32":
+        return set()
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", _AUTOMATION_QUERY],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    return {int(line) for line in result.stdout.split() if line.isdigit()}
+
+
+def mark_before(workdir: Path) -> None:
+    """Antes de lanzar Office: qué procesos de automatización ya existían."""
+    if sys.platform != "win32":
         return
-    for line in path.read_text(encoding="utf-8", errors="ignore").split():
-        if line.isdigit() and int(line) > 0:
+    try:
+        (workdir / BEFORE).write_text(
+            " ".join(str(p) for p in sorted(automation_pids())), encoding="utf-8"
+        )
+    except Exception:
+        return
+
+
+def kill_owned(workdir: Path) -> None:
+    """Termina solo los procesos que este trabajo arrancó.
+
+    Los apuntados en `owned.pids` y, si el trabajo se canceló mientras Office
+    arrancaba (antes de poder apuntarlo), los procesos de automatización que
+    no existían cuando el trabajo los fue a lanzar. Un Office del usuario no
+    se abre en modo automatización: nunca entra.
+    """
+    if sys.platform != "win32":
+        return
+    pids: set[int] = set()
+    path = workdir / OWNED
+    if path.is_file():
+        pids |= {
+            int(x) for x in path.read_text(encoding="utf-8", errors="ignore").split() if x.isdigit()
+        }
+    before = workdir / BEFORE
+    if before.is_file():
+        known = {int(x) for x in before.read_text(encoding="utf-8").split() if x.isdigit()}
+        pids |= automation_pids() - known
+    for pid in sorted(pids):
+        if pid > 0:
             subprocess.run(
-                ["taskkill", "/PID", line, "/T", "/F"],
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
                 capture_output=True,
                 check=False,
                 creationflags=subprocess.CREATE_NO_WINDOW,

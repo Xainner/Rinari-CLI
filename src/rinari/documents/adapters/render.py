@@ -191,6 +191,9 @@ def _office(source: Path, kind: str, out_dir: Path, timeout_s: float) -> bytes:
     script.write_text(_SCRIPTS[kind], encoding="utf-8-sig")
     target = out_dir / "rendered.pdf"
     target.unlink(missing_ok=True)
+    from rinari.documents.adapters.excel_calc import mark_before
+
+    mark_before(out_dir.parent)
     result = _run(
         [
             "powershell.exe",

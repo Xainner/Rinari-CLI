@@ -552,3 +552,25 @@ def test_cancelling_a_calculation_ends_only_its_own_excel(app_ctx):
         assert restarted.get(job["job_id"], session_id=SESSION)["status"] == "cancelled"
     finally:
         JobManager.close_for(app_ctx)
+
+
+@pytest.mark.skipif(not excel_calc.available(), reason="no Excel")
+def test_cancelling_while_excel_starts_leaves_no_orphan(app_ctx):
+    import time
+
+    store = ArtifactStore(app_ctx)
+    try:
+        service = DocumentService(store, SESSION)
+        parent = service.wait(service.create({**BOOK, "kind": "xlsx"}, render=False), 120)
+        before = excel_calc.automation_pids()
+        for delay in (0.3, 0.8, 1.5):
+            job = service.calculate(parent["result"]["revision"]["id"])
+            time.sleep(delay)
+            service.cancel(job["job_id"])
+            assert service.wait(job, 30)["status"] in ("cancelled", "succeeded")
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and excel_calc.automation_pids() - before:
+            time.sleep(0.5)
+        assert not (excel_calc.automation_pids() - before), "an automation Excel was left behind"
+    finally:
+        JobManager.close_for(app_ctx)
