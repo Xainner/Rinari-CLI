@@ -235,7 +235,8 @@ def test_pptx_renders_through_the_installed_office(store, tmp_path):
 def test_capabilities_never_claim_what_is_missing():
     rows = {(r["kind"], r["operation"]): r for r in capabilities.capabilities()}
     assert rows[("pptx", "inspect")]["available"] is True
-    assert rows[("pdf", "redact")]["available"] is False
+    assert rows[("pdf", "redact")]["backend"] == "raster-pdfium"
+    assert rows[("docx", "redact")]["available"] is False
     assert rows[("docx", "calculate")]["available"] is False
 
 

@@ -506,3 +506,49 @@ def test_budget_scenarios_are_edited_and_recalculated_by_excel(app_ctx):
         assert cached["B3"] == pytest.approx(1210)
     finally:
         JobManager.close_for(app_ctx)
+
+
+def _excel_pids() -> set[int]:
+    import subprocess
+
+    out = subprocess.run(
+        ["tasklist", "/FI", "IMAGENAME eq EXCEL.EXE", "/FO", "CSV", "/NH"],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout
+    return {int(line.split('","')[1]) for line in out.splitlines() if line.startswith('"EXCEL')}
+
+
+@pytest.mark.skipif(not excel_calc.available(), reason="no Excel")
+def test_cancelling_a_calculation_ends_only_its_own_excel(app_ctx):
+    """Gate A11: cancelar durante el cálculo y reiniciar no deja nada a medias."""
+    import time
+
+    store = ArtifactStore(app_ctx)
+    try:
+        service = DocumentService(store, SESSION)
+        parent = service.wait(service.create({**BOOK, "kind": "xlsx"}, render=False), 120)
+        parent = parent["result"]["revision"]
+        before = _excel_pids()
+        job = service.calculate(parent["id"])
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline and not (_excel_pids() - before):
+            time.sleep(0.1)
+        started = _excel_pids() - before
+        assert started, "Excel never started"
+        service.cancel(job["job_id"])
+        final = service.wait(job, 30)
+        assert final["status"] == "cancelled"
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and (started & _excel_pids()):
+            time.sleep(0.2)
+        assert not (started & _excel_pids()), "the job's Excel is still running"
+        assert before <= _excel_pids(), "an Excel that was already running was touched"
+        assert service.revisions.get(parent["id"]).sha256 == parent["sha256"]
+        assert service.revisions.path(service.revisions.get(parent["id"]))
+        JobManager._instances.clear()
+        restarted = JobManager.for_context(app_ctx)
+        assert restarted.get(job["job_id"], session_id=SESSION)["status"] == "cancelled"
+    finally:
+        JobManager.close_for(app_ctx)

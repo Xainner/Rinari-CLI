@@ -167,6 +167,7 @@ class DocumentService:
         """Inicia (o reutiliza) el render de una revisión; devuelve el trabajo."""
         revision = self.resolve(ref)
         kind = revision.kind
+        inspect_container(self.revisions.path(revision))
         caps.require(kind, "render")
         request = {"revision_id": revision.id, "pages": pages}
 
@@ -425,6 +426,8 @@ class DocumentService:
     ) -> dict[str, Any]:
         revision = self.resolve(ref)
         kind = revision.kind
+        # Límites del contenedor (expansión ZIP, rutas, cifrado) antes de abrirlo.
+        inspect_container(self.revisions.path(revision))
         if expected_sha256 and expected_sha256 != revision.sha256:
             raise DocumentError(
                 DocumentErrorCode.REVISION_CONFLICT,
@@ -850,6 +853,56 @@ class DocumentService:
                 inputs[str(ref)] = revision
         return inputs
 
+    # -- redacción -----------------------------------------------------------------
+    def redact(self, ref: str, *, terms: Any = None, regions: Any = None) -> dict[str, Any]:
+        """Redacción verificada: revisión nueva sin el contenido, o ninguna revisión."""
+        revision = self.resolve(ref)
+        if revision.kind != "pdf":
+            raise DocumentError(DocumentErrorCode.UNSUPPORTED_FEATURE, "Only PDFs are redacted")
+        inspect_container(self.revisions.path(revision))
+        caps.require("pdf", "redact")
+        if not terms and not regions:
+            raise DocumentError(DocumentErrorCode.INVALID_SPEC, "Give terms or regions")
+        request = {
+            "revision_id": revision.id,
+            "terms": len(terms or []),
+            "regions": len(regions or []),
+        }
+
+        def runner(handle: JobHandle) -> dict[str, Any]:
+            handle.phase("build")
+            with tempfile.TemporaryDirectory(prefix="rinari-doc-redact-") as tmp:
+                source = Path(tmp) / "source.pdf"
+                shutil.copyfile(self.revisions.path(revision), source)
+                result = handle.run_worker(
+                    "pdf.redact",
+                    {"path": str(source), "terms": terms, "regions": regions},
+                    timeout_s=900,
+                )
+            handle.phase("publish")
+            data = result.pop("_files")["document"]
+            child = self.revisions.create(
+                data,
+                session_id=self.session_id,
+                name=revision.name,
+                operation="redact",
+                backend="raster-pdfium",
+                parent=revision,
+                # Los términos no se guardan: serían una copia de lo redactado.
+                provenance={"parent": revision.id, "parent_sha256": revision.sha256},
+            )
+            checks = dict(result["checks"])
+            checks["preservation"] = Check(
+                CHECK_NOT_APPLICABLE, reason="REWRITTEN_BY_REDACTION"
+            ).to_dict()
+            return self._after_build(
+                handle, child, {"checks": checks, "changes": [result["redaction"]]}, True
+            )
+
+        return self.jobs.start(
+            session_id=self.session_id, operation="redact", request=request, runner=runner
+        )
+
     # -- cálculo -------------------------------------------------------------------
     def calculate(self, ref: str, *, render: bool = False) -> dict[str, Any]:
         """Recalcula con el backend certificado: revisión nueva con cachés frescas."""
@@ -858,6 +911,7 @@ class DocumentService:
             raise DocumentError(
                 DocumentErrorCode.CALCULATION_UNSUPPORTED, "Only workbooks are calculated"
             )
+        inspect_container(self.revisions.path(revision))
         caps.require("xlsx", "calculate")
         request = {"revision_id": revision.id}
 

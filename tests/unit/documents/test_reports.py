@@ -340,3 +340,82 @@ def test_word_paginates_the_table_of_contents(app_ctx):
         assert job["result"]["revision"]["backend"] == "python-docx+word-com"
     finally:
         JobManager.close_for(app_ctx)
+
+
+# -- redacción (gate A10) ---------------------------------------------------------------
+
+
+@pytest.fixture
+def sensitive_pdf(tmp_path):
+    from pypdf import PdfReader, PdfWriter
+    from pypdf.annotations import Text
+    from reportlab.pdfgen import canvas
+
+    raw = tmp_path / "raw.pdf"
+    page = canvas.Canvas(str(raw))
+    page.setAuthor("Juan Secreto")
+    page.drawString(72, 700, "Cliente: Juan Secreto, DNI 12345678Z")
+    page.drawString(72, 680, "Importe 1.200 EUR")
+    page.showPage()
+    page.drawString(72, 700, "Pagina limpia")
+    page.showPage()
+    page.save()
+    writer = PdfWriter(clone_from=PdfReader(str(raw)))
+    writer.add_attachment("notas.txt", b"Juan Secreto")
+    writer.add_annotation(1, Text(rect=(50, 50, 100, 100), text="nota sobre Juan Secreto"))
+    path = tmp_path / "expediente.pdf"
+    writer.write(str(path))
+    return path
+
+
+def test_redaction_removes_the_data_everywhere_and_proves_it(sensitive_pdf, tmp_path):
+    from pypdf import PdfReader
+
+    from rinari.documents.adapters import pdf_redact
+
+    terms = ["Juan Secreto", "12345678Z"]
+    before = pdf_redact.verify(sensitive_pdf, terms, [])
+    assert {item["where"] for item in before} >= {"text", "metadata", "annotation", "attachments"}
+    out = tmp_path / "redactado.pdf"
+    result = pdf_redact.redact(sensitive_pdf, out, terms=terms, regions=None)
+    assert result["pages_rasterized"] == [1] and result["residual"] == []
+    assert pdf_redact.verify(out, terms, []) == []
+    reader = PdfReader(str(out))
+    assert reader.pages[1].extract_text().strip() == "Pagina limpia"
+    assert not reader.attachments
+
+
+def test_regions_cover_scans_and_missing_terms_are_reported(sensitive_pdf, tmp_path):
+    from rinari.documents.adapters import pdf_redact
+
+    with pytest.raises(DocumentError) as err:
+        pdf_redact.redact(sensitive_pdf, tmp_path / "x.pdf", terms=["no aparece"], regions=None)
+    assert err.value.code is DocumentErrorCode.NOT_FOUND
+    result = pdf_redact.redact(
+        sensitive_pdf,
+        tmp_path / "r.pdf",
+        terms=None,
+        regions=[{"page": 1, "box": [60, 130, 400, 170]}],
+    )
+    assert result["pages_rasterized"] == [1]
+
+
+def test_service_redaction_never_stores_the_terms(store, sensitive_pdf):
+    service = DocumentService(store, SESSION)
+    uri = store.create(
+        SESSION,
+        "media",
+        "expediente.pdf",
+        sensitive_pdf.read_bytes(),
+        content_type="application/pdf",
+    ).uri()
+    job = service.wait(service.redact(uri, terms=["Juan Secreto"]), 120)
+    assert job["status"] == "succeeded", job["error"]
+    revision = job["result"]["revision"]
+    assert revision["operation"] == "redact" and revision["backend"] == "raster-pdfium"
+    assert job["result"]["report"]["checks"]["redaction"]["status"] == "passed"
+    stored = str(service.revisions.get(revision["id"]).to_dict()) + str(service.job(job["job_id"]))
+    assert "Juan Secreto" not in stored
+    assert job["result"]["report"]["checks"]["redaction"]["evidence"]["terms_found"] == {
+        "term_1": 1
+    }

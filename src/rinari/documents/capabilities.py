@@ -74,7 +74,10 @@ def capability(kind: str, operation: str) -> dict[str, Any]:
         return row
     if operation == "redact":
         row.update(available=("pdf", "redact") in _ENABLED and kind == "pdf")
-        if not row["available"]:
+        if row["available"]:
+            row["backend"] = "raster-pdfium"
+            row["note"] = "Affected pages become images and lose selectable text"
+        else:
             row["reason"] = "BACKEND_UNAVAILABLE"
             row["action"] = "Secure redaction needs a certified backend; it is never simulated"
         return row

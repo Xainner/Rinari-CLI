@@ -369,7 +369,32 @@ def _pdf_validate(request: dict[str, Any], out: Path) -> tuple[dict[str, Any], F
     }, {}
 
 
+def _pdf_redact(request: dict[str, Any], out: Path) -> tuple[dict[str, Any], Files]:
+    from rinari.documents.adapters import pdf_redact
+    from rinari.documents.contracts import Check
+    from rinari.documents.validation import report_checks
+
+    target = out / "redacted.pdf"
+    result = pdf_redact.redact(
+        Path(request["path"]), target, terms=request.get("terms"), regions=request.get("regions")
+    )
+    checks = report_checks.pdf_checks(target, None)
+    checks["redaction"] = Check(
+        "passed",
+        evidence={
+            "backend": result["backend"],
+            "pages_rasterized": result["pages_rasterized"],
+            "terms_found": result["terms"],
+            "regions": result["regions"],
+            "removed": result["removed"],
+            "verified_by": "pypdf (text, content streams, annotations, metadata, attachments)",
+        },
+    ).to_dict()
+    return {"redaction": result, "checks": checks}, {"document": target}
+
+
 REGISTRY: dict[str, Any] = {
+    "pdf.redact": _pdf_redact,
     "docx.create": _docx_create,
     "docx.edit": _docx_edit,
     "docx.validate": _docx_validate,
@@ -439,6 +464,7 @@ capabilities.enable("docx", "create")
 capabilities.enable("docx", "edit")
 capabilities.enable("pdf", "create")
 capabilities.enable("pdf", "edit")
+capabilities.enable("pdf", "redact")
 
 
 def register(name: str, function: Any, *, kind: str | None = None, operation: str | None = None):

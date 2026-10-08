@@ -22,7 +22,11 @@ OWNED = "owned.pids"
 _SCRIPT = r"""
 param([string]$In, [string]$Out, [string]$Pids)
 $ErrorActionPreference = 'Stop'
+$known = @(Get-Process WINWORD -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
 $app = New-Object -ComObject Word.Application
+# Solo es nuestro el proceso que no existía antes: el del usuario nunca se apunta.
+Get-Process WINWORD -ErrorAction SilentlyContinue | Where-Object { $known -notcontains $_.Id } |
+  ForEach-Object { if ($Pids) { Add-Content -Path $Pids -Value $_.Id } }
 $before = $app.Documents.Count
 try {
   $app.Visible = $false
@@ -81,6 +85,9 @@ def update(source: Path, out_dir: Path, *, timeout_s: float = 300.0) -> Path:
     while process.poll() is None:
         if time.monotonic() > deadline:
             process.kill()
+            from rinari.documents.adapters.excel_calc import kill_owned
+
+            kill_owned(out_dir.parent)
             raise DocumentError(DocumentErrorCode.RENDER_FAILED, "Word did not finish in time")
         time.sleep(0.2)
     stderr = (process.stderr.read() if process.stderr else b"").decode("utf-8", "replace")

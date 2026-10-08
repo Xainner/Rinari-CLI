@@ -30,6 +30,15 @@
 
 `documents.read` returns text per page and `has_text: false` for pages without a text layer (often scans). OCR is a separate step for those pages; never present OCR or table extraction from a PDF as exact without checking.
 
+## Redaction (pdf.redact)
+
+- `terms`: exact texts to remove (case-insensitive), found in the text layer of every page.
+- `regions`: `{page, box: [x0, y0, x1, y1]}` in points from the top-left of the page, for scans, signatures, photos or anything that is not text.
+- Each affected page is replaced by an image of that page with the areas blacked out; other pages are untouched. The new file is written from scratch without XMP metadata, outline, attachments or forms, and annotations that mention a term are removed.
+- An independent check (a different PDF library) searches text, content streams, annotations, metadata and attachments. If anything is recoverable the job fails and no revision is created.
+- Costs to tell the user: affected pages lose selectable text; forms and attachments are dropped. Rotated pages are not supported yet.
+- The report counts matches per term as `term_1`, `term_2`…; it never stores the redacted text.
+
 ## Not available (say so)
 
-Secure redaction (needs a certified backend; drawing boxes is not redaction), digital signatures, PDF/A or PDF/UA conformance, editing paragraphs inside an existing PDF.
+Digital signatures, PDF/A or PDF/UA conformance, editing paragraphs inside an existing PDF.

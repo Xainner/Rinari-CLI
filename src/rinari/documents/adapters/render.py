@@ -23,6 +23,7 @@ from typing import Any
 
 from rinari.documents.contracts import DocumentError, DocumentErrorCode
 
+OWNED = "owned.pids"
 _PROGIDS = {
     "pptx": "PowerPoint.Application",
     "docx": "Word.Application",
@@ -33,9 +34,13 @@ _PROGIDS = {
 # interpolado en el código. AutomationSecurity 3 = msoAutomationSecurityForceDisable.
 _SCRIPTS = {
     "pptx": r"""
-param([string]$In, [string]$Out)
+param([string]$In, [string]$Out, [string]$Pids)
 $ErrorActionPreference = 'Stop'
+$known = @(Get-Process POWERPNT -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
 $app = New-Object -ComObject PowerPoint.Application
+# Solo es nuestro el proceso que no existía antes: el del usuario nunca se apunta.
+Get-Process POWERPNT -ErrorAction SilentlyContinue | Where-Object { $known -notcontains $_.Id } |
+  ForEach-Object { if ($Pids) { Add-Content -Path $Pids -Value $_.Id } }
 $before = $app.Presentations.Count
 $visible = $app.Visible
 try {
@@ -48,9 +53,13 @@ try {
 }
 """,
     "docx": r"""
-param([string]$In, [string]$Out)
+param([string]$In, [string]$Out, [string]$Pids)
 $ErrorActionPreference = 'Stop'
+$known = @(Get-Process WINWORD -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
 $app = New-Object -ComObject Word.Application
+# Solo es nuestro el proceso que no existía antes: el del usuario nunca se apunta.
+Get-Process WINWORD -ErrorAction SilentlyContinue | Where-Object { $known -notcontains $_.Id } |
+  ForEach-Object { if ($Pids) { Add-Content -Path $Pids -Value $_.Id } }
 $before = $app.Documents.Count
 try {
   $app.Visible = $false
@@ -64,9 +73,13 @@ try {
 }
 """,
     "xlsx": r"""
-param([string]$In, [string]$Out)
+param([string]$In, [string]$Out, [string]$Pids)
 $ErrorActionPreference = 'Stop'
+$known = @(Get-Process EXCEL -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
 $app = New-Object -ComObject Excel.Application
+# Solo es nuestro el proceso que no existía antes: el del usuario nunca se apunta.
+Get-Process EXCEL -ErrorAction SilentlyContinue | Where-Object { $known -notcontains $_.Id } |
+  ForEach-Object { if ($Pids) { Add-Content -Path $Pids -Value $_.Id } }
 $before = $app.Workbooks.Count
 try {
   $app.Visible = $false
@@ -150,7 +163,9 @@ def to_pdf(
     raise DocumentError(DocumentErrorCode.RENDER_FAILED, "; ".join(errors))
 
 
-def _run(argv: list[str], timeout_s: float) -> subprocess.CompletedProcess:
+def _run(
+    argv: list[str], timeout_s: float, *, owner: Path | None = None
+) -> subprocess.CompletedProcess:
     kwargs: dict[str, Any] = {}
     if sys.platform == "win32":
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
@@ -164,6 +179,10 @@ def _run(argv: list[str], timeout_s: float) -> subprocess.CompletedProcess:
             **kwargs,
         )
     except subprocess.TimeoutExpired as exc:
+        if owner is not None:
+            from rinari.documents.adapters.excel_calc import kill_owned
+
+            kill_owned(owner)
         raise DocumentError(DocumentErrorCode.RENDER_FAILED, "The renderer timed out") from exc
 
 
@@ -183,8 +202,10 @@ def _office(source: Path, kind: str, out_dir: Path, timeout_s: float) -> bytes:
             str(script),
             str(source.resolve()),
             str(target.resolve()),
+            str((out_dir.parent / OWNED).resolve()),
         ],
         timeout_s,
+        owner=out_dir.parent,
     )
     if result.returncode != 0 or not target.is_file():
         detail = (result.stderr or result.stdout or b"").decode("utf-8", "replace").strip()

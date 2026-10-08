@@ -3,8 +3,8 @@
 Instancia propia y aislada: si la instancia que COM entrega ya tiene libros
 abiertos (el usuario trabajando), se rechaza en lugar de recalcular o cerrar
 su trabajo. Macros desactivadas, sin actualizar vínculos ni eventos. El PID
-de ese Excel se apunta en `owned.pids` del trabajo: cancelar termina ese
-proceso y ningún otro EXCEL.EXE.
+del Excel que el trabajo arrancó (y solo ese: uno que ya existía no se
+apunta) queda en `owned.pids`; cancelar termina ese proceso y ningún otro.
 """
 
 from __future__ import annotations
@@ -22,13 +22,11 @@ OWNED = "owned.pids"
 _SCRIPT = r"""
 param([string]$In, [string]$Out, [string]$Pids)
 $ErrorActionPreference = 'Stop'
-$sig = '[DllImport("user32.dll")] public static extern int ' +
-  'GetWindowThreadProcessId(System.IntPtr h, out int p);'
-Add-Type -Namespace Rinari -Name Win -MemberDefinition $sig
+$known = @(Get-Process EXCEL -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
 $app = New-Object -ComObject Excel.Application
-$owner = 0
-[void][Rinari.Win]::GetWindowThreadProcessId([System.IntPtr]$app.Hwnd, [ref]$owner)
-Add-Content -Path $Pids -Value $owner
+# Solo es nuestro el proceso que no existía antes: el del usuario nunca se apunta.
+Get-Process EXCEL -ErrorAction SilentlyContinue | Where-Object { $known -notcontains $_.Id } |
+  ForEach-Object { if ($Pids) { Add-Content -Path $Pids -Value $_.Id } }
 if ($app.Workbooks.Count -gt 0) {
   [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($app)
   Write-Error 'SHARED_INSTANCE'

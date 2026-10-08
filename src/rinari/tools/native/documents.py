@@ -477,6 +477,24 @@ def spreadsheets_recalculate(arguments: dict, ctx: ToolContext) -> ToolResult:
     return ToolResult(ok=True, data=job)
 
 
+def pdf_redact(arguments: dict, ctx: ToolContext) -> ToolResult:
+    from rinari.documents.contracts import DocumentError, DocumentErrorCode
+
+    try:
+        if arguments.get("confirm") is not True:
+            raise DocumentError(
+                DocumentErrorCode.INVALID_SPEC,
+                "confirm must be true: the affected pages become images without selectable text",
+            )
+        service = _service(ctx)
+        ref = _reference(service, ctx, arguments.get("document"))
+        job = service.redact(ref, terms=arguments.get("terms"), regions=arguments.get("regions"))
+        job = service.wait(job, _wait(arguments), ctx.cancellation)
+    except Exception as exc:
+        return _fail(exc)
+    return _built(service, job, None)
+
+
 def _source_target(arguments: dict) -> ClassifiedAction:
     source = str(arguments.get("source") or "")
     if source and not source.startswith("artifact://"):
@@ -814,6 +832,31 @@ def document_tools() -> list[ToolDefinition]:
             handler=spreadsheets_recalculate,
             classify=_read_target,
             **{**common, "namespace": "spreadsheets"},
+        ),
+        ToolDefinition(
+            name="pdf.redact",
+            description=(
+                "Really remove text from a PDF: terms (found in the text layer) and/or regions "
+                "{page, box [x0,y0,x1,y1] pt from top-left}. Affected pages become images; the "
+                "result is verified independently or no revision is made. confirm: true."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "document": _DOCUMENT,
+                    "terms": {"type": "array", "items": {"type": "string"}},
+                    "regions": {"type": "array", "items": {"type": "object"}},
+                    "confirm": {"type": "boolean"},
+                    "wait_s": _WAIT,
+                },
+                "required": ["document", "confirm"],
+            },
+            risk=RISK_MEDIUM,
+            side_effects=SIDE_EFFECT_LOCAL_REVERSIBLE,
+            timeout_ms=MAX_WAIT_S * 1000 + 30_000,
+            handler=pdf_redact,
+            classify=_read_target,
+            **{**common, "namespace": "pdf"},
         ),
         ToolDefinition(
             name="documents.job.get",

@@ -27,6 +27,7 @@ FIELDS = {
     "documents.diff": "before:s after:s package:o content:a?",
     "spreadsheets.query": "job_id:s? status:s? result:o? datasets:a?",
     "spreadsheets.recalculate": "job_id:s status:s phase:s? result:o? error:o?",
+    "pdf.redact": "job_id:s status:s phase:s? result:o? error:o?",
     "documents.finalize": "finalized:b revision:o report:o state:s? blocked_by:a? saved_to:s?",
     "fs.read": "path:s text:s size_bytes:i sha256:s? truncated:b",
     "fs.read_image": "uri:s sha256:s name:s path:s width:i height:i mime_type:s size_bytes:i",
