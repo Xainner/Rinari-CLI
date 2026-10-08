@@ -494,6 +494,7 @@
         "model.content.completed",
         "model.completed",
         "model.failed",
+        "model.retrying",
         "model.changed",
         "session.renamed",
         "tool.requested",

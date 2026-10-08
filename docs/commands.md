@@ -1637,8 +1637,8 @@ rinari vision execution --provider opencode-go --inherit-timeouts
 ```
 
 These are shared streaming settings despite the historical `vision execution`
-command name. Agent exposes them under Settings → Vision and images → Model
-execution. Empty UI fields inherit. `--inherit-timeouts` clears the selected
+command name. Agent exposes them under Settings → Advanced → Model execution.
+Empty UI fields inherit. `--inherit-timeouts` clears the selected
 provider's overrides, or the global overrides without `--provider`.
 
 Precedence: installation → provider execution overrides → saved provider
@@ -1649,11 +1649,20 @@ fallback `RINARI_MODEL_STREAM_READ_TIMEOUT_SECONDS`, remain compatible and fill
 first-byte/inactivity values not specified by the new policy. Direct adapter
 callers without a policy retain the legacy 30-second read default.
 
+A provider on this machine or the local network (localhost, a private address,
+`.local`) starts from longer defaults — first byte 600 s, inactivity 300 s,
+total 3600 s — because a local model can read a long prompt for minutes before
+answering; anything configured above still wins.
+
 First-byte includes waiting for response headers; inactivity measures raw bytes,
 including heartbeat traffic. The total bound also limits streams that send only
-heartbeats. A timeout is terminal with phase diagnostics; streaming requests and
-tools are never replayed automatically. Explicit continuation restores durable
-context. These settings do not change non-streaming call deadlines.
+heartbeats. The agent loop makes a failed model call again after a short wait
+when the failure is transient: a 5xx or overload, a rate limit, a cut stream or
+a lost connection (two retries), or a timeout (one retry). Clients get
+`model.retrying` and drop the text the failed attempt streamed. Tools are never
+replayed: the call is retried before any tool runs on its answer. Each retry
+counts as a model call. These settings do not change non-streaming call
+deadlines; non-streaming calls keep the router's own retries.
 
 ---
 

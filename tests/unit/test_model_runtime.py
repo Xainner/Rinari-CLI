@@ -1252,6 +1252,53 @@ def test_stream_timeout_policy_precedence_is_transport_only(monkeypatch, tmp_pat
         ctx.close()
 
 
+def test_local_endpoints_wait_longer_for_a_slow_model(monkeypatch, tmp_path):
+    """ses_01M3TRACMVFCZZ5JT9C87K39VM: a local model timed out before its first byte."""
+    from rinari.providers.adapters.http import is_local_endpoint
+
+    for url in (
+        "http://localhost:11434/v1",
+        "http://127.0.0.1:1234/v1",
+        "http://[::1]:8080",
+        "http://192.168.1.20:11434",
+        "http://gpu-box.local:8000/v1",
+    ):
+        assert is_local_endpoint(url), url
+    for url in ("https://api.openai.com/v1", "https://8.8.8.8/v1", "", None, "not a url"):
+        assert not is_local_endpoint(url), url
+
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(
+            200,
+            content=(
+                b'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\n'
+                b"data: [DONE]\n"
+            ),
+        )
+
+    ctx, services = _app_and_services(handler, monkeypatch, tmp_path)
+    try:
+        provider = services.providers.add(
+            _add_input(services, "openai", "http://localhost:11434/v1")
+        )
+        model = services.models.add(provider.alias, "qwen-local", "local")
+        router = ModelRouter(services.providers, services.models, http_client=_client(handler))
+        router.invoke_stream(provider, model.id, _request(), lambda _: None)
+        assert seen[-1].extensions["timeout"]["read"] == 600
+        # What the owner configures still wins over the local default.
+        (ctx.home / "model-execution.json").write_text(
+            json.dumps({"provider_timeouts": {provider.id: {"first_byte": 42, "idle": 50}}}),
+            encoding="utf-8",
+        )
+        router.invoke_stream(provider, model.id, _request(), lambda _: None)
+        assert seen[-1].extensions["timeout"]["read"] == 50
+    finally:
+        ctx.close()
+
+
 # -- F3: wire tool names conform to the official contracts everywhere ----------
 
 

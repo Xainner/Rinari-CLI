@@ -4326,6 +4326,13 @@ cost
 wall time
 ```
 
+The model-call and tool-call ceilings are emergency brakes for one runaway
+loop, so each agent counts only its own calls; an agent without its own
+ceiling gets the spawning turn's. A subagent's calls still show in the parent
+turn's usage, and cost, wall time and spawn limits apply to the aggregate.
+Reaching a ceiling pauses the turn as recoverable: the desktop offers
+«Continuar».
+
 No recursive agent explosion.
 
 ---

@@ -82,6 +82,13 @@ _OPENING_REMINDER = (
 DEFAULT_MAX_MODEL_CALLS = 500
 DEFAULT_MAX_TOOL_CALLS = 5000
 
+# A model call that failed in a known transient way is made again: a 5xx, a
+# rate limit, a cut stream or a lost connection. No tool has run on its
+# answer yet, so the retry repeats only the call itself. One delay per retry;
+# a timeout gets a single retry, since a slow server tends to stay slow.
+MODEL_RETRY_DELAYS_S: tuple[float, ...] = (2.0, 6.0)
+MAX_RETRY_AFTER_S = 60.0
+
 
 @dataclass(frozen=True, slots=True)
 class TurnResult:
@@ -150,6 +157,9 @@ class AgentContext:
     pending_origin: dict[str, Any] | None = None
     allow_unconfirmed_vision: bool = False
     collect_subagent_results: Callable[[CancellationToken], str | None] | None = None
+    # Subagents that finished since the last look, worded for the model: the
+    # coordinator otherwise kept messaging agents that had already ended.
+    collect_agent_notices: Callable[[], list[str]] | None = None
     # Messages the owner sent while this turn runs (steering). Each call
     # hands over what arrived since the last one; the loop puts them in the
     # history after the current step and the model reads them next.
@@ -281,10 +291,11 @@ class AgentLoop:
                         requested=tool_calls_requested,
                         rejected=tool_calls_rejected,
                         governor=governor,
+                        stop_detail=_budget_detail(budget, hit),
                     )
                 if (
                     budget.limits.max_model_calls is not None
-                    and budget.model_calls >= budget.limits.max_model_calls
+                    and budget.own_model_calls >= budget.limits.max_model_calls
                 ):
                     return self._stop(
                         ctx.session_id,
@@ -297,6 +308,7 @@ class AgentLoop:
                         requested=tool_calls_requested,
                         rejected=tool_calls_rejected,
                         governor=governor,
+                        stop_detail=_budget_detail(budget, "model-calls"),
                     )
                 budget.reserve_model_call(model_only=True)
             self._take_steering(ctx)
@@ -333,6 +345,16 @@ class AgentLoop:
 
             accepted_output = False
 
+            def restart_output() -> None:
+                # A retried call streams its answer from the start again.
+                nonlocal accepted_output
+                accepted_output = False
+
+            def call_model(current: ModelRequest, call_id: str = model_call_id) -> Any:
+                return self._call_with_retries(
+                    ctx, current, visible_delta, cancel, call_id, budget, restart_output
+                )
+
             def visible_delta(text: str, call_id: str = model_call_id) -> None:
                 nonlocal accepted_output
                 accepted_output = accepted_output or bool(text)
@@ -345,9 +367,7 @@ class AgentLoop:
 
             try:
                 try:
-                    response = self._invoke(
-                        ctx, request, self._guarded_delta(ctx, visible_delta), cancel
-                    )
+                    response = call_model(request)
                 except Exception as rejected:
                     from rinari.providers.errors import ProviderErrorCode
 
@@ -375,9 +395,7 @@ class AgentLoop:
                     )
                     if budget is not None:
                         budget.reserve_model_call(model_only=True)
-                    response = self._invoke(
-                        ctx, request, self._guarded_delta(ctx, visible_delta), cancel
-                    )
+                    response = call_model(request)
             except BaseException as exc:
                 error = {
                     "message": str(exc),
@@ -850,6 +868,12 @@ class AgentLoop:
                         )
                     )
                 ctx.history.extend(round_nudges)
+                if ctx.collect_agent_notices is not None:
+                    with contextlib.suppress(Exception):
+                        ctx.history.extend(
+                            ChatMessage.harness(notice, "subagents")
+                            for notice in ctx.collect_agent_notices()
+                        )
 
             decision = governor.after_cycle(looping=looping_detected)
             self._emit_activity(
@@ -904,6 +928,7 @@ class AgentLoop:
                         requested=tool_calls_requested,
                         rejected=tool_calls_rejected,
                         governor=governor,
+                        stop_detail=_budget_detail(budget, hit),
                     )
 
         return self._stop(
@@ -918,6 +943,7 @@ class AgentLoop:
             requested=tool_calls_requested,
             rejected=tool_calls_rejected,
             governor=governor,
+            stop_detail={"budget": "model-calls", "limit": max_iters},
         )
 
     # -- internals ------------------------------------------------------------
@@ -1083,6 +1109,55 @@ class AgentLoop:
             if isinstance(value, CancelledError):
                 value.details = {"partial_text": "".join(partial_text)}
             raise value
+
+    def _call_with_retries(
+        self,
+        ctx: AgentContext,
+        request: ModelRequest,
+        visible_delta: DeltaFn,
+        cancel: CancellationToken,
+        model_call_id: str,
+        budget: BudgetMeter | None,
+        restart_output: Callable[[], None],
+    ) -> Any:
+        """Invoke the model, retrying a transient failure after a short wait.
+
+        Each retry is a model call for the budget. `model.retrying` tells
+        clients to drop the text the failed attempt streamed: the retry
+        streams its answer from the beginning under the same call id.
+        """
+        retries = 0
+        while True:
+            try:
+                return self._invoke(ctx, request, self._guarded_delta(ctx, visible_delta), cancel)
+            except Exception as exc:
+                reason = _transient_failure(exc)
+                if reason is not None and not _streams(self._provider) and _router_retried(exc):
+                    # A non-streaming call was already retried by the router.
+                    reason = None
+                delays = MODEL_RETRY_DELAYS_S[:1] if reason == "TIMEOUT" else MODEL_RETRY_DELAYS_S
+                if reason is None or retries >= len(delays) or not _reserve_retry(budget):
+                    raise
+                retry_after = getattr(exc, "retry_after", None)
+                delay = (
+                    min(float(retry_after), MAX_RETRY_AFTER_S)
+                    if isinstance(retry_after, (int, float)) and retry_after > 0
+                    else delays[retries]
+                )
+                retries += 1
+                restart_output()
+                self._emit_activity(
+                    "model.retrying",
+                    {
+                        "model_call_id": model_call_id,
+                        "attempt": retries + 1,
+                        "max_attempts": len(delays) + 1,
+                        "delay_s": delay,
+                        "reason": reason,
+                        "message": str(exc)[:300],
+                    },
+                )
+                _cancellable_wait(delay, cancel)
 
     def _guarded_delta(self, ctx: AgentContext, on_delta: DeltaFn | None) -> DeltaFn | None:
         """Abort a live stream promptly on cancel (Â§8/Etapa D).
@@ -1273,6 +1348,73 @@ _BUDGET_REASONS = {
     "cost": "cost limit reached",
     "wall-time": "wall-time limit reached",
 }
+
+
+def _transient_failure(exc: BaseException) -> str | None:
+    """The kind of a failure worth one more model call, or None."""
+    from rinari.providers.errors import ProviderError, ProviderErrorCode
+    from rinari.shared.errors import NetworkError
+
+    if isinstance(exc, ProviderError):
+        code = exc.error_code
+        if code in (ProviderErrorCode.STREAM_INTERRUPTED, ProviderErrorCode.TIMEOUT):
+            return str(code)
+        retryable = (
+            ProviderErrorCode.SERVER_ERROR,
+            ProviderErrorCode.RATE_LIMIT,
+            ProviderErrorCode.MODEL_UNAVAILABLE,
+        )
+        return str(code) if exc.retryable and code in retryable else None
+    if isinstance(exc, NetworkError):
+        kind = (getattr(exc, "details", None) or {}).get("kind")
+        return kind if kind in ("TIMEOUT", "STREAM_INTERRUPTED") else "NETWORK"
+    return None
+
+
+def _streams(provider: Any) -> bool:
+    try:
+        return bool(getattr(provider.capabilities(), "streaming", False))
+    except Exception:
+        return False
+
+
+def _router_retried(exc: BaseException) -> bool:
+    from rinari.providers.errors import RETRYABLE_MODEL_CODES, ProviderError
+
+    return isinstance(exc, ProviderError) and exc.error_code in RETRYABLE_MODEL_CODES
+
+
+def _reserve_retry(budget: BudgetMeter | None) -> bool:
+    if budget is None:
+        return True
+    try:
+        budget.reserve_model_call(model_only=True)
+    except ValueError:
+        return False
+    return True
+
+
+def _cancellable_wait(seconds: float, cancel: CancellationToken) -> None:
+    deadline = time.monotonic() + seconds
+    while True:
+        cancel.throw_if_cancelled("Model call cancelled")
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return
+        time.sleep(min(0.05, left))
+
+
+def _budget_detail(budget: BudgetMeter | None, hit: str) -> dict:
+    """Which ceiling stopped the turn, for clients to word it themselves."""
+    from rinari.runtime.budget import MODEL_CALLS, TOOL_CALLS, WALL_TIME
+
+    limits = budget.limits if budget is not None else None
+    limit = {
+        MODEL_CALLS: getattr(limits, "max_model_calls", None),
+        TOOL_CALLS: getattr(limits, "max_tool_calls", None),
+        WALL_TIME: getattr(limits, "max_wall_time_s", None),
+    }.get(hit)
+    return {"budget": hit, "limit": limit}
 
 
 def _budget_reason(name: str) -> str:

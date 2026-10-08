@@ -153,12 +153,22 @@ def _agent_tools(host: AgentToolHost):
         if not agent_id or not text:
             return _err(None, "agent_id and text required")
         try:
-            accepted = orch.message(agent_id, text)
+            delivery = orch.deliver(
+                agent_id, text, parent_budget=getattr(ctx, "parent_budget", None)
+            )
         except Exception as exc:
             return _err(getattr(exc, "code", ""), str(exc))
-        if not accepted:
-            return _err(None, "agent not running; message not accepted")
-        return ToolResult(ok=True, data={"agent_id": agent_id, "accepted": True}, origin="agents")
+        note = (
+            "The agent had already finished; it is running again on this follow-up. "
+            "Wait for its new result with agent.wait."
+            if delivery == "resumed"
+            else "The agent reads this before its next step."
+        )
+        return ToolResult(
+            ok=True,
+            data={"agent_id": agent_id, "accepted": True, "delivery": delivery, "note": note},
+            origin="agents",
+        )
 
     def cancel(arguments, ctx):
         agent_id = str((arguments or {}).get("agent_id") or "")
@@ -261,7 +271,11 @@ def _agent_tools(host: AgentToolHost):
         ),
         ToolDefinition(
             name="agent.message",
-            description="Send a follow-up instruction to a running subagent (next turn).",
+            description=(
+                "Send a follow-up instruction to a subagent. A running agent reads it "
+                "before its next step; a finished one runs again on it, with its "
+                "previous result as context."
+            ),
             input_schema={
                 "type": "object",
                 "properties": {

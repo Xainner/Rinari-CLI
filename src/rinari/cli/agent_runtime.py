@@ -683,6 +683,7 @@ def build_agent_session(
         assembler_base=build_assembler_context(services, record, profile),
         history=_restore_history(services, record),
         collect_subagent_results=orchestrator.collect_for_final,
+        collect_agent_notices=orchestrator.completion_notices,
     )
     if hasattr(gateway.current, "budget_getter"):
 

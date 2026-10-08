@@ -544,10 +544,16 @@ class ModelRouter:
         model = self._resolve_model(provider, model_id)
         request = self.generation_request(provider, model, request)
         from rinari.models.execution import policy
-        from rinari.providers.adapters.http import validate_stream_timeouts
+        from rinari.providers.adapters.http import (
+            LOCAL_STREAM_DEFAULTS,
+            is_local_endpoint,
+            validate_stream_timeouts,
+        )
 
         config = policy(getattr(getattr(self._providers, "_ctx", None), "home", None))
         limits = {
+            # Local models read long prompts slowly; anything configured wins.
+            **(LOCAL_STREAM_DEFAULTS if is_local_endpoint(provider.endpoint) else {}),
             **config.get("timeouts", {}),
             **config.get("provider_timeouts", {}).get(provider.id, {}),
             **(provider.settings or {}).get("stream_timeouts", {}),

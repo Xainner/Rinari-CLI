@@ -17,7 +17,7 @@ import queue
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -39,8 +39,8 @@ _SUCCESS_STATES = ("completed",)
 class OrchestratorError(Exception):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
-        # AGENT_NOT_FOUND | AGENT_NOT_TERMINAL | LIMIT_TOTAL | LIMIT_CONCURRENT
-        # | LIMIT_DEPTH | AGENT_DEFINITION
+        # AGENT_NOT_FOUND | AGENT_NOT_TERMINAL | AGENT_BUSY | LIMIT_TOTAL
+        # | LIMIT_CONCURRENT | LIMIT_DEPTH | AGENT_DEFINITION
         self.code = code
         self.message = message
 
@@ -89,6 +89,26 @@ class SubagentRunSpec:
 
 class SubagentRunner(Protocol):
     def run(self, spec: SubagentRunSpec) -> AgentResult: ...
+
+
+def _drain(messages: queue.Queue[str]) -> list[str]:
+    drained: list[str] = []
+    while True:
+        try:
+            drained.append(messages.get_nowait())
+        except queue.Empty:
+            return drained
+
+
+def _follow_up_objective(objective: str, previous: AgentResult | None, text: str) -> str:
+    parts = [f"Original objective:\n{objective}"]
+    if previous is not None:
+        outcome = previous.summary.strip() or previous.error.strip() or "(no summary)"
+        parts.append(f"Your previous run ended {previous.status}. Its report:\n{outcome[:6000]}")
+        if previous.files_changed:
+            parts.append("Files you changed: " + ", ".join(previous.files_changed[:50]))
+    parts.append(f"Follow-up instruction from the main agent:\n{text}")
+    return "\n\n".join(parts)
 
 
 def extract_evidence(text: str) -> list[str]:
@@ -169,6 +189,7 @@ class AgentOrchestrator:
         self._session_id = ""
         self._project_root_value: Path | None = None
         self._collected_results: set[str] = set()
+        self._announced: set[tuple[str, int]] = set()
 
     def bind_session(self, session_id: str) -> None:
         self._session_id = session_id
@@ -286,6 +307,32 @@ class AgentOrchestrator:
             collected.append({"agent_id": agent_id, **asdict(result)})
         return json.dumps(collected, ensure_ascii=True) if collected else None
 
+    def completion_notices(self) -> list[str]:
+        """One line per agent run that ended since the last call.
+
+        Runs whose result the coordinator already read are skipped.
+        """
+        notices: list[str] = []
+        with self._lock:
+            for state in self._agents.values():
+                key = (state["id"], state.get("follow_ups", 0))
+                result = state["result"]
+                if (
+                    result is None
+                    or state["state"] not in _terminal_states
+                    or key in self._announced
+                ):
+                    continue
+                self._announced.add(key)
+                if state["id"] in self._collected_results:
+                    continue
+                notices.append(
+                    f"[Runtime note, not from the user] Subagent {state['id']} "
+                    f"({state['agent']}) has finished: {result.status}. Read its report "
+                    "with agent.result; agent.message to it now starts a follow-up run."
+                )
+        return notices
+
     def note_result_delivered(self, agent_id: str) -> None:
         if self.result(agent_id) is not None:
             self._collected_results.add(agent_id)
@@ -320,14 +367,56 @@ class AgentOrchestrator:
         state = self._state(agent_id)
         return state["result"]
 
-    def message(self, agent_id: str, text: str) -> bool:
+    def message(self, agent_id: str, text: str, *, parent_budget: Any | None = None) -> bool:
+        return self.deliver(agent_id, text, parent_budget=parent_budget) in ("queued", "resumed")
+
+    def deliver(self, agent_id: str, text: str, *, parent_budget: Any | None = None) -> str:
+        """Hand a follow-up instruction to an agent; say how it gets it.
+
+        `queued`: the running agent reads it before its next step.
+        `resumed`: the agent had finished, so it runs again on the follow-up
+        with its previous result as context (same id, same worktree). The
+        coordinator often does not know an agent already ended; an error
+        here used to drop the instruction.
+        """
         state = self._state(agent_id)
-        if state["state"] == "running":
-            state["messages"].put(str(text))
-            return True
-        if state["state"] in _terminal_states:
-            raise OrchestratorError("AGENT_NOT_TERMINAL", f"agent {agent_id} is {state['state']}")
-        return False
+        with self._lock:
+            if state["state"] == "running":
+                state["messages"].put(str(text))
+                return "queued"
+            if state["state"] not in _terminal_states:
+                raise OrchestratorError(
+                    "AGENT_BUSY", f"agent {agent_id} is {state['state']}; try again shortly"
+                )
+            if self._count_running() >= self.max_concurrent:
+                raise OrchestratorError(
+                    "LIMIT_CONCURRENT",
+                    f"max_concurrent agents reached ({self.max_concurrent})",
+                )
+            spec = state["spec"]
+            follow_up = replace(
+                spec,
+                objective=_follow_up_objective(state["objective"], state["result"], str(text)),
+                token=CancellationToken(),
+                messages=queue.Queue(),
+                parent_budget=parent_budget if parent_budget is not None else spec.parent_budget,
+            )
+            thread = threading.Thread(target=self._run_agent, args=(agent_id,), daemon=True)
+            state.update(
+                spec=follow_up,
+                token=follow_up.token,
+                messages=follow_up.messages,
+                state="running",
+                result=None,
+                error="",
+                started_at=time.monotonic(),
+                thread=thread,
+                follow_ups=state.get("follow_ups", 0) + 1,
+            )
+            self._collected_results.discard(agent_id)
+        self._emit_hook("SubagentStart", self._hook_payload(state))
+        thread.start()
+        return "resumed"
 
     # -- synthesis -----------------------------------------------------------------
 
@@ -426,6 +515,12 @@ class AgentOrchestrator:
             state["state"] = result.status if result.status in _terminal_states else "failed"
         self._emit_hook("SubagentStop", self._hook_payload(state))
         self._post_complete(agent_id)
+        # An instruction accepted while the run was already wrapping up was
+        # never read: it becomes a follow-up run instead of being lost.
+        late = _drain(state["messages"])
+        if late and result.status != "cancelled":
+            with contextlib.suppress(OrchestratorError):
+                self.deliver(agent_id, "\n\n".join(late))
 
     def _post_complete(self, agent_id: str) -> None:
         # No auto task-join here: a concurrent thread can finish before a

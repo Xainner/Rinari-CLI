@@ -234,6 +234,30 @@ def decode_json(response: httpx.Response, url: str):
 
 
 STREAM_DEFAULTS = {"connect": 15.0, "first_byte": 120.0, "idle": 120.0, "total": 900.0}
+# A model served from this machine or the local network (Ollama, LM Studio,
+# llama.cpp…) can spend minutes reading a long prompt before its first byte;
+# a dead local server fails at connect, which keeps its short bound.
+LOCAL_STREAM_DEFAULTS = {"first_byte": 600.0, "idle": 300.0, "total": 3600.0}
+
+
+def is_local_endpoint(endpoint: str | None) -> bool:
+    """Loopback, private network or a .local/.localhost name."""
+    import ipaddress
+    from urllib.parse import urlparse
+
+    try:
+        host = (urlparse(endpoint or "").hostname or "").strip("[]").lower()
+    except ValueError:
+        return False
+    if not host:
+        return False
+    if host == "localhost" or host.endswith((".localhost", ".local", ".lan")):
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_private or address.is_unspecified
 
 
 def validate_stream_timeouts(value):
@@ -310,7 +334,8 @@ def open_model_stream(client, request, started_at, *args, **kwargs):
             bound = min(limits["first_byte"], limits["total"])
             if elapsed >= bound:
                 raise NetworkError(
-                    "Timed out waiting for provider response headers",
+                    f"Timed out waiting for provider response headers after {bound:g}s",
+                    hint="Raise the first-byte timeout in Settings → Advanced → Model execution.",
                     details={
                         "kind": "TIMEOUT",
                         "phase": phase,
@@ -409,7 +434,8 @@ def iter_model_lines(response, request, started_at, stats: dict | None = None):
                 phase = None
             if phase:
                 raise NetworkError(
-                    "Timed out streaming from provider",
+                    f"Timed out streaming from provider after {limit:g}s",
+                    hint="Raise the stream timeouts in Settings → Advanced → Model execution.",
                     details={
                         "kind": "TIMEOUT",
                         "phase": phase,
