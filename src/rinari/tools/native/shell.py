@@ -426,7 +426,8 @@ def shell_tools() -> list[ToolDefinition]:
                 "On Windows `command` runs in cmd.exe unless `shell` says otherwise: chain "
                 "with &&, there is no grep/head/tail; set shell=powershell or shell=bash to "
                 "write in those syntaxes. Set a short explicit timeout for SSH and network "
-                "probes, and an explicit longer timeout for builds/tests."
+                "probes, and an explicit longer timeout for builds/tests. To wait for a server, "
+                "port, file or log line use wait.for, never sleep, ping, timeout or Start-Sleep."
             ),
             input_schema={
                 "type": "object",

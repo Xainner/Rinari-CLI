@@ -17,6 +17,10 @@ ROLE_SYSTEM = "system"
 ROLE_USER = "user"
 ROLE_ASSISTANT = "assistant"
 ROLE_TOOL = "tool"
+# Source of the harness note that closes every request with the volatile
+# prompt segments (prompts/assembler.py). Never persisted; provider adapters
+# keep their prompt-cache breakpoints before it.
+TURN_CONTEXT_SOURCE = "turn-context"
 
 STOP_END_TURN = "end_turn"
 STOP_TOOL_CALLS = "tool_calls"
@@ -80,6 +84,11 @@ class ChatMessage:
         show it as something the owner wrote.
         """
         return cls(role=ROLE_USER, content=content, origin={"kind": "harness", "source": source})
+
+    @property
+    def is_turn_context(self) -> bool:
+        origin = self.origin or {}
+        return origin.get("kind") == "harness" and origin.get("source") == TURN_CONTEXT_SOURCE
 
     @classmethod
     def assistant(

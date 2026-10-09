@@ -402,8 +402,7 @@ def _do_compact(session: AgentSession, console: Console) -> SlashOutcome:
     record = session.record
     pressure = None
     estimated = tokens.estimate_tokens(
-        system_prompt=" "
-        * len(PromptAssembler().build(session.context.assembler_base).system_prompt),
+        system_prompt=" " * PromptAssembler().build(session.context.assembler_base).prompt_chars,
         history=session.context.history,
     )
     window_resolved = tokens.resolve_context_window(window)

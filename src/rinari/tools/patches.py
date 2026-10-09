@@ -78,6 +78,13 @@ def patch_files(files, ctx):
                     ),
                 )
             updated = updated.replace(edit["old_string"], edit["new_string"], 1)
+        from rinari.shared.redaction import REDACTION_WRITE_ERROR, adds_redaction_marker
+
+        if adds_redaction_marker(original, updated):
+            return ToolResult(
+                ok=False,
+                error=ToolErrorInfo(ToolErrorCode.INVALID_ARGUMENT, REDACTION_WRITE_ERROR),
+            )
         if len(updated.encode("utf-8")) > 1024 * 1024:
             return ToolResult(
                 ok=False,

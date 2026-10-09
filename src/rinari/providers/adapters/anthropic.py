@@ -338,7 +338,8 @@ class AnthropicAdapter(ProviderAdapter):
         stream: bool,
         tool_aliases: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        system, messages = _convert_to_anthropic(request.messages, tool_aliases)
+        conversation, notes = _split_turn_context(request.messages)
+        system, messages = _convert_to_anthropic(conversation, tool_aliases)
         payload: dict[str, Any] = {
             "model": request.model,
             "max_tokens": request.max_tokens or DEFAULT_MAX_TOKENS,
@@ -383,6 +384,9 @@ class AnthropicAdapter(ProviderAdapter):
         # capabilities.structured_output before requesting it.
         if self.prompt_caching:
             _mark_cache_breakpoints(payload)
+        # After the breakpoints: the note changes on every call, so the cached
+        # prefix must end before it for the next call to read it back.
+        _append_turn_context(payload, notes)
         return payload
 
 
@@ -428,6 +432,36 @@ def _mark_cache_breakpoints(payload: dict[str, Any]) -> None:
             marked[index] = {**block, "cache_control": _EPHEMERAL}
             messages[-1] = {**last, "content": marked}
             return
+
+
+def _split_turn_context(
+    messages: tuple[ChatMessage, ...],
+) -> tuple[tuple[ChatMessage, ...], list[str]]:
+    """The conversation, and the trailing turn-context notes that close it."""
+    end = len(messages)
+    while end and messages[end - 1].is_turn_context:
+        end -= 1
+    return messages[:end], [m.content or "" for m in messages[end:] if m.content]
+
+
+def _append_turn_context(payload: dict[str, Any], notes: list[str]) -> None:
+    """Close the request with the notes, as their own text blocks.
+
+    A separate block (never concatenated into the previous text) keeps the
+    block that carries the breakpoint identical between calls. Roles must
+    alternate, so after a user turn (the owner's message or tool results)
+    the note joins it; otherwise it opens a user turn of its own.
+    """
+    if not notes:
+        return
+    blocks = [{"type": "text", "text": note} for note in notes]
+    messages = payload.setdefault("messages", [])
+    if messages and messages[-1].get("role") == "user":
+        last = messages[-1]
+        existing = last.get("content")
+        messages[-1] = {**last, "content": (_as_blocks(existing) if existing else []) + blocks}
+    else:
+        messages.append({"role": "user", "content": blocks})
 
 
 def _anthropic_input_schema(schema: dict[str, Any]) -> dict[str, Any]:

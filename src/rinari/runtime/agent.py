@@ -169,6 +169,9 @@ class AgentContext:
     # hands over what arrived since the last one; the loop puts them in the
     # history after the current step and the model reads them next.
     collect_steering: Callable[[], list[ChatMessage]] | None = None
+    # Reads whose full text this conversation already holds (tools.read_cache);
+    # created on first use and cleared when compaction rewrites the history.
+    read_cache: Any = None
 
 
 class AgentLoop:
@@ -674,6 +677,8 @@ class AgentLoop:
                     }
                     if turn_index is not None:
                         trace["turn_index"] = turn_index
+                    from rinari.tools.read_cache import for_agent
+
                     call_context = replace(
                         ctx.tool_ctx,
                         observation_budget_bytes=min(
@@ -681,6 +686,7 @@ class AgentLoop:
                             ctx.tool_ctx.round_observation_bytes
                             // max(1, len(response.tool_calls)),
                         ),
+                        reads=for_agent(ctx),
                     )
                     from rinari.tools.scheduler import is_parallelizable
 
@@ -997,6 +1003,13 @@ class AgentLoop:
         from rinari.context.settle import settle_old_observations
 
         messages.extend(settle_old_observations(ctx.history))
+        # Volatile state closes the request instead of opening it: the system
+        # prompt and the history stay a byte-identical prefix between calls
+        # and turns, which is what provider prompt caches reuse. The note is
+        # rebuilt per request and never enters ctx.history.
+        note = bundle.turn_context_message
+        if note is not None:
+            messages.append(note)
         exposure = getattr(ctx.tool_ctx, "exposure", None)
         if wire_tools is not None:
             pass

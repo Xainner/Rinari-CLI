@@ -38,7 +38,7 @@ from rinari.shared.errors import (
     SandboxViolationError,
     ToolError,
 )
-from rinari.shared.redaction import Redactor
+from rinari.shared.redaction import Redactor, redact_value
 from rinari.tools.definition import (
     ArtifactRef,
     ToolContext,
@@ -864,7 +864,10 @@ class ToolRuntime:
 
     def _event(self, type_: str, payload: dict) -> None:
         if self._emit is not None:
-            self._emit(type_, self._redact_payload(payload))
+            # Events are stored and shown: besides the known provider keys,
+            # hide credentials recognizable by shape (a password typed into a
+            # command). The call itself already ran with the real arguments.
+            self._emit(type_, redact_value(payload, self._redactor.secrets))
 
     def _redact_payload(self, payload):
         if isinstance(payload, str):

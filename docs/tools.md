@@ -23,6 +23,66 @@ aviso para revisarla y deshacerla; una skill nueva fuera de `/learn`, una skill
 instalada o creada por el dueño y cualquier contenido peligroso esperan
 aprobación. Reenviar el mismo contenido devuelve `status: unchanged`.
 
+## Esperas y relecturas (2026-10-08)
+
+Una auditoría de sesiones reales encontró dos desperdicios generales: esperas a
+ciegas por la shell para que arrancara un servidor (`ping -n 6 127.0.0.1`,
+`Start-Sleep`, `timeout /t`, `sleep`: 73 llamadas, ~24 minutos) y el mismo
+archivo sin cambios leído entero una y otra vez (36 relecturas en un turno, 73 en
+una sesión), cada una reenviando todo su texto al modelo.
+
+### `wait.for`
+
+Herramienta núcleo (siempre expuesta, namespace `wait`) que espera **una**
+condición y vuelve en cuanto se cumple:
+
+- `port` (+ `host`, por defecto `localhost`): el puerto TCP acepta conexiones.
+- `url`: la URL responde con un estado entre `status_min` y `status_max` (por
+  defecto 200–499: un 404 ya demuestra que el servidor está arriba; 502/503 son un
+  proxy o un servidor arrancando). GET sin seguir redirecciones.
+- `output` (+ `handle`, `regex`): el texto (o la regex) aparece en la salida de un
+  proceso de `process.start` o `shell.exec` con `background=true`.
+- `file`: el archivo existe.
+
+`handle` junto a `port`, `url` o `file` corta la espera si ese proceso termina.
+`timeout_s` por defecto 60, máximo 600; `interval_s` 0,1–10 (0,5 por defecto);
+ningún sondeo bloquea más de 3 s, y la cancelación del turno la despierta al
+instante. Devuelve `condition`, `target`, `ready`, `state` (`ready`,
+`timed_out`, `exited`), `elapsed_s`, `checks`, `last` (estado HTTP, error de
+conexión, línea encontrada, tamaño del archivo), `process` (`exit_code` y la cola
+de la salida si terminó) y `timeout` cuando se agota. Una condición mal formada
+se rechaza antes de la política (`INVALID_ARGUMENT`).
+
+Política: nunca más débil que la herramienta que haría la comprobación. Un puerto
+o una URL son `network.outbound` en modo lectura, como un GET de `http.request`
+(local permitido; internet según `network.mode`, y marca el turno como que leyó
+contenido externo); un archivo es `fs.read`; vigilar un handle es
+`process.local`. Las descripciones de `shell.exec` y `process.start` y la
+referencia `efficiency.md` del manual remiten a `wait.for` en vez de dormir.
+
+### Relecturas sin cambios
+
+`fs.read` y `fs.read_lines` responden `unchanged: true` con una nota (sin
+`text`, con `sha256`/`size_bytes` o el rango y `total_lines`/`next_line`) cuando
+el modelo todavía ve exactamente ese texto en un resultado anterior de la
+conversación. `fresh: true` fuerza el texto completo. La comprobación es sobre la
+conversación, no sobre contadores (`tools/read_cache.py`):
+
+- La caché es por `AgentContext` (un subagente tiene la suya) y llega a los
+  handlers como `ToolContext.reads`; sin `AgentLoop` (tests, hosts sin bucle) se
+  lee siempre entero.
+- El resultado anterior debe seguir en el historial, llegar intacto a la próxima
+  petición según `settle.py` (`settled_boundary` / `kept_intact`: dentro de las
+  rondas que se conservan o por debajo de `MIN_CHARS`) y contener **el mismo
+  texto** que la lectura nueva, que se hace siempre: un archivo escrito por
+  Rinari o cambiado en disco no coincide y se lee entero. Un resultado recortado,
+  derramado a artefacto o redactado tampoco coincide.
+- Un rango de `fs.read_lines` cuenta si está entero dentro de un rango anterior o
+  de un `fs.read` completo del mismo archivo; las lecturas en lote (`paths`) se
+  recuerdan por archivo.
+- La compactación (`compact_revision`) o un historial más corto vacían la caché.
+- Textos de menos de 512 caracteres se envían siempre: la nota costaría lo mismo.
+
 ## Documentos de oficina (2026-10-07)
 
 Servicio documental del Engine (`src/rinari/documents`) para PPTX, XLSX, DOCX y
@@ -171,6 +231,7 @@ por operación y conserva un derivado recuperable; reproducir historia no lo rea
 - `process.list`
 - `process.inspect`
 - `process.wait`
+- `wait.for` — espera un puerto, una URL, una línea en la salida de un handle o un archivo (ver «Esperas y relecturas»).
 - `process.signal`
 - `process.kill`
 - `process.stdin`

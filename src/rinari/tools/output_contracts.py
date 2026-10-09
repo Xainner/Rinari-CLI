@@ -29,10 +29,12 @@ FIELDS = {
     "spreadsheets.recalculate": "job_id:s status:s phase:s? result:o? error:o?",
     "pdf.redact": "job_id:s status:s phase:s? result:o? error:o?",
     "documents.finalize": "finalized:b revision:o report:o state:s? blocked_by:a? saved_to:s?",
-    "fs.read": "path:s text:s size_bytes:i sha256:s? truncated:b",
+    "fs.read": "path:s text:s size_bytes:i sha256:s? truncated:b unchanged:b? note:s?",
     "fs.read_image": "uri:s sha256:s name:s path:s width:i height:i mime_type:s size_bytes:i",
     "fs.read_pdf_pages": "uri:s name:s page_count:i pages:a",
-    "fs.read_lines": "path:s text:s start_line:i end_line:i? total_lines:i? next_line:i?",
+    "fs.read_lines": (
+        "path:s text:s start_line:i end_line:i? total_lines:i? next_line:i? unchanged:b? note:s?"
+    ),
     "fs.write": "path:s bytes_written:i sha256:s",
     "fs.patch": "path:s replacements:i sha256:s",
     "fs.list": "path:s entries:a total_entries:i revision:s next_offset:i?",
@@ -51,6 +53,9 @@ FIELDS = {
     "process.output": "handle:s stdout:s stderr:s cursor:o has_more:b running:b exit_code:i?",
     "process.signal": "handle:s signal:s",
     "process.list": "processes:a",
+    "wait.for": (
+        "condition:s target:s ready:b state:s elapsed_s:n checks:i last:o process:o? timeout:o?"
+    ),
     "pty.start": "handle:s command:s running:b",
     "pty.read": "handle:s output:s running:b exit_code:i?",
     "pty.write": "handle:s written:i",

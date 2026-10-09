@@ -40,6 +40,7 @@ from rinari.models.types import ChatMessage
 from rinari.policy.approvals import ApprovalRequest
 from rinari.shared.clock import now_iso
 from rinari.shared.errors import CancelledError, RinariError
+from rinari.shared.redaction import redact_value
 from rinari.storage.records import SessionEventRecord
 
 logger = logging.getLogger(__name__)
@@ -144,6 +145,10 @@ class _PendingApproval:
     choices: tuple[str, ...] = DECISIONS
     rule_id: str = "default"
     reusable: bool = True
+
+
+# Events whose text is the owner's, not the model's or a tool's.
+_OWNER_TEXT_EVENTS = ("steer.", "question.")
 
 
 def _safe_detail(value: Any) -> Any:
@@ -1375,6 +1380,12 @@ class TurnManager:
                 if event_name == "agent.activity"
                 else event_name
             )
+            if not effective_event.startswith(_OWNER_TEXT_EVENTS):
+                # The desktop shows, stores and exports these payloads
+                # (timeline, history, diagnostics): a credential in a command
+                # or an output is hidden once, here. The owner's own words
+                # (steering, answers) are shown as written.
+                payload = redact_value(payload)
             safe = {**payload, "turn_id": turn.turn_id, "session_id": turn.session_id}
             if event_name != "usage.updated":
                 safe["workspace_root"] = self._services.sessions.show(turn.session_id).current_cwd
@@ -1672,14 +1683,19 @@ class TurnManager:
                 turn_id = owner.turn_id
                 token = token or getattr(owner.session, "token", None)
         approval_id = self._services.ctx.ids.new("apr")
+        # What the card shows (the command, its target) is display only: the
+        # decision binds to the request itself, so a credential typed into the
+        # command is hidden here as in the timeline.
+        target = redact_value(request.target)
+        description = redact_value(request.description)
         pending = _PendingApproval(
             approval_id=approval_id,
             session_id=request.session_id,
             turn_id=turn_id,
             capability=request.capability,
-            target=request.target,
+            target=target,
             risk=request.risk,
-            description=request.description,
+            description=description,
             choices=request.choices,
             rule_id=request.rule_id,
             reusable=request.reusable,
@@ -1691,9 +1707,9 @@ class TurnManager:
             "approval_id": approval_id,
             "tool": request.capability,
             "capability": request.capability,
-            "target": request.target,
+            "target": target,
             "risk": request.risk,
-            "description": request.description,
+            "description": description,
             "choices": list(request.choices),
             "rule_id": request.rule_id,
             "reusable": request.reusable,

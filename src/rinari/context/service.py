@@ -97,8 +97,8 @@ class ContextService:
         """Compact if pressure >= PRESSURE_COMPACT. Returns True when it did."""
         window = tokens.resolve_context_window(window_tokens)
         history = agent_ctx.history if history is None else history
-        system_length = len(
-            PromptAssembler().build(dataclasses.replace(agent_ctx.assembler_base)).system_prompt
+        system_length = (
+            PromptAssembler().build(dataclasses.replace(agent_ctx.assembler_base)).prompt_chars
         )
         estimated = tokens.estimate_tokens(system_prompt=" " * system_length, history=history)
         used = max(estimated, used_input_tokens or 0)

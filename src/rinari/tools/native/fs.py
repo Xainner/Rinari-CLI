@@ -31,10 +31,15 @@ from rinari.tools.definition import (
     ToolErrorInfo,
     ToolResult,
 )
+from rinari.tools.read_cache import MIN_DEDUPE_CHARS, holds_rows, numbered_rows
 
 MAX_READ_BYTES = 256 * 1024
 MAX_LIST_ENTRIES = 500
 MAX_SEARCH_RESULTS = 200
+FRESH_SCHEMA = {
+    "type": "boolean",
+    "description": "Return the full text even if an earlier read already showed it.",
+}
 
 
 def _ok(data: Any) -> ToolResult:
@@ -89,7 +94,8 @@ def fs_read(input: dict, ctx: ToolContext) -> ToolResult:
     if "paths" in input:
         from rinari.tools.read_batch import read_batch
 
-        return read_batch(input["paths"], ctx, fs_read)
+        fresh = bool(input.get("fresh"))
+        return read_batch(input["paths"], ctx, lambda args, c: fs_read({**args, "fresh": fresh}, c))
     resolved, error = _resolve_read(ctx, input.get("path"))
     if error:
         return error
@@ -103,10 +109,32 @@ def fs_read(input: dict, ctx: ToolContext) -> ToolResult:
     raw = read_text_bounded(resolved)
     if raw.error:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, raw.error)
+    size = resolved.stat().st_size
+    whole = not raw.truncated and ctx.reads is not None
+    if whole and not input.get("fresh") and len(raw.text) >= MIN_DEDUPE_CHARS:
+        earlier = ctx.reads.earlier(
+            str(resolved),
+            lambda tool, data: (
+                tool == "fs.read" and not data.get("truncated") and data.get("text") == raw.text
+            ),
+        )
+        if earlier is not None:
+            return _ok(
+                {
+                    "path": str(resolved),
+                    "size_bytes": size,
+                    "sha256": raw.sha256,
+                    "truncated": False,
+                    "unchanged": True,
+                    "note": earlier.note(),
+                }
+            )
+    if whole:
+        ctx.reads.record(str(resolved), ctx.tool_call_id)
     return _ok(
         {
             "path": str(resolved),
-            "size_bytes": resolved.stat().st_size,
+            "size_bytes": size,
             "text": raw.text,
             "truncated": raw.truncated,
             "sha256": raw.sha256,
@@ -190,24 +218,44 @@ def fs_read_lines(input: dict, ctx: ToolContext) -> ToolResult:
                     selected.append(f"{number}| {text}")
                     last = number
                     used += len(text)
-        return ToolResult(
-            ok=True,
-            data={
-                "path": str(resolved),
-                "text": "\n".join(selected),
-                "start_line": start,
-                "end_line": last,
-                "total_lines": number if complete else None,
-                "next_line": None if complete else (last + 1 if last is not None else start),
-            },
-            truncated=not complete,
-        )
+        rows = "\n".join(selected)
+        data = {
+            "path": str(resolved),
+            "text": rows,
+            "start_line": start,
+            "end_line": last,
+            "total_lines": number if complete else None,
+            "next_line": None if complete else (last + 1 if last is not None else start),
+        }
+        if ctx.reads is not None and not input.get("fresh") and len(rows) >= MIN_DEDUPE_CHARS:
+            earlier = ctx.reads.earlier(
+                str(resolved), lambda tool, seen: _holds_range(tool, seen, rows, start, last)
+            )
+            if earlier is not None:
+                del data["text"]
+                data.update(unchanged=True, note=earlier.note())
+                return ToolResult(ok=True, data=data, truncated=not complete)
+        if ctx.reads is not None and selected:
+            ctx.reads.record(str(resolved), ctx.tool_call_id)
+        return ToolResult(ok=True, data=data, truncated=not complete)
     except UnicodeDecodeError:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "File is not valid UTF-8 text")
     except OSError as exc:
         return _fail(ToolErrorCode.PERMISSION_DENIED, f"Read failed: {type(exc).__name__}")
     except (TypeError, ValueError):
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "start/end must be integers")
+
+
+def _holds_range(tool: str, seen: dict, rows: str, start: int, last: int | None) -> bool:
+    """Whether an earlier read already showed exactly these rows of the file."""
+    text = seen.get("text")
+    if last is None or not isinstance(text, str):
+        return False
+    if tool == "fs.read_lines":
+        return holds_rows(text, rows)
+    if tool == "fs.read" and not seen.get("truncated"):
+        return numbered_rows(text, start, last) == rows
+    return False
 
 
 # -- fs.write -----------------------------------------------------------------
@@ -242,6 +290,15 @@ def fs_write(input: dict, ctx: ToolContext) -> ToolResult:
     content = input.get("content")
     if not isinstance(content, str):
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "content must be a string")
+    from rinari.shared.redaction import REDACTED, REDACTION_WRITE_ERROR, adds_redaction_marker
+
+    if REDACTED in content:
+        try:
+            before = resolved.read_text(encoding="utf-8") if resolved.is_file() else ""
+        except (OSError, UnicodeDecodeError):
+            before = ""
+        if adds_redaction_marker(before, content):
+            return _fail(ToolErrorCode.INVALID_ARGUMENT, REDACTION_WRITE_ERROR)
     if resolved.is_dir():
         return _fail(ToolErrorCode.INVALID_ARGUMENT, f"Path is a directory: {resolved}")
     missing = _missing_parents(resolved)
@@ -324,6 +381,10 @@ def fs_patch(input: dict, ctx: ToolContext) -> ToolResult:
         if input.get("replace_all", False)
         else original.replace(old, new, 1)
     )
+    from rinari.shared.redaction import REDACTION_WRITE_ERROR, adds_redaction_marker
+
+    if adds_redaction_marker(original, updated):
+        return _fail(ToolErrorCode.INVALID_ARGUMENT, REDACTION_WRITE_ERROR)
     pre_existing = _classify_user_work(ctx, resolved)
     try:
         digest = replace_text(
@@ -614,13 +675,15 @@ def filesystem_tools() -> list[ToolDefinition]:
             description=(
                 "Read a whole text file; use paths for up to 16 independent files in one "
                 "parallel batch. Every path is permission checked. For a line range use "
-                "fs.read_lines."
+                "fs.read_lines. Re-reading an unchanged file whose text you still have "
+                "returns unchanged=true instead of the text; fresh=true forces the text."
             ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
                     "paths": PATHS_SCHEMA,
+                    "fresh": FRESH_SCHEMA,
                 },
                 "oneOf": [{"required": ["path"]}, {"required": ["paths"]}],
             },
@@ -637,7 +700,8 @@ def filesystem_tools() -> list[ToolDefinition]:
                 "Read a 1-indexed inclusive line range from a text file (default 200 "
                 "lines). text holds one 'N| line' row per line; the 'N| ' prefix is not "
                 "part of the file, so drop it before quoting a line in fs.patch. Continue "
-                "from next_line when it is set."
+                "from next_line when it is set. Lines you already have unchanged come back "
+                "as unchanged=true; fresh=true forces the text."
             ),
             input_schema={
                 "type": "object",
@@ -645,6 +709,7 @@ def filesystem_tools() -> list[ToolDefinition]:
                     "path": {"type": "string"},
                     "start": {"type": "integer", "minimum": 1},
                     "end": {"type": "integer", "minimum": 1},
+                    "fresh": FRESH_SCHEMA,
                 },
                 "required": ["path"],
             },
