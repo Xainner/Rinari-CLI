@@ -1063,6 +1063,8 @@ def _build_tools(
         ),
         clock=services.ctx.clock,
         redactor=Redactor(_secrets_for_redaction(services)),
+        spill_threshold_bytes=services.ctx.config.config.context.artifact_output_threshold_kb
+        * 1024,
         event_sink=lambda event_type, payload: _persist_event(
             services, record.id, event_type, payload
         ),

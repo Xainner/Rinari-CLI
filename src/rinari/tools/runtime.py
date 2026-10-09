@@ -113,6 +113,16 @@ def _external_source(action, tool) -> str | None:
     return None
 
 
+# Inline limit for process output (`context.artifact_output_threshold_kb`).
+# 16 KiB is ~4k tokens: a whole test or build summary, a stack trace or a
+# compiler error block fit, while a 64 KiB log cost ~16k tokens and was
+# resent on every later request of the turn. Above it the model sees the head
+# and the tail (what ran, and how it ended) plus an artifact.read pointer to
+# the complete output.
+DEFAULT_OUTPUT_THRESHOLD_BYTES = 16 * 1024
+# Room a capped observation keeps for its result_ref/recovery pointer.
+_RECOVERY_METADATA_BYTES = 1024
+
 # Tools whose schema comes from outside Rinari keep their own contract.
 _DYNAMIC_SOURCES = frozenset({"plugin", "mcp", "openapi"})
 
@@ -127,7 +137,7 @@ class ToolRuntime:
         clock: Clock | None = None,
         redactor: Redactor | None = None,
         event_sink: EventSink | None = None,
-        spill_threshold_bytes: int = 64 * 1024,
+        spill_threshold_bytes: int = DEFAULT_OUTPUT_THRESHOLD_BYTES,
         network_event_log: NetworkEventLog | None = None,
     ) -> None:
         self.registry = registry
@@ -688,19 +698,12 @@ class ToolRuntime:
 
         from rinari.tools.observations import project_result
 
-        budget = ctx.observation_budget_bytes
-        threshold = (
-            min(self.spill_threshold_bytes, tool.max_output_bytes or self.spill_threshold_bytes)
-            if tool
-            else self.spill_threshold_bytes
-        )
+        budget = self._result_budget(tool, data, ctx.observation_budget_bytes)
         try:
             projected = project_result(
                 sanitized,
                 tool=tool.name if tool else "",
                 budget=budget - 128,
-                force=len(json.dumps(data, ensure_ascii=False, default=str).encode("utf-8"))
-                > threshold,
                 spill=lambda suffix, content: self._spill(f"{tool_call_id}-{suffix}", content, ctx),
             )
             return dataclasses.replace(projected, full_observation=sanitized)
@@ -720,8 +723,15 @@ class ToolRuntime:
         from rinari.tools.observations import allocate_budgets, project_result
 
         sources = [result.full_observation or result for call, result in entries]
+        # A result's demand is capped by its own inline limit, so a spilled
+        # command never takes round budget it would not use.
         sizes = [
-            len(source.to_model_text(call.name).encode("utf-8")) + 128
+            min(
+                len(source.to_model_text(call.name).encode("utf-8")) + 128,
+                self._result_budget(
+                    self.registry.get(call.name), source.data, ctx.observation_budget_bytes
+                ),
+            )
             for (call, _), source in zip(entries, sources, strict=True)
         ]
         budgets = allocate_budgets(sizes, ctx.observation_budget_bytes, ctx.round_observation_bytes)
@@ -756,6 +766,23 @@ class ToolRuntime:
                 "Executed actions must not be repeated."
             )
         return projected
+
+    def _result_budget(self, tool: ToolDefinition | None, data: Any, budget: int) -> int:
+        """Bytes one observation may take inline before its excess is spilled.
+
+        Process output (stdout/stderr) is capped by the configured artifact
+        output threshold, a tool by its own max_output_bytes; the cap bounds
+        the content and leaves room for the recovery metadata, so a capped
+        result still fits with its artifact.read pointer.
+        """
+        from rinari.tools.definition import _is_process_output
+
+        cap = tool.max_output_bytes if tool is not None and tool.max_output_bytes else None
+        if _is_process_output(data):
+            cap = min(cap or self.spill_threshold_bytes, self.spill_threshold_bytes)
+        if cap is None:
+            return budget
+        return min(budget, cap + _RECOVERY_METADATA_BYTES)
 
     def _spill(self, tool_call_id: str, payload: str | bytes, ctx: ToolContext) -> ArtifactRef:
         directory = ctx.artifact_root / ctx.session_id / "runtime"

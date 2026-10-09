@@ -205,3 +205,131 @@ def test_an_unreadable_ssh_folder_does_not_break_building_the_store(tmp_path, mo
     assert not result.ok
     assert result.error.code.value == "PERMISSION_DENIED"
     assert str(tmp_path / "ssh") in result.error.message
+
+
+# -- ssh.run -------------------------------------------------------------------
+
+
+class _Stdin(io.BytesIO):
+    def __init__(self, sink):
+        super().__init__()
+        self._sink = sink
+
+    def close(self):
+        self._sink.append(self.getvalue())
+        super().close()
+
+
+def _remote(calls, sent, *, exit_code=0, stdout=b"ok\n", stderr=b"", hang=False):
+    class Process:
+        def __init__(self, argv, **kwargs):
+            calls.append((argv, kwargs))
+            self.returncode = None
+            self.stdin = _Stdin(sent)
+            self.stdout = io.BytesIO(stdout)
+            self.stderr = io.BytesIO(stderr)
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout):
+            if self.returncode is None and hang:
+                raise subprocess.TimeoutExpired("ssh", timeout)
+            if self.returncode is None:
+                self.returncode = exit_code
+            return self.returncode
+
+    return Process
+
+
+def _run_runtime(store, prompt="y"):
+    registry = ToolRegistry()
+    registry.register_all(ssh.ssh_tools(store))
+    return ToolRuntime(registry, PolicyEngine(), ApprovalEngine(prompt=lambda _: prompt))
+
+
+def test_run_sends_the_script_on_stdin_with_pinned_host_keys(setup, monkeypatch):
+    store, ctx, _registry, _policy = setup
+    calls, sent = [], []
+    monkeypatch.setattr(ssh.subprocess, "Popen", _remote(calls, sent, stdout=b"active\n"))
+    script = "set -e\r\nsystemctl is-active 'web' \"$UNIT\"\r\necho done"
+    result = _run_runtime(store).execute("ssh.run", {"target_id": "Fixture", "script": script}, ctx)
+    assert result.ok and result.data["exit_code"] == 0
+    argv, kwargs = calls[0]
+    # The script never touches a local or remote command line: no quoting.
+    assert argv[-2:] == ["192.0.2.10", "bash -s"] and script not in " ".join(argv)
+    assert "-n" not in argv and kwargs["stdin"] == subprocess.PIPE and kwargs["shell"] is False
+    assert "StrictHostKeyChecking=yes" in argv and "IdentityAgent=none" in argv
+    # CRLF from a Windows editor would reach bash as part of each command.
+    assert sent == [b"set -e\nsystemctl is-active 'web' \"$UNIT\"\necho done\n"]
+    text = result.to_model_text("ssh.run")
+    assert "--- stdout ---\nactive" in text and "systemctl" not in text
+
+
+def test_run_reports_the_script_exit_code_and_classifies_ssh_failures(setup, monkeypatch):
+    store, ctx, _registry, _policy = setup
+    rt = _run_runtime(store)
+    monkeypatch.setattr(
+        ssh.subprocess, "Popen", _remote([], [], exit_code=3, stderr=b"no such unit\n")
+    )
+    failed_script = rt.execute("ssh.run", {"target_id": "fixture", "script": "false"}, ctx)
+    assert failed_script.ok and failed_script.data["exit_code"] == 3
+    assert "exit_code: 3 (failed" in failed_script.to_model_text("ssh.run")
+
+    rejected = b"Host key verification failed.\r\n"
+    monkeypatch.setattr(ssh.subprocess, "Popen", _remote([], [], exit_code=255, stderr=rejected))
+    host_key = rt.execute("ssh.run", {"target_id": "fixture", "script": "true"}, ctx)
+    assert not host_key.ok and host_key.error.code == "AUTH_REQUIRED"
+
+    # A script may exit 255 itself; without an ssh diagnostic it is its answer.
+    monkeypatch.setattr(ssh.subprocess, "Popen", _remote([], [], exit_code=255))
+    assert rt.execute("ssh.run", {"target_id": "fixture", "script": "exit 255"}, ctx).ok
+
+    monkeypatch.setattr(ssh.subprocess, "Popen", _remote([], [], hang=True))
+    monkeypatch.setattr(ssh, "_kill_tree", lambda process: setattr(process, "returncode", -9))
+    timed_out = rt.execute(
+        "ssh.run", {"target_id": "fixture", "script": "sleep 99", "timeout_s": 1}, ctx
+    )
+    assert not timed_out.ok and timed_out.error.code == "TIMEOUT"
+    assert "timeout_s=1s" in timed_out.error.message
+
+
+def test_run_is_never_freer_than_a_shell_ssh_command(setup, monkeypatch):
+    store, ctx, _registry, _policy = setup
+    monkeypatch.setattr(ssh.subprocess, "Popen", lambda *a, **kw: pytest.fail("must not dial"))
+    arguments = {"target_id": "fixture", "script": "rm -rf /srv/app"}
+    rt = _run_runtime(store, prompt="n")
+    # Read-only (PLAN/REVIEW): no remote actions at all.
+    read_only = dataclasses.replace(ctx, profile=PermissionProfile.READ_ONLY)
+    denied = rt.execute("ssh.run", arguments, read_only)
+    assert denied.error.code == "POLICY_DENIED"
+    # A turn started by another agent's message cannot run commands anywhere.
+    peer = dataclasses.replace(ctx, origin_kind="peer")
+    assert rt.execute("ssh.run", arguments, peer).error.code == "POLICY_DENIED"
+    # Workspace: acting on an internet host asks, and a refusal stops it.
+    assert rt.execute("ssh.run", arguments, ctx).error.code == "APPROVAL_DENIED"
+
+
+def test_run_rejects_an_unknown_destination_before_asking(setup, monkeypatch):
+    store, ctx, _registry, _policy = setup
+    monkeypatch.setattr(ssh.subprocess, "Popen", lambda *a, **kw: pytest.fail("must not dial"))
+    asked = []
+    registry = ToolRegistry()
+    registry.register_all(ssh.ssh_tools(store))
+    rt = ToolRuntime(
+        registry, PolicyEngine(), ApprovalEngine(prompt=lambda request: asked.append(1) or "y")
+    )
+    result = rt.execute("ssh.run", {"target_id": "nowhere", "script": "id"}, ctx)
+    assert result.error.code == "INVALID_ARGUMENT" and not asked
+
+
+def test_bound_remote_operations_keep_their_read_only_surface(setup):
+    store, _ctx, _registry, _policy = setup
+    bound = ssh.ssh_tools(store, store.get("fixture"))
+    assert [tool.name for tool in bound] == ["ssh.inspect"]
+    assert bound[0].always_loaded
+    # In ordinary sessions both are on demand (capability.search finds them).
+    assert {tool.name: tool.always_loaded for tool in ssh.ssh_tools(store)} == {
+        "ssh.inspect": False,
+        "ssh.run": False,
+    }

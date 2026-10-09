@@ -12,8 +12,11 @@ core or activated tools; when they alone exceed the budget the request
 still carries them and metrics flag ``over_budget``.
 
 Lazy sources (Nivel C: browser / MCP / OpenAPI / plugins) stay out of the
-default view until activated or recently used. ``capability.search`` is
-always exposed so the model can always recover the on-demand ecosystem.
+default view until activated or recently used, and so do rarely used native
+packs flagged ``always_loaded=False`` (documents, lsp, pty, context, ssh,
+rinari.*). ``capability.search`` is always exposed so the model can always
+recover the on-demand ecosystem; a tool called by its exact name still runs
+(the registry, not the exposure, resolves calls) and stays visible after.
 """
 
 from __future__ import annotations
@@ -64,6 +67,11 @@ def is_lazy_tool(tool: Any) -> bool:
 
 
 def _schema_tokens(tool: Any) -> int:
+    """Estimated wire cost of one tool: name + description + input schema.
+
+    Providers send all three on every request; counting only the schema
+    under-estimated the cost by ~40% and the exposure budget never bound.
+    """
     try:
         raw = json.dumps(
             getattr(tool, "input_schema", {}),
@@ -72,7 +80,8 @@ def _schema_tokens(tool: Any) -> int:
         )
     except (TypeError, ValueError):
         raw = "{}"
-    return max(1, len(raw) // 4)
+    text = str(getattr(tool, "name", "")) + str(getattr(tool, "description", "") or "")
+    return max(1, (len(text) + len(raw)) // 4)
 
 
 @dataclass(slots=True)

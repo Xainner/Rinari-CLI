@@ -109,6 +109,7 @@ FIELDS = {
     "verify.plan": "checks:a",
     "verify.evaluate": "outcome:s reasons:a",
     "ssh.inspect": "target_id:s section:s revision:s output:s sections:o",
+    "ssh.run": "target_id:s revision:s shell:s exit_code:i stdout:s stderr:s truncated:b",
     "web.search": "query:s results:a",
     "web.fetch": "url:s text:s sha256:s truncated:b",
     "web.open": "url:s title:s description:s text:s links:a provenance:o",
