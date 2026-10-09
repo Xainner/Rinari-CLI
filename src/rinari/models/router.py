@@ -263,11 +263,16 @@ def scheduled(method):
 
     @wraps(method)
     def wrapped(self, provider, model_id, request, *args, **kwargs):
-        from rinari.models.execution import destination_slot
+        from rinari.models.execution import EXTERNAL_RUNTIME_CONCURRENCY, destination_slot
 
         home = getattr(getattr(self._providers, "_ctx", None), "home", None)
         check = request.cancellation.throw_if_cancelled if request.cancellation else lambda: None
-        with destination_slot(home, provider.id, check):
+        default = (
+            EXTERNAL_RUNTIME_CONCURRENCY
+            if getattr(provider, "auth_method", None) == "external-cli"
+            else None
+        )
+        with destination_slot(home, provider.id, check, default):
             if request.on_dispatched:
                 request.on_dispatched()
             return method(self, provider, model_id, request, *args, **kwargs)
@@ -344,7 +349,16 @@ class ModelRouter:
             return base
         if model.provider_id != provider.id:
             return base
-        if _resolve_transport(provider, model) not in ("chat", "responses", "anthropic"):
+        # A provider served by an external runtime routes itself: its adapter
+        # is the transport, so the "unknown wire transport" guard below does
+        # not apply. Flattening it here told the desktop that a model with no
+        # HTTP transport also had no streaming and no configurable reasoning,
+        # which greyed out the whole effort selector.
+        if provider.auth_method != "external-cli" and _resolve_transport(provider, model) not in (
+            "chat",
+            "responses",
+            "anthropic",
+        ):
             return replace(
                 base,
                 streaming=False,
@@ -353,6 +367,8 @@ class ModelRouter:
                 reasoning_effort=False,
                 vision=False,
             )
+        if provider.auth_method == "external-cli":
+            return _merge_capabilities(base, effective_metadata(provider, model))
         if _resolve_transport(provider, model) == "anthropic":
             from rinari.providers.adapters.anthropic import AnthropicAdapter
 
@@ -473,6 +489,22 @@ class ModelRouter:
         return response
 
     def _transport_adapter(self, provider, transport):
+        # An external runtime is its own transport: the adapter owns the
+        # process and there is no wire API to pick. The guard below is about
+        # HTTP transports Rinari cannot speak, and must not swallow this one.
+        if provider.auth_method == "external-cli":
+            # Turning the setting off stops saved providers too, not just
+            # new ones: off means no `claude` process is started.
+            enabled = getattr(self._providers, "external_runtimes_enabled", None)
+            if enabled is not None and not enabled():
+                from rinari.providers.errors import ProviderError, ProviderErrorCode
+
+                raise ProviderError(
+                    "Claude Subscription is turned off.",
+                    code=ProviderErrorCode.AUTH,
+                    hint="Turn it on in Settings > Providers (experimental).",
+                )
+            return self.adapter(provider), transport
         if transport == "anthropic":
             from rinari.providers.adapters.anthropic import AnthropicAdapter
 

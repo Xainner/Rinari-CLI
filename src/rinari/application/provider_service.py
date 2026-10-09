@@ -60,6 +60,11 @@ class DiscoveryCandidate:
 
 KEY_ACTIVE_PROVIDER = "active_provider"
 KEY_ACTIVE_MODEL = "active_model"
+#: Providers served by an external CLI (Claude Subscription) are opt-in:
+#: off until the owner turns them on in Settings. Anthropic allows using a
+#: plan through `claude -p` in third-party apps, but a public app offering
+#: it by default is not settled, so nobody gets it without asking.
+KEY_EXTERNAL_RUNTIMES = "providers.external_runtimes"
 
 
 class ProviderService:
@@ -77,6 +82,19 @@ class ProviderService:
         return now_iso(self._ctx.clock)
 
     # -- lookup ---------------------------------------------------------
+
+    def external_runtimes_enabled(self) -> bool:
+        return self._ctx.config_repo.get(KEY_EXTERNAL_RUNTIMES) == "on"
+
+    def set_external_runtimes_enabled(self, enabled: bool) -> bool:
+        self._ctx.config_repo.set(
+            ConfigValue(
+                key=KEY_EXTERNAL_RUNTIMES,
+                value="on" if enabled else "off",
+                updated_at=self._now(),
+            )
+        )
+        return enabled
 
     def list(self) -> list[ProviderRecord]:
         return self._ctx.provider_repo.list()
@@ -107,6 +125,11 @@ class ProviderService:
             return self._add(input)
 
     def _add(self, input: AddProviderInput) -> ProviderRecord:
+        if input.auth_method == "external-cli" and not self.external_runtimes_enabled():
+            raise InvalidUsageError(
+                "Claude Subscription is turned off",
+                hint="Turn it on in Settings > Providers (experimental).",
+            )
         validate_provider_type(
             input.provider_type, input.auth_method, input.settings.get("protocol")
         )
@@ -118,7 +141,7 @@ class ProviderService:
         if (
             input.secret is None
             and input.secret_env is None
-            and input.auth_method not in ("none", "oauth")
+            and input.auth_method not in ("none", "oauth", "external-cli")
         ):
             raise InvalidUsageError(
                 "A credential is required",
@@ -126,6 +149,16 @@ class ProviderService:
             )
         if input.secret is not None and input.secret_env is not None:
             raise InvalidUsageError("Use either --api-key or --api-key-env, not both")
+        # An external runtime owns its own authentication: a credential here
+        # would be stored for nothing and would suggest Rinari holds the
+        # account (plan sections 27, 28).
+        if input.auth_method == "external-cli" and (
+            input.secret is not None or input.secret_env is not None
+        ):
+            raise InvalidUsageError(
+                "This provider does not take a credential",
+                hint="Authentication belongs to the external CLI.",
+            )
         # F1: validate the env NAME before any write. A rejected reference is
         # never persisted and never echoed back (it may hold a pasted key).
         if input.secret_env is not None:
@@ -167,7 +200,30 @@ class ProviderService:
                     raise InvalidUsageError(
                         "Use interactive login with a supported subscription endpoint."
                     )
-            if record.auth_method not in ("none", "oauth"):
+            if record.auth_method == "external-cli":
+                from rinari.providers.catalog import product_for
+
+                if product_for(record) != "claude-subscription":
+                    raise InvalidUsageError(
+                        "Unsupported external CLI provider.",
+                        hint="Add it from the Claude Subscription catalog entry.",
+                    )
+                from rinari.providers.claude_cli import is_claude_binary
+
+                override = (record.settings or {}).get("command_path")
+                if override is not None and not (
+                    isinstance(override, str) and is_claude_binary(override)
+                ):
+                    raise InvalidUsageError(
+                        "command_path must point at the Claude Code CLI",
+                        hint="Expected an existing file named claude, claude.exe or claude.cmd.",
+                    )
+                # Prove the transport is usable before saving the provider,
+                # without spending an inference call. A provider that cannot
+                # be shown to run on a subscription is never created: a saved
+                # one that merely looks connected is how API billing sneaks in.
+                adapter_for(record).require_subscription()
+            if record.auth_method not in ("none", "oauth", "external-cli"):
                 if input.secret is not None:
                     secret_ref = self._credentials.store_provider_secret(record.id, input.secret)
                 else:
@@ -213,6 +269,17 @@ class ProviderService:
         """
         record = self.get(ref)
         changed = False
+        if record.auth_method == "external-cli":
+            # Endpoint and transport are what make the record this product
+            # (`product_for` needs all three signals): editing them would
+            # quietly turn it into a different provider.
+            if endpoint is not None and endpoint.strip() != (record.endpoint or ""):
+                raise InvalidUsageError("This provider's endpoint cannot be changed")
+            if settings is not None and (
+                settings.get("transport") != (record.settings or {}).get("transport")
+                or settings.get("product_id") != (record.settings or {}).get("product_id")
+            ):
+                raise InvalidUsageError("This provider's transport cannot be changed")
         if endpoint is not None:
             if not endpoint.strip():
                 raise InvalidUsageError("Endpoint must be a non-empty string")
@@ -496,6 +563,11 @@ class ProviderService:
         self, ref: str, secret: str | None = None, secret_env: str | None = None
     ) -> ProviderRecord:
         record = self.get(ref)
+        if self.get(ref).auth_method == "external-cli":
+            raise InvalidUsageError(
+                "This provider does not take a credential",
+                hint="Authentication belongs to the external CLI.",
+            )
         if (secret is None) == (secret_env is None):
             raise InvalidUsageError("Pass exactly one of --api-key or --api-key-env")
         # F2: validate the new source structurally *before* touching state.
@@ -659,6 +731,10 @@ class ProviderService:
         return credential.secret_ref if credential else None
 
     def resolve_secret(self, record: ProviderRecord) -> str | None:
+        # Never fabricate an empty-string credential for a transport that
+        # authenticates itself: None is the honest answer.
+        if record.auth_method == "external-cli":
+            return None
         if record.auth_method == "oauth":
             from rinari.providers.auth import token_for
 

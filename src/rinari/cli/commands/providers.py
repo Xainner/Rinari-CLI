@@ -8,6 +8,7 @@ from rinari.application.provider_service import AddProviderInput
 from rinari.cli.deps import fail, is_json, services, with_error_handling
 from rinari.cli.output import emit_json, success_envelope
 from rinari.cli.serializers import provider_dict
+from rinari.providers.catalog import CLAUDE_CLI_ENDPOINT
 from rinari.providers.registry import PROVIDER_TYPES
 from rinari.shared.errors import InvalidUsageError, ProviderModelError
 
@@ -71,11 +72,43 @@ def providers_add(
         None, "--api-key-env", help="Environment variable holding the API key."
     ),
     no_auth: bool = typer.Option(False, "--no-auth", help="Provider requires no credential."),
+    claude_subscription: bool = typer.Option(
+        False,
+        "--claude-subscription",
+        help="Use a Claude plan through the official Claude Code CLI (experimental).",
+    ),
     protocol: str = typer.Option(
         None, "--protocol", help="Wire protocol for custom providers (openai-compatible)."
     ),
 ) -> None:
     """Save a new provider entry. Never removes or replaces another one."""
+    if claude_subscription:
+        # The product is fixed by its three signals; a typed endpoint or key
+        # here would either be ignored or quietly change what is saved.
+        if api_key or api_key_env or no_auth or endpoint or protocol:
+            raise InvalidUsageError(
+                "--claude-subscription takes no endpoint, credential or protocol",
+                hint="Authentication belongs to the Claude Code CLI.",
+            )
+        with services(ctx) as s:
+            # Typing the flag is the opt-in the desktop asks for with a
+            # switch in Settings; both store the same setting.
+            s.providers.set_external_runtimes_enabled(True)
+            record = s.providers.add(
+                AddProviderInput(
+                    alias=name or "claude-subscription",
+                    provider_type="custom",
+                    auth_method="external-cli",
+                    endpoint=CLAUDE_CLI_ENDPOINT,
+                    account_hint=account,
+                    settings={"product_id": "claude-subscription", "transport": "claude-cli"},
+                )
+            )
+            if is_json(ctx):
+                emit_json(success_envelope("providers.add", provider_dict(record)))
+                return
+            typer.echo(f"Provider {record.alias!r} saved (Claude subscription, experimental).")
+            return
     if provider_type is None:
         raise InvalidUsageError(
             "provider type is required", hint="rinari providers add <openai|anthropic|custom>"

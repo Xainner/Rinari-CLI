@@ -466,6 +466,9 @@
         "provider.catalog.get",
         "provider.usage.get",
         "provider.diagnostics.get",
+        "provider.runtime.probe",
+        "provider.settings.get",
+        "provider.settings.set",
         "provider.auth.start",
         "provider.auth.get",
         "provider.auth.cancel",
@@ -3097,7 +3100,9 @@
         "auth_methods",
         "experimental",
         "enabled",
-        "local"
+        "local",
+        "runtime",
+        "requires_external_binary"
       ],
       "properties": {
         "id": {
@@ -3126,6 +3131,21 @@
         },
         "local": {
           "type": "boolean"
+        },
+        "runtime": {
+          "type": "string",
+          "description": "How the provider is reached: 'http' or an external runtime id such as 'claude-cli'."
+        },
+        "requires_external_binary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Executable the user must install themselves; null for HTTP providers."
         }
       }
     },
@@ -3352,6 +3372,28 @@
         },
         "detail": {
           "type": "string"
+        },
+        "auth_kind": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Who runs the login: absent for Rinari-managed OAuth, 'external-cli' when an external CLI owns the authentication."
+        },
+        "managed_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Runtime that owns the login when auth_kind is 'external-cli'."
         }
       }
     },

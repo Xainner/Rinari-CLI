@@ -7,6 +7,9 @@ from contextlib import contextmanager
 from pathlib import Path
 
 DEFAULT_CONCURRENCY = 8  # Client scheduling policy, never a claim about server slots.
+# A provider served by an external CLI runs one process per call against one
+# personal plan: a board that fans out agents must not open eight of them.
+EXTERNAL_RUNTIME_CONCURRENCY = 2
 _guard = threading.RLock()
 _gates = {}
 
@@ -46,11 +49,13 @@ def validate(value):
     return result
 
 
-def destination_limit(home, provider_id):
+def destination_limit(home, provider_id, default=None):
+    """The provider's own limit if set, else `default`, else the global one."""
     value = policy(home)
-    return value.get("providers", {}).get(
-        provider_id, value.get("max_concurrency", DEFAULT_CONCURRENCY)
-    )
+    fallback = value.get("max_concurrency", DEFAULT_CONCURRENCY)
+    if default is not None:
+        fallback = min(fallback, default)
+    return value.get("providers", {}).get(provider_id, fallback)
 
 
 class Gate:
@@ -85,9 +90,9 @@ class Gate:
 
 
 @contextmanager
-def destination_slot(home, provider_id, check=lambda: None):
+def destination_slot(home, provider_id, check=lambda: None, default=None):
     key = (str(Path(home).resolve()) if home else "", provider_id)
     with _guard:
         gate = _gates.setdefault(key, Gate())
-    with gate.acquire(destination_limit(home, provider_id), check):
+    with gate.acquire(destination_limit(home, provider_id, default), check):
         yield
