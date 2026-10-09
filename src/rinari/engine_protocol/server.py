@@ -380,6 +380,8 @@ class EngineServer:
         self._dispatcher.register("memory.candidate.resolve", self._memory_candidate_resolve)
         self._dispatcher.register("memory.settings.get", self._memory_settings_get)
         self._dispatcher.register("memory.settings.set", self._memory_settings_set)
+        self._dispatcher.register("memory.export", self._memory_export)
+        self._dispatcher.register("memory.import", self._memory_import)
         self._dispatcher.register("conversation.memory.status", self._conversation_memory_status)
         self._dispatcher.register("conversation.memory.exclude", self._conversation_memory_exclude)
         self._dispatcher.register("conversation.delete", self._conversation_delete)
@@ -1271,6 +1273,40 @@ class EngineServer:
             raise EngineProtocolError(INVALID_PARAMS, "ledger_digest must be a SHA-256 hex digest.")
         try:
             return self._services.memory.import_privacy_ledger(params["ledger"], digest)
+        except InvalidUsageError as exc:
+            raise EngineProtocolError(INVALID_PARAMS, exc.message) from exc
+
+    def _memory_export(self, params: dict[str, Any]) -> dict[str, Any]:
+        if params:
+            raise EngineProtocolError(INVALID_PARAMS, "memory.export takes no parameters.")
+        memory = self._services.memory
+        bundle = memory.export_bundle()
+        return {
+            "bundle": bundle,
+            "digest": memory.memory_bundle_digest(bundle),
+            "count": len(bundle["records"]),
+        }
+
+    def _memory_import(self, params: dict[str, Any]) -> dict[str, Any]:
+        params = params or {}
+        self._memory_reject_unknown(params, {"bundle", "digest", "dry_run"})
+        bundle = params.get("bundle")
+        digest = params.get("digest")
+        dry_run = params.get("dry_run", False)
+        if not isinstance(bundle, dict):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'bundle' must be an object.")
+        if not isinstance(digest, str) or len(digest) != 64:
+            raise EngineProtocolError(
+                INVALID_PARAMS, "Param 'digest' must be a SHA-256 hex digest."
+            )
+        if not isinstance(dry_run, bool):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'dry_run' must be a boolean.")
+        if not dry_run and self._turns.has_active_turns():
+            raise EngineProtocolError(
+                TURN_RUNNING, "Finish active turns before importing durable memory."
+            )
+        try:
+            return self._services.memory.import_bundle(bundle, digest, dry_run=dry_run)
         except InvalidUsageError as exc:
             raise EngineProtocolError(INVALID_PARAMS, exc.message) from exc
 

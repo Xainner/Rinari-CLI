@@ -98,6 +98,9 @@ CAPABILITIES: dict[str, bool] = {
     # cards (memory.candidate.created/resolved, memory.remembered), project
     # records in memory.list/search/update/forget.
     "learned_memory_v1": True,
+    # memory.export / memory.import: portable bundle of user and project
+    # records plus forgotten-text suppressions (additive, digest-checked).
+    "memory_portability_v1": True,
     # Peer messaging between agent sessions (Boards): untrusted data, per-target
     # consent, provenance ceiling in the receiving turn.
     "session_peer_messaging_v1": True,
