@@ -641,7 +641,11 @@ def login_command(binary: ClaudeCliBinary | None, *, windows: bool | None = None
     on_windows = _WINDOWS if windows is None else windows
     if on_windows:
         return f'& "{binary.path}" {args}'
-    return f'"{binary.path}" {args}'
+    # Single quotes: inside double quotes a shell still expands `$(...)` and
+    # backticks, so a crafted directory name would run on paste.
+    import shlex
+
+    return f"{shlex.quote(binary.path)} {args}"
 
 
 def platform_install_command() -> str:

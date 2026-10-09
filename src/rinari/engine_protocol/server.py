@@ -3674,6 +3674,8 @@ def _runtime_block(runtime: Any) -> dict[str, Any]:
     """
     from rinari.providers.claude_cli import (
         STATE_MISSING_CLI,
+        STATE_NON_SUBSCRIPTION_AUTH,
+        blocked_source,
         login_command,
         platform_install_command,
         platform_install_hint,
@@ -3710,6 +3712,17 @@ def _runtime_block(runtime: Any) -> dict[str, Any]:
         "safe_for_subscription": status.safe_for_subscription,
     }
     block["state"] = status.state if version.supported else "unsupported_cli"
+    # A run that picked another credential blocks the transport even while
+    # `auth status` still says claude.ai: the card must not say Connected
+    # while every turn is refused. Checking again (the probe) lifts it.
+    blocked = blocked_source(binary.path)
+    block["blocked_source"] = blocked
+    if blocked and block["state"] == "connected":
+        block["state"] = STATE_NON_SUBSCRIPTION_AUTH
+        block["detail"] = (
+            f"A request picked {blocked} instead of the subscription. Remove that "
+            "credential, then check again."
+        )
     if status.detail:
         block["detail"] = status.detail
     return block

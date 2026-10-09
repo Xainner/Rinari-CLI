@@ -713,8 +713,14 @@ def test_off_path_elsewhere_it_is_the_quoted_full_path():
     from rinari.providers.claude_cli import ClaudeCliBinary, login_command
 
     binary = ClaudeCliBinary("/Users/x/.local/bin/claude", "well-known")
-    assert login_command(binary, windows=False) == (
-        '"/Users/x/.local/bin/claude" auth login --claudeai'
+    assert (
+        login_command(binary, windows=False) == "/Users/x/.local/bin/claude auth login --claudeai"
+    )
+    # Single quotes when needed: in double quotes the shell would still run
+    # `$(...)` from a crafted directory name the moment the user pastes it.
+    spaced = ClaudeCliBinary("/opt/my tools/$(touch pwned)/claude", "well-known")
+    assert login_command(spaced, windows=False) == (
+        "'/opt/my tools/$(touch pwned)/claude' auth login --claudeai"
     )
 
 

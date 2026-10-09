@@ -246,6 +246,17 @@ class ProviderService:
         """
         record = self.get(ref)
         changed = False
+        if record.auth_method == "external-cli":
+            # Endpoint and transport are what make the record this product
+            # (`product_for` needs all three signals): editing them would
+            # quietly turn it into a different provider.
+            if endpoint is not None and endpoint.strip() != (record.endpoint or ""):
+                raise InvalidUsageError("This provider's endpoint cannot be changed")
+            if settings is not None and (
+                settings.get("transport") != (record.settings or {}).get("transport")
+                or settings.get("product_id") != (record.settings or {}).get("product_id")
+            ):
+                raise InvalidUsageError("This provider's transport cannot be changed")
         if endpoint is not None:
             if not endpoint.strip():
                 raise InvalidUsageError("Endpoint must be a non-empty string")
@@ -529,6 +540,11 @@ class ProviderService:
         self, ref: str, secret: str | None = None, secret_env: str | None = None
     ) -> ProviderRecord:
         record = self.get(ref)
+        if self.get(ref).auth_method == "external-cli":
+            raise InvalidUsageError(
+                "This provider does not take a credential",
+                hint="Authentication belongs to the external CLI.",
+            )
         if (secret is None) == (secret_env is None):
             raise InvalidUsageError("Pass exactly one of --api-key or --api-key-env")
         # F2: validate the new source structurally *before* touching state.

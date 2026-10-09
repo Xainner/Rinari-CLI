@@ -421,3 +421,55 @@ def test_an_override_changed_later_is_still_never_executed(tmp_path):
     assert not marker.exists()
     found = adapter.runtime.resolve()
     assert found is None or Path(found.path) != impostor
+
+
+# -- edicion y bloqueo (revision del PR) ---------------------------------------
+
+
+def test_an_external_runtime_cannot_be_edited_into_another_product(services, tmp_path, monkeypatch):
+    """Endpoint and transport are what make the record this product."""
+    provider, _model = _saved_model(services, tmp_path, monkeypatch)
+    with pytest.raises(InvalidUsageError):
+        services.providers.update(provider.alias, endpoint="https://api.example.test/v1")
+    with pytest.raises(InvalidUsageError):
+        services.providers.update(provider.alias, settings={"product_id": "openai"})
+    # The same endpoint and settings are not a change, and the hint still is.
+    services.providers.update(
+        provider.alias,
+        endpoint=CLAUDE_CLI_ENDPOINT,
+        settings=dict(SETTINGS),
+        account_hint="personal",
+    )
+    assert services.providers.get(provider.alias).account_hint == "personal"
+
+
+def test_an_external_runtime_never_takes_a_credential_after_creation(
+    services, tmp_path, monkeypatch
+):
+    provider, _model = _saved_model(services, tmp_path, monkeypatch)
+    with pytest.raises(InvalidUsageError):
+        services.providers.set_auth(provider.alias, secret="sk-not-for-claude")
+
+
+def test_a_billing_block_shows_in_the_runtime_state_until_checked_again(
+    engine_server, tmp_path, monkeypatch
+):
+    """The card must not say Connected while every turn is refused."""
+    from rinari.engine_protocol import server as server_module
+    from rinari.providers import claude_cli
+
+    cli = fake_cli(tmp_path)
+    monkeypatch.setenv("RINARI_CLAUDE_COMMAND", str(cli))
+    runtime = claude_cli.ClaudeCliRuntime()
+    monkeypatch.setattr(server_module, "_claude_probe_runtime", lambda: runtime)
+    claude_cli.clear_source_block()
+    try:
+        claude_cli._BLOCKED_SOURCES[str(cli)] = "ANTHROPIC_API_KEY"
+        blocked = server_module._runtime_block(runtime)
+        assert blocked["state"] == "non_subscription_auth"
+        assert blocked["blocked_source"] == "ANTHROPIC_API_KEY"
+        response = _rpc(engine_server, "provider.runtime.probe", {"runtime": "claude-cli"})
+        assert response["result"]["runtime"]["state"] == "connected"
+        assert claude_cli.blocked_source(str(cli)) is None
+    finally:
+        claude_cli.clear_source_block()
