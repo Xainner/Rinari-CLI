@@ -263,11 +263,16 @@ def scheduled(method):
 
     @wraps(method)
     def wrapped(self, provider, model_id, request, *args, **kwargs):
-        from rinari.models.execution import destination_slot
+        from rinari.models.execution import EXTERNAL_RUNTIME_CONCURRENCY, destination_slot
 
         home = getattr(getattr(self._providers, "_ctx", None), "home", None)
         check = request.cancellation.throw_if_cancelled if request.cancellation else lambda: None
-        with destination_slot(home, provider.id, check):
+        default = (
+            EXTERNAL_RUNTIME_CONCURRENCY
+            if getattr(provider, "auth_method", None) == "external-cli"
+            else None
+        )
+        with destination_slot(home, provider.id, check, default):
             if request.on_dispatched:
                 request.on_dispatched()
             return method(self, provider, model_id, request, *args, **kwargs)

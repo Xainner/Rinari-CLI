@@ -1470,6 +1470,10 @@ def _transient_failure(exc: BaseException) -> str | None:
     from rinari.shared.errors import NetworkError
 
     if isinstance(exc, ProviderError):
+        if (getattr(exc, "details", None) or {}).get("no_retry"):
+            # A transport whose failed call may already have spent a
+            # generation (one subscription call per process) says so.
+            return None
         code = exc.error_code
         if code in (ProviderErrorCode.STREAM_INTERRUPTED, ProviderErrorCode.TIMEOUT):
             return str(code)

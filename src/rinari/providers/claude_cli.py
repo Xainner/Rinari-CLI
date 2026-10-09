@@ -23,6 +23,7 @@ import contextlib
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import time
@@ -62,6 +63,17 @@ BILLING_ENV_VARS: tuple[str, ...] = (
 )
 
 ENV_COMMAND_OVERRIDE = "RINARI_CLAUDE_COMMAND"
+
+#: What a `--model` value may contain: aliases (`opus`), ids
+#: (`claude-opus-5-5`) and context suffixes (`sonnet[1m]`).
+_MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,127}")
+
+#: Throttling in a result's text. Whole words only: a bare "rate" also matches
+#: "generate" or "moderate" and turned ordinary failures into retries.
+_RATE_LIMITED = re.compile(r"\brate[ _-]?limit|\btoo many requests\b|\b429\b")
+
+#: Bytes of stderr kept for error mapping; the rest is read and dropped.
+_STDERR_TAIL_CHARS = 16_000
 
 #: File names a saved override may point at. The override is stored in
 #: provider settings, which the desktop can write, so without this a renderer
@@ -205,6 +217,34 @@ def _parse_version(raw: str) -> tuple[int, ...]:
     return tuple(parts)
 
 
+def _which_claude(path_value: str | None) -> str | None:
+    """`claude` from the absolute PATH entries only.
+
+    `shutil.which` on Windows also looks in the current directory unless
+    NoDefaultCurrentDirectoryInExePath is set, and so does an empty or
+    relative PATH entry anywhere: a `claude.cmd` at the root of a cloned repo
+    would run as soon as the provider is probed, before the project is
+    trusted. Only absolute directories qualify, and the match must be a file
+    named like the official CLI.
+    """
+    names = ("claude.exe", "claude.cmd") if _WINDOWS else ("claude",)
+    for entry in (path_value or "").split(os.pathsep):
+        directory = entry.strip().strip('"')
+        if not directory or not os.path.isabs(directory):
+            continue
+        for name in names:
+            candidate = os.path.join(directory, name)
+            if is_claude_binary(candidate) and (_WINDOWS or os.access(candidate, os.X_OK)):
+                return candidate
+    return None
+
+
+def _system_tool(name: str) -> str:
+    """A Windows system tool by absolute path, never looked up through PATH or cwd."""
+    root = os.environ.get("SYSTEMROOT") or r"C:\Windows"
+    return os.path.join(root, "System32", name)
+
+
 def _well_known_paths(home: Path | None = None) -> list[Path]:
     """Where the official installers put `claude` when PATH does not have it.
 
@@ -258,15 +298,15 @@ class ClaudeCliRuntime:
             return self._resolved
         sources = ((self._override, "override"), (self._env.get(ENV_COMMAND_OVERRIDE), "env"))
         for raw, source in sources:
-            if raw and Path(raw).exists():
+            if raw and Path(raw).is_absolute() and is_claude_binary(raw):
                 self._resolved = ClaudeCliBinary(str(Path(raw)), source)
                 return self._resolved
-        found = shutil.which("claude", path=self._env.get("PATH"))
+        found = _which_claude(self._env.get("PATH"))
         if found:
             self._resolved = ClaudeCliBinary(found, "path")
             return self._resolved
         for candidate in _well_known_paths(self._home):
-            if candidate.exists():
+            if candidate.is_file():
                 self._resolved = ClaudeCliBinary(str(candidate), "well-known")
                 return self._resolved
         return None
@@ -709,7 +749,7 @@ def terminate_tree(process: subprocess.Popen) -> None:
     try:
         if _WINDOWS:
             subprocess.run(
-                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                [_system_tool("taskkill.exe"), "/PID", str(process.pid), "/T", "/F"],
                 capture_output=True,
                 timeout=TERMINATE_GRACE_S,
                 shell=False,
@@ -761,6 +801,16 @@ class ClaudeCliStream:
         import tempfile
 
         binary = self._runtime.require_binary()
+        blocked = blocked_source(binary.path)
+        if blocked:
+            raise _source_error(blocked)
+        if request.model and not _MODEL_ID.fullmatch(request.model):
+            # The npm shim is a .cmd, so cmd.exe re-parses every argument: a
+            # model id is data and may not carry `&`, `|` or quotes.
+            raise ProviderError(
+                f"{request.model!r} is not a Claude model id.",
+                code=ProviderErrorCode.MODEL_UNAVAILABLE,
+            )
         env, _ = self._runtime.child_env()
         # Isolated cwd: even with built-in tools off, this keeps Claude Code
         # from discovering the repo's CLAUDE.md, .claude/, hooks or MCP config
@@ -803,7 +853,7 @@ class ClaudeCliStream:
 
         run = ClaudeCliRun(process, cwd)
         try:
-            return self._pump(run, process, request, on_delta, cancellation)
+            return self._pump(run, process, request, on_delta, cancellation, binary.path)
         finally:
             run.cleanup()
 
@@ -814,22 +864,25 @@ class ClaudeCliStream:
         request: ClaudeRunRequest,
         on_delta: Callable[[str], None] | None,
         cancellation: Any,
+        binary_path: str | None = None,
     ) -> ClaudeRunResult:
         admission = _Admission()
         if process.stdin is None or process.stdout is None:
             raise ProviderError(
                 "Claude Code did not expose its streams.", code=ProviderErrorCode.SERVER_ERROR
             )
+        stderr_tail, stderr_reader = _drain(process.stderr)
         try:
             for message in request.messages:
                 process.stdin.write(_stream_json_user(message) + "\n")
             process.stdin.flush()
             process.stdin.close()
         except OSError as exc:
-            raise ProviderError(
-                "Claude Code closed its input before the request was sent.",
-                code=ProviderErrorCode.STREAM_INTERRUPTED,
-                retryable=True,
+            raise _no_retry(
+                ProviderError(
+                    "Claude Code closed its input before the request was sent.",
+                    code=ProviderErrorCode.STREAM_INTERRUPTED,
+                )
             ) from exc
 
         text_parts: list[str] = []
@@ -848,10 +901,17 @@ class ClaudeCliStream:
             kind = event.get("type")
             if kind == "system" and event.get("subtype") == "init":
                 resolved_model = event.get("model") or resolved_model
-                _require_subscription_source(event, run)
+                _require_subscription_source(event, run, binary_path)
                 continue
             if kind == "stream_event":
                 inner = event.get("event") or {}
+                if inner.get("type") == "message_start":
+                    started = inner.get("message") or {}
+                    if not admission.admit(started.get("id")):
+                        # Refused at its first event, so nothing of a second
+                        # generation reaches the blocks or the user.
+                        run.cancel()
+                        break
                 _collect_block(inner, blocks)
                 delta = _text_delta(inner)
                 if delta:
@@ -900,9 +960,19 @@ class ClaudeCliStream:
                 process.wait(timeout=TERMINATE_GRACE_S)
             except subprocess.TimeoutExpired:
                 run.cancel()
-        stderr = (process.stderr.read() if process.stderr else "") or ""
-        if not text_parts and result_payload is None:
-            raise _startup_error(process.returncode, stderr)
+        if result_payload is None and admission.rejected == 0:
+            if not text_parts:
+                if stderr_reader is not None:
+                    stderr_reader.join(TERMINATE_GRACE_S)
+                raise _startup_error(process.returncode, "".join(stderr_tail))
+            # Output and then silence: the child died mid-answer. Handing the
+            # fragment back as a finished reply would hide that it is cut.
+            raise _no_retry(
+                ProviderError(
+                    "Claude Code stopped before finishing the answer.",
+                    code=ProviderErrorCode.STREAM_INTERRUPTED,
+                )
+            )
         return ClaudeRunResult(
             text="".join(text_parts),
             usage=usage,
@@ -911,6 +981,35 @@ class ClaudeCliStream:
             raw_result=result_payload,
             blocks=tuple(blocks[index] for index in sorted(blocks)),
         )
+
+
+def _drain(stream: Any) -> tuple[list[str], Any]:
+    """Read stderr while the child runs, keeping only its tail.
+
+    Left unread until exit, a chatty child fills the pipe buffer and blocks
+    on its next write: it stops answering, the idle deadline fires, and the
+    turn fails for a reason that has nothing to do with the model.
+    """
+    import threading
+
+    tail: list[str] = []
+    if stream is None:
+        return tail, None
+
+    def _reader() -> None:
+        size = 0
+        try:
+            for chunk in stream:
+                tail.append(chunk)
+                size += len(chunk)
+                while size > _STDERR_TAIL_CHARS and len(tail) > 1:
+                    size -= len(tail.pop(0))
+        except (OSError, ValueError):
+            pass
+
+    thread = threading.Thread(target=_reader, name="claude-cli-stderr", daemon=True)
+    thread.start()
+    return tail, thread
 
 
 def _cancelled(cancellation: Any) -> bool:
@@ -960,10 +1059,10 @@ def _result_error(event: dict[str, Any]) -> ProviderError:
     if "usage limit" in lowered or "usage credits" in lowered or "quota" in lowered:
         return ProviderError(
             "The Claude subscription has no usage left for this model.",
-            code=ProviderErrorCode.RATE_LIMIT,
+            code=ProviderErrorCode.QUOTA_EXHAUSTED,
             hint="Pick another model, or check your plan at claude.ai/settings/usage.",
         )
-    if status == 429 or "rate" in lowered or "429" in lowered:
+    if status == 429 or _RATE_LIMITED.search(lowered):
         return ProviderError(
             "Claude rate-limited this request.",
             code=ProviderErrorCode.RATE_LIMIT,
@@ -980,7 +1079,9 @@ def _result_error(event: dict[str, Any]) -> ProviderError:
             "The request exceeded the model's context window.",
             code=ProviderErrorCode.CONTEXT_OVERFLOW,
         )
-    return ProviderError(f"Claude Code failed: {detail}", code=ProviderErrorCode.SERVER_ERROR)
+    return _no_retry(
+        ProviderError(f"Claude Code failed: {detail}", code=ProviderErrorCode.SERVER_ERROR)
+    )
 
 
 def _startup_error(returncode: int | None, stderr: str) -> ProviderError:
@@ -992,17 +1093,21 @@ def _startup_error(returncode: int | None, stderr: str) -> ProviderError:
             code=ProviderErrorCode.AUTH,
             hint="Run `claude auth login` and check again.",
         )
+    # Neither is retried: a child that exits silently does the same on the
+    # next try, and one that crashed may already have sent the request.
     if returncode == 0:
-        return ProviderError(
-            "Claude Code exited without producing a response.",
-            code=ProviderErrorCode.STREAM_INTERRUPTED,
-            retryable=True,
-            hint="This Claude Code version may have a print-mode regression.",
+        return _no_retry(
+            ProviderError(
+                "Claude Code exited without producing a response.",
+                code=ProviderErrorCode.STREAM_INTERRUPTED,
+                hint="This Claude Code version may have a print-mode regression.",
+            )
         )
-    return ProviderError(
-        f"Claude Code exited with status {returncode}.",
-        code=ProviderErrorCode.SERVER_ERROR,
-        retryable=True,
+    return _no_retry(
+        ProviderError(
+            f"Claude Code exited with status {returncode}.",
+            code=ProviderErrorCode.SERVER_ERROR,
+        )
     )
 
 
@@ -1043,26 +1148,28 @@ def _pumped_events(
     while True:
         if _cancelled(cancellation):
             run.cancel()
-            raise ProviderError(
-                "The turn was cancelled.", code=ProviderErrorCode.STREAM_INTERRUPTED
+            raise _no_retry(
+                ProviderError("The turn was cancelled.", code=ProviderErrorCode.STREAM_INTERRUPTED)
             )
         now = time.monotonic()
         if now > hard_deadline:
             run.cancel()
-            raise ProviderError(
-                "Claude Code exceeded the turn time budget.",
-                code=ProviderErrorCode.TIMEOUT,
-                retryable=True,
+            raise _no_retry(
+                ProviderError(
+                    "Claude Code exceeded the turn time budget.",
+                    code=ProviderErrorCode.TIMEOUT,
+                )
             )
         budget = TIMEOUT_IDLE_STREAM_S if produced else TIMEOUT_FIRST_TOKEN_S
         if now - last_activity > budget:
             run.cancel()
-            raise ProviderError(
-                "Claude Code stopped sending output."
-                if produced
-                else "Claude Code did not start answering in time.",
-                code=ProviderErrorCode.TIMEOUT,
-                retryable=True,
+            raise _no_retry(
+                ProviderError(
+                    "Claude Code stopped sending output."
+                    if produced
+                    else "Claude Code did not start answering in time.",
+                    code=ProviderErrorCode.TIMEOUT,
+                )
             )
         try:
             line = lines.get(timeout=_POLL_INTERVAL_S)
@@ -1113,7 +1220,49 @@ def _collect_block(event: dict[str, Any], blocks: dict[int, dict[str, Any]]) -> 
         block[field] = block.get(field, "") + delta[field]
 
 
-def _require_subscription_source(init: dict[str, Any], run: ClaudeCliRun) -> None:
+#: Credentials a child picked instead of the subscription, by binary. Once a
+#: run shows one, every later call is refused before a process starts: the
+#: init event arrives with the request already on its way, so finding out
+#: again on each turn would bill the API once per turn. Cleared only by an
+#: explicit probe from the user (`clear_source_block`).
+_BLOCKED_SOURCES: dict[str, str] = {}
+
+
+def blocked_source(binary_path: str) -> str | None:
+    return _BLOCKED_SOURCES.get(binary_path)
+
+
+def clear_source_block(binary_path: str | None = None) -> None:
+    if binary_path is None:
+        _BLOCKED_SOURCES.clear()
+    else:
+        _BLOCKED_SOURCES.pop(binary_path, None)
+
+
+def _no_retry(error: ProviderError) -> ProviderError:
+    """Mark a failure that may already have spent a generation.
+
+    The child is one subscription call. Re-running it after a timeout, a cut
+    stream or a crash can spend a second one for the same answer, so these
+    reach the user instead of the router's or the agent's retry loop.
+    """
+    error._retryable = False
+    error.details["no_retry"] = True
+    return error
+
+
+def _source_error(source: str) -> ProviderError:
+    return ProviderError(
+        f"Claude Code was about to bill {source}, not the Claude subscription.",
+        code=ProviderErrorCode.AUTH,
+        hint="Remove that credential from the environment or settings that Claude Code "
+        "reads, then check the provider again.",
+    )
+
+
+def _require_subscription_source(
+    init: dict[str, Any], run: ClaudeCliRun, binary_path: str | None = None
+) -> None:
     """Stop a run that is about to bill an API key instead of the subscription.
 
     The init event names the credential the child actually picked. The
@@ -1129,9 +1278,6 @@ def _require_subscription_source(init: dict[str, Any], run: ClaudeCliRun) -> Non
     if source is None or source == "none":
         return
     run.cancel()
-    raise ProviderError(
-        f"Claude Code was about to bill {source}, not the Claude subscription.",
-        code=ProviderErrorCode.AUTH,
-        hint="Remove that credential from the environment or settings that Claude Code "
-        "reads, then try again.",
-    )
+    if binary_path:
+        _BLOCKED_SOURCES[binary_path] = str(source)
+    raise _source_error(str(source))

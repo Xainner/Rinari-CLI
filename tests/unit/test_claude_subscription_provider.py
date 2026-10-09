@@ -294,18 +294,31 @@ def test_the_router_routes_an_external_runtime_instead_of_rejecting_it(
     assert response.content
 
 
-def test_a_level_the_cli_rejects_is_refused_before_spending_a_call(services, tmp_path, monkeypatch):
-    """The engine validates the effort against the published levels."""
+def test_a_level_the_cli_rejects_is_dropped_with_a_notice_not_sent(services, tmp_path, monkeypatch):
+    """An effort the model does not take is a preference, not the task.
+
+    Main drops it and says so (`provider.reasoning.dropped`) instead of ending
+    the turn; for this transport that also means `--effort` never carries a
+    level the CLI would silently ignore.
+    """
     from rinari.models.router import ModelRouter
     from rinari.models.types import ChatMessage, ModelRequest
 
+    record = tmp_path / "record.json"
+    monkeypatch.setenv("FAKE_CLAUDE_RECORD", str(record))
     provider, model = _saved_model(services, tmp_path, monkeypatch)
     router = ModelRouter(services.providers, services.models)
+    notices: list[str] = []
     request = ModelRequest(
-        model=model.alias, messages=(ChatMessage.user("hola"),), reasoning_effort="ultra"
+        model=model.alias,
+        messages=(ChatMessage.user("hola"),),
+        reasoning_effort="ultra",
+        usage_observer=lambda kind, _payload: notices.append(kind),
     )
-    with pytest.raises(InvalidUsageError):
-        router.invoke(provider, model.id, request)
+    router.invoke(provider, model.id, request)
+    assert "provider.reasoning.dropped" in notices
+    argv = json.loads(record.read_text(encoding="utf-8"))["argv"]
+    assert "--effort" not in argv
 
 
 # -- auth del proveedor (seccion 26) ---------------------------------------

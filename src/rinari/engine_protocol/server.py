@@ -3231,7 +3231,12 @@ class EngineServer:
         if runtime_id != "claude-cli":
             raise EngineProtocolError(INVALID_PARAMS, f"Unknown runtime: {runtime_id}")
         from rinari.providers.adapters.claude_subscription import ClaudeSubscriptionAdapter
+        from rinari.providers.claude_cli import clear_source_block
 
+        # The user asking to check again is what lifts a block set when a run
+        # picked a non-subscription credential: the next call may bill once
+        # more if the cause is still there, but only because they asked.
+        clear_source_block()
         # No path parameter on purpose: the probe runs before any provider
         # exists, and taking a path from the desktop would let it make the
         # Engine execute any program. It uses the normal discovery only.

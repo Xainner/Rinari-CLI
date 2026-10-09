@@ -436,7 +436,8 @@ def test_capabilities_do_not_promise_tools_before_the_bridge_exists(tmp_path):
     caps = adapter(tmp_path).capabilities()
     assert caps.streaming is True
     assert caps.tool_calls is False
-    assert caps.vision is None
+    # Images are not forwarded yet, so the runtime describes them instead.
+    assert caps.vision is False
     assert caps.max_context_tokens is None
 
 
@@ -475,9 +476,12 @@ def test_invoke_builds_history_from_rinari_not_from_claude(tmp_path):
     # every turn answer the first message of the conversation.)
     assert len(lines) == 1
     texts = [block["text"] for block in lines[0]["message"]["content"]]
-    assert texts[-1] == "segunda"
-    assert '<turn role="user">\nprimera\n</turn>' in texts[0]
-    assert '<turn role="assistant">\nrespuesta\n</turn>' in texts[0]
+    # One block per turn in a fixed form, so each call is a prefix of the next.
+    assert texts[1:] == [
+        '<turn role="user">\nprimera\n</turn>',
+        '<turn role="assistant">\nrespuesta\n</turn>',
+        '<turn role="user">\nsegunda\n</turn>',
+    ]
     # The system prompt replaces Claude Code's own, it is not a user turn.
     assert not any("Sos Rinari." in text for text in texts)
     assert response.provider_state["transport"] == "claude-cli"
@@ -586,7 +590,8 @@ def test_an_error_reported_as_success_is_an_error(tmp_path):
             ClaudeRunRequest(model=None, system=None, messages=({"role": "user", "content": []},)),
             on_delta=deltas.append,
         )
-    assert exc.value.error_code == ProviderErrorCode.RATE_LIMIT
+    # QUOTA_EXHAUSTED, not RATE_LIMIT: the desktop offers to change model for it.
+    assert exc.value.error_code == ProviderErrorCode.QUOTA_EXHAUSTED
     assert exc.value.retryable is False
     # Nothing of the notice was streamed as if the model had said it.
     assert deltas == []
@@ -650,7 +655,7 @@ def test_the_reply_answers_the_latest_message_not_the_first(tmp_path):
     response = adapter(tmp_path, FAKE_CLAUDE_ECHO="1").invoke_stream(
         request, None, None, lambda _d: None
     )
-    assert response.content.endswith("que modelo estoy usando?")
+    assert response.content.rstrip().endswith("que modelo estoy usando?\n</turn>")
 
 
 def test_one_rinari_turn_is_one_user_message_on_stdin(tmp_path):
@@ -675,7 +680,7 @@ def test_one_rinari_turn_is_one_user_message_on_stdin(tmp_path):
     text = "".join(b["text"] for b in json.loads(lines[0])["message"]["content"])
     # The whole thread travels, in order, with the new message last.
     assert text.index("primera") < text.index("respuesta") < text.index("segunda")
-    assert text.rstrip().endswith("segunda")
+    assert text.rstrip().endswith("segunda\n</turn>")
 
 
 # -- guia de inicio de sesion ------------------------------------------------

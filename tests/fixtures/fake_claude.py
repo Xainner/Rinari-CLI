@@ -18,7 +18,7 @@ import time
 
 # Test knobs. Each one reproduces a failure the real CLI has shown.
 ENV_AUTH = "FAKE_CLAUDE_AUTH"  # subscription | console | logged_out | broken
-ENV_MODE = "FAKE_CLAUDE_MODE"  # ok | double | empty | hang | error | rate_limit
+ENV_MODE = "FAKE_CLAUDE_MODE"  # ok | double | empty | hang | error | rate_limit | truncated
 ENV_TEXT = "FAKE_CLAUDE_TEXT"
 ENV_RECORD = "FAKE_CLAUDE_RECORD"  # path: dump argv + env + stdin for assertions
 ENV_VERSION = "FAKE_CLAUDE_VERSION"
@@ -266,6 +266,8 @@ def _user_turns(stdin_text: str) -> list[str]:
 
 def _generation(text: str, message_id: str, mode: str) -> int | None:
     """One generation with its own `result`, as the real CLI emits per turn."""
+    # The Anthropic stream opens with the message id, before any block.
+    _stream({"type": "message_start", "message": {"id": message_id, "role": "assistant"}})
     if os.environ.get(ENV_THINKING):
         # Extended thinking arrives as the same Anthropic blocks the HTTP API
         # sends, only wrapped in `stream_event`.
@@ -305,13 +307,33 @@ def _generation(text: str, message_id: str, mode: str) -> int | None:
                 "delta": {"type": "text_delta", "text": chunk},
             }
         )
+    if mode == "truncated":
+        # The child dies mid-answer: text streamed, no assistant, no result.
+        return 0
     if os.environ.get(ENV_THINKING):
         # Thinking first, as its own event, with the same id as the text.
         _emit(_assistant(os.environ[ENV_THINKING], message_id, block="thinking"))
     _emit(_assistant(text, message_id))
     if mode == "double":
-        # A second generation for one request: Rinari must reject it locally.
-        _emit(_assistant("SEGUNDA GENERACION", "msg_fake_second_generation"))
+        # A second generation for one request, streamed like the first one:
+        # Rinari must reject it at its first event, before any of its text.
+        second = "msg_fake_second_generation"
+        _stream({"type": "message_start", "message": {"id": second, "role": "assistant"}})
+        _stream(
+            {
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {"type": "text", "text": ""},
+            }
+        )
+        _stream(
+            {
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {"type": "text_delta", "text": "SEGUNDA GENERACION"},
+            }
+        )
+        _emit(_assistant("SEGUNDA GENERACION", second))
     if mode == "rate_limit":
         _emit({"type": "result", "subtype": "error_rate_limit", "result": "rate limit reached"})
         return 1
