@@ -470,7 +470,8 @@ def test_fs_read_lines(project) -> None:
     ctx = _ctx(tmp_path, root)
     runtime, _ = _runtime(ctx, tmp_path)
     result = runtime.execute("fs.read_lines", {"path": "src/a.py", "start": 2, "end": 2}, ctx)
-    assert result.ok and result.data["lines"] == [{"line": 2, "text": "world"}]
+    assert result.ok and result.data["text"] == "2| world"
+    assert result.data["start_line"] == result.data["end_line"] == 2
 
 
 # -- shell tools --------------------------------------------------------------------
@@ -617,7 +618,7 @@ def test_line_range_beyond_initial_megabyte(project):
     path.write_text(("x" * 1000 + "\n") * 1100 + "última\n", encoding="utf-8")
     result = fs_read_lines({"path": str(path), "start": 1101, "end": 1101}, _ctx(tmp_path, root))
     assert result.ok
-    assert result.data["lines"] == [{"line": 1101, "text": "última"}]
+    assert result.data["text"] == "1101| última"
 
 
 def test_read_utf8_boundary_is_not_binary(tmp_path):

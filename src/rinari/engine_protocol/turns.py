@@ -244,6 +244,13 @@ class TurnManager:
         self.peers = PeerBroker(self)
         # A new engine process never replays deliveries accepted by an older one.
         self.peers.on_engine_start()
+        # Nor leaves its turns open: one that died mid-turn is closed now.
+        self.reconcile_orphan_turns()
+        try:
+            # Cheap housekeeping: lock files of sessions deleted long ago.
+            services.sessions.sweep_turn_locks()
+        except Exception:
+            logger.exception("turn lock sweep failed")
 
     def set_browser_registry(self, registry: Any) -> None:
         """Registry de contextos de browser nativo, puesta por el servidor."""
@@ -294,6 +301,31 @@ class TurnManager:
                 not turn.done.is_set() and turn.session_id == session_id
                 for turn in self._turns.values()
             )
+
+    def reconcile_orphan_turns(self, session_id: str | None = None) -> list[str]:
+        """Close turns a dead engine process left without a terminal event.
+
+        Best effort: a failure here must never keep the engine from starting
+        or a session from opening.
+        """
+        from rinari.engine_protocol.orphans import reconcile
+
+        def is_live(turn_id: str) -> bool:
+            with self._lock:
+                turn = self._turns.get(turn_id)
+                return turn is not None and not turn.done.is_set()
+
+        try:
+            with self._lock:
+                return reconcile(
+                    self._services,
+                    is_live=is_live,
+                    emit=lambda name, payload: self._emit(event(name, payload)),
+                    session_id=session_id,
+                )
+        except Exception:
+            logger.exception("orphaned turn reconciliation failed")
+            return []
 
     def conflicts_with_changeset(self, changeset: dict[str, Any]) -> bool:
         """Return whether undo would race an active turn in its session/project."""

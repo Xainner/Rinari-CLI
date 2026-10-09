@@ -78,6 +78,15 @@ _GENERIC_SECTION_TITLES = frozenset(
 )
 
 
+# Quoted when a draft has no usable procedure: a model fixes the shape in one
+# retry from an example, not from a rule restated in prose.
+PROCEDURE_EXAMPLE = (
+    "Minimal valid SKILL.md: '---\\nname: my-skill\\ndescription: What it does and "
+    "when to use it.\\n---\\n# Procedure\\n## Prepare\\n1. First step.\\n## Run\\n"
+    "2. Next step.\\n# Verification\\n- How to check it worked.'"
+)
+
+
 def _section_title(title: str) -> str:
     """Normalize accents, parenthetical hints and trailing punctuation."""
     import unicodedata
@@ -188,6 +197,8 @@ def _split_sections(body: str) -> dict[str, str]:
     chunks: dict[str, list[str]] = {}
     active: str | None = None
     level = 0
+    # Set once Procedure adopts headings of its own level as its steps.
+    peer_steps = False
     fence: str | None = None
     for line in body.splitlines():
         if fence is not None:
@@ -214,8 +225,21 @@ def _split_sections(body: str) -> dict[str, str]:
                 and (key == active or title in _GENERIC_SECTION_TITLES)
             ):
                 key = None
+            # Steps written as peers of the heading ("## Procedure" then
+            # "## Step 1") left an empty Procedure and a rejected proposal.
+            # A Procedure with no content yet cannot be ending at its first
+            # heading, so that heading and its peers become its subsections.
+            if (
+                active == "procedure"
+                and key is None
+                and len(header[1]) == level
+                and (peer_steps or not "".join(chunks[active]).strip())
+            ):
+                peer_steps = True
+                chunks[active].append(line)
+                continue
             if key is not None or len(header[1]) <= level:
-                active, level = key, len(header[1])
+                active, level, peer_steps = key, len(header[1]), False
                 if active is not None:
                     chunks.setdefault(active, [])
                 continue
@@ -328,7 +352,8 @@ def validate_skill(m: SkillManifest, known_tools: set[str]) -> list[dict]:
                     if m.procedure_present
                     else f"{m.name} has no procedure: after the frontmatter, add a line "
                     "'# Procedure' followed by the steps"
-                ),
+                )
+                + f". {PROCEDURE_EXAMPLE}",
             }
             if m.format == "rinari"
             else {

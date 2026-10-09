@@ -530,6 +530,9 @@ def _classify_pty_local(input: dict) -> ClassifiedAction:
 
 
 def pty_tools() -> list[ToolDefinition]:
+    # On demand (always_loaded=False): interactive terminals are rare for the
+    # model (shell.exec/process.* cover batch work) and cost schema tokens on
+    # every request; capability.search exposes them.
     return [
         ToolDefinition(
             name="pty.start",
@@ -556,6 +559,7 @@ def pty_tools() -> list[ToolDefinition]:
             handler=pty_start,
             classify=_classify_shell_like,
             namespace="pty",
+            always_loaded=False,
         ),
         ToolDefinition(
             name="pty.read",
@@ -577,6 +581,7 @@ def pty_tools() -> list[ToolDefinition]:
             handler=pty_read,
             classify=_classify_pty_local,
             namespace="pty",
+            always_loaded=False,
         ),
         ToolDefinition(
             name="pty.write",
@@ -601,6 +606,7 @@ def pty_tools() -> list[ToolDefinition]:
             handler=pty_write,
             classify=_classify_pty_local,
             namespace="pty",
+            always_loaded=False,
         ),
         ToolDefinition(
             name="pty.resize",
@@ -621,6 +627,7 @@ def pty_tools() -> list[ToolDefinition]:
             handler=pty_resize,
             classify=_classify_pty_local,
             namespace="pty",
+            always_loaded=False,
         ),
         ToolDefinition(
             name="pty.terminate",
@@ -637,5 +644,6 @@ def pty_tools() -> list[ToolDefinition]:
             handler=pty_terminate,
             classify=_classify_pty_local,
             namespace="pty",
+            always_loaded=False,
         ),
     ]

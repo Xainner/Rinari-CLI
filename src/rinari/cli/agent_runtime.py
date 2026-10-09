@@ -733,7 +733,11 @@ def build_agent_session(
                 activity_sink(event, payload)
             else:
                 _persist_event(services, record.id, event, payload)
-                if interactive:
+                if interactive and payload.get("fallback"):
+                    from rinari.cli.repl_output import emit
+
+                    emit("stdout", f"Visión: {payload.get('error')}\n")
+                elif interactive:
                     from rinari.cli.repl_output import emit
 
                     names = ", ".join(i.get("name", "imagen") for i in payload.get("images", []))
@@ -1063,6 +1067,8 @@ def _build_tools(
         ),
         clock=services.ctx.clock,
         redactor=Redactor(_secrets_for_redaction(services)),
+        spill_threshold_bytes=services.ctx.config.config.context.artifact_output_threshold_kb
+        * 1024,
         event_sink=lambda event_type, payload: _persist_event(
             services, record.id, event_type, payload
         ),
@@ -1921,6 +1927,35 @@ def _record_branch(session: AgentSession, turn_id: str, source: str) -> None:
         return
 
 
+INTERRUPTION_MESSAGE_CHARS = 500
+
+
+def _interruption_detail(exc: BaseException) -> dict:
+    """What a terminal turn needs to explain its failure later.
+
+    The exception name alone ("ProviderError") said nothing about which
+    limit, model or HTTP status ended the turn. The message is redacted and
+    bounded: provider errors can echo request fragments.
+    """
+    from rinari.shared.redaction import redact_text
+
+    detail: dict = {}
+    code = getattr(exc, "error_code", None) or getattr(exc, "machine_code", None)
+    if code:
+        detail["code"] = str(getattr(code, "value", code))
+    message = redact_text(str(exc)).strip()
+    if message:
+        if len(message) > INTERRUPTION_MESSAGE_CHARS:
+            message = message[: INTERRUPTION_MESSAGE_CHARS - 1] + "…"
+        detail["message"] = message
+    if getattr(exc, "retryable", None) is not None:
+        detail["retryable"] = bool(exc.retryable)
+    details = getattr(exc, "details", None)
+    if isinstance(details, dict) and isinstance(details.get("http_status"), int):
+        detail["http_status"] = details["http_status"]
+    return detail
+
+
 def _run_turn_unlocked(
     session: AgentSession,
     message: str,
@@ -2128,6 +2163,7 @@ def _run_turn_unlocked(
             {
                 "turn_id": turn_id,
                 "reason": type(exc).__name__,
+                **_interruption_detail(exc),
                 "history_preserved": True,
                 "resume_requires_request": True,
             },

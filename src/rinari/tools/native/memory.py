@@ -52,6 +52,21 @@ def _project_root(ctx: ToolContext) -> Path | None:
     return Path(root).resolve()
 
 
+# Without a project there is no project memory to read or write. Recall falls
+# back to the owner's memory with a note (reading is harmless and usually what
+# was wanted); writes refuse instead, because a project fact or convention
+# filed as personal memory would follow the owner into every other chat.
+_NO_PROJECT = (
+    "this session has no project, so there is no project memory. Use scope=user "
+    "for something about the owner, or open the folder as a project. Do not retry "
+    "with scope=project."
+)
+
+
+def _no_project() -> ToolResult:
+    return _fail(ToolErrorCode.INVALID_ARGUMENT, _NO_PROJECT)
+
+
 def _classify_write(input: dict) -> ClassifiedAction:
     return ClassifiedAction("state.write", None)
 
@@ -189,10 +204,7 @@ def memory_remember(input: dict, ctx: ToolContext) -> ToolResult:
     elif scope == "project":
         root = _project_root(ctx)
         if root is None:
-            return _fail(
-                ToolErrorCode.DEPENDENCY_ERROR,
-                "project memory requires a PROJECT session with a project root",
-            )
+            return _no_project()
         kind = input.get("kind", "fact")
         if kind not in _PROJECT_KINDS:
             return _fail(
@@ -251,16 +263,15 @@ def memory_recall(input: dict, ctx: ToolContext) -> ToolResult:
     limit = input.get("limit", 10)
     if not isinstance(limit, int) or not 1 <= limit <= 50:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "limit must be an integer 1..50")
+    notes: tuple[str, ...] = ()
+    if scope == "project" and _project_root(ctx) is None:
+        scope = "user"
+        notes = ("this session has no project: searched user memory instead of project memory",)
     try:
         if scope == "user":
             rows = service.search_user(query, kind=kind, limit=limit)
         elif scope == "project":
             root = _project_root(ctx)
-            if root is None:
-                return _fail(
-                    ToolErrorCode.DEPENDENCY_ERROR,
-                    "project memory requires a PROJECT session with a project root",
-                )
             rows = service.search_project(str(root), query, kind=kind, limit=limit)
         elif scope == "pattern":
             p_scope = input.get("pattern_scope")
@@ -272,7 +283,9 @@ def memory_recall(input: dict, ctx: ToolContext) -> ToolResult:
             rows = service.search_episodic(str(root) if root else "", query, limit=limit)
     except Exception as exc:
         return _fail(ToolErrorCode.UNKNOWN, getattr(exc, "message", str(exc)))
-    return _ok({"scope": scope, "count": len(rows), "records": rows})
+    return ToolResult(
+        ok=True, data={"scope": scope, "count": len(rows), "records": rows}, notes=notes
+    )
 
 
 def memory_update(input: dict, ctx: ToolContext) -> ToolResult:
@@ -328,10 +341,7 @@ def memory_update(input: dict, ctx: ToolContext) -> ToolResult:
         else:
             root = _project_root(ctx)
             if root is None:
-                return _fail(
-                    ToolErrorCode.DEPENDENCY_ERROR,
-                    "project memory requires a PROJECT session with a project root",
-                )
+                return _no_project()
             row = service.update_project(
                 str(root),
                 memory_id,
@@ -381,10 +391,7 @@ def memory_forget(input: dict, ctx: ToolContext) -> ToolResult:
         else:
             root = _project_root(ctx)
             if root is None:
-                return _fail(
-                    ToolErrorCode.DEPENDENCY_ERROR,
-                    "project memory requires a PROJECT session with a project root",
-                )
+                return _no_project()
             forgotten = service.forget_project(str(root), memory_id)
     except MemoryConflictError as exc:
         return _fail(ToolErrorCode.CONFLICT, exc.message)
@@ -432,7 +439,8 @@ def memory_tools() -> list[ToolDefinition]:
                 "owner started. Sensitive personal data (health, money, identity) is "
                 "saved as a proposal for the owner to approve. "
                 "scope=project: a stable fact/rule/convention of this project "
-                "(PROJECT sessions only). scope=pattern: a reusable procedure. "
+                "(only in a session with a project; a chat without one refuses it). "
+                "scope=pattern: a reusable procedure. "
                 "A re-statement with the same kind+topic refreshes the record; "
                 "a conflicting statement supersedes the old one. Secrets are rejected. "
                 "A refusal that says 'Do not retry' will fail again: tell the owner."
@@ -465,7 +473,8 @@ def memory_tools() -> list[ToolDefinition]:
             name="memory.recall",
             description=(
                 "Search durable memory. scope=user (cross-session preferences/facts), "
-                "scope=project (this project's records), scope=pattern (reusable "
+                "scope=project (this project's records; a chat without a project "
+                "searches user memory instead and says so), scope=pattern (reusable "
                 "procedures), scope=episodic (summarized past tasks). Records are "
                 "possibly stale: re-verify volatile facts before relying on them."
             ),

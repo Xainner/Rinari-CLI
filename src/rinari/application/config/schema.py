@@ -63,7 +63,7 @@ class RuntimeSettings:
 @dataclass(frozen=True, slots=True)
 class ContextSettings:
     compact_at_percent: int = 80
-    artifact_output_threshold_kb: int = 64
+    artifact_output_threshold_kb: int = 16
 
 
 @dataclass(frozen=True, slots=True)

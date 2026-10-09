@@ -65,6 +65,19 @@ class _ChildProgress:
         return "\n".join(lines)
 
 
+def expose_allowlisted(definition, registry, exposure) -> None:
+    """Show a child every tool its definition names, on-demand ones included.
+
+    A definition that lists a tool means the child needs it; it must not hide
+    behind capability.search, which the allowlist may not even include.
+    """
+    if not definition.tool_allowlist or exposure is None:
+        return
+    names = [name for name in registry.names() if definition.allows(name)]
+    if names:
+        exposure.activate(names, reason=f"agent {definition.name}", scope="session")
+
+
 def _written_paths(observation: object) -> list[str]:
     import json
 
@@ -160,6 +173,8 @@ class _SubagentRunner:
             spec, "agent.context", {"cwd": str(tool_ctx.cwd), "profile": tool_ctx.profile.value}
         )
         registry = self._build_registry(spec)
+        expose_allowlisted(definition, registry, tool_ctx.exposure)
+        parent_runtime = cfg.parent_runtime() if cfg.parent_runtime else None
         runtime = ToolRuntime(
             registry,
             cfg.policy,
@@ -169,6 +184,12 @@ class _SubagentRunner:
                 (lambda event, payload: cfg.event_sink(spec.session_id, event, payload))
                 if cfg.event_sink is not None
                 else None
+            ),
+            # Children spill large output at the same configured threshold.
+            **(
+                {"spill_threshold_bytes": parent_runtime.spill_threshold_bytes}
+                if isinstance(getattr(parent_runtime, "spill_threshold_bytes", None), int)
+                else {}
             ),
         )
         # The policy scope is derived from tool_ctx (policy is enforced at

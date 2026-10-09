@@ -4,6 +4,7 @@ Every call costs a round trip and context. Before calling, know what you will do
 
 ## Choose the right tool
 - Typed tools before shell: `fs.*`, `search.*`, `git.*`, `ssh.inspect`, `rinari.*` return structured, bounded data; shell output is raw and long.
+- Remote machines: `ssh.run` sends a whole script on stdin, with no nested quoting; never `shell.exec` with `ssh host '...'`. Read `references/remote.md` before changing a remote machine.
 - On-demand tools: one `capability.search` with `load=true` both finds and exposes them. Activating a skill exposes the tools it requires in the same call.
 - Questions about Rinari's own state go to `rinari.*`, never to SQL over the home or to guessing.
 

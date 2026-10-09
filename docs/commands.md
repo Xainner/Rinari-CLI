@@ -936,7 +936,7 @@ profiles are cut by what cannot be undone. read-only reads anything (files
 and the internet) and never writes, runs or sends. workspace is free inside
 the project or chat folder, on localhost/LAN and reading the internet; it asks
 once to write or run outside, send data to an internet host (a request body or
-a non-GET method, `ssh.inspect` to a public host), call an MCP tool, interact
+a non-GET method, `ssh.inspect` or `ssh.run` to a public host), call an MCP tool, interact
 with a web page or `git push`. full-access asks for none of that. Every profile
 asks for the hard list (force push, deleting outside the project; never granted
 for good) and for system secrets (`~/.ssh`, GPG/cloud keys, OS and browser

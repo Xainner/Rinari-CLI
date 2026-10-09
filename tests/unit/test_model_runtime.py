@@ -1505,6 +1505,56 @@ def test_router_stream_repeats_without_a_refused_reasoning_control(monkeypatch, 
         ctx.close()
 
 
+@pytest.mark.parametrize(
+    ("capable", "levels"), [(False, None), (True, ["low", "medium"])], ids=["none", "level"]
+)
+def test_an_unsupported_reasoning_effort_is_dropped_instead_of_failing_the_turn(
+    monkeypatch, tmp_path, capable, levels
+) -> None:
+    """A model without configurable reasoning (or without this level) used to
+    end the turn before the first call. The call goes without the effort and
+    the drop is reported with its reason."""
+    from rinari.models.types import ProviderCapabilities
+
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"role": "assistant", "content": "hola"}, "finish_reason": "stop"}
+                ]
+            },
+        )
+
+    ctx, services = _app_and_services(handler, monkeypatch, tmp_path)
+    try:
+        provider = services.providers.add(_add_custom_input("local", "http://127.0.0.1:8080/v1"))
+        model = services.models.add(provider.alias, "qwen-local", "qwen")
+        router = ModelRouter(services.providers, services.models, http_client=_client(handler))
+        monkeypatch.setattr(
+            router,
+            "capabilities",
+            lambda *_: ProviderCapabilities(
+                streaming=True, tool_calls=True, structured_output=True, reasoning_effort=capable
+            ),
+        )
+        monkeypatch.setattr(router, "reasoning_levels", lambda _model: levels)
+        events: list = []
+        request = _request(
+            reasoning_effort="high",
+            usage_observer=lambda name, payload: events.append((name, payload)),
+        )
+        assert router.invoke(provider, model.id, request).content == "hola"
+        assert len(seen) == 1 and "reasoning_effort" not in seen[0]
+        dropped = [payload for name, payload in events if name == "provider.reasoning.dropped"]
+        assert dropped and dropped[0]["effort"] == "high" and dropped[0]["reason"]
+    finally:
+        ctx.close()
+
+
 def test_every_provider_receives_projected_combinators_and_validation_keeps_them() -> None:
     """llama.cpp drops sibling properties when a root oneOf is present."""
     from rinari.tools.schema import validate_against, wire_input_schema

@@ -373,21 +373,78 @@ def test_other_failures_do_not_fallback(visual, code):
     assert caller.visual_decision().route == "conversation"
 
 
-def test_native_rejection_is_reported_without_silent_route_change(visual):
+def test_native_rejection_continues_once_without_images_and_is_remembered(visual):
+    from rinari.providers.errors import ProviderError, ProviderErrorCode
+
+    caller, request, calls = visual
+    configure(caller.services, {"mode": "conversation"})
+    events = []
+    caller.activity_sink = lambda name, payload: events.append((name, payload))
+
+    def fail_on_pixels(provider, model, req):
+        calls.append((model, req))
+        if any(m.images for m in req.messages):
+            raise ProviderError("No image support", code=ProviderErrorCode.VISION_UNSUPPORTED)
+        return ModelResponse(content="sin imagen", usage=Usage(1, 1))
+
+    caller.main.router.invoke = fail_on_pixels
+    assert caller.invoke(request).content == "sin imagen"
+    assert len(calls) == 2
+    retried = calls[1][1].messages[0]
+    assert not retried.images and "fs.read_image" in retried.content
+    assert request.messages[0].images  # canonical history is unchanged
+    notice = [payload for name, payload in events if name == "vision.failed"]
+    assert len(notice) == 1 and notice[0]["fallback"] == "without_images"
+    assert "can't see images" in notice[0]["error"]
+    assert settings(caller.services)["model_overrides"] == {"main": False}
+    # Known now: the next call does not pay for the same rejection, and the
+    # images already reported are not reported again.
+    caller.invoke(request)
+    assert len(calls) == 3 and not calls[2][1].messages[0].images
+    assert len([n for n, _ in events if n == "vision.failed"]) == 1
+
+
+def test_an_opaque_400_with_unknown_vision_falls_back_but_not_for_a_declared_model(visual):
+    import json
+
+    from rinari.providers.errors import ProviderError, ProviderErrorCode
+
+    caller, request, calls = visual
+    (caller.services.ctx.home / "vision.json").write_text(json.dumps({"mode": "conversation"}))
+
+    def opaque(provider, model, req):
+        calls.append((model, req))
+        if any(m.images for m in req.messages):
+            error = ProviderError("Provider returned HTTP 400", code=ProviderErrorCode.SERVER_ERROR)
+            error.details["http_status"] = 400
+            raise error
+        return ModelResponse(content="ok", usage=Usage(1, 1))
+
+    caller.main.router.invoke = opaque
+    caller.main.router.main_vision = True
+    with pytest.raises(ProviderError):
+        caller.invoke(request)
+    assert len(calls) == 1
+    caller.main.router.main_vision = None
+    assert caller.invoke(request).content == "ok"
+    assert len(calls) == 3
+    assert settings(caller.services)["model_overrides"] == {"main": False}
+
+
+def test_a_rejection_never_loops(visual):
     from rinari.providers.errors import ProviderError, ProviderErrorCode
 
     caller, request, calls = visual
     configure(caller.services, {"mode": "conversation"})
 
-    def fail(provider, model, req):
+    def always(provider, model, req):
         calls.append((model, req))
         raise ProviderError("No image support", code=ProviderErrorCode.VISION_UNSUPPORTED)
 
-    caller.main.router.invoke = fail
+    caller.main.router.invoke = always
     with pytest.raises(ProviderError):
         caller.invoke(request)
-    assert len(calls) == 1
-    assert caller.visual_decision().route == "conversation"
+    assert len(calls) == 2
 
 
 def test_no_fallback_after_partial_stream(visual):

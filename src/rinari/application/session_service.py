@@ -709,7 +709,21 @@ class SessionService:
             self._ctx.db.execute("DELETE FROM session_events WHERE session_id = ?", (record.id,))
             self._ctx.db.execute("DELETE FROM session_messages WHERE session_id = ?", (record.id,))
             self._ctx.db.execute("DELETE FROM sessions WHERE id = ?", (record.id,))
+        from rinari.sessions.turn_lock import discard_lock, lock_path
+
+        # After the rows: no turn can start in a session that is gone. A lock
+        # still held is left for the engine-start sweep.
+        discard_lock(lock_path(self._ctx.layout.dir("sessions"), record.id), record.id)
         return record.id
+
+    def sweep_turn_locks(self) -> int:
+        """Discard the free turn-lock files of sessions that no longer exist."""
+        from rinari.sessions.turn_lock import sweep_orphan_locks
+
+        def live() -> set[str]:
+            return {str(row["id"]) for row in self._ctx.db.query("SELECT id FROM sessions")}
+
+        return sweep_orphan_locks(self._ctx.layout.dir("sessions"), live)
 
     def latest_for_root(self, root: str | Path) -> SessionRecord | None:
         """Latest active session bound to a project root (or None)."""

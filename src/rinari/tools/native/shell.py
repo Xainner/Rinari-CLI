@@ -16,6 +16,7 @@ import threading
 import time
 from typing import Any
 
+from rinari.tools import normalize
 from rinari.tools.definition import (
     RISK_HIGH,
     SIDE_EFFECT_LOCAL_REVERSIBLE,
@@ -454,6 +455,7 @@ def shell_tools() -> list[ToolDefinition]:
             idempotent=False,
             timeout_ms=600_000,
             handler=shell_exec,
+            normalize=normalize.shell_exec,
             namespace="shell",
             manifest={
                 "notes": "executes with the session user; the policy engine decides allow/ask/deny"

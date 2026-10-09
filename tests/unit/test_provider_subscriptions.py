@@ -18,7 +18,6 @@ from rinari.providers.auth import ProviderAuthService
 from rinari.providers.catalog import PROVIDER_CATALOG, product_for
 from rinari.providers.metadata import model_metadata
 from rinari.providers.usage import ProviderUsageService, amount, percent
-from rinari.shared.errors import InvalidUsageError
 
 
 def setup(app_ctx, handler, *, product="opencode-go", alias="account", auth="api-key"):
@@ -234,8 +233,20 @@ def test_claude_reasoning_and_signed_continuation_scoped_and_persisted(app_ctx):
     other = replace(p, id="other-account")
     prepared = router.generation_request(other, m, follow)
     assert all(msg.continuation is None for msg in prepared.messages)
-    with pytest.raises(InvalidUsageError):
-        router.invoke(p, m.id, replace(request, reasoning_effort="xhigh"))
+    # A level the model does not offer no longer ends the turn: the call goes
+    # without it and says so.
+    dropped = []
+    router.invoke(
+        p,
+        m.id,
+        replace(
+            request,
+            reasoning_effort="xhigh",
+            usage_observer=lambda name, payload: dropped.append((name, payload)),
+        ),
+    )
+    assert "output_config" not in calls[-1] or "effort" not in calls[-1]["output_config"]
+    assert [name for name, _ in dropped if name == "provider.reasoning.dropped"]
 
 
 def test_claude_stream_preserves_thinking_and_signature():
@@ -839,8 +850,9 @@ def test_gemini_stream_signature_survives_tool_continuation(app_ctx):
         == "opaque-signed"
     )
     assert calls[0]["reasoning_effort"] == "high"
-    with pytest.raises(InvalidUsageError):
-        router.invoke(p, m.id, replace(req, reasoning_effort="medium"))
+    # An unsupported level is dropped for the call instead of ending the turn.
+    router.invoke(p, m.id, replace(req, reasoning_effort="medium"))
+    assert "reasoning_effort" not in calls[-1]
 
 
 @pytest.mark.parametrize("endpoint", ["/v1/messages", "/responses", "/chat/completions"])

@@ -46,14 +46,18 @@ def _counting_tool(name: str, schema: dict, *, source: str | None = None):
     return tool, calls
 
 
-def test_shell_exec_rejects_timeout_ms_and_names_timeout_s(project) -> None:
+def test_shell_exec_rejects_timeout_ms_beside_timeout_s_and_names_timeout_s(project) -> None:
+    # timeout_ms alone is normalized (test_argument_normalization); next to
+    # timeout_s it has no single meaning and is still rejected.
     tmp_path, root, _ = project
     ctx = _ctx(tmp_path, root, profile="full-access")
     runtime, _ = _runtime(ctx, tmp_path, answer="y")
     marker = root / "ran.txt"
     command = [sys.executable, "-c", f"open({str(marker)!r}, 'w').write('x')"]
 
-    result = runtime.execute("shell.exec", {"argv": command, "timeout_ms": 900000}, ctx)
+    result = runtime.execute(
+        "shell.exec", {"argv": command, "timeout_ms": 900000, "timeout_s": 5}, ctx
+    )
 
     assert result.ok is False
     assert result.error.code is ToolErrorCode.INVALID_ARGUMENT

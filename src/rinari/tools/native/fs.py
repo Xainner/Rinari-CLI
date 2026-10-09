@@ -9,13 +9,16 @@ bounded (harness.md section 65).
 from __future__ import annotations
 
 import codecs
+import dataclasses
 import fnmatch
 import hashlib
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
 
+from rinari.tools import normalize
 from rinari.tools.atomic import ContentConflict, replace_text
 from rinari.tools.definition import (
     RISK_LOW,
@@ -157,7 +160,10 @@ def fs_read_lines(input: dict, ctx: ToolContext) -> ToolResult:
         if end < start:
             return _fail(ToolErrorCode.INVALID_ARGUMENT, "end must be >= start")
         end = min(end, start + 1999)
-        selected = []
+        # "N| text" rows: a {"line", "text"} object per line spent about a
+        # third of the observation on keys and quotes.
+        selected: list[str] = []
+        last = None
         number = 0
         used = 0
         complete = True
@@ -181,17 +187,18 @@ def fs_read_lines(input: dict, ctx: ToolContext) -> ToolResult:
                     if used + len(text) > 64_000:
                         complete = False
                         break
-                    selected.append({"line": number, "text": text})
+                    selected.append(f"{number}| {text}")
+                    last = number
                     used += len(text)
         return ToolResult(
             ok=True,
             data={
                 "path": str(resolved),
-                "lines": selected,
+                "text": "\n".join(selected),
+                "start_line": start,
+                "end_line": last,
                 "total_lines": number if complete else None,
-                "next_line": None
-                if complete
-                else (selected[-1]["line"] + 1 if selected else start),
+                "next_line": None if complete else (last + 1 if last is not None else start),
             },
             truncated=not complete,
         )
@@ -206,6 +213,28 @@ def fs_read_lines(input: dict, ctx: ToolContext) -> ToolResult:
 # -- fs.write -----------------------------------------------------------------
 
 
+def _missing_parents(path: Path) -> list[Path]:
+    """Ancestors of ``path`` that do not exist yet, outermost first."""
+    missing: list[Path] = []
+    folder = path.parent
+    while not folder.exists() and folder != folder.parent:
+        missing.append(folder)
+        folder = folder.parent
+    return list(reversed(missing))
+
+
+def _inside_write_roots(ctx: ToolContext, folder: Path) -> bool:
+    """Whether ``folder`` lies strictly inside a granted write root.
+
+    Missing folders there are created without asking: writing the file was
+    already authorized and the folders stay inside the same root (the
+    result lists them, so a mistyped path is visible). A root granted by a
+    one-off approval is the target's own folder, never strictly inside, so
+    approved writes outside the workspace still require create_parents.
+    """
+    return any(root in folder.parents for root in ctx.sandbox.write_roots)
+
+
 def fs_write(input: dict, ctx: ToolContext) -> ToolResult:
     resolved, error = _resolve_write(ctx, input.get("path"))
     if error:
@@ -213,15 +242,30 @@ def fs_write(input: dict, ctx: ToolContext) -> ToolResult:
     content = input.get("content")
     if not isinstance(content, str):
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "content must be a string")
-    create_parents = bool(input.get("create_parents", False))
+    if resolved.is_dir():
+        return _fail(ToolErrorCode.INVALID_ARGUMENT, f"Path is a directory: {resolved}")
+    missing = _missing_parents(resolved)
+    if missing and not (
+        bool(input.get("create_parents", False)) or _inside_write_roots(ctx, missing[0])
+    ):
+        return _fail(
+            ToolErrorCode.NOT_FOUND,
+            f"Parent folder does not exist: {missing[0]}. Nothing was written. Check the "
+            "path; if the folder is meant to be new, retry with create_parents=true.",
+        )
     # Classified before the write: the write itself changes the content hash.
     pre_existing = _classify_user_work(ctx, resolved)
     try:
-        if create_parents:
+        if missing:
             resolved.parent.mkdir(parents=True, exist_ok=True)
         digest = replace_text(resolved, content, input.get("expected_hash"))
     except ContentConflict as exc:
         return _fail(ToolErrorCode.CONFLICT, str(exc))
+    except FileNotFoundError:
+        return _fail(
+            ToolErrorCode.NOT_FOUND,
+            f"Write failed: the parent folder of {resolved} does not exist",
+        )
     except OSError as exc:
         return _fail(ToolErrorCode.PERMISSION_DENIED, f"Write failed: {exc.__class__.__name__}")
     data: dict = {
@@ -229,6 +273,8 @@ def fs_write(input: dict, ctx: ToolContext) -> ToolResult:
         "bytes_written": len(content.encode("utf-8")),
         "sha256": digest,
     }
+    if missing:
+        data["created_dirs"] = [str(folder) for folder in missing]
     if pre_existing is not None:
         data["user_pre_existing_changes"] = True
         data["warning"] = (
@@ -380,6 +426,7 @@ def fs_glob(input: dict, ctx: ToolContext) -> ToolResult:
                 ctx,
                 limit=min(500, max(1, int(input.get("limit", 500)))),
                 offset=max(0, int(input.get("offset", 0))),
+                include_dirs=bool(input.get("include_dirs", False)),
             )
         )
     except ValueError as exc:
@@ -436,7 +483,44 @@ def fs_search_text(input: dict, ctx: ToolContext) -> ToolResult:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "pattern must be a non-empty string")
     from rinari.tools.text_search import search_text
 
-    return search_text(resolved, input, ctx, literal=True)
+    regex = bool(input.get("regex", False))
+    # Case-insensitive in both modes, with absolute file paths: the regex
+    # switch changes how the pattern is read, not the shape of the result.
+    result = search_text(resolved, input, ctx, literal=not regex, ignore_case=True, relative=False)
+    if (
+        result.ok
+        and not regex
+        and isinstance(result.data, dict)
+        and not result.data.get("matches")
+        and looks_like_regex(pattern)
+    ):
+        # Models pass `a|b` or `foo\.bar` here; a silent zero sent them on
+        # to conclude the text did not exist.
+        result = dataclasses.replace(
+            result,
+            data={
+                **result.data,
+                "note": "no literal match; the pattern looks like a regex — set "
+                "regex=true or use search.regex",
+            },
+        )
+    return result
+
+
+_REGEX_HINTS = re.compile(
+    r"\\[.\\dDwWsSbB()\[\]{}|*+?^$]"  # escaped metacharacter or class
+    r"|\|"  # alternation
+    r"|\.[*+?]"  # .* .+ .?
+    r"|\[[^\]]+\]"  # character class
+    r"|\(\?"  # group extension
+    r"|^\^|\$$"  # anchors
+    r"|\{\d+(,\d*)?\}"  # counted repetition
+)
+
+
+def looks_like_regex(pattern: str) -> bool:
+    """Whether a literal search pattern was probably meant as a regex."""
+    return bool(_REGEX_HINTS.search(pattern))
 
 
 # -- fs.stat --------------------------------------------------------------------
@@ -528,8 +612,9 @@ def filesystem_tools() -> list[ToolDefinition]:
             name="fs.read",
             concurrency="local-read",
             description=(
-                "Read a text file; use paths for up to 16 independent files in one "
-                "parallel batch. Every path is permission checked."
+                "Read a whole text file; use paths for up to 16 independent files in one "
+                "parallel batch. Every path is permission checked. For a line range use "
+                "fs.read_lines."
             ),
             input_schema={
                 "type": "object",
@@ -542,12 +627,18 @@ def filesystem_tools() -> list[ToolDefinition]:
             risk=RISK_LOW,
             side_effects=SIDE_EFFECT_NONE,
             handler=fs_read,
+            normalize=normalize.fs_read,
             namespace="fs",
         ),
         ToolDefinition(
             name="fs.read_lines",
             concurrency="local-read",
-            description="Read a 1-indexed inclusive line range from a text file.",
+            description=(
+                "Read a 1-indexed inclusive line range from a text file (default 200 "
+                "lines). text holds one 'N| line' row per line; the 'N| ' prefix is not "
+                "part of the file, so drop it before quoting a line in fs.patch. Continue "
+                "from next_line when it is set."
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -560,17 +651,24 @@ def filesystem_tools() -> list[ToolDefinition]:
             risk=RISK_LOW,
             side_effects=SIDE_EFFECT_NONE,
             handler=fs_read_lines,
+            normalize=normalize.fs_read_lines,
             namespace="fs",
         ),
         ToolDefinition(
             name="fs.write",
-            description="Write a text file (overwrites). create_parents makes missing directories.",
+            description=(
+                "Write a text file (overwrites). Missing folders inside the workspace are "
+                "created and listed in created_dirs; elsewhere set create_parents=true."
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
                     "content": {"type": "string"},
-                    "create_parents": {"type": "boolean"},
+                    "create_parents": {
+                        "type": "boolean",
+                        "description": "Create missing folders even outside the workspace.",
+                    },
                     "expected_hash": {
                         "type": "string",
                         "description": "SHA-256 of the current file, or missing for create-only.",
@@ -587,7 +685,8 @@ def filesystem_tools() -> list[ToolDefinition]:
         ToolDefinition(
             name="fs.patch",
             description=(
-                "Replace unique text, or supply files with edits for a prevalidated "
+                "Replace unique text (path, old_string, new_string), or supply "
+                "files=[{path, edits:[{old_string, new_string}]}] for a prevalidated "
                 "multi-file patch. Rollback never overwrites concurrent changes."
             ),
             input_schema={
@@ -612,6 +711,7 @@ def filesystem_tools() -> list[ToolDefinition]:
             side_effects=SIDE_EFFECT_LOCAL_REVERSIBLE,
             idempotent=False,
             handler=fs_patch,
+            normalize=normalize.fs_patch,
             namespace="fs",
         ),
         ToolDefinition(
@@ -639,7 +739,10 @@ def filesystem_tools() -> list[ToolDefinition]:
         ToolDefinition(
             name="fs.glob",
             concurrency="local-read",
-            description="Find files matching a glob pattern under a root.",
+            description=(
+                "Find files matching a glob pattern under a root (e.g. **/*.py). "
+                "Folders match only with include_dirs=true; they end with a path separator."
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -647,6 +750,10 @@ def filesystem_tools() -> list[ToolDefinition]:
                     "path": {"type": "string"},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 500},
                     "offset": {"type": "integer", "minimum": 0},
+                    "include_dirs": {
+                        "type": "boolean",
+                        "description": "Also match folders (default false: files only).",
+                    },
                 },
                 "required": ["pattern"],
             },
@@ -658,13 +765,22 @@ def filesystem_tools() -> list[ToolDefinition]:
         ToolDefinition(
             name="fs.search_text",
             concurrency="local-read",
-            description="Case-insensitive literal text search across text files.",
+            description=(
+                "Case-insensitive text search across text files. The pattern is literal "
+                "text ('a|b' searches for that exact text) unless regex=true, which reads it "
+                "as a regular expression. search.regex is the case-sensitive regex search."
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string"},
                     "path": {"type": "string"},
                     "include": {"type": "string"},
+                    "regex": {
+                        "type": "boolean",
+                        "description": "Read pattern as a regular expression (default false).",
+                    },
+                    "max_results": {"type": "integer", "minimum": 1, "maximum": 200},
                 },
                 "required": ["pattern"],
             },

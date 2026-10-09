@@ -611,3 +611,41 @@ def test_independent_rewrite_targets_do_not_share_escalation():
         assert det.check().action == NUDGE
     det.record_tool("fs.write", {"path": "b.py", "content": "1"})
     assert det.check().action == STOP
+
+
+def test_one_new_identical_error_after_a_nudge_does_not_stop_the_turn():
+    """The nudge's own errors stay in the tail: one more identical error, even
+    after a successful call in between, used to stop the turn at once."""
+    det = LoopDetector(repeats=3)
+    for _ in range(3):
+        det.begin_response()
+        det.record_error("fs.patch", "INVALID_ARGUMENTS", "old_string not found")
+    assert det.check().action == NUDGE
+    det.begin_response()
+    det.record_tool("fs.read", {"path": "a.py"})
+    assert det.check() is None
+    det.begin_response()
+    det.record_error("fs.patch", "INVALID_ARGUMENTS", "old_string not found")
+    assert det.check() is None
+    det.begin_response()
+    det.record_error("fs.patch", "INVALID_ARGUMENTS", "old_string not found")
+    assert det.check() is None
+    det.begin_response()
+    det.record_error("fs.patch", "INVALID_ARGUMENTS", "old_string not found")
+    signal = det.check()
+    assert signal is not None and signal.kind == "same-error" and signal.action == STOP
+
+
+def test_identical_errors_in_the_nudged_response_do_not_count_toward_the_stop():
+    det = LoopDetector(repeats=3)
+    det.begin_response()
+    for _ in range(3):
+        det.record_error("web.fetch", "TIMEOUT", "timed out")
+    assert det.check().action == NUDGE
+    # The rest of that same response had not read the nudge yet.
+    for _ in range(3):
+        det.record_error("web.fetch", "TIMEOUT", "timed out")
+        assert det.check() is None
+    det.begin_response()
+    det.record_error("web.fetch", "TIMEOUT", "timed out")
+    assert det.check() is None

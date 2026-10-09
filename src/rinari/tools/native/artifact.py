@@ -259,6 +259,9 @@ def artifact_tools() -> list[ToolDefinition]:
             handler=artifact_metadata,
             classify=lambda _: ClassifiedAction("state.read"),
             namespace="artifact",
+            # Rarely needed: on demand through capability.search. artifact.read
+            # stays core because every spilled observation points at it.
+            always_loaded=False,
         ),
         ToolDefinition(
             name="artifact.export",
@@ -280,6 +283,7 @@ def artifact_tools() -> list[ToolDefinition]:
             handler=artifact_export,
             classify=lambda a: ClassifiedAction("fs.write", _export_target(a) or "."),
             namespace="artifact",
+            always_loaded=False,
         ),
     ]
 

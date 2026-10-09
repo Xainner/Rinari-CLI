@@ -542,6 +542,7 @@
         "flow.invalidated",
         "provider.usage.updated",
         "provider.auth.updated",
+        "provider.reasoning.dropped",
         "skill.job.completed",
         "skill.job.failed",
         "skill.learned",

@@ -42,6 +42,7 @@ Route each request to the smallest call; stop as soon as the answer is supported
 | A CLI command for a task | `skills.read` `references/cli.md` | — |
 | Architecture, state layout, precedence rules | `skills.read` `references/engine.md` | — |
 | A known failure (empty turn, 0 models, login, file access, compaction) | `skills.read` `references/recipes.md` | the calls the recipe names |
+| Work on a remote machine over SSH | `skills.read` `references/remote.md` | `ssh.inspect` / `ssh.run` |
 
 Read `references/efficiency.md` once when a task needs many tool calls.
 
