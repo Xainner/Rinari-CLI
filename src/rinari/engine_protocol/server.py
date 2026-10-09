@@ -795,6 +795,7 @@ class EngineServer:
             raise EngineProtocolError(INVALID_PARAMS, "Param 'ref' must be a non-empty string.")
         started = self._services.sessions.resume(ref=ref)
         record = started.session
+        self._turns.reconcile_orphan_turns(record.id)
         return {
             "session": session_to_dict(record),
             "created": started.created,
@@ -1193,6 +1194,7 @@ class EngineServer:
             raise EngineProtocolError(INVALID_PARAMS, "Param 'limit' must be an int in 1..100.")
         record = self._services.sessions.show(ref)
         self._turns.questions.list(record.id)  # Reconcile orphaned waits after restart.
+        self._turns.reconcile_orphan_turns(record.id)
         events = [row for row in self._services.ctx.event_repo.list(record.id) if row.turn_id]
         messages = self._services.ctx.message_repo.list(record.id)
         messages, _redacted = self._services.memory.redact_history(messages)

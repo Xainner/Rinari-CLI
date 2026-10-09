@@ -19,6 +19,7 @@ model I/O surfaces as a CancelledError at the next boundary.
 from __future__ import annotations
 
 import contextlib
+import json
 import queue
 import threading
 import time
@@ -32,7 +33,7 @@ from rinari.context.tokens import (
     estimate_tokens,
     pressure,
 )
-from rinari.models.types import ChatMessage, ModelRequest, StopReason, Usage
+from rinari.models.types import ChatMessage, ModelRequest, StopReason, ToolCall, Usage
 from rinari.prompts.assembler import AssemblerContext, PromptAssembler
 from rinari.runtime.budget import NETWORK_CALLS as NETWORK_CALLS_DIM
 from rinari.runtime.budget import TOOL_CALLS as TOOL_CALLS_DIM
@@ -618,10 +619,7 @@ class AgentLoop:
                         ok=False,
                         error=ToolErrorInfo(
                             code=ToolErrorCode.INVALID_ARGUMENT,
-                            message=(
-                                f"Model emitted invalid JSON for arguments of "
-                                f"{call.name!r}; fix the arguments and retry"
-                            ),
+                            message=_invalid_arguments_message(call),
                             retryable=True,
                         ),
                     )
@@ -1274,6 +1272,33 @@ class AgentLoop:
             return
         with contextlib.suppress(Exception):
             self._activity_sink(event, payload)
+
+
+def _invalid_arguments_message(call: ToolCall) -> str:
+    """Where the arguments broke, so the retry can fix that spot.
+
+    "Invalid JSON" alone made models resend the same oversized patch: the
+    usual cause is a long edit cut off or mis-escaped mid-string.
+    """
+    message = f"Model emitted invalid JSON for arguments of {call.name!r}"
+    raw = call.raw_arguments
+    if isinstance(raw, str):
+        try:
+            json.loads(raw)
+        except json.JSONDecodeError as exc:
+            message += (
+                f": {exc.msg} at line {exc.lineno} column {exc.colno} "
+                f"(char {exc.pos} of {len(raw)})"
+            )
+        else:
+            message += ": the arguments must be a JSON object"
+    message += "; fix the arguments and retry"
+    if call.name in ("fs.patch", "fs.write"):
+        message += (
+            ". Long edits are where strings break: split the patch into smaller "
+            "fs.patch calls, or rewrite the whole file with fs.write"
+        )
+    return message
 
 
 def _turn_completed_payload(
