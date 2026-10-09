@@ -319,7 +319,9 @@ class EngineServer:
         self._dispatcher.register("plugin.diagnostics", self._plugin_diagnostics)
         from rinari.engine_protocol.skills import SkillMethods
 
-        self._skills = SkillMethods(self._services, self._turns.emit_external)
+        self._skills = SkillMethods(
+            self._services, self._turns.emit_external, self._turns.emit_skill_resolution
+        )
         self._services.skills.on_learned = lambda payload: self._turns.emit_external(
             event("skill.learned", payload)
         )
@@ -337,6 +339,8 @@ class EngineServer:
         self._dispatcher.register("skill.pending.approve", self._skills.pending_approve)
         self._dispatcher.register("skill.pending.reject", self._skills.pending_reject)
         self._dispatcher.register("skill.revert", self._skills.revert)
+        self._dispatcher.register("skill.duplicates.list", self._skills.duplicates_list)
+        self._dispatcher.register("skill.duplicates.dismiss", self._skills.duplicates_dismiss)
         self._dispatcher.register("skill.settings.get", self._skills.settings_get)
         self._dispatcher.register("skill.settings.set", self._skills.settings_set)
         self._dispatcher.register("tool.list", self._tool_list)

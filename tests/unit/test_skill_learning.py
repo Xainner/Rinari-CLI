@@ -54,6 +54,10 @@ def services(app_ctx, tmp_path):
     )
     container.models.add("fake", "fake-model-1", "fake-one")
     container.providers.use("fake")
+    # These tests reuse one skill text under many names to probe authorization,
+    # undo and history; the near-duplicate gate would (rightly) stop them.
+    # It has its own tests in test_skill_duplicates.py.
+    container.skills.similar_skills = lambda *_args, **_kwargs: []
     return container
 
 
@@ -69,7 +73,7 @@ def test_the_owner_asked_so_it_is_saved_active(services) -> None:
     assert record["origin"] == "learned" and record["learned_from"] == "ses_1"
     entry = next(row for row in services.skills.library() if row["name"] == "deploy-saturno")
     assert entry["origin"] == "learned" and entry["editable"] is True
-    assert seen == [{**result, "session_id": "ses_1"}]
+    assert seen == [{**result, "session_id": "ses_1", "card": True}]
 
 
 def test_rinari_proposing_on_its_own_waits_for_approval(services) -> None:
@@ -159,7 +163,7 @@ def test_an_update_of_a_learned_skill_needs_no_approval(services) -> None:
     )
     assert result["status"] == "active" and result["update"] is True
     assert result["version"] == "1.1.0" and result["previous_version"] == "1.0.0"
-    assert seen == [{**result, "session_id": "ses_3"}]
+    assert seen == [{**result, "session_id": "ses_3", "card": True}]
     assert services.skills.learning.pending() == []
     assert "3. Restart." in services.skills.get("deploy-saturno").procedure
     detail = services.skills.detail("deploy-saturno")

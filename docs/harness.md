@@ -2418,7 +2418,20 @@ new skill outside /learn                  → pending until the owner approves
 update of an installed/owner-created skill → pending until the owner approves
 dangerous review findings (any case)      → pending until the owner approves
 same content as the installed version     → "unchanged": no history, no event
+new skill close to an installed one       → refused (SIMILAR_EXISTS) until update_of
+                                            or distinct_from {name: why}; then pending
+merge (replaces=[...], /merge-skills)     → pending; approval turns the merged off
 ```
+
+/lesson and /merge-skills count as the owner asking, like /learn. "Close" is
+TF-IDF cosine over the installed skills (`rinari.skills.similarity`): what two
+skills share and few others have weighs most, so a stale sibling (the same job
+through an older backend) is caught where word overlap is not. The threshold
+for a proposal is 0.25 (a false alarm costs one sentence of reasons); Settings
+› Skills lists pairs of the owner's own skills above 0.30
+(`skill.duplicates.list`), and a pair dismissed there stays hidden. Every
+proposal from a turn is also `skill.proposed` on that turn (a chat card) and
+its approval, rejection or undo is `skill.proposal.resolved`.
 
 A change Rinari makes to an installed or owner-created skill (approved, or
 under `/learn`) keeps that skill's record: origin, source, source kind,
