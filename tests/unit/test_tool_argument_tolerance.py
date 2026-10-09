@@ -13,7 +13,6 @@ equivalences are rewritten, and policy judges the rewritten call.
 from __future__ import annotations
 
 import dataclasses
-import json
 import os
 import sys
 
@@ -48,7 +47,8 @@ def test_shell_exec_runs_with_timeout_ms_converted_to_seconds(project) -> None:
     assert result.ok, result.error
     assert marker.exists()
     assert result.notes == ("used timeout_s=300 (received timeout_ms=300000)",)
-    assert json.loads(result.to_model_text("shell.exec"))["notes"] == list(result.notes)
+    # Command output reaches the model as plain text; the note travels with it.
+    assert "notes: " + result.notes[0] in result.to_model_text("shell.exec")
     normalized = [payload for kind, payload in events if kind == "ToolArgumentsNormalized"]
     assert normalized == [{"tool": "shell.exec", "notes": list(result.notes), "tool_call_id": "c1"}]
 
@@ -430,3 +430,15 @@ def test_read_lines_is_compact_and_continues_from_next_line(project) -> None:
     assert whole.data["text"] == "9| row 9\n10| row 10"
     assert (whole.data["next_line"], whole.data["total_lines"]) == (None, 10)
     assert '"lines"' not in first.to_model_text("fs.read_lines")
+
+
+def test_notes_reach_the_model_in_compact_command_output() -> None:
+    from rinari.tools.definition import ToolResult
+
+    result = ToolResult(
+        ok=True,
+        data={"exit_code": 0, "stdout": "ok", "stderr": ""},
+        notes=("used timeout_s=300 (received timeout_ms=300000)",),
+    )
+    text = result.to_model_text("shell.exec")
+    assert "notes: used timeout_s=300 (received timeout_ms=300000)" in text

@@ -183,6 +183,9 @@ class ToolResult:
         status = "running" if code is None else "exited_zero" if code == 0 else "failed"
         timing = f", {round(self.duration_ms)} ms" if self.duration_ms else ""
         lines.append(f"exit_code: {code} ({status}; task not verified{timing})")
+        if self.notes:
+            # How the call was understood (e.g. timeout_ms read as timeout_s).
+            lines.append("notes: " + "; ".join(self.notes))
         # Rendered below, echoes of the request, or bookkeeping the model
         # cannot act on.
         hidden = {
