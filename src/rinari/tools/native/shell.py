@@ -54,6 +54,68 @@ def resolve_argv(command: Any, env: dict[str, str]) -> Any:
     return [found, *command[1:]] if found else command
 
 
+SHELLS = ("default", "cmd", "powershell", "bash", "sh")
+
+
+def shell_argv(command: Any, shell: Any) -> Any:
+    """`command` run by the requested shell, as argv; unchanged for the default.
+
+    Models write bash or PowerShell while Windows runs cmd.exe: `;`, `| head`
+    and `$var` failed there. Choosing the shell is explicit and only wraps the
+    command at launch, so policy still classifies the command text itself.
+    Raises ValueError with what to do when the shell is not available.
+    """
+    if not isinstance(command, str) or shell in (None, "", "default"):
+        return command
+    import shutil
+
+    if shell == "powershell":
+        program = shutil.which("pwsh") or shutil.which("powershell")
+        if not program:
+            raise ValueError("PowerShell is not installed; use the default shell")
+        return [program, "-NoProfile", "-NonInteractive", "-Command", command]
+    if shell == "cmd":
+        if sys.platform != "win32":
+            raise ValueError("cmd is only available on Windows")
+        return [os.environ.get("COMSPEC") or "cmd.exe", "/d", "/s", "/c", command]
+    if shell in ("bash", "sh"):
+        program = _bash() if shell == "bash" else shutil.which("sh") or _bash()
+        if not program:
+            raise ValueError(f"{shell} is not installed; use the default shell")
+        return [program, "-c", command]
+    raise ValueError(f"shell must be one of {', '.join(SHELLS)}")
+
+
+def _bash() -> str | None:
+    import shutil
+
+    if sys.platform == "win32":
+        # Git for Windows' bash, not the WSL launcher in System32: that one
+        # runs inside a Linux distribution that cannot see this session's paths.
+        # Prefer the bin/bash.exe launcher: it sets up the PATH for grep,
+        # head and the other tools. git.exe lives in cmd/ or mingw64/bin/.
+        git = shutil.which("git")
+        if git:
+            base = os.path.dirname(os.path.dirname(git))
+            for root in (base, os.path.dirname(base)):
+                path = os.path.join(root, "bin", "bash.exe")
+                if os.path.isfile(path):
+                    return path
+        found = shutil.which("bash")
+        return found if found and "system32" not in found.lower() else None
+    return shutil.which("bash")
+
+
+SHELL_SCHEMA = {
+    "type": "string",
+    "enum": list(SHELLS),
+    "description": (
+        "Shell for `command`: default is cmd.exe on Windows and /bin/sh elsewhere; "
+        "powershell or bash run the command with that syntax."
+    ),
+}
+
+
 def _ok(data: Any) -> ToolResult:
     return ToolResult(ok=True, data=data)
 
@@ -220,6 +282,10 @@ def shell_exec(input: dict, ctx: ToolContext) -> ToolResult:
         from rinari.tools.native.process import process_start
 
         return process_start(input, ctx)
+    try:
+        command = shell_argv(command, input.get("shell"))
+    except ValueError as exc:
+        return _fail(ToolErrorCode.INVALID_ARGUMENT, str(exc))
     if ctx.cancellation is not None:
         ctx.cancellation.throw_if_cancelled()
 
@@ -356,9 +422,10 @@ def shell_tools() -> list[ToolDefinition]:
                 "Returns exit code and "
                 "bounded stdout/stderr. Use for builds, tests, git, and anything without a "
                 "dedicated structured tool. This is non-interactive (stdin is closed). "
-                "On Windows the command runs through the configured Windows command shell; "
-                "use Windows-compatible commands. Set a short explicit timeout for SSH and "
-                "network probes, and an explicit longer timeout for builds/tests."
+                "On Windows `command` runs in cmd.exe unless `shell` says otherwise: chain "
+                "with &&, there is no grep/head/tail; set shell=powershell or shell=bash to "
+                "write in those syntaxes. Set a short explicit timeout for SSH and network "
+                "probes, and an explicit longer timeout for builds/tests."
             ),
             input_schema={
                 "type": "object",
@@ -378,6 +445,7 @@ def shell_tools() -> list[ToolDefinition]:
                         "description": "Seconds; default 60, max 600 (longer: background=true).",
                     },
                     "env": {"type": "object"},
+                    "shell": SHELL_SCHEMA,
                 },
                 "oneOf": [{"required": ["command"]}, {"required": ["argv"]}],
             },

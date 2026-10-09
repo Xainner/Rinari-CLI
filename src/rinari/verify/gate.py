@@ -102,6 +102,11 @@ def evaluate_gate(
     DONE.
     """
     by_kind = _latest_by_kind(records)
+    generic = not required_kinds
+    if generic:
+        # No kind is specific to the work (it was not source code): any check
+        # counts, and every kind recorded must hold.
+        required_kinds = tuple(sorted(by_kind))
     evidence = [
         {
             "id": rec.get("id"),
@@ -143,7 +148,7 @@ def evaluate_gate(
         return GateDecision(outcome=OUTCOME_FAILED, reasons=rs, evidence=evidence)
 
     missing = [k for k in required_kinds if by_kind.get(k) is None]
-    if require_evidence and missing and not records:
+    if require_evidence and (missing or generic) and not records:
         return GateDecision(
             outcome=OUTCOME_IMPLEMENTED_UNVERIFIED,
             reasons=[

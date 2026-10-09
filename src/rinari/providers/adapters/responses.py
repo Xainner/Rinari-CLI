@@ -408,9 +408,18 @@ def _function_call_from_responses(raw: Any) -> ToolCall | None:
 def _usage_from_responses(raw: Any) -> Usage:
     if not isinstance(raw, dict):
         return Usage()
+    inputs = raw.get("input_tokens_details")
+    outputs = raw.get("output_tokens_details")
     return Usage(
         input_tokens=_optional_int(raw.get("input_tokens")),
         output_tokens=_optional_int(raw.get("output_tokens")),
+        # Without these the cache looked unused and reasoning invisible.
+        cached_input_tokens=_optional_int(
+            inputs.get("cached_tokens") if isinstance(inputs, dict) else None
+        ),
+        reasoning_tokens=_optional_int(
+            outputs.get("reasoning_tokens") if isinstance(outputs, dict) else None
+        ),
     )
 
 
