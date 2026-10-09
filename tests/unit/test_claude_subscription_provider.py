@@ -32,7 +32,10 @@ SETTINGS = {"product_id": "claude-subscription", "transport": "claude-cli"}
 def services(app_ctx, tmp_path):
     user_home = tmp_path / "home"
     user_home.mkdir()
-    return build_services(app_ctx, user_home=user_home)
+    built = build_services(app_ctx, user_home=user_home)
+    # The product is opt-in; these tests are about what it does once on.
+    built.providers.set_external_runtimes_enabled(True)
+    return built
 
 
 @pytest.fixture
@@ -473,3 +476,66 @@ def test_a_billing_block_shows_in_the_runtime_state_until_checked_again(
         assert claude_cli.blocked_source(str(cli)) is None
     finally:
         claude_cli.clear_source_block()
+
+
+# -- interruptor en Ajustes (opt-in) -------------------------------------------
+
+
+def test_it_is_off_until_the_owner_turns_it_on(app_ctx, tmp_path, monkeypatch):
+    """Nobody gets Claude Subscription without asking for it."""
+    home = tmp_path / "fresh-home"
+    home.mkdir()
+    fresh = build_services(app_ctx, user_home=home)
+    assert fresh.providers.external_runtimes_enabled() is False
+    monkeypatch.setenv("RINARI_CLAUDE_COMMAND", str(fake_cli(tmp_path)))
+    with pytest.raises(InvalidUsageError) as exc:
+        fresh.providers.add(
+            AddProviderInput(
+                alias="claude-sub",
+                provider_type="custom",
+                auth_method="external-cli",
+                endpoint=CLAUDE_CLI_ENDPOINT,
+                settings=dict(SETTINGS),
+            )
+        )
+    assert "turned off" in str(exc.value)
+
+
+def test_the_catalog_lists_it_as_disabled_until_switched_on(engine_server, services):
+    from itertools import count
+
+    ids = count()
+
+    def call(method, params):
+        line = json.dumps({"id": f"{method}-{next(ids)}", "method": method, "params": params})
+        return engine_server.handle_line(line)
+
+    def claude_entry():
+        presets = call("provider.catalog.get", {})["result"]["presets"]
+        return next(p for p in presets if p["id"] == "claude-subscription")
+
+    off = call("provider.settings.set", {"external_runtimes": False})
+    assert off["result"] == {"external_runtimes": False}
+    assert claude_entry()["enabled"] is False
+    assert call("provider.settings.get", {})["result"] == {"external_runtimes": False}
+    on = call("provider.settings.set", {"external_runtimes": True})
+    assert on["result"] == {"external_runtimes": True}
+    assert claude_entry()["enabled"] is True
+    assert call("provider.settings.set", {"external_runtimes": "yes"})["ok"] is False
+
+
+def test_switching_it_off_stops_saved_providers_before_any_process(services, tmp_path, monkeypatch):
+    from rinari.models.router import ModelRouter
+    from rinari.models.types import ChatMessage, ModelRequest
+    from rinari.providers.errors import ProviderError, ProviderErrorCode
+
+    record = tmp_path / "record.json"
+    monkeypatch.setenv("FAKE_CLAUDE_RECORD", str(record))
+    provider, model = _saved_model(services, tmp_path, monkeypatch)
+    services.providers.set_external_runtimes_enabled(False)
+    router = ModelRouter(services.providers, services.models)
+    request = ModelRequest(model=model.alias, messages=(ChatMessage.user("hola"),))
+    with pytest.raises(ProviderError) as exc:
+        router.invoke(provider, model.id, request)
+    assert exc.value.error_code == ProviderErrorCode.AUTH
+    assert not record.exists(), "no claude process may start while it is off"

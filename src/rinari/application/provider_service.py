@@ -60,6 +60,11 @@ class DiscoveryCandidate:
 
 KEY_ACTIVE_PROVIDER = "active_provider"
 KEY_ACTIVE_MODEL = "active_model"
+#: Providers served by an external CLI (Claude Subscription) are opt-in:
+#: off until the owner turns them on in Settings. Anthropic allows using a
+#: plan through `claude -p` in third-party apps, but a public app offering
+#: it by default is not settled, so nobody gets it without asking.
+KEY_EXTERNAL_RUNTIMES = "providers.external_runtimes"
 
 
 class ProviderService:
@@ -77,6 +82,19 @@ class ProviderService:
         return now_iso(self._ctx.clock)
 
     # -- lookup ---------------------------------------------------------
+
+    def external_runtimes_enabled(self) -> bool:
+        return self._ctx.config_repo.get(KEY_EXTERNAL_RUNTIMES) == "on"
+
+    def set_external_runtimes_enabled(self, enabled: bool) -> bool:
+        self._ctx.config_repo.set(
+            ConfigValue(
+                key=KEY_EXTERNAL_RUNTIMES,
+                value="on" if enabled else "off",
+                updated_at=self._now(),
+            )
+        )
+        return enabled
 
     def list(self) -> list[ProviderRecord]:
         return self._ctx.provider_repo.list()
@@ -107,6 +125,11 @@ class ProviderService:
             return self._add(input)
 
     def _add(self, input: AddProviderInput) -> ProviderRecord:
+        if input.auth_method == "external-cli" and not self.external_runtimes_enabled():
+            raise InvalidUsageError(
+                "Claude Subscription is turned off",
+                hint="Turn it on in Settings > Providers (experimental).",
+            )
         validate_provider_type(
             input.provider_type, input.auth_method, input.settings.get("protocol")
         )

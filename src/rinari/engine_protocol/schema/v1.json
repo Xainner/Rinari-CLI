@@ -467,6 +467,8 @@
         "provider.usage.get",
         "provider.diagnostics.get",
         "provider.runtime.probe",
+        "provider.settings.get",
+        "provider.settings.set",
         "provider.auth.start",
         "provider.auth.get",
         "provider.auth.cancel",

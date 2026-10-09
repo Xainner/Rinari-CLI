@@ -90,6 +90,22 @@ has changed between CLI versions.
 
 ## Setup
 
+The provider is **off by default**. Anthropic lets people use their plan
+through `claude -p` in third-party apps, but whether a public app may offer it
+out of the box is not settled, so nobody gets it without asking. Turning it on
+is one switch, stored by the Engine (`providers.external_runtimes`) and shared
+with the CLI:
+
+- Desktop: Settings → Providers → «Claude Subscription (experimental)».
+- CLI: `rinari providers add --claude-subscription` (typing the flag is the
+  opt-in).
+- Protocol: `provider.settings.get` / `provider.settings.set
+  {external_runtimes: bool}`.
+
+While it is off the catalog lists the product with `enabled: false`, new
+providers are refused, and saved ones fail with `AUTH` before any `claude`
+process starts.
+
 Desktop: Settings → Providers → Claude Subscription. The card reports the state
 above and only lets the provider be saved when the CLI is on a subscription.
 Until then it shows a step-by-step guide with the command to copy.

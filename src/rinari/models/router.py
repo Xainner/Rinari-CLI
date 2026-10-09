@@ -493,6 +493,17 @@ class ModelRouter:
         # process and there is no wire API to pick. The guard below is about
         # HTTP transports Rinari cannot speak, and must not swallow this one.
         if provider.auth_method == "external-cli":
+            # Turning the setting off stops saved providers too, not just
+            # new ones: off means no `claude` process is started.
+            enabled = getattr(self._providers, "external_runtimes_enabled", None)
+            if enabled is not None and not enabled():
+                from rinari.providers.errors import ProviderError, ProviderErrorCode
+
+                raise ProviderError(
+                    "Claude Subscription is turned off.",
+                    code=ProviderErrorCode.AUTH,
+                    hint="Turn it on in Settings > Providers (experimental).",
+                )
             return self.adapter(provider), transport
         if transport == "anthropic":
             from rinari.providers.adapters.anthropic import AnthropicAdapter

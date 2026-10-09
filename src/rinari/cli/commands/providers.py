@@ -91,6 +91,9 @@ def providers_add(
                 hint="Authentication belongs to the Claude Code CLI.",
             )
         with services(ctx) as s:
+            # Typing the flag is the opt-in the desktop asks for with a
+            # switch in Settings; both store the same setting.
+            s.providers.set_external_runtimes_enabled(True)
             record = s.providers.add(
                 AddProviderInput(
                     alias=name or "claude-subscription",

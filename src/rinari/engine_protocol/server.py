@@ -399,6 +399,8 @@ class EngineServer:
         self._dispatcher.register("provider.usage.get", self._provider_usage)
         self._dispatcher.register("provider.diagnostics.get", self._provider_diagnostics)
         self._dispatcher.register("provider.runtime.probe", self._provider_runtime_probe)
+        self._dispatcher.register("provider.settings.get", self._provider_settings_get)
+        self._dispatcher.register("provider.settings.set", self._provider_settings_set)
         self._dispatcher.register("provider.create", self._provider_create)
         self._dispatcher.register("provider.get", self._provider_get)
         self._dispatcher.register("provider.update", self._provider_update)
@@ -3086,7 +3088,32 @@ class EngineServer:
     def _provider_catalog(self, params):
         from rinari.providers.catalog import catalog_view
 
-        return {"presets": catalog_view(), "version": "2026-09-22"}
+        presets = catalog_view()
+        if not self._services.providers.external_runtimes_enabled():
+            # Listed but not offered: the desktop filters on `enabled`, and
+            # Settings can still name what the switch turns on.
+            for preset in presets:
+                if "external-cli" in preset["auth_methods"]:
+                    preset["enabled"] = False
+        return {"presets": presets, "version": "2026-09-22"}
+
+    def _provider_settings_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        if params:
+            raise EngineProtocolError(INVALID_PARAMS, "provider.settings.get takes no parameters.")
+        return {"external_runtimes": self._services.providers.external_runtimes_enabled()}
+
+    def _provider_settings_set(self, params: dict[str, Any]) -> dict[str, Any]:
+        unknown = set(params) - {"external_runtimes"}
+        if unknown:
+            raise EngineProtocolError(
+                INVALID_PARAMS, f"Unknown params: {', '.join(sorted(unknown))}"
+            )
+        value = params.get("external_runtimes")
+        if not isinstance(value, bool):
+            raise EngineProtocolError(
+                INVALID_PARAMS, "Param 'external_runtimes' must be a boolean."
+            )
+        return {"external_runtimes": self._services.providers.set_external_runtimes_enabled(value)}
 
     def _auth_service(self):
         from rinari.providers.auth import ProviderAuthService
