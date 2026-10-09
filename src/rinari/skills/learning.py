@@ -21,6 +21,14 @@ Layout under ~/.rinari/skills (dot folders are never discovered as skills):
     .pending/<name>/            a proposal waiting for the owner
     .pending/<name>.json        who proposed it, when, update or new
     .history/<name>/<stamp>/    previous versions of learned skills
+    .merges/<name>.json         skills a merge turned off, to turn back on
+
+Near-duplicates are stopped, not stored: a new skill whose purpose is close
+to an installed one (rinari.skills.similarity) is refused with SIMILAR_EXISTS
+until the model either improves that skill (`update_of`) or says why this
+is a different job (`distinct_from`). A justified one still waits for the
+owner, marked as similar. A merge (`replaces`) always waits too; approving
+it turns the merged skills off, and undoing it turns them back on.
 """
 
 from __future__ import annotations
@@ -44,6 +52,8 @@ _REFERENCES_MAX = 20
 # Snapshots kept per learned skill; updates no longer wait for approval, so
 # the undo trail must not grow without bound.
 _HISTORY_KEPT = 20
+# A reason shorter than this is not a reason ("different", "other").
+_MIN_DISTINCT_REASON = 15
 AUTO_LEARN_KEY = "skills.auto_learn"
 AUTO_LEARN_MODES = ("propose", "never")
 
@@ -76,12 +86,20 @@ class SkillLearning:
         *,
         update_of: str | None = None,
         known: set[str] | None = None,
+        replaces: list[str] | None = None,
+        project: Path | None = None,
     ) -> dict:
         """Inspect a temporary draft; never touch skills, records or events."""
-        with self._draft(name, skill_md, references, update_of=update_of, known=known) as (
-            _,
-            report,
-        ):
+        replaces, update_of = self._merge_target(name, replaces, update_of)
+        with self._draft(
+            name,
+            skill_md,
+            references,
+            update_of=update_of,
+            known=known,
+            replaces=replaces,
+            project=project,
+        ) as (_, report):
             return report
 
     def propose(
@@ -94,17 +112,27 @@ class SkillLearning:
         update_of: str | None = None,
         owner_asked: bool = False,
         known: set[str] | None = None,
+        distinct_from: dict[str, str] | None = None,
+        replaces: list[str] | None = None,
+        project: Path | None = None,
     ) -> dict:
-        with self._draft(name, skill_md, references, update_of=update_of, known=known) as (
-            draft,
-            report,
-        ):
+        replaces, update_of = self._merge_target(name, replaces, update_of)
+        with self._draft(
+            name,
+            skill_md,
+            references,
+            update_of=update_of,
+            known=known,
+            replaces=replaces,
+            project=project,
+        ) as (draft, report):
             if not report["valid"]:
                 raise SkillError(
                     "SKILL_INVALID",
                     "; ".join(issue["message"] for issue in report["issues"]),
                     details={"issues": report["issues"], "warnings": report["warnings"]},
                 )
+            similar_to = _justified(report["similar"], distinct_from)
             result = {
                 "name": name,
                 "status": "active",
@@ -113,6 +141,8 @@ class SkillLearning:
                 "review": report["review"]["verdict"],
                 "warnings": report["warnings"],
                 "previous_version": report["previous_version"],
+                "similar_to": similar_to,
+                "replaces": replaces,
             }
             if report["unchanged"]:
                 # A retry of what is already active: no snapshot, no notice.
@@ -123,13 +153,29 @@ class SkillLearning:
             learned = (
                 bool(update_of) and (self._service.record(name) or {}).get("origin") == "learned"
             )
-            active = (owner_asked or learned) and report["review"]["verdict"] != "danger"
+            # A near-duplicate the model justified, and a merge, are the
+            # owner's call even when they asked: both change what the library
+            # offers for a job that already has a skill.
+            active = (
+                (owner_asked or learned)
+                and report["review"]["verdict"] != "danger"
+                and not similar_to
+                and not replaces
+            )
             if active:
                 self._activate(draft, name, session_id=session_id)
             else:
-                self._stage(draft, name, session_id=session_id, update=bool(update_of))
+                self._stage(
+                    draft,
+                    name,
+                    session_id=session_id,
+                    update=bool(update_of),
+                    similar_to=similar_to,
+                    replaces=replaces,
+                )
                 result["status"] = "pending"
-        self._service.notify_learned({**result, "session_id": session_id})
+        # `card`: a proposal from a turn is shown as a card in that conversation.
+        self._service.notify_learned({**result, "session_id": session_id, "card": bool(session_id)})
         return result
 
     @contextmanager
@@ -141,6 +187,8 @@ class SkillLearning:
         *,
         update_of: str | None,
         known: set[str] | None,
+        replaces: list[str] | None = None,
+        project: Path | None = None,
     ) -> Iterator[tuple[Path, dict]]:
         """Temporary files are private and removed even on validation failure.
 
@@ -165,6 +213,12 @@ class SkillLearning:
             )
         if update_of and not exists:
             raise SkillError("SKILL_NOT_FOUND", f"no installed skill {name} to update")
+        for merged in replaces or []:
+            if not (self._root / merged).is_dir():
+                raise SkillError(
+                    "SKILL_NOT_FOUND",
+                    f"{merged} is not one of the owner's skills; only those can be merged",
+                )
         files = {SKILL_FILE: skill_md, **_checked_references(references or {})}
         leaks = sum(1 for text in files.values() if redact_text(text) != text)
         if leaks:
@@ -240,6 +294,13 @@ class SkillLearning:
                     }
                 )
             review = review_skill(draft)
+            # Only a brand-new skill can duplicate another; an update or a
+            # merge is how a duplicate is avoided.
+            similar = (
+                []
+                if update_of or replaces
+                else self._service.similar_skills(manifest, project, exclude=(name,))
+            )
             yield (
                 draft,
                 {
@@ -251,6 +312,7 @@ class SkillLearning:
                     "review": review.to_dict(),
                     "previous_version": previous_version,
                     "unchanged": unchanged,
+                    "similar": similar,
                 },
             )
 
@@ -288,13 +350,28 @@ class SkillLearning:
             updated_at=now,
         )
 
-    def _stage(self, draft: Path, name: str, *, session_id: str, update: bool) -> None:
+    def _stage(
+        self,
+        draft: Path,
+        name: str,
+        *,
+        session_id: str,
+        update: bool,
+        similar_to: list[dict] | None = None,
+        replaces: list[str] | None = None,
+    ) -> None:
         self._pending.mkdir(parents=True, exist_ok=True)
         target = self._pending / name
         if target.exists():
             shutil.rmtree(target)  # the latest proposal replaces an older one
         shutil.copytree(draft, target)
-        meta = {"session_id": session_id, "update": update, "proposed_at": self._service.now()}
+        meta = {
+            "session_id": session_id,
+            "update": update,
+            "proposed_at": self._service.now(),
+            "similar_to": similar_to or [],
+            "replaces": replaces or [],
+        }
         (self._pending / f"{name}.json").write_text(json.dumps(meta), encoding="utf-8")
 
     # -- the owner's decision ----------------------------------------------------------
@@ -320,6 +397,8 @@ class SkillLearning:
                     "learned_from": meta.get("session_id") or None,
                     "proposed_at": meta.get("proposed_at"),
                     "update": bool(meta.get("update")),
+                    "similar_to": meta.get("similar_to") or [],
+                    "replaces": meta.get("replaces") or [],
                     "review": review_skill(folder).to_dict(),
                     "skill_md": (folder / SKILL_FILE).read_text(encoding="utf-8"),
                     "current_skill_md": (
@@ -337,7 +416,20 @@ class SkillLearning:
         meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.is_file() else {}
         self._activate(folder, name, session_id=meta.get("session_id") or "")
         self._discard(name)
-        return {"name": name, "status": "active"}
+        replaced = [r for r in meta.get("replaces") or [] if r != name]
+        turned_off = []
+        for merged in replaced:
+            # Off, never deleted: «Deshacer» on the merge turns them back on.
+            with suppress(SkillError):
+                self._service.set_enabled(merged, False)
+                turned_off.append(merged)
+        if turned_off:
+            self._merges.mkdir(parents=True, exist_ok=True)
+            (self._merges / f"{name}.json").write_text(
+                json.dumps({"turned_off": turned_off, "at": self._service.now()}),
+                encoding="utf-8",
+            )
+        return {"name": name, "status": "active", "turned_off": turned_off}
 
     def reject(self, name: str) -> bool:
         if not (self._pending / name).is_dir():
@@ -356,6 +448,7 @@ class SkillLearning:
         learned = record.get("origin") == "learned"
         if not learned and not (self._root / name).is_dir():
             raise SkillError("NOT_EDITABLE", f"{name} is not a skill Rinari can undo")
+        restored_skills = self._undo_merge(name)
         snapshots = (
             sorted((self._history / name).iterdir()) if (self._history / name).is_dir() else []
         )
@@ -368,11 +461,17 @@ class SkillLearning:
                 fields["content_hash"] = content_hash(self._root / name)
             self._service.upsert_record(name, **fields)
             restored = load_skill_manifest(self._root / name, "user").version
-            return {"name": name, "restored": restored, "removed": False}
+            return _with_turned_on(
+                {"name": name, "restored": restored, "removed": False}, restored_skills
+            )
         if not learned:
+            if restored_skills:
+                return _with_turned_on(
+                    {"name": name, "restored": None, "removed": False}, restored_skills
+                )
             raise SkillError("NO_HISTORY", f"{name} has no change by Rinari to undo")
         self._service.remove(name)
-        return {"name": name, "restored": None, "removed": True}
+        return _with_turned_on({"name": name, "restored": None, "removed": True}, restored_skills)
 
     def previous(self, name: str) -> dict | None:
         """The version «Deshacer» would restore, for reviewing an update."""
@@ -392,9 +491,75 @@ class SkillLearning:
             else "",
         }
 
+    @property
+    def _merges(self) -> Path:
+        return self._root / ".merges"
+
+    def _undo_merge(self, name: str) -> list[str]:
+        marker = self._merges / f"{name}.json"
+        if not marker.is_file():
+            return []
+        try:
+            turned_off = json.loads(marker.read_text(encoding="utf-8")).get("turned_off") or []
+        except (OSError, ValueError, AttributeError):
+            turned_off = []
+        turned_on = []
+        for merged in turned_off:
+            with suppress(SkillError):
+                self._service.set_enabled(merged, True)
+                turned_on.append(merged)
+        marker.unlink(missing_ok=True)
+        return turned_on
+
+    def _merge_target(
+        self, name: str, replaces: list[str] | None, update_of: str | None
+    ) -> tuple[list[str], str | None]:
+        """Normalize a merge: at least two of the owner's skills, no repeats.
+
+        The merged skill may keep the name of one it replaces; that one is
+        then updated in place (a snapshot keeps it for undo) and the rest
+        are turned off.
+        """
+        if not replaces:
+            return [], update_of
+        if not isinstance(replaces, list) or not all(isinstance(r, str) for r in replaces):
+            raise SkillError("SKILL_INVALID", "replaces must be a list of skill names")
+        merged = list(dict.fromkeys(r.strip() for r in replaces if r.strip()))
+        total = len(set(merged) | {name})
+        if len(merged) < 1 or total < 2:
+            raise SkillError("SKILL_INVALID", "a merge combines at least two of the owner's skills")
+        if name in merged:
+            update_of = name
+        return merged, update_of
+
     def _discard(self, name: str) -> None:
         shutil.rmtree(self._pending / name, ignore_errors=True)
         (self._pending / f"{name}.json").unlink(missing_ok=True)
+
+
+def _with_turned_on(result: dict, turned_on: list[str]) -> dict:
+    # Only an undone merge turns skills back on; other undos keep their shape.
+    return {**result, "turned_on": turned_on} if turned_on else result
+
+
+def _justified(similar: list[dict], distinct_from: dict[str, str] | None) -> list[dict]:
+    """The similar skills, each with the model's reason; refuse if one has none."""
+    if not similar:
+        return []
+    reasons = distinct_from if isinstance(distinct_from, dict) else {}
+    missing = [
+        s for s in similar if len(str(reasons.get(s["name"]) or "").strip()) < _MIN_DISTINCT_REASON
+    ]
+    if missing:
+        names = ", ".join(f"{s['name']} (shares: {', '.join(s['shared'][:4])})" for s in missing)
+        raise SkillError(
+            "SIMILAR_EXISTS",
+            f"this looks like an installed skill: {names}. Improve it instead with "
+            "update_of (and its name), or, if it really is a different job, propose "
+            "again with distinct_from={name: why it is different} for each one.",
+            details={"similar": missing},
+        )
+    return [{**s, "reason": str(reasons[s["name"]]).strip()[:500]} for s in similar]
 
 
 def _checked_references(references: dict[str, str]) -> dict[str, str]:

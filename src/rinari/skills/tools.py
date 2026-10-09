@@ -9,10 +9,15 @@ policy: a skill requesting tools still needs the normal approvals
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from pathlib import Path
 
 from rinari.skills.manifest import SkillError
+
+#: Turn commands that are the owner asking for a skill change: `/learn`,
+#: `/lesson` (save what a turn taught) and `/merge-skills`.
+OWNER_COMMANDS = frozenset({"learn", "lesson", "merge-skills"})
 
 
 @dataclass
@@ -40,6 +45,40 @@ def skill_tools(host: SkillToolHost):
 
     def _sid(ctx) -> str:
         return getattr(ctx, "session_id", "") or ""
+
+    def _announce(ctx, result: dict) -> None:
+        """`skill.proposed` on the turn: the chat shows it as a card.
+
+        Presentation only: a failing sink never fails the save.
+        """
+        sink = getattr(ctx, "activity_sink", None)
+        if not callable(sink):
+            return
+        try:
+            description = ""
+            with contextlib.suppress(Exception):
+                pending = {p["name"]: p for p in service.learning.pending()}
+                if result["name"] in pending:
+                    description = pending[result["name"]]["description"]
+                else:
+                    description = service.get(result["name"], _project()).description
+            sink(
+                "skill.proposed",
+                {
+                    "name": result["name"],
+                    "status": result["status"],
+                    "version": result.get("version"),
+                    "previous_version": result.get("previous_version"),
+                    "update": bool(result.get("update")),
+                    "description": description,
+                    "similar_to": result.get("similar_to") or [],
+                    "replaces": result.get("replaces") or [],
+                    "review": result.get("review"),
+                    "pending_reason": result.get("pending_reason"),
+                },
+            )
+        except Exception:  # presentation never fails a write
+            return
 
     def list_(arguments, ctx):
         query = str((arguments or {}).get("query") or "").strip()
@@ -200,8 +239,9 @@ def skill_tools(host: SkillToolHost):
         # else waits for approval.
         quote = args.get("owner_request")
         authorization = None
-        if getattr(ctx, "turn_command", "") == "learn":
-            authorization = {"source": "learn"}
+        command = getattr(ctx, "turn_command", "")
+        if command in OWNER_COMMANDS:
+            authorization = {"source": command}
         elif save and isinstance(quote, str) and getattr(ctx, "origin_kind", "user") == "user":
             message_id = service.owner_message_quoting(_sid(ctx), quote)
             if message_id:
@@ -214,7 +254,17 @@ def skill_tools(host: SkillToolHost):
                 skill_md,
                 args.get("references") or None,
                 update_of=args.get("update_of") or None,
-                **({"session_id": _sid(ctx), "owner_asked": owner_asked} if save else {}),
+                replaces=args.get("replaces") or None,
+                project=_project(),
+                **(
+                    {
+                        "session_id": _sid(ctx),
+                        "owner_asked": owner_asked,
+                        "distinct_from": args.get("distinct_from") or None,
+                    }
+                    if save
+                    else {}
+                ),
             )
         except SkillError as exc:
             return ToolResult(
@@ -230,12 +280,18 @@ def skill_tools(host: SkillToolHost):
             # Say why, so the model reports it exactly instead of guessing.
             if result.get("review") == "danger":
                 result["pending_reason"] = "review_flagged"
+            elif result.get("replaces"):
+                result["pending_reason"] = "merge_needs_owner_approval"
+            elif result.get("similar_to"):
+                result["pending_reason"] = "similar_to_installed_skill"
             elif isinstance(quote, str) and quote.strip():
                 result["pending_reason"] = "owner_request_not_found"
             else:
                 result["pending_reason"] = "needs_owner_approval"
         if save and authorization and result.get("status") == "active":
             result["authorized_by"] = authorization
+        if save and result.get("status") in ("active", "pending"):
+            _announce(ctx, result)
         return ToolResult(ok=True, data=result, origin="skills")
 
     read = ("state.read",)
@@ -255,6 +311,24 @@ def skill_tools(host: SkillToolHost):
                 "additionalProperties": {"type": "string"},
             },
             "update_of": {"type": "string"},
+            "distinct_from": {
+                "type": "object",
+                "description": (
+                    "Only when Rinari says a new skill looks like installed ones "
+                    "(SIMILAR_EXISTS): for each named skill, why this is a different "
+                    "job. Prefer update_of when it is the same job done better."
+                ),
+                "additionalProperties": {"type": "string", "maxLength": 500},
+            },
+            "replaces": {
+                "type": "array",
+                "description": (
+                    "Merging the owner's skills into this one (/merge-skills): the "
+                    "skills it replaces. They are turned off when the owner approves."
+                ),
+                "items": {"type": "string"},
+                "maxItems": 10,
+            },
             "owner_request": {
                 "type": "string",
                 "maxLength": 2000,
@@ -372,7 +446,11 @@ def skill_tools(host: SkillToolHost):
                 "update_of with its name and a "
                 "higher version: an update of a learned skill is saved active and the owner "
                 "is notified to review it (undo restores the previous version); reference "
-                "files you do not resend are kept. Dangerous content always waits for "
+                "files you do not resend are kept. Before a new skill, look for one that "
+                "already does the job (skills.list with a query) and improve it instead: a "
+                "new skill too close to an installed one is refused (SIMILAR_EXISTS) until "
+                "you use update_of or explain in distinct_from why it is a different job, "
+                "and then it waits for approval. Dangerous content always waits for "
                 "approval. Never include secrets: a token or password is refused. "
                 "Validate with skills.validate_draft first; this tool saves real content, "
                 "so never use it for diagnostic probes."

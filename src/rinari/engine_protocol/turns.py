@@ -409,6 +409,40 @@ class TurnManager:
             )
         return True
 
+    def emit_skill_resolution(
+        self, name: str, status: str, extra: dict[str, Any] | None = None
+    ) -> bool:
+        """`skill.proposal.resolved` on the turn whose card showed `name`.
+
+        Same rule as memory: a live turn takes it as activity, a finished
+        one gets it appended so a reloaded chat shows the card resolved.
+        """
+        found = None
+        for row in self._services.ctx.db.query(
+            "SELECT session_id, turn_id, payload_json FROM session_events "
+            "WHERE type = 'skill.proposed' AND turn_id IS NOT NULL ORDER BY seq DESC",
+            (),
+        ):
+            if _json_payload(row["payload_json"]).get("name") == name:
+                found = (str(row["session_id"]), str(row["turn_id"]))
+                break
+        if found is None:
+            return False
+        session_id, turn_id = found
+        payload: dict[str, Any] = {"name": name, "status": status, **(extra or {})}
+        with self._lock:
+            live = self._turns.get(turn_id)
+        if live is not None and not live.done.is_set():
+            self._activity_cb(live)("skill.proposal.resolved", payload)
+        else:
+            self.emit_persisted_activity(
+                "skill.proposal.resolved",
+                session_id=session_id,
+                turn_id=turn_id,
+                payload=payload,
+            )
+        return True
+
     def runtime_state(self) -> dict[str, Any]:
         """Presentation-safe live state used to recover after a UI reload."""
         with self._lock:
