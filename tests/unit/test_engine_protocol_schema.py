@@ -23,6 +23,10 @@ def test_protocol_schema_matches_server_method_inventory() -> None:
     registered = set(re.findall(r'_dispatcher\.register\(\s*"([^"]+)"', source))
     media_source = (root / "src/rinari/engine_protocol/media.py").read_text(encoding="utf-8")
     registered.update(re.findall(r'dispatcher\.register\(\s*"([^"]+)"', media_source))
+    documents_source = (root / "src/rinari/engine_protocol/documents.py").read_text(
+        encoding="utf-8"
+    )
+    registered.update(re.findall(r'dispatcher\.register\(\s*"([^"]+)"', documents_source))
     assert set(schema["$defs"]["method"]["enum"]) == registered
 
 

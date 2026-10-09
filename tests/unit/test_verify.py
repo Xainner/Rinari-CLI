@@ -343,3 +343,19 @@ def test_pty_unavailable_outside_posix(tmp_path):
     )
     assert not started.ok
     assert started.error.code.value == "DEPENDENCY_ERROR"
+
+
+def test_checks_made_stale_by_a_later_change_say_so(app_ctx, tmp_path):
+    """A check recorded, then a file changed: "no evidence" was misleading."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "app.py").write_text("x = 1\n", encoding="utf-8")
+    service = VerificationService(app_ctx)
+    check = service.record(project, kind="test", result="passed", command="pytest")
+    (project / "app.py").write_text("x = 2  # changed after the check\n", encoding="utf-8")
+    decision = service.evaluate(project, record_ids={check["id"]})
+    assert decision.outcome == "IMPLEMENTED_UNVERIFIED"
+    assert decision.reasons[0].startswith("stale evidence")
+    fresh = service.record(project, kind="test", result="passed", command="pytest")
+    again = service.evaluate(project, record_ids={fresh["id"]})
+    assert again.outcome == OUTCOME_DONE, again.reasons

@@ -57,7 +57,16 @@ def last_owner_message(messages):
     ]
     if owners:
         return owners[-1]
-    return max((i for i, m in enumerate(messages) if m.role == "user"), default=-1)
+    # Harness notes (turn context, loop reminders) travel as user messages
+    # after the owner's; they are never the owner's message.
+    return max(
+        (
+            i
+            for i, m in enumerate(messages)
+            if m.role == "user" and (m.origin or {}).get("kind") != "harness"
+        ),
+        default=-1,
+    )
 
 
 def prepare_visual_payload(request, constraints):

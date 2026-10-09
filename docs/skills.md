@@ -5,6 +5,21 @@
 
 ---
 
+## Skills documentales incluidas (2026-10-07)
+
+| Skill | Para |
+|---|---|
+| `rinari-presentations` | Crear, editar y verificar decks PowerPoint editables |
+| `rinari-spreadsheets` | Libros Excel con fórmulas reales y análisis de datos grandes con SQL |
+| `rinari-documents` | Informes y documentos Word con estilos, tablas e índice |
+| `rinari-pdf` | Autoría, manipulación, formularios y redacción real de PDF |
+| `rinari-artifact-review` | Revisión independiente de lo generado, con cobertura declarada |
+
+Cada una lista sus herramientas en `required_tools` y lleva referencias en
+`references/` que se leen con `skills.read` solo cuando hacen falta.
+
+---
+
 ## 1. Core Agent Skills
 
 El flujo implementado para crear una skill es `skill-author` →

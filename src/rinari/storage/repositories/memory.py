@@ -10,8 +10,10 @@ from typing import Any
 
 from rinari.storage.db import Database
 
-USER_KINDS = ("preference", "rule", "fact")
-PROJECT_KINDS = ("fact", "rule", "convention")
+# environment/workflow hold learned facts (memory.propose): hosts, ports and
+# paths of this machine, and how a project is started, built or tested.
+USER_KINDS = ("preference", "rule", "fact", "environment", "workflow")
+PROJECT_KINDS = ("fact", "rule", "convention", "environment", "workflow")
 
 
 class MemoryRepository:
@@ -247,10 +249,15 @@ class MemoryRepository:
             ),
         )
 
-    def candidates(self, *, status: str | None = None, limit: int = 100) -> list[dict]:
+    def candidates(
+        self, *, status: str | tuple[str, ...] | None = None, limit: int = 100
+    ) -> list[dict]:
         sql = "SELECT * FROM memory_candidates"
         params: list[Any] = []
-        if status is not None:
+        if isinstance(status, tuple):
+            sql += f" WHERE status IN ({', '.join('?' for _ in status)})"
+            params.extend(status)
+        elif status is not None:
             sql += " WHERE status = ?"
             params.append(status)
         sql += " ORDER BY created_at, id LIMIT ?"
@@ -266,8 +273,9 @@ class MemoryRepository:
             """
             INSERT OR IGNORE INTO memory_candidates
               (id, session_id, message_id, topic, text, kind, confidence,
-               classification, reason, status, memory_id, created_at, resolved_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               classification, reason, status, memory_id, created_at, resolved_at,
+               scope, project_root)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 row["id"],
@@ -283,6 +291,8 @@ class MemoryRepository:
                 row.get("memory_id"),
                 row["created_at"],
                 row.get("resolved_at"),
+                row.get("scope", "user"),
+                row.get("project_root"),
             ),
         )
 
@@ -355,6 +365,20 @@ class MemoryRepository:
         )
         return dict(row) if row else None
 
+    def project_get_by_id(self, memory_id: str) -> dict | None:
+        """A live project record by id alone: the desktop edits records of
+        any project from one memory panel, without knowing their root."""
+        row = self._db.query_one(
+            "SELECT * FROM project_memory WHERE id = ? AND superseded_by IS NULL", (memory_id,)
+        )
+        return dict(row) if row else None
+
+    def project_all_live(self) -> list[dict]:
+        rows = self._db.query(
+            "SELECT * FROM project_memory WHERE superseded_by IS NULL ORDER BY updated_at DESC, id"
+        )
+        return [dict(r) for r in rows]
+
     def project_live(self, project_root: str) -> list[dict]:
         rows = self._db.query(
             "SELECT * FROM project_memory WHERE project_root = ? AND superseded_by IS NULL "
@@ -389,8 +413,8 @@ class MemoryRepository:
         assignments = ", ".join(f"{key} = ?" for key in fields)
         params = (*fields.values(), updated_at, project_root, memory_id)
         self._db.execute(
-            f"UPDATE project_memory SET {assignments}, updated_at = ? "
-            f"WHERE project_root = ? AND id = ?",
+            f"UPDATE project_memory SET {assignments}, updated_at = ?, "
+            "revision = revision + 1 WHERE project_root = ? AND id = ?",
             tuple(params),
         )
 
@@ -450,6 +474,26 @@ class MemoryRepository:
             rows = self._db.query(
                 "SELECT * FROM episodic_memory ORDER BY created_at DESC, id LIMIT ?",
                 (max(1, min(limit, 200)),),
+            )
+        return [dict(r) for r in rows]
+
+    def episodic_window(self, project_root: str | None, *, limit: int = 2000) -> list[dict]:
+        """The newest episodic rows, for ranking in Python.
+
+        Summaries are short (400 chars) and the store grows by a few rows a
+        day, so scoring a bounded recent window beats a full-text index that
+        depends on how the bundled SQLite was compiled.
+        """
+        if project_root:
+            rows = self._db.query(
+                "SELECT * FROM episodic_memory WHERE project_root = ? "
+                "ORDER BY created_at DESC, id LIMIT ?",
+                (project_root, max(1, limit)),
+            )
+        else:
+            rows = self._db.query(
+                "SELECT * FROM episodic_memory ORDER BY created_at DESC, id LIMIT ?",
+                (max(1, limit),),
             )
         return [dict(r) for r in rows]
 

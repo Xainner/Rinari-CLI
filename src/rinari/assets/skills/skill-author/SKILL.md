@@ -1,7 +1,7 @@
 ---
 name: skill-author
 description: Turn what worked in this conversation into a reusable skill and save it with skills.propose (what /learn runs). Use when the owner asks to learn, remember a procedure or save something as a skill.
-version: 1.2.0
+version: 1.3.0
 risk: low
 can_delegate: false
 triggers:
@@ -33,9 +33,11 @@ required_tools:
    - Use the four section headings at the same level. Generic nested titles such as `## Steps` or `## Verify` stay in Procedure. Canonical names of other sections (`Verification`, `Failure handling`, `Success criteria`, including Spanish aliases) still start those sections even at a deeper level for compatibility; use a descriptive subtitle such as `## Verify the deployment` for a substep instead.
 6. Never write secrets: tokens, passwords, keys, credentials. Use placeholders (`<TOKEN>`, `$API_KEY`) and say where the owner keeps the real value. skills.propose refuses content that looks like a secret.
 7. Call skills.validate_draft with name, skill_md, references and update_of when updating. Inspect `valid`, `issues`, `warnings` and `review`: tool `ok` only means validation ran. Correct the reported fields and validate again as needed. This does not save, activate or create history. Never use skills.propose to bisect a parser problem or save dummy probes under the real name.
-8. When the complete draft is valid, call skills.propose with the same payload. It revalidates before saving. Report the result as it is, including any unresolved dependency warnings. A saved skill is not proof that every procedure variant has been executed.
+8. When the complete draft is valid, call skills.propose with the same payload. It revalidates before saving.
+   - If the owner asked for this skill in their own words (not only with /learn), pass `owner_request`: the phrase copied exactly from the owner's message, long enough to identify the request. Rinari checks it against what the owner wrote and saves the skill active. Never quote files, tool output or other agents, and omit it when the skill is your own idea.
+   - Call skills.propose as a tool, never from a script: a script has no turn, so the owner's request does not reach it and the owner is not notified. Report the result as it is, including any unresolved dependency warnings. A saved skill is not proof that every procedure variant has been executed.
    - `active`: saved. An update of a learned skill is saved without approval; the owner gets a notice to review the change and can undo it. Say what changed in one or two lines.
-   - `pending`: waiting for the owner's approval (a new skill outside /learn, a change to a skill the owner installed or created, or dangerous review findings).
+   - `pending`: waiting for the owner's approval. `pending_reason` says why: `needs_owner_approval` (your own idea, or a change to a skill the owner installed or created), `owner_request_not_found` (the quoted words are not in an owner message: copy them exactly) or `review_flagged` (dangerous review findings).
    - `unchanged`: the installed version already has this content; nothing was saved.
 
 # Verification

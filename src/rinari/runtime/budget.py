@@ -87,11 +87,15 @@ class BudgetMeter:
     is_network: Callable[[str], bool] | None = None
     # Hierarchical ledger (P0.10): a child meter forwards every note to its
     # parent, so the spawning turn's snapshot reflects real aggregate cost
-    # instead of main-agent-only spend. Gates always apply to the local
-    # counters; the parent's own gates see the forwarded totals.
+    # instead of main-agent-only spend. The call ceilings are emergency
+    # brakes for one runaway loop, so they count each agent's own calls
+    # (`own_*`): four busy subagents must not stop the coordinator's real
+    # work. Cost, time and spawn limits still see the aggregate.
     parent: BudgetMeter | None = None
     model_calls: int = 0
     tool_calls: int = 0
+    own_model_calls: int = 0
+    own_tool_calls: int = 0
     network_calls: int = 0
     subagent_calls: int = 0
     max_recursion_depth: int = 0
@@ -128,32 +132,40 @@ class BudgetMeter:
     def reserve_model_call(self, *, model_only=False):
         meter = self
         while meter is not None:
+            own = meter is self
             if (
                 (
-                    meter.limits.max_model_calls is not None
-                    and meter.model_calls >= meter.limits.max_model_calls
+                    own
+                    and meter.limits.max_model_calls is not None
+                    and meter.own_model_calls >= meter.limits.max_model_calls
                 )
                 if model_only
-                else meter.first_exhausted()
+                else meter.first_exhausted(ignore=() if own else (MODEL_CALLS, TOOL_CALLS))
             ):
                 raise ValueError("Model call stopped: turn budget exhausted")
             meter = meter.parent
         self.note_model_call()
 
     @ledger_locked
-    def note_model_call(self) -> None:
+    def note_model_call(self, *, forwarded: bool = False) -> None:
         self.model_calls += 1
+        if not forwarded:
+            self.own_model_calls += 1
         if self.parent is not None:
-            self.parent.note_model_call()
+            self.parent.note_model_call(forwarded=True)
 
     @ledger_locked
-    def note_tool_call(self, name: str, *, is_network: bool | None = None) -> None:
+    def note_tool_call(
+        self, name: str, *, is_network: bool | None = None, forwarded: bool = False
+    ) -> None:
         self.tool_calls += 1
+        if not forwarded:
+            self.own_tool_calls += 1
         network = is_network if is_network is not None else self._net(name)
         if network:
             self.network_calls += 1
         if self.parent is not None:
-            self.parent.note_tool_call(name, is_network=network)
+            self.parent.note_tool_call(name, is_network=network, forwarded=True)
 
     @ledger_locked
     def note_usage(self, usage: Usage | None) -> None:
@@ -182,11 +194,15 @@ class BudgetMeter:
         """
         network = is_network if is_network is not None else self._net(name)
         meter: BudgetMeter | None = self
-        # A child's calls count against every ancestor, so every ancestor
-        # gates them too.
+        # The network ceiling is shared: a child's calls count against
+        # every ancestor. The tool-call ceiling is each agent's own.
         while meter is not None:
             limits = meter.limits
-            if limits.max_tool_calls is not None and meter.tool_calls >= limits.max_tool_calls:
+            if (
+                meter is self
+                and limits.max_tool_calls is not None
+                and meter.own_tool_calls >= limits.max_tool_calls
+            ):
                 return False
             if (
                 network
@@ -206,7 +222,10 @@ class BudgetMeter:
         hit = self.first_exhausted(ignore=ignore)
         meter = self.parent
         while hit is None and meter is not None:
-            hit = meter.first_exhausted(ignore=(*ignore, SUBAGENTS, RECURSION_DEPTH))
+            # Nor whether the coordinator's own call ceilings were reached.
+            hit = meter.first_exhausted(
+                ignore=(*ignore, SUBAGENTS, RECURSION_DEPTH, MODEL_CALLS, TOOL_CALLS)
+            )
             meter = meter.parent
         return hit
 
@@ -235,10 +254,13 @@ class BudgetMeter:
         # stay strict (>) — no exact-boundary gate exists for them.
         if (
             self.limits.max_model_calls is not None
-            and self.model_calls >= self.limits.max_model_calls
+            and self.own_model_calls >= self.limits.max_model_calls
         ):
             hits.append(MODEL_CALLS)
-        if self.limits.max_tool_calls is not None and self.tool_calls >= self.limits.max_tool_calls:
+        if (
+            self.limits.max_tool_calls is not None
+            and self.own_tool_calls >= self.limits.max_tool_calls
+        ):
             hits.append(TOOL_CALLS)
         if (
             self.limits.max_network_calls is not None
@@ -282,6 +304,8 @@ class BudgetMeter:
         return {
             "model_calls": self.model_calls,
             "tool_calls": self.tool_calls,
+            "own_model_calls": self.own_model_calls,
+            "own_tool_calls": self.own_tool_calls,
             "network_calls": self.network_calls,
             "subagent_calls": self.subagent_calls,
             "max_recursion_depth": self.max_recursion_depth,

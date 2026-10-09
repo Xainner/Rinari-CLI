@@ -237,6 +237,9 @@ def lsp_tools() -> list[ToolDefinition]:
             handler=_handler(op),
             classify=_as_fs_read,
             namespace="lsp",
+            # Seldom used and ~750 schema tokens per request: on demand through
+            # capability.search (search.* covers most navigation).
+            always_loaded=False,
         )
         for name, description, schema, op in entries
     ]

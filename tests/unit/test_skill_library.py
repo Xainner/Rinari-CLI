@@ -339,7 +339,8 @@ def test_a_standard_skill_reaches_the_model_with_rinaris_mapping(services, tmp_p
     script = tools["skills.read"].handler({"name": "pdf-tools", "path": "scripts/extract.py"}, None)
     assert script.ok and script.data["text"] == "print(1)"
     found = tools["skills.list"].handler({"query": "pdf"}, None).data["skills"]
-    assert [row["name"] for row in found] == ["pdf-tools"]
+    # La búsqueda encuentra la skill instalada (y las incluidas que hablan de PDF).
+    assert "pdf-tools" in [row["name"] for row in found]
 
 
 def test_the_catalog_stays_small_when_the_library_grows(services) -> None:

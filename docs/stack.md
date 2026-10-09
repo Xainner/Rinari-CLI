@@ -2701,7 +2701,7 @@ max_runtime_minutes = 120
 
 [context]
 compact_at_percent = 80
-artifact_output_threshold_kb = 64
+artifact_output_threshold_kb = 16
 
 [agents]
 enabled = true

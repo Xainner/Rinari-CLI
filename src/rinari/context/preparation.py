@@ -1,5 +1,6 @@
 """Pre-dispatch semantic compaction, shared by all session hosts."""
 
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -16,10 +17,15 @@ from rinari.context.compact_state import (
     merge_evidence,
 )
 from rinari.context.continuity import contradictions, repair_request
-from rinari.context.projection import ContextPreparationError, render, select_tail
+from rinari.context.projection import (
+    ContextPreparationError,
+    latest_exchange,
+    render,
+    select_tail,
+)
 from rinari.context.settings import input_budget, summarizer
 from rinari.context.settings import window as resolve_window
-from rinari.context.tokens import estimate_tokens
+from rinari.context.tokens import estimate_message_tokens, estimate_tokens
 from rinari.models.types import ChatMessage, ModelRequest, StopReason
 from rinari.shared.errors import CancelledError
 
@@ -75,6 +81,11 @@ def summary_problem(response) -> str | None:
     return None
 
 
+# Automatic compactions closer than this (in model calls) wait for the window
+# itself to fill instead of the threshold.
+MIN_CALLS_BETWEEN_COMPACTIONS = 6
+
+
 def prepare(service, ctx, request, caller, rebuild, emit, cancel):
     """Persist a verified replacement before changing the running projection."""
     config = service._ctx.config.config
@@ -88,7 +99,22 @@ def prepare(service, ctx, request, caller, rebuild, emit, cancel):
     points = thresholds(window, config.context.compact_at_percent)
     threshold = config.context.compact_at_percent / 100
     force = getattr(ctx, "force_compaction", False)
+    calls = getattr(ctx, "prepared_calls", 0) + 1
+    with contextlib.suppress(AttributeError):
+        ctx.prepared_calls = calls
     if used < window * threshold and not force:
+        return request
+    last = getattr(ctx, "compacted_at_call", None)
+    if (
+        not force
+        and ctx.compaction_reason == "automatic"
+        and last is not None
+        and calls - last < MIN_CALLS_BETWEEN_COMPACTIONS
+        and used < window * 0.95
+    ):
+        # It just compacted and the work refilled the window within a few
+        # calls (seen: 8 compactions in 10 minutes, each re-reading the same
+        # files). Keep going until the window itself is at risk.
         return request
     if not config.runtime.safeguards.context_compaction and ctx.compaction_reason != "manual":
         if used >= window or force:
@@ -131,10 +157,21 @@ def prepare(service, ctx, request, caller, rebuild, emit, cancel):
         # Reserve part of the target for the cumulative summary, then verify the
         # fully assembled replacement; never silently clip a generated summary.
         cut, tail = select_tail(history, target - overhead - target // 4)
-        if not cut:
-            if ctx.compaction_reason == "manual":
-                status("skipped")
+        if not cut and ctx.compaction_reason == "manual":
+            # The owner asked to compact: everything before the latest
+            # exchange is summarized even when it would still fit. Only an
+            # empty history, or one that is just that exchange, is a no-op,
+            # and the event says which, with the numbers behind it.
+            cut, tail = latest_exchange(history)
+            if not cut:
+                status(
+                    "skipped",
+                    skip_reason="empty_history" if not history else "only_latest_exchange",
+                    history_messages=len(history),
+                    history_tokens=sum(estimate_message_tokens(m) for m in history),
+                )
                 return request
+        if not cut:
             raise ContextPreparationError(
                 "Compaction cannot reduce this request without discarding required context."
             )
@@ -182,6 +219,33 @@ def prepare(service, ctx, request, caller, rebuild, emit, cancel):
             )
         meter = getattr(ctx.tool_ctx, "parent_budget", None)
 
+        def observe(event, data):
+            # The live turn usage counts the summarizer's tokens as cost; the
+            # tag keeps them out of the conversation's own size.
+            emit(event, {**data, "purpose": "compaction"} if event.startswith("usage.") else data)
+
+        def record_usage(response):
+            # usage.get, provider usage and metrics read `ModelInvoked`: without
+            # it a compaction's tokens never appeared anywhere durable. No
+            # context anchor, so it never calibrates the conversation estimate.
+            from rinari.runtime.agent import EVENT_MODEL_INVOKED, _usage_dict
+
+            provider = getattr(summary_caller, "provider", None)
+            service._persist_event(
+                ctx.session_id,
+                EVENT_MODEL_INVOKED,
+                {
+                    "purpose": "compaction",
+                    "compaction_id": identity,
+                    "provider_id": (response.provider_state or {}).get("provider_id")
+                    or getattr(provider, "id", None),
+                    "model_id": getattr(summary_caller, "model_id", None),
+                    "stop_reason": response.stop_reason.value,
+                    "tool_calls": [],
+                    "usage": _usage_dict(response.usage),
+                },
+            )
+
         def summarize(summary_request):
             # One retry: a model that answered with nothing, or spent its
             # output on reasoning, often summarizes on a second call (a manual
@@ -197,9 +261,16 @@ def prepare(service, ctx, request, caller, rebuild, emit, cancel):
                             "Turn budget exhausted during context compaction."
                         )
                     meter.reserve_model_call(model_only=True)
-                response = invoke_summary(summary_caller, summary_request, cancel)
+                # A fresh usage identity per call: a retry or repair is a
+                # second cost, not a correction of the first.
+                response = invoke_summary(
+                    summary_caller,
+                    dataclasses.replace(summary_request, usage_call_id=uuid4().hex),
+                    cancel,
+                )
                 if meter is not None:
                     meter.note_usage(response.usage)
+                record_usage(response)
                 problem = summary_problem(response)
                 if problem is None:
                     return response.content
@@ -235,7 +306,7 @@ def prepare(service, ctx, request, caller, rebuild, emit, cancel):
                     ),
                     cancellation=cancel,
                     session_id=ctx.session_id,
-                    usage_observer=emit,
+                    usage_observer=observe,
                 )
                 if request_size(summary_request) <= int(summary_window * 0.60):
                     break
@@ -291,6 +362,17 @@ def prepare(service, ctx, request, caller, rebuild, emit, cancel):
         projected = dataclasses.replace(ctx, history=tail, compact_state_text=render(state))
         replacement = rebuild(projected)
         after = request_size(replacement)
+        if ctx.compaction_reason == "manual" and after >= used:
+            # A short history can summarize into as much text as it had:
+            # nothing is published, and the owner sees why.
+            status(
+                "skipped",
+                skip_reason="summary_not_smaller",
+                history_messages=len(history),
+                after_tokens=after,
+                checks=checks,
+            )
+            return request
         if after > target or after >= used:
             checks["reduction"] = "failed"
             raise ContextPreparationError(
@@ -315,6 +397,8 @@ def prepare(service, ctx, request, caller, rebuild, emit, cancel):
         ctx.dropped_total = 0
         ctx.context_usage = {}
         ctx.compact_revision = state["revision"]
+        with contextlib.suppress(AttributeError):
+            ctx.compacted_at_call = calls
         status(
             "completed",
             after_tokens=after,

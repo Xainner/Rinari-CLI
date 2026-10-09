@@ -287,3 +287,145 @@ def test_resuming_an_interrupted_session_does_bump_recency(services, home) -> No
 
     assert services.sessions.show(started.session.id).last_active_at >= before
     assert services.sessions.show(started.session.id).state == "active"
+
+
+def _user_message(app_ctx, session_id: str, text: str) -> None:
+    from rinari.storage.records import SessionMessageRecord
+
+    app_ctx.message_repo.append_many(
+        session_id,
+        [
+            SessionMessageRecord(
+                id=app_ctx.ids.new("msg"), session_id=session_id, seq=0, role="user", content=text
+            )
+        ],
+    )
+
+
+def _title_events(app_ctx, session_id: str, kind: str) -> list[dict]:
+    return [e.payload for e in app_ctx.event_repo.list(session_id) if e.type == kind]
+
+
+def test_promoted_chat_keeps_an_untouched_default_title(app_ctx, services, home):
+    """A CHAT promoted before its first message (opening a folder) still gets named."""
+    _configure(services, home)
+    folder = home / "RoadRash"
+    folder.mkdir()
+    record = services.sessions.new(folder, forced_chat=True)
+    assert record.title == "chat in RoadRash"
+    services.sessions.promote(record.id, folder)
+    result = services.sessions.name_from_first_message(
+        record.id, "Arregla el salto del personaje", title_factory=lambda _: "Salto del personaje"
+    )
+    assert result.title == "Salto del personaje"
+
+
+def test_failed_title_is_provisional_and_retried_from_the_first_message(app_ctx, services, home):
+    _configure(services, home)
+    record = services.sessions.start(home).session
+    first = "Recitame un poema en frances sobre porque los huskies son excelentes perros"
+    seen: list[str] = []
+
+    def empty(text):
+        seen.append(text)
+        return ""
+
+    result = services.sessions.name_from_first_message(record.id, first, title_factory=empty)
+    assert result.title.startswith("Recitame un poema")
+    assert _title_events(app_ctx, record.id, "SessionTitleFailed") == [{"reason": "empty"}]
+    assert _title_events(app_ctx, record.id, "SessionRenamed")[-1]["source"] == "fallback"
+    _user_message(app_ctx, record.id, first)
+
+    # Next turn: a new message, but the title still summarizes the first one.
+    result = services.sessions.name_from_first_message(
+        record.id,
+        "Ahora en inglés",
+        title_factory=lambda text: seen.append(text) or "Poema francés sobre los huskies",
+    )
+    assert result.title == "Poema francés sobre los huskies"
+    assert seen == [first, first]
+    assert _title_events(app_ctx, record.id, "SessionRenamed")[-1] == {
+        "title": "Poema francés sobre los huskies",
+        "source": "generated",
+    }
+    # Generated titles are final.
+    assert (
+        services.sessions.name_from_first_message(
+            record.id, "Otro", title_factory=lambda _: "No"
+        ).title
+        == "Poema francés sobre los huskies"
+    )
+
+
+def test_title_retries_are_bounded_and_record_only_the_reason(app_ctx, services, home):
+    _configure(services, home)
+    record = services.sessions.start(home).session
+
+    def failing(_):
+        raise RuntimeError("secret provider detail")
+
+    for _ in range(5):
+        services.sessions.name_from_first_message(
+            record.id, "Revisar el proyecto", title_factory=failing
+        )
+        _user_message(app_ctx, record.id, "Revisar el proyecto")
+    assert (
+        _title_events(app_ctx, record.id, "SessionTitleFailed")
+        == [{"reason": "error:RuntimeError"}] * 3
+    )
+    assert services.sessions.show(record.id).title == "Revisar el proyecto"
+
+
+def test_a_manual_rename_ends_the_retries(app_ctx, services, home):
+    _configure(services, home)
+    record = services.sessions.start(home).session
+    services.sessions.name_from_first_message(
+        record.id, "Revisar el proyecto", title_factory=lambda _: ""
+    )
+    _user_message(app_ctx, record.id, "Revisar el proyecto")
+    services.sessions.rename(record.id, "Mi nombre")
+    calls: list[str] = []
+    result = services.sessions.name_from_first_message(
+        record.id, "Otro", title_factory=lambda text: calls.append(text) or "Generado"
+    )
+    assert result.title == "Mi nombre"
+    assert calls == []
+
+
+def test_every_rename_is_published_with_its_source(app_ctx, services, home):
+    _configure(services, home)
+    published: list[dict] = []
+    services.sessions.on_renamed = published.append
+    record = services.sessions.start(home).session
+    services.sessions.name_from_first_message(
+        record.id, "Hola", title_factory=lambda _: "Saludo inicial"
+    )
+    services.sessions.rename(record.id, "A mano")
+    assert published == [
+        {"session_id": record.id, "title": "Saludo inicial", "source": "generated"},
+        {"session_id": record.id, "title": "A mano", "source": "manual"},
+    ]
+
+
+def test_a_greeting_does_not_name_the_session_the_next_topic_does(services, home, app_ctx):
+    """53 of 56 real titles were the opening message trimmed, often "Hola"."""
+    _configure(services, home)
+    record = services.sessions.start(home).session
+    default = record.title
+
+    def factory(text: str) -> str:
+        return "NONE" if text.strip().lower() in {"hola", "hi"} else "Arreglar el build de la app"
+
+    after_hello = services.sessions.name_from_first_message(
+        record.id, "Hola", title_factory=factory
+    )
+    assert after_hello.title == default
+    _user_message(app_ctx, record.id, "Hola")
+    named = services.sessions.name_from_first_message(
+        record.id, "El build falla con un error de tipos en la app", title_factory=factory
+    )
+    assert named.title == "Arreglar el build de la app"
+    # A session that already had a topic is not renamed again.
+    _user_message(app_ctx, record.id, "El build falla con un error de tipos en la app")
+    again = services.sessions.name_from_first_message(record.id, "otra cosa", title_factory=factory)
+    assert again.title == "Arreglar el build de la app"

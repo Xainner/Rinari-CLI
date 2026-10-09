@@ -193,7 +193,7 @@ def test_declared_visual_attachments_and_tool_need_no_consent(
     fake.scripted.extend(
         [
             ModelResponse(
-                content="",
+                content="Voy a ello.",
                 tool_calls=(ToolCall("view-again", "fs.read_image", {"path": original.uri}),),
             ),
             _answer(),
@@ -246,7 +246,8 @@ def test_local_image_turn_persists_pixels_and_large_preview(
     fake = VisionModel(
         [
             ModelResponse(
-                content="", tool_calls=(ToolCall("view", "fs.read_image", {"path": str(path)}),)
+                content="Voy a ello.",
+                tool_calls=(ToolCall("view", "fs.read_image", {"path": str(path)}),),
             ),
             _answer(),
         ]
@@ -430,7 +431,9 @@ def test_image_protocol_preserves_reference_and_reaches_model(
     assert any(e["event"] == "turn.completed" for e in events)
     user = next(m for m in fake.requests[0].messages if m.images)
     assert user.images[0].uri == attachment["uri"]
-    assert user.content == "Describe"
+    # The model also gets a handle to reuse the image, not only its pixels.
+    assert user.content.endswith("User request:\nDescribe")
+    assert attachment["uri"] in user.content
     listed = server.handle_line(
         _req("image-list", "artifact.media_list", {"session_id": session_id})
     )
@@ -1048,7 +1051,7 @@ def test_owner_memory_tool_receives_persisted_source_before_loop(
     fake = FakeModel(
         scripted=[
             ModelResponse(
-                content="",
+                content="Voy a ello.",
                 tool_calls=(
                     ToolCall(
                         id="remember",
@@ -1094,7 +1097,7 @@ def test_owner_turn_keeps_a_memory_in_the_models_own_words(server, services, tmp
     fake = FakeModel(
         scripted=[
             ModelResponse(
-                content="",
+                content="Voy a ello.",
                 tool_calls=(
                     ToolCall(
                         id="remember",
@@ -1794,3 +1797,132 @@ def test_plain_compaction_does_not_continue(server, tmp_path, monkeypatch) -> No
     completed = _collect_until(server, session_id)[-1]
     assert completed["payload"]["kind"] == "compaction"
     assert len(model.requests) == 1
+
+
+def test_model_changed_notice_follows_the_models_that_wrote(
+    server, services, tmp_path, monkeypatch
+):
+    """A writes, B fails without writing, C writes: one notice "A → C", after C's first text."""
+    two = services.models.add("fake", "fake-model-2", "fake-two").id
+    three = services.models.add("fake", "fake-model-3", "fake-three").id
+    session_id = _create_chat(server, tmp_path, tag="mc")
+    services.sessions.rename(session_id, "Cambio de modelo")
+
+    class Failing(FakeModel):
+        def invoke(self, request):
+            raise RuntimeError("provider down")
+
+    callers = {
+        "fake-model-1": FakeModel(scripted=[_answer(), _answer()]),
+        "fake-model-2": Failing(scripted=[]),
+        "fake-model-3": FakeModel(scripted=[_answer(), _answer()]),
+    }
+    monkeypatch.setattr(
+        agent_runtime,
+        "_caller_for",
+        lambda services, rec: callers[services.ctx.model_repo.get(rec.model_id).provider_model_id],
+    )
+
+    def turn(tag, model_alias):
+        if model_alias is not None:
+            response = server.handle_line(
+                _req(f"{tag}-m", "session.model.set", {"ref": session_id, "model": model_alias})
+            )
+            assert response is not None and response["ok"] is True, response
+        started = server.handle_line(
+            _req(tag, "session.turn.start", {"session_id": session_id, "message": "hola"})
+        )
+        assert started is not None and started["ok"] is True, started
+        return _collect_until(server, session_id)
+
+    first = turn("mc1", None)
+    assert not [e for e in first if e["event"] == "model.changed"]
+    failed = turn("mc2", two)
+    assert failed[-1]["event"] == "turn.failed"
+    assert not [e for e in failed if e["event"] == "model.changed"]
+    written = turn("mc3", three)
+    names = [e["event"] for e in written]
+    notices = [e["payload"] for e in written if e["event"] == "model.changed"]
+    assert len(notices) == 1
+    notice = notices[0]
+    assert notice["previous"]["alias"] == "fake-one"
+    assert notice["next"]["alias"] == "fake-three"
+    assert notice["next"]["provider_alias"] == "fake"
+    assert names.index("model.changed") == names.index("model.content.completed") + 1
+    completed = next(e["payload"] for e in written if e["event"] == "model.content.completed")
+    assert notice["after_model_call_id"] == completed["model_call_id"]
+    # Persisted with the turn, so a reload rebuilds it in place.
+    stored = [e for e in services.ctx.event_repo.list(session_id) if e.type == "model.changed"]
+    assert len(stored) == 1 and stored[0].turn_id == notice["turn_id"]
+    again = turn("mc4", None)
+    assert not [e for e in again if e["event"] == "model.changed"]
+
+
+def test_command_secret_runs_for_real_but_is_hidden_from_storage_ui_and_later_turns(
+    server, services, tmp_path, monkeypatch
+):
+    from rinari.models.types import ToolCall
+
+    secret = "FakePass91x"
+    sid = _create_chat(server, tmp_path, "secret")
+    services.sessions.set_permission(sid, "full-access")
+    command = f"echo PASSWORD={secret}"
+    first = FakeModel(
+        [
+            ModelResponse(
+                content="Connecting the share.",
+                tool_calls=(ToolCall("secret-call", "shell.exec", {"command": command}),),
+                # A provider block echoing the call: signed blocks are never
+                # edited, so this one must be left out of storage.
+                continuation={
+                    "protocol": "anthropic",
+                    "blocks": [
+                        {"type": "thinking", "thinking": "run it", "signature": "sig"},
+                        {
+                            "type": "tool_use",
+                            "id": "secret-call",
+                            "name": "shell.exec",
+                            "input": {"command": command},
+                        },
+                    ],
+                },
+            ),
+            _answer(),
+        ]
+    )
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda *args: first)
+    assert server.handle_line(
+        _req("secret-start", "session.turn.start", {"session_id": sid, "message": "conecta"})
+    )["ok"]
+    events = _collect_until(server, sid)
+    assert any(e["event"] == "turn.completed" for e in events)
+
+    # The command ran with the real value: its output reached this turn.
+    observation = next(m for m in first.requests[-1].messages if m.role == "tool")
+    assert secret in observation.content
+    # The desktop never received it.
+    assert secret not in json.dumps(events)
+    requested = next(e for e in events if e["event"] == "tool.requested")
+    assert "[REDACTED]" in requested["payload"]["arguments"]
+    # Nor did the database: messages, tool calls or events.
+    rows = services.ctx.message_repo.list(sid)
+    stored = json.dumps(
+        [[r.content, r.tool_calls, r.continuation] for r in rows if r.role != "user"]
+    )
+    assert secret not in stored and "PASSWORD=[REDACTED]" in stored
+    assert all(r.continuation is None for r in rows if r.tool_calls)
+    assert secret not in json.dumps([e.payload for e in services.ctx.event_repo.list(sid)])
+
+    # The next turn replays the stored form: the model does not see it again.
+    second = FakeModel([_answer()])
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda *args: second)
+    assert server.handle_line(
+        _req("secret-next", "session.turn.start", {"session_id": sid, "message": "sigue"})
+    )["ok"]
+    _collect_until(server, sid)
+    replayed = second.requests[0].messages
+    assert secret not in json.dumps(
+        [[m.content, [c.arguments for c in m.tool_calls]] for m in replayed]
+    )
+    call = next(m for m in replayed if m.tool_calls)
+    assert call.tool_calls[0].arguments == {"command": "echo PASSWORD=[REDACTED]"}

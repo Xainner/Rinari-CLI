@@ -32,6 +32,20 @@ at most once per minute while visible. Unsupported products link to their panel.
 Local usage only counts recorded model events with provider identity; legacy
 history and unrecorded auxiliary calls are intentionally not attributed.
 
+Inference failures say which limit was hit. The provider's structured error
+fields (`code`, `type`, `status`) decide before the HTTP status, and the
+message text is never searched for limit words. A plan quota, missing credits
+or a spend cap (`insufficient_quota`, HTTP 402…) is `QUOTA_EXHAUSTED` and is
+not retried. An explicit rate code is `RATE_LIMIT` with `limit_kind: rate`; a
+429 without a code is `RATE_LIMIT` with `limit_kind: unknown`, so clients say
+the provider did not tell which. Errors sent inside a stream (chat, Anthropic,
+Responses) use the same classification and lead with the provider's message.
+Every error carries `http_status`, `provider_response_code`,
+`provider_error_type` and `retry_after_s` when known. The router adds the
+`provider_id` and `provider_alias` of the configuration that failed, so a
+notice read later points at that provider and not at the current selection.
+Quota and rate failures both invalidate the usage cache.
+
 ChatGPT login uses external-browser PKCE or device flow. Refresh tokens live in
 the Engine credential store; per-provider file locks serialize renewal across
 processes. An authentication rejection may be retried once before output starts.

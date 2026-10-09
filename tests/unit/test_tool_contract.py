@@ -70,7 +70,7 @@ def _def(name, handler, **kwargs):
     return ToolDefinition(
         name=name,
         description=name,
-        input_schema={"type": "object", "properties": {}},
+        input_schema={"type": "object", "properties": {"path": {"type": "string"}}},
         handler=handler,
         **kwargs,
     )
@@ -276,10 +276,13 @@ def test_builtin_catalog_covers_session_tools_without_executing_them():
     from rinari.tools.catalog import builtin_catalog
 
     registry = builtin_catalog()
-    assert len(registry.names()) == 114
+    assert len(registry.names()) == 135
     assert {
+        "artifact.export",
         "fs.read_image",
+        "fs.read_pdf_pages",
         "ssh.inspect",
+        "ssh.run",
         "skills.activate",
         "skills.read",
         "skills.validate_draft",
@@ -289,6 +292,7 @@ def test_builtin_catalog_covers_session_tools_without_executing_them():
         "rinari.sessions",
         "rinari.session",
         "rinari.turn",
+        "wait.for",
     } <= set(registry.names())
     result = registry.get("ssh.inspect").handler(
         {"target_id": "unconfigured", "section": "hardware"}, None

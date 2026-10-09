@@ -84,6 +84,13 @@ rinari providers login <alias>
 Cambiar de proveedor/modelo (`provider use` / `model use`) **nunca** borra
 configuración previa; cada proveedor recuerda su último modelo.
 
+### El nivel de razonamiento elegido no se aplica
+
+Si el modelo no admite razonamiento configurable (o no admite ese nivel), la
+llamada sale sin él y se registra `provider.reasoning.dropped` con el motivo;
+el turno no se corta. Revise las capacidades del modelo en Proveedores y
+modelos si esperaba que lo admitiera.
+
 ## Red
 
 Las acciones de red se rigen por policy (`network.mode` + reglas allow/deny),
@@ -104,6 +111,18 @@ El reconciler re-verifica hechos duraderos (proyecto, branch, dirty,
 proveedor, trust, cwd). Cada warning tiene `action` sugerida en el JSON
 (`--json`). Nada se corrige en silencio excepto re-registrar la row del
 proyecto.
+
+### Un turno quedó «en curso» tras cerrar Rinari
+
+Si el motor se cerró en mitad de un turno (por ejemplo esperando un proceso),
+el siguiente arranque lo cierra como `turn.failed` con código `ENGINE_EXITED`
+(recuperable: puede continuar o repetir la petición). Lo que corrió antes se
+conserva. Los turnos del CLI que fallan guardan en `TurnInterrupted` el código
+y un mensaje acotado y redactado del error, no solo el tipo.
+
+Los ficheros `~/.rinari/sessions/<id>.turn.lock` de sesiones borradas se
+eliminan al borrar la sesión y en cada arranque del motor, salvo si otro
+proceso los tiene tomados.
 
 ### Perder contexto largo
 

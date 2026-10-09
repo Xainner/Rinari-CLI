@@ -270,12 +270,16 @@ def test_legacy_recovery_uses_evidence_only_and_stable_ids():
 
 @pytest.mark.parametrize("code,status", [(0, "exited_zero"), (127, "failed"), (255, "failed")])
 def test_large_process_observation_preserves_exit_status(code, status):
+    # shell.exec is plain text for the model now; the evidence is the same.
     text = ToolResult(ok=True, data={"stdout": "x" * 9000, "exit_code": code}).to_model_text(
         "shell.exec"
     )
-    data = json.loads(text)
-    assert data["process_status"] == status and data["data"]["exit_code"] == code
-    assert data["task_verified"] is False
+    assert text.splitlines()[0] == f"exit_code: {code} ({status}; task not verified)"
+    assert text.endswith("x" * 9000)
+    data = json.loads(
+        ToolResult(ok=True, data={"stdout": "x", "exit_code": code}).to_model_text("process.wait")
+    )
+    assert data["process_status"] == status and data["task_verified"] is False
 
 
 def test_cli_stream_timeouts_persist_and_inherit(tmp_path, monkeypatch):

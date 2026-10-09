@@ -31,9 +31,9 @@
 - Compaction runs automatically at the threshold (percent of usable input, default 80-90%) and aims at about 60% of it, or at 75% of the threshold if that is lower. It keeps the goal, constraints, decisions and open work, and checks its summary against recorded tasks and validations.
 
 ## Tools
-- Core tools are always visible; on-demand ones (browser, MCP, OpenAPI, plugins, `rinari.*`) appear after `capability.search` with `load=true`, `capability.activate`, or activating a skill that requires them.
+- Core tools are always visible; on-demand ones (browser, MCP, OpenAPI, plugins, `rinari.*`, `documents.*`, `lsp.*`, `pty.*`, `context.*`, `ssh.*`, `artifact.metadata`/`artifact.export`) appear after `capability.search` with `load=true`, `capability.activate`, or activating a skill that requires them.
 - Every call goes through policy: reading harness state is always allowed; writes, shell and network follow the permission profile and may ask for approval.
-- Large results spill to artifacts; read them with `artifact.read`.
+- Large results spill to artifacts; read them with `artifact.read`. Command output above `context.artifact_output_threshold_kb` (16 KiB) arrives as head + tail with the artifact pointer.
 
 ## Skills and souls
 - Skills: packaged, user (`~/.rinari/skills`) and project (`.rinari/skills`, trusted projects only). The catalog line of each is always in context; activating one injects its SKILL.md every turn and exposes its required tools; its `references/` are read with `skills.read` only when needed.

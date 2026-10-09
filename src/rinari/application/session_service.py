@@ -7,6 +7,7 @@ state (turns, tool calls) joins in phase 2 without changing this contract.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -32,11 +33,24 @@ from rinari.storage.records import (
 )
 from rinari.trust import TrustService
 
+logger = logging.getLogger(__name__)
+
 EVENT_SESSION_STARTED = "SessionStarted"
 EVENT_SESSION_PROMOTED = "SessionPromotedToProject"
 EVENT_SESSION_FORKED = "SessionForked"
 EVENT_SESSION_CLOSED = "SessionClosed"
 EVENT_SESSION_RENAMED = "SessionRenamed"
+EVENT_SESSION_TITLE_FAILED = "SessionTitleFailed"
+# The first messages carried no topic (a greeting): the title waits for one.
+EVENT_SESSION_TITLE_DEFERRED = "SessionTitleDeferred"
+# What a title factory returns for a message with no topic.
+TITLE_NO_TOPIC = "NONE"
+# Who set a title. Only a fallback (the trimmed first message, stored when
+# the model gave no usable title) is ever replaced automatically.
+TITLE_SOURCE_MANUAL = "manual"
+TITLE_SOURCE_GENERATED = "generated"
+TITLE_SOURCE_FALLBACK = "fallback"
+TITLE_ATTEMPTS = 3
 EVENT_SESSION_ARCHIVED = "SessionArchived"
 EVENT_SESSION_RESTORED = "SessionRestored"
 EVENT_SESSION_PINNED = "SessionPinned"
@@ -91,6 +105,9 @@ class SessionService:
         self._projects = projects
         self._trust = trust
         self._user_home = user_home
+        # Called after a rename is stored: the protocol server publishes it
+        # as `session.renamed` so every client shows the new title live.
+        self.on_renamed = None
 
     def _now(self) -> str:
         return now_iso(self._ctx.clock)
@@ -542,43 +559,110 @@ class SessionService:
     def name_from_first_message(
         self, ref: str, message: str, *, title_factory=None
     ) -> SessionRecord:
-        """Give an untouched session a bounded, Unicode-safe first-message title."""
+        """Give an untouched session a title that summarizes the user's intent.
+
+        The first message names the session. When the model gives no usable
+        title, the trimmed message stands in as a *provisional* title and the
+        next turns retry from that same first message, up to
+        `TITLE_ATTEMPTS` failures in all; a manual rename always wins. Every
+        failure leaves a `SessionTitleFailed` event with its reason (never the
+        content), so a bad title can be diagnosed afterwards.
+        """
         record = self._resolve(ref)
-        defaults = {
-            "Nueva conversación",
-            "New conversation",
-            "New chat",
-            "",
-            self._default_title(Path(record.current_cwd), record.kind),
-        }
-        if record.title not in defaults or self._ctx.message_repo.list(record.id):
-            return record
-        if any(e.type == EVENT_SESSION_RENAMED for e in self._ctx.event_repo.list(record.id)):
-            return record
-        clean = " ".join(message.split())
+        renames = [
+            e for e in self._ctx.event_repo.list(record.id) if e.type == EVENT_SESSION_RENAMED
+        ]
+        if not renames:
+            # A CHAT promoted to PROJECT keeps its `chat in …` default: both
+            # kinds' defaults are still "untouched".
+            cwd = Path(record.current_cwd)
+            defaults = {
+                "Nueva conversación",
+                "New conversation",
+                "New chat",
+                "",
+                self._default_title(cwd, SESSION_KIND_CHAT),
+                self._default_title(cwd, SESSION_KIND_PROJECT),
+            }
+            if record.title not in defaults:
+                return record
+            if self._ctx.message_repo.list(record.id):
+                # Earlier messages had no topic ("Hola"): name it from this one.
+                deferred = sum(
+                    1
+                    for e in self._ctx.event_repo.list(record.id)
+                    if e.type == EVENT_SESSION_TITLE_DEFERRED
+                )
+                if not deferred:
+                    return record
+            source_text = message
+        else:
+            last = renames[-1].payload or {}
+            if last.get("source") != TITLE_SOURCE_FALLBACK or record.title != last.get("title"):
+                return record
+            failures = sum(
+                1
+                for e in self._ctx.event_repo.list(record.id)
+                if e.type == EVENT_SESSION_TITLE_FAILED
+            )
+            if failures >= TITLE_ATTEMPTS or title_factory is None:
+                return record
+            first = next(
+                (m for m in self._ctx.message_repo.list(record.id) if m.role == "user"), None
+            )
+            source_text = (first.display_content or first.content or "") if first else message
+        clean = " ".join(source_text.split())
         if not clean:
             return record
         if len(clean) > 72:
             prefix = clean[:69]
             clean = (prefix.rsplit(" ", 1)[0] or prefix) + "…"
-        if title_factory is not None:
+        title, source, failure = clean, TITLE_SOURCE_FALLBACK, None
+        if title_factory is None:
+            failure = "unavailable"
+        else:
             try:
-                generated = title_factory(message)
-                if isinstance(generated, str):
-                    generated = generated.strip().strip('"').strip()
-                    if generated and len(generated) <= 160 and "\n" not in generated:
-                        clean = generated
-            except Exception:
+                generated = title_factory(source_text)
+                generated = (
+                    generated.strip().strip('"').strip() if isinstance(generated, str) else ""
+                )
+                if generated.upper().rstrip(".") == TITLE_NO_TOPIC and not renames:
+                    deferrals = sum(
+                        1
+                        for e in self._ctx.event_repo.list(record.id)
+                        if e.type == EVENT_SESSION_TITLE_DEFERRED
+                    )
+                    if deferrals < TITLE_ATTEMPTS:
+                        # A greeting is not a topic: "Hola" made a poor title
+                        # for most sessions. Keep the default until one comes.
+                        with self._ctx.db.transaction():
+                            self._append_event(record.id, EVENT_SESSION_TITLE_DEFERRED, {})
+                        return self._resolve(ref)
+                    failure = "empty"
+                elif not generated:
+                    failure = "empty"
+                elif len(generated) > 160 or "\n" in generated:
+                    failure = "invalid"
+                else:
+                    title, source = generated, TITLE_SOURCE_GENERATED
+            except Exception as exc:
                 # Naming is optional metadata; provider failure must not lose the turn.
-                pass
+                failure = getattr(exc, "title_failure", None) or f"error:{type(exc).__name__}"
+                logger.warning("Session title generation failed (%s)", failure)
         latest = self._resolve(ref)
-        if latest.title != record.title or any(
-            e.type == EVENT_SESSION_RENAMED for e in self._ctx.event_repo.list(record.id)
-        ):
+        current = [
+            e for e in self._ctx.event_repo.list(record.id) if e.type == EVENT_SESSION_RENAMED
+        ]
+        if latest.title != record.title or len(current) != len(renames):
             return latest
-        return self.rename(ref, clean)
+        if failure is not None:
+            with self._ctx.db.transaction():
+                self._append_event(record.id, EVENT_SESSION_TITLE_FAILED, {"reason": failure})
+            if renames:
+                return latest
+        return self.rename(ref, title, source=source)
 
-    def rename(self, ref: str, title: str) -> SessionRecord:
+    def rename(self, ref: str, title: str, *, source: str = TITLE_SOURCE_MANUAL) -> SessionRecord:
         record = self._resolve(ref)
         clean = (title or "").strip()
         if not clean:
@@ -589,7 +673,12 @@ class SessionService:
         record.updated_at = self._now()
         with self._ctx.db.transaction():
             self._ctx.session_repo.update(record)
-            self._append_event(record.id, EVENT_SESSION_RENAMED, {"title": clean})
+            self._append_event(record.id, EVENT_SESSION_RENAMED, {"title": clean, "source": source})
+        if self.on_renamed is not None:
+            try:
+                self.on_renamed({"session_id": record.id, "title": clean, "source": source})
+            except Exception:
+                logger.exception("session rename observer failed")
         return record
 
     def set_pinned(self, ref: str, pinned: bool) -> SessionRecord:
@@ -646,7 +735,21 @@ class SessionService:
             self._ctx.db.execute("DELETE FROM session_events WHERE session_id = ?", (record.id,))
             self._ctx.db.execute("DELETE FROM session_messages WHERE session_id = ?", (record.id,))
             self._ctx.db.execute("DELETE FROM sessions WHERE id = ?", (record.id,))
+        from rinari.sessions.turn_lock import discard_lock, lock_path
+
+        # After the rows: no turn can start in a session that is gone. A lock
+        # still held is left for the engine-start sweep.
+        discard_lock(lock_path(self._ctx.layout.dir("sessions"), record.id), record.id)
         return record.id
+
+    def sweep_turn_locks(self) -> int:
+        """Discard the free turn-lock files of sessions that no longer exist."""
+        from rinari.sessions.turn_lock import sweep_orphan_locks
+
+        def live() -> set[str]:
+            return {str(row["id"]) for row in self._ctx.db.query("SELECT id FROM sessions")}
+
+        return sweep_orphan_locks(self._ctx.layout.dir("sessions"), live)
 
     def latest_for_root(self, root: str | Path) -> SessionRecord | None:
         """Latest active session bound to a project root (or None)."""

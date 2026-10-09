@@ -171,6 +171,80 @@ class ArtifactStore:
         target = self._storage_path(storage_path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
+        return self._save(
+            session_id,
+            namespace,
+            name,
+            storage_path,
+            digest,
+            len(data),
+            content_type=content_type,
+            summary=summary,
+            provenance=provenance,
+            project_root=project_root,
+            retention=retention,
+        )
+
+    def create_from_file(
+        self,
+        session_id: str,
+        namespace: str,
+        name: str,
+        source: Path,
+        *,
+        content_type: str = "application/octet-stream",
+        summary: str = "",
+        provenance: str = "",
+        retention: str = RETENTION_SESSION,
+    ) -> ArtifactRecord:
+        """Un archivo grande entra sin pasar por memoria: se mueve y se hashea por bloques."""
+        if not _SEGMENT.match(namespace or ""):
+            raise ArtifactURIError(f"Invalid artifact namespace: {namespace!r}")
+        if not _SEGMENT.match(name or ""):
+            raise ArtifactURIError(f"Invalid artifact name: {name!r}")
+        if retention not in RETENTIONS:
+            raise ArtifactURIError(f"Invalid retention {retention!r}; use one of {RETENTIONS}")
+        source = Path(source)
+        if source.is_symlink() or not source.is_file():
+            raise ArtifactURIError("create_from_file needs a regular file")
+        digest = sha256()
+        with source.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        size = source.stat().st_size
+        storage_path = f"{session_id.strip()}/{namespace}/{name}"
+        target = self._storage_path(storage_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(source), str(target))
+        return self._save(
+            session_id,
+            namespace,
+            name,
+            storage_path,
+            digest.hexdigest(),
+            size,
+            content_type=content_type,
+            summary=summary,
+            provenance=provenance,
+            project_root="",
+            retention=retention,
+        )
+
+    def _save(
+        self,
+        session_id: str,
+        namespace: str,
+        name: str,
+        storage_path: str,
+        digest: str,
+        size: int,
+        *,
+        content_type: str,
+        summary: str,
+        provenance: str,
+        project_root: str,
+        retention: str,
+    ) -> ArtifactRecord:
         record = ArtifactRecord(
             id=name,
             session_ref=session_id.strip(),
@@ -179,7 +253,7 @@ class ArtifactStore:
             name=name,
             content_type=content_type,
             sha256=digest,
-            byte_count=len(data),
+            byte_count=size,
             storage_path=storage_path,
             summary=summary,
             provenance=provenance,

@@ -113,16 +113,21 @@ def test_project_resume_clean_with_stored_branch(env, repo) -> None:
 
 
 def test_resume_detects_branch_switch(env, repo) -> None:
+    from rinari.projects.branch_tracking import BranchTracker
+
     s = env[2]
     record = s.sessions.start(repo).session
     s.trust.add(repo)
-    record.git_branch = "main"
-    s.ctx.session_repo.update(record)
+    branch = git_state(repo).branch
+    BranchTracker(s.ctx.db, s.ctx.clock).record_work(
+        repo, session_id=record.id, turn_id="turn_1", source="turn.end"
+    )
     _git(repo, "checkout", "-qb", "feature")
     started = s.sessions.resume(record.id)
     finding = _finding(started, "git-branch")
     assert finding.state == "changed"
-    assert "main -> feature" in finding.detail
+    assert f"{branch} -> feature" in finding.detail
+    assert "since the last work here" in finding.detail
     assert any("git-branch" in w for w in started.warnings)
 
 

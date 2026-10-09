@@ -41,6 +41,14 @@ def normalize(metadata):
         return min((v for v in values if type(v) is int and v > 0), default=None)
 
     total = positive("max_context_tokens", "context_length", "context_window", "max_model_len")
+    meta = metadata.get("meta")
+    if not total and isinstance(meta, dict):
+        # llama.cpp's /v1/models: n_ctx is what the server allocated,
+        # n_ctx_train what the model was trained on (an upper bound).
+        total = next(
+            (meta[k] for k in ("n_ctx", "n_ctx_train") if type(meta.get(k)) is int and meta[k] > 0),
+            None,
+        )
     incoming = positive("max_input_tokens", "max_input_length")
     outgoing = positive("max_output_tokens", "max_completion_tokens")
     result = {}

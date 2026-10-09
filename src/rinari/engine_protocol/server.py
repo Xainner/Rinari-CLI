@@ -8,6 +8,7 @@ roundtrips, provider/model reads. Envelope contract is unchanged.
 from __future__ import annotations
 
 import contextlib
+import logging
 import secrets
 import threading
 import time
@@ -23,6 +24,8 @@ from rinari.application.session_service import (
 )
 from rinari.cli.serializers import model_dict
 from rinari.engine_protocol import protocol
+from rinari.engine_protocol.diagnostics import RequestLog
+from rinari.engine_protocol.diagnostics import collect as collect_diagnostics
 from rinari.engine_protocol.dispatcher import EngineDispatcher
 from rinari.engine_protocol.ecosystem import mcp_row_view, plugin_row_view, tool_row_view
 from rinari.engine_protocol.errors import (
@@ -32,6 +35,7 @@ from rinari.engine_protocol.errors import (
     EngineProtocolError,
 )
 from rinari.engine_protocol.flow import collect_flow
+from rinari.engine_protocol.frames import newest_within
 from rinari.engine_protocol.messages import event, hello
 from rinari.engine_protocol.observability import (
     clamp_read_bytes,
@@ -56,6 +60,8 @@ from rinari.shared.errors import (
     PermissionDeniedError,
 )
 from rinari.soul.store import SoulStore
+
+logger = logging.getLogger(__name__)
 
 _TEXT_EXTENSIONS = {
     ".c",
@@ -145,6 +151,7 @@ class EngineServer:
         # Fresh per boot: sequential process ids may repeat after a
         # restart, so desktops must scope destructive preconditions to it.
         self._engine_instance_id = secrets.token_hex(16)
+        self._requests = RequestLog()
         self._home_id = protocol.home_id(services.ctx.home)
         home = Path(user_home) if user_home is not None else None
         self._user_home = home
@@ -168,6 +175,7 @@ class EngineServer:
         self._turns.set_browser_registry(self._browser_registry)
 
         self._dispatcher.register("engine.info", self._engine_info)
+        self._dispatcher.register("engine.diagnostics", self._engine_diagnostics)
         self._dispatcher.register("browser.view.get", self._turns.browser_view)
         # `host.browser.*` no está en la allowlist del preload: sólo el
         # supervisor de main puede emitirlos (§5.2).
@@ -198,6 +206,11 @@ class EngineServer:
         self._services.schedules.on_proposed = lambda payload: self._turns.emit_external(
             event("schedule.proposed", payload)
         )
+        # Automatic titles land mid-turn (or on a later turn, when the first
+        # attempt failed): clients learn the new title as soon as it is stored.
+        self._services.sessions.on_renamed = lambda payload: self._turns.emit_external(
+            event("session.renamed", payload)
+        )
         self._dispatcher.register("schedule.list", self._schedule.list)
         self._dispatcher.register("schedule.get", self._schedule.get)
         self._dispatcher.register("schedule.create", self._schedule.create)
@@ -214,6 +227,7 @@ class EngineServer:
         self._dispatcher.register("workspace.preview.stop", self._previews.stop)
         self._dispatcher.register("session.move", self._desktop.move)
         self._dispatcher.register("workspace.file.read", self._desktop.read)
+        self._dispatcher.register("workspace.file.resolve", self._desktop.resolve)
         self._dispatcher.register("workspace.file.watch", self._desktop.watch)
         self._dispatcher.register("workspace.file.unwatch", self._desktop.unwatch)
         self._dispatcher.register("question.list", self._question_list)
@@ -335,6 +349,15 @@ class EngineServer:
         self._dispatcher.register("artifact.list", self._artifact_list)
         self._dispatcher.register("artifact.read", self._artifact_read)
         self._dispatcher.register("artifact.export", self._artifact_export)
+        self._dispatcher.register("artifact.resolve", self._artifact_resolve)
+        from rinari.engine_protocol.documents import register_documents
+
+        register_documents(
+            self._dispatcher,
+            self._services,
+            lambda job: self._turns.emit_external(event("document.job.updated", job)),
+            resolve_file=self._desktop.resolve_file,
+        )
         self._dispatcher.register("context.get", self._context_get)
         self._dispatcher.register("memory.list", self._memory_list)
         self._dispatcher.register("memory.search", self._memory_search)
@@ -344,6 +367,8 @@ class EngineServer:
         self._dispatcher.register("memory.forget", self._memory_forget)
         self._dispatcher.register("memory.candidates.list", self._memory_candidates_list)
         self._dispatcher.register("memory.candidate.resolve", self._memory_candidate_resolve)
+        self._dispatcher.register("memory.settings.get", self._memory_settings_get)
+        self._dispatcher.register("memory.settings.set", self._memory_settings_set)
         self._dispatcher.register("conversation.memory.status", self._conversation_memory_status)
         self._dispatcher.register("conversation.memory.exclude", self._conversation_memory_exclude)
         self._dispatcher.register("conversation.delete", self._conversation_delete)
@@ -401,7 +426,10 @@ class EngineServer:
         return hello(self._engine_instance_id, home_id=self._home_id)
 
     def handle_line(self, line: str) -> dict[str, Any] | None:
-        return self._dispatcher.dispatch(line)
+        started = time.monotonic()
+        response = self._dispatcher.dispatch(line)
+        self._requests.record(line, response, int((time.monotonic() - started) * 1000))
+        return response
 
     def drain_events(self) -> list[dict[str, Any]]:
         return self._turns.drain_events()
@@ -421,6 +449,9 @@ class EngineServer:
         if hasattr(self, "_provider_auth_service"):
             self._provider_auth_service.close()
         self._attachment_jobs.close()
+        from rinari.documents.jobs import JobManager
+
+        JobManager.close_for(self._services.ctx)
         self._previews.close()
         self._desktop.close()
         self._pty.shutdown()
@@ -437,6 +468,19 @@ class EngineServer:
             "engine_instance_id": self._engine_instance_id,
             "home_id": self._home_id,
             "capabilities": dict(protocol.CAPABILITIES),
+        }
+
+    def _engine_diagnostics(self, params: dict[str, Any]) -> dict[str, Any]:
+        _ = params
+        info = self._engine_info({})
+        return {
+            "diagnostics": collect_diagnostics(
+                self._services,
+                engine={k: info[k] for k in ("protocol_version", "engine_version", "home_id")},
+                requests=self._requests,
+                connected=self._mcp_connected,
+                active_turns=len(self._turns.runtime_state().get("active_turns", [])),
+            )
         }
 
     def _browser_context_get(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -757,10 +801,21 @@ class EngineServer:
             raise EngineProtocolError(INVALID_PARAMS, "Param 'ref' must be a non-empty string.")
         started = self._services.sessions.resume(ref=ref)
         record = started.session
+        self._turns.reconcile_orphan_turns(record.id)
         return {
             "session": session_to_dict(record),
             "created": started.created,
             "warnings": list(started.warnings),
+            # The branch change behind a [git-branch] warning, so a client
+            # can word it in its own language: from, to, since, reference.
+            "branch_change": next(
+                (
+                    finding.data
+                    for finding in started.findings
+                    if finding.subsystem == "git-branch" and finding.data
+                ),
+                None,
+            ),
             # Structured, so a client can tell "never trusted" from "the
             # project's identity changed since the grant" (a new Git remote,
             # a re-created repository) without parsing the warning text.
@@ -791,11 +846,14 @@ class EngineServer:
         total = len(stored)
         stored, redacted = self._services.memory.redact_history(stored)
         window = stored[-limit:] if total > limit else stored
+        # A page is bounded by bytes too: a few huge tool outputs must not
+        # produce a line the desktop drops, taking the whole connection with it.
+        messages = newest_within([message_to_dict(item) for item in window])
         return {
             "session_id": record.id,
-            "messages": [message_to_dict(item) for item in window],
+            "messages": messages,
             "total": total,
-            "has_more": total > len(window),
+            "has_more": total > len(messages),
             "redacted": redacted,
         }
 
@@ -823,34 +881,99 @@ class EngineServer:
             raise EngineProtocolError(INVALID_PARAMS, "Param 'id' must be a non-empty string.")
         return value
 
+    @staticmethod
+    def _memory_kind(params: dict[str, Any]) -> str | None:
+        from rinari.storage.repositories.memory import PROJECT_KINDS, USER_KINDS
+
+        kinds = tuple(dict.fromkeys((*USER_KINDS, *PROJECT_KINDS)))
+        kind = params.get("kind")
+        if kind is not None and kind not in kinds:
+            raise EngineProtocolError(
+                INVALID_PARAMS, f"Param 'kind' must be one of: {', '.join(kinds)}."
+            )
+        return kind
+
+    @staticmethod
+    def _memory_scope(params: dict[str, Any]) -> tuple[str, str | None]:
+        """`scope` user (default, as before) | project | all, and an optional
+        `project_root` that narrows project records to one project."""
+        scope = params.get("scope", "user")
+        if scope not in ("user", "project", "all"):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'scope' must be user, project or all.")
+        root = params.get("project_root")
+        if root is not None and (not isinstance(root, str) or not root or len(root) > 4096):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'project_root' must be a path.")
+        return scope, root
+
     def _memory_list(self, params: dict[str, Any]) -> dict[str, Any]:
-        self._memory_reject_unknown(params, {"limit"})
-        rows = self._services.memory.list_user(limit=self._memory_limit(params))
-        return {"scope": "user", "records": rows, "count": len(rows)}
+        self._memory_reject_unknown(params, {"limit", "kind", "scope", "project_root"})
+        limit = self._memory_limit(params)
+        kind = self._memory_kind(params)
+        scope, root = self._memory_scope(params)
+        memory = self._services.memory
+        rows: list[dict[str, Any]] = []
+        if scope in ("user", "all"):
+            rows += memory.list_user(limit=limit, kind=kind)
+        if scope in ("project", "all"):
+            rows += memory.list_project(root, limit=limit, kind=kind)
+        if scope == "all":
+            rows.sort(key=lambda row: str(row.get("updated_at") or ""), reverse=True)
+            rows = rows[:limit]
+        return {"scope": scope, "records": rows, "count": len(rows)}
 
     def _memory_search(self, params: dict[str, Any]) -> dict[str, Any]:
-        self._memory_reject_unknown(params, {"query", "kind", "limit"})
+        self._memory_reject_unknown(params, {"query", "kind", "limit", "scope", "project_root"})
         query = params.get("query", "")
         if not isinstance(query, str) or len(query) > 256:
             raise EngineProtocolError(
                 INVALID_PARAMS, "Param 'query' must be a string up to 256 chars."
             )
-        kind = params.get("kind")
-        if kind is not None and kind not in ("preference", "rule", "fact"):
-            raise EngineProtocolError(
-                INVALID_PARAMS, "Param 'kind' must be preference, rule, or fact."
-            )
+        kind = self._memory_kind(params)
         limit = self._memory_limit(params, 20)
-        rows = self._services.memory.search_user(query, kind=kind, limit=limit)
-        return {"scope": "user", "query": query, "records": rows, "count": len(rows)}
+        scope, root = self._memory_scope(params)
+        memory = self._services.memory
+        rows: list[dict[str, Any]] = []
+        if scope in ("user", "all"):
+            rows += memory.search_user(query, kind=kind, limit=limit)
+        if scope in ("project", "all"):
+            roots = (
+                [root]
+                if root
+                else sorted({str(row["project_root"]) for row in memory.list_project(None)})
+            )
+            for project_root in roots:
+                rows += memory.search_project(project_root, query, kind=kind, limit=limit)
+        if scope != "user":
+            from rinari.memory.service import rank_by_terms
+
+            rows = rank_by_terms(rows, query, {"topic": 3, "text": 2}, limit=limit)
+        return {"scope": scope, "query": query, "records": rows, "count": len(rows)}
 
     def _memory_get(self, params: dict[str, Any]) -> dict[str, Any]:
         self._memory_reject_unknown(params, {"id"})
         memory_id = self._memory_id(params)
-        row = self._services.memory.get_user(memory_id)
+        row = self._services.memory.get_any(memory_id)
         if row is None or row.get("superseded_by") is not None:
             raise EngineProtocolError("NOT_FOUND", "Personal memory record not found.")
-        return {"scope": "user", "record": row}
+        return {"scope": row["scope"], "record": row}
+
+    @staticmethod
+    def _learned_record(row: dict[str, Any] | None) -> bool:
+        from rinari.memory.service import LEARNED_PROVENANCE_PREFIX
+
+        return bool(row) and str(row.get("provenance") or "").startswith(LEARNED_PROVENANCE_PREFIX)
+
+    def _memory_settings_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        if params:
+            raise EngineProtocolError(INVALID_PARAMS, "memory.settings.get takes no parameters.")
+        return {"learned_facts": self._services.memory.learned_facts_mode()}
+
+    def _memory_settings_set(self, params: dict[str, Any]) -> dict[str, Any]:
+        self._memory_reject_unknown(params, {"learned_facts"})
+        mode = params.get("learned_facts")
+        if mode not in ("ask", "auto"):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'learned_facts' must be ask or auto.")
+        return {"learned_facts": self._services.memory.set_learned_facts_mode(mode)}
 
     def _memory_remember(self, params: dict[str, Any]) -> dict[str, Any]:
         if self._turns.has_active_turns():
@@ -903,7 +1026,14 @@ class EngineServer:
         return {"scope": "user", "record": row, "action": result.get("action", "created")}
 
     def _memory_update(self, params: dict[str, Any]) -> dict[str, Any]:
-        if self._turns.has_active_turns():
+        # A learned fact has no source message, so editing it cannot race
+        # the turn that is running: the owner corrects the card right away.
+        existing = (
+            self._services.memory.get_any(params.get("id"))
+            if isinstance(params.get("id"), str)
+            else None
+        )
+        if self._turns.has_active_turns() and not self._learned_record(existing):
             raise EngineProtocolError(
                 TURN_RUNNING,
                 "Finish active turns before changing durable personal memory.",
@@ -947,11 +1077,23 @@ class EngineServer:
         from rinari.memory.service import MemoryConflictError, MemoryNotFoundError
 
         try:
-            existing = self._services.memory.get_user(memory_id)
+            if existing is not None and existing.get("scope") == "project":
+                row = self._services.memory.update_project(
+                    existing["project_root"],
+                    memory_id,
+                    expected_revision=expected_revision,
+                    **fields,
+                )
+                return {"scope": "project", "record": row}
             row = self._services.memory.update_user(
                 memory_id,
                 expected_revision=expected_revision,
-                owner_consent=bool(existing and existing.get("provenance") == "panel"),
+                # The desktop is the owner: their edit of a record they made
+                # in the panel, or of a learned fact, is their consent.
+                owner_consent=bool(
+                    existing
+                    and (existing.get("provenance") == "panel" or self._learned_record(existing))
+                ),
                 **fields,
             )
         except MemoryConflictError as exc:
@@ -963,7 +1105,13 @@ class EngineServer:
         return {"scope": "user", "record": row}
 
     def _memory_forget(self, params: dict[str, Any]) -> dict[str, Any]:
-        if self._turns.has_active_turns():
+        # Undoing a learned fact from its card happens while the turn runs.
+        target = (
+            self._services.memory.get_any(params.get("id"))
+            if isinstance(params.get("id"), str)
+            else None
+        )
+        if self._turns.has_active_turns() and not self._learned_record(target):
             raise EngineProtocolError(
                 TURN_RUNNING,
                 "Finish active turns before forgetting durable personal memory.",
@@ -981,6 +1129,18 @@ class EngineServer:
             )
         from rinari.memory.service import MemoryConflictError
 
+        if target is not None and target.get("scope") == "project":
+            from rinari.memory.service import MemoryConflictError
+
+            try:
+                forgotten = self._services.memory.forget_project(
+                    target["project_root"], memory_id, expected_revision=expected_revision
+                )
+            except MemoryConflictError as exc:
+                raise EngineProtocolError("CONFLICT", exc.message) from exc
+            if not forgotten:
+                raise EngineProtocolError("NOT_FOUND", "Memory record not found.")
+            return {"scope": "project", "id": memory_id, "forgotten": True}
         try:
             existing = self._services.memory.get_user(memory_id)
             for source in self._services.memory.repo.sources_for_memory(memory_id, live_only=True):
@@ -1014,20 +1174,28 @@ class EngineServer:
         if unknown:
             raise EngineProtocolError(INVALID_PARAMS, "Unknown candidate parameter.")
         status = params.get("status", "pending")
-        if status is not None and status not in ("pending", "accepted", "denied"):
+        if status is not None and status not in (
+            "pending",
+            "accepted",
+            "denied",
+            "resolved",
+            "all",
+        ):
             raise EngineProtocolError(INVALID_PARAMS, "Invalid candidate status.")
         limit = self._memory_limit(params)
         rows = self._services.memory.list_candidates(status=status, limit=limit)
         return {"candidates": rows, "count": len(rows)}
 
     def _memory_candidate_resolve(self, params: dict[str, Any]) -> dict[str, Any]:
-        if self._turns.has_active_turns():
-            raise EngineProtocolError(
-                TURN_RUNNING,
-                "Finish active turns before resolving a memory candidate.",
-            )
+        from rinari.memory.service import MODEL_CANDIDATE_CLASSES, MemoryNotFoundError
+
         params = params or {}
-        if set(params) != {"id", "decision"}:
+        if not {"id", "decision"} <= set(params) or set(params) - {
+            "id",
+            "decision",
+            "text",
+            "topic",
+        }:
             raise EngineProtocolError(INVALID_PARAMS, "Candidate id and decision are required.")
         candidate_id = params.get("id")
         decision = params.get("decision")
@@ -1035,14 +1203,42 @@ class EngineServer:
             raise EngineProtocolError(INVALID_PARAMS, "Candidate id is required.")
         if decision not in ("allow_once", "deny"):
             raise EngineProtocolError(INVALID_PARAMS, "Decision must be allow_once or deny.")
-        from rinari.memory.service import MemoryNotFoundError
-
+        text = params.get("text")
+        topic = params.get("topic")
+        if text is not None and (not isinstance(text, str) or not text.strip() or len(text) > 4096):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'text' must be max 4096 chars.")
+        if topic is not None and (
+            not isinstance(topic, str) or not topic.strip() or len(topic) > 128
+        ):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'topic' must be max 128 chars.")
+        current = self._services.memory.repo.candidate_get(candidate_id)
+        # A proposal the model wrote carries its own text: the owner answers
+        # the card while the turn runs. One parsed from an owner message is
+        # re-read from that message, so it still waits for the turns to end.
+        model_written = bool(current) and current.get("classification") in MODEL_CANDIDATE_CLASSES
+        if self._turns.has_active_turns() and not model_written:
+            raise EngineProtocolError(
+                TURN_RUNNING,
+                "Finish active turns before resolving a memory candidate.",
+            )
         try:
-            row = self._services.memory.resolve_candidate(candidate_id, decision)
+            row = self._services.memory.resolve_candidate(
+                candidate_id, decision, text=text, topic=topic
+            )
         except MemoryNotFoundError as exc:
             raise EngineProtocolError("NOT_FOUND", exc.message) from exc
         except InvalidUsageError as exc:
             raise EngineProtocolError("INVALID_PARAMS", exc.message) from exc
+        if (
+            current is not None
+            and current.get("status") == "pending"
+            and row["status"] != "pending"
+        ):
+            try:
+                self._turns.emit_memory_resolution(row)
+            except Exception:
+                # The card refetches the list; a lost event is presentation.
+                logger.exception("memory.candidate.resolved event failed")
         return {"candidate": row}
 
     def _memory_ledger_export(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1142,6 +1338,7 @@ class EngineServer:
             raise EngineProtocolError(INVALID_PARAMS, "Param 'limit' must be an int in 1..100.")
         record = self._services.sessions.show(ref)
         self._turns.questions.list(record.id)  # Reconcile orphaned waits after restart.
+        self._turns.reconcile_orphan_turns(record.id)
         events = [row for row in self._services.ctx.event_repo.list(record.id) if row.turn_id]
         messages = self._services.ctx.message_repo.list(record.id)
         messages, _redacted = self._services.memory.redact_history(messages)
@@ -1216,6 +1413,9 @@ class EngineServer:
             selected = [item for item in selected if item["turn_index"] < before]
         has_more = len(selected) > limit
         selected = selected[-limit:]
+        bounded = newest_within(selected)
+        has_more = has_more or len(bounded) < len(selected)
+        selected = bounded
         return {
             "session_id": record.id,
             "turns": selected,
@@ -2391,6 +2591,40 @@ class EngineServer:
             "text": text,
             "truncated": truncated,
             "max_bytes": max_bytes,
+        }
+
+    def _artifact_resolve(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Where an artifact's bytes are and what they are, without reading them.
+
+        For the desktop's media player: the host serves the approved file by
+        ranges, so an audio or video artifact plays at any size. `kind` comes
+        from the first bytes, like `workspace.file.resolve`.
+        """
+        from rinari.engine_protocol.desktop import _file_kind
+
+        params = params or {}
+        uri = params.get("uri", "")
+        if not isinstance(uri, str) or not uri:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'uri' is required.")
+        try:
+            record = self._services.artifacts.meta(uri)
+        except NotFoundError as exc:
+            raise NotFoundError(f"Artifact not found: {uri}") from exc
+        path = self._services.artifacts._storage_path(record.storage_path)
+        try:
+            size = path.stat().st_size
+            with path.open("rb") as stream:
+                head = stream.read(64)
+        except OSError as exc:
+            raise NotFoundError(f"Artifact not found: {uri}") from exc
+        kind, mime = _file_kind(Path(record.name), head)
+        return {
+            "uri": uri,
+            "path": str(path),
+            "name": Path(record.name).name or record.id,
+            "size": size,
+            "kind": kind,
+            "mime": mime,
         }
 
     def _artifact_export(self, params: dict[str, Any]) -> dict[str, Any]:

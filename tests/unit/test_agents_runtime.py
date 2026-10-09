@@ -875,7 +875,7 @@ def test_cli_session_wires_agent_tools_end_to_end(app_ctx, git_repo, monkeypatch
     main = _MainModel(
         scripted=[
             ModelResponse(
-                content="",
+                content="Voy a ello.",
                 stop_reason=StopReason.TOOL_CALLS,
                 tool_calls=(
                     ToolCall(
@@ -1176,8 +1176,12 @@ class _WriteThenLoopModel(_AnswerModel):
         return ModelResponse(content="", stop_reason=StopReason.TOOL_CALLS, tool_calls=(call,))
 
 
-def test_builtin_subagent_shares_the_parent_turn_budget(monkeypatch, git_repo):
-    """No ceiling of its own: the child runs until the parent turn's limit."""
+def test_builtin_subagent_inherits_the_parent_ceiling_for_its_own_calls(monkeypatch, git_repo):
+    """No ceiling of its own: the child gets the parent's, counted on its own calls.
+
+    A user's turn stopped at "model-call limit reached" while its subagents
+    worked: their calls used up the coordinator's emergency ceiling.
+    """
     from rinari.agents.definition import BUILTIN_AGENTS
     from rinari.agents.orchestrator import SubagentRunSpec
     from rinari.agents.runtime import SubagentRuntimeConfig, make_subagent_runner
@@ -1198,7 +1202,7 @@ def test_builtin_subagent_shares_the_parent_turn_budget(monkeypatch, git_repo):
         worktrees=None,
     )
     parent = BudgetMeter(TurnBudgetLimits(max_model_calls=20), clock)
-    parent.model_calls = 5  # the coordinator's own calls so far
+    parent.model_calls = 5  # spend reported by earlier work
     spec = SubagentRunSpec(
         agent_id="agt_shared",
         definition=BUILTIN_AGENTS["explore"],
@@ -1210,8 +1214,10 @@ def test_builtin_subagent_shares_the_parent_turn_budget(monkeypatch, git_repo):
     monkeypatch.setattr("rinari.agents.runtime._make_assembler", lambda: _NoopAssembler())
     result = make_subagent_runner(config).run(spec)
     assert result.status == "budget"
-    assert model.calls == 15  # well past the old ceiling of 12
-    assert parent.model_calls == 20
+    assert model.calls == 20  # its own 20, not what the coordinator left
+    assert parent.model_calls == 25  # the ledger still shows the total
+    assert parent.own_model_calls == 0
+    assert parent.first_exhausted() is None  # the coordinator can go on
 
 
 def test_stopped_subagent_reports_how_far_it_got(monkeypatch, git_repo):
@@ -1272,3 +1278,97 @@ def test_subagent_measurements_carry_the_model_they_called(monkeypatch, git_repo
     assert invoked
     assert invoked[0][0] == "parent-agt_test"
     assert invoked[0][1]["context_anchor"]["model"] == "mdl_child"
+
+
+# -- follow-ups to subagents (usage report 2026-10-08) ------------------------
+
+
+def test_a_message_to_a_finished_agent_runs_it_again_on_the_follow_up():
+    """A user saw "agent agt_012 is completed": the coordinator thought it still ran."""
+    runner = FakeRunner()
+    orch = _orchestrator(runner)
+    agent_id = orch.spawn("explore", "map the auth module")
+    first = orch.wait(agent_id)
+    assert first.summary == "done: map the auth module"
+    assert orch.deliver(agent_id, "now list its tests") == "resumed"
+    second = orch.wait(agent_id)
+    follow_up = runner.seen[-1].objective
+    assert "map the auth module" in follow_up
+    assert "done: map the auth module" in follow_up
+    assert follow_up.endswith("now list its tests")
+    assert second.summary.startswith("done: ")
+    assert orch.result(agent_id) is second
+    events = [event for event, _ in orch.events]
+    assert events.count("SubagentStart") == 2 and events.count("SubagentStop") == 2
+
+
+def test_a_message_to_a_running_agent_is_queued_for_its_next_step():
+    started, release = threading.Event(), threading.Event()
+
+    class SlowRunner(FakeRunner):
+        def run(self, spec):
+            started.set()
+            release.wait(5)
+            return super().run(spec)
+
+    orch = _orchestrator(SlowRunner())
+    agent_id = orch.spawn("explore", "task")
+    assert started.wait(5)
+    assert orch.deliver(agent_id, "also check README") == "queued"
+    assert orch.message(agent_id, "and the docs") is True
+    release.set()
+    orch.wait(agent_id)
+
+
+def test_an_instruction_left_unread_when_the_run_ends_starts_a_follow_up():
+    runner = FakeRunner()
+    gate = threading.Event()
+
+    class EndingRunner(FakeRunner):
+        def run(self, spec):
+            result = runner.run(spec)
+            gate.wait(5)  # the agent already answered; the message lands now
+            return result
+
+    orch = _orchestrator(EndingRunner())
+    agent_id = orch.spawn("explore", "task")
+    time.sleep(0.05)
+    assert orch.deliver(agent_id, "one more thing") == "queued"
+    gate.set()
+    deadline = time.monotonic() + 5
+    while len(runner.seen) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(runner.seen) == 2
+    assert runner.seen[-1].objective.endswith("one more thing")
+    orch.wait(agent_id)
+
+
+def test_the_coordinator_hears_once_when_an_agent_finishes():
+    orch = _orchestrator()
+    first = orch.spawn("explore", "a")
+    second = orch.spawn("explore", "b")
+    orch.wait(first)
+    orch.wait(second)
+    orch.note_result_delivered(second)
+    notices = orch.completion_notices()
+    assert len(notices) == 1 and first in notices[0] and "completed" in notices[0]
+    assert orch.completion_notices() == []
+    orch.deliver(first, "again")
+    orch.wait(first)
+    assert len(orch.completion_notices()) == 1
+
+
+def test_coordinator_messages_reach_a_running_subagent_loop():
+    from rinari.agents.runtime import _coordinator_messages
+
+    spec = SubagentRunSpec(
+        agent_id="agt_001",
+        definition=BUILTIN_AGENTS["explore"],
+        objective="task",
+    )
+    spec.messages.put("check the tests too")
+    messages = _coordinator_messages(spec)
+    assert [m.role for m in messages] == ["user"]
+    assert messages[0].content.endswith("check the tests too")
+    assert messages[0].display_content == "check the tests too"
+    assert _coordinator_messages(spec) == []

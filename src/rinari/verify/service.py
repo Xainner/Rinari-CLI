@@ -161,13 +161,28 @@ class VerificationService:
         from rinari.verify.revision import PREFIX, revision
 
         current = revision(Path(project_root))
+        recorded = records
         records = [
             r
             for r in records
-            if current and str(r.get("detail", "")).startswith(f"{PREFIX}{current}\n")
+            # The first line is the marker; a record without detail is
+            # stored as the bare marker (no trailing newline) and counts too.
+            if current and str(r.get("detail", "")).split("\n", 1)[0] == f"{PREFIX}{current}"
         ]
         if record_ids is not None:
             records = [record for record in records if record.get("id") in record_ids]
+            if not records and any(r.get("id") in record_ids for r in recorded):
+                # Checks ran this turn, but the workspace changed after them.
+                from rinari.verify.gate import OUTCOME_IMPLEMENTED_UNVERIFIED
+
+                return GateDecision(
+                    outcome=OUTCOME_IMPLEMENTED_UNVERIFIED,
+                    reasons=[
+                        "stale evidence: the workspace changed after the checks recorded "
+                        "this turn; run them again"
+                    ],
+                    evidence=[],
+                )
         return evaluate_gate(
             records=records,
             required_kinds=tuple(required_kinds),

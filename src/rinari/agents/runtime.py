@@ -65,6 +65,19 @@ class _ChildProgress:
         return "\n".join(lines)
 
 
+def expose_allowlisted(definition, registry, exposure) -> None:
+    """Show a child every tool its definition names, on-demand ones included.
+
+    A definition that lists a tool means the child needs it; it must not hide
+    behind capability.search, which the allowlist may not even include.
+    """
+    if not definition.tool_allowlist or exposure is None:
+        return
+    names = [name for name in registry.names() if definition.allows(name)]
+    if names:
+        exposure.activate(names, reason=f"agent {definition.name}", scope="session")
+
+
 def _written_paths(observation: object) -> list[str]:
     import json
 
@@ -160,6 +173,8 @@ class _SubagentRunner:
             spec, "agent.context", {"cwd": str(tool_ctx.cwd), "profile": tool_ctx.profile.value}
         )
         registry = self._build_registry(spec)
+        expose_allowlisted(definition, registry, tool_ctx.exposure)
+        parent_runtime = cfg.parent_runtime() if cfg.parent_runtime else None
         runtime = ToolRuntime(
             registry,
             cfg.policy,
@@ -169,6 +184,12 @@ class _SubagentRunner:
                 (lambda event, payload: cfg.event_sink(spec.session_id, event, payload))
                 if cfg.event_sink is not None
                 else None
+            ),
+            # Children spill large output at the same configured threshold.
+            **(
+                {"spill_threshold_bytes": parent_runtime.spill_threshold_bytes}
+                if isinstance(getattr(parent_runtime, "spill_threshold_bytes", None), int)
+                else {}
             ),
         )
         # The policy scope is derived from tool_ctx (policy is enforced at
@@ -221,18 +242,22 @@ class _SubagentRunner:
             ),
             tool_ctx=tool_ctx,
             assembler_base=base,
+            # agent.message: what the coordinator sends while this agent
+            # works is read before its next step (it was queued, never read).
+            collect_steering=lambda: _coordinator_messages(spec),
         )
         parent_budget = getattr(spec, "parent_budget", None)
         own = definition.budget
         if parent_budget is not None:
             # Hierarchical ledger (P0.10): the child's spend forwards to
             # the spawning turn; the spawn itself is counted with depth. A
-            # limit the agent does not set is the parent's: the ledger checks
-            # every ancestor before each call.
+            # call ceiling the agent does not set is the parent's, applied to
+            # the child's own calls: neither one uses up the other's.
+            inherited = parent_budget.limits
             budget = parent_budget.spawn_child(
                 TurnBudgetLimits(
-                    max_model_calls=own.max_model_calls,
-                    max_tool_calls=own.max_tool_calls,
+                    max_model_calls=own.max_model_calls or inherited.max_model_calls,
+                    max_tool_calls=own.max_tool_calls or inherited.max_tool_calls,
                     max_network_calls=own.max_tool_calls,
                     max_wall_time_s=own.max_wall_time_s,
                 ),
@@ -429,6 +454,10 @@ class _SubagentRunner:
             # session and the provenance ceiling of the parent turn carries over.
             peer_host=None,
             memory_source=None,
+            # A child proposes no memory of its own (memory.propose refuses
+            # outside the owner's conversation): the parent's timeline sink
+            # would otherwise receive events under the child's session id.
+            activity_sink=None,
             ask_user=None,
             web_snapshots={},
             change_tracker=None,
@@ -527,3 +556,24 @@ def make_subagent_runner(config: SubagentRuntimeConfig) -> _SubagentRunner:
 
 
 __all__ = ["SubagentRuntimeConfig", "_LinkedToken", "make_subagent_runner"]
+
+
+def _coordinator_messages(spec: SubagentRunSpec) -> list:
+    import queue
+
+    from rinari.models.types import ChatMessage
+
+    messages = []
+    while True:
+        try:
+            text = spec.messages.get_nowait()
+        except queue.Empty:
+            return messages
+        messages.append(
+            ChatMessage(
+                role="user",
+                content=f"Instruction from the main agent (coordinator):\n{text}",
+                display_content=text,
+                origin={"kind": "coordinator"},
+            )
+        )

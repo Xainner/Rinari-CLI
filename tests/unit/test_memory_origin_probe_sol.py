@@ -28,7 +28,7 @@ def test_live_turn_attaches_current_owner_message_to_memory_tool(app_ctx, tmp_pa
     caller = FakeModel(
         scripted=[
             ModelResponse(
-                content="",
+                content="Voy a ello.",
                 stop_reason=StopReason.TOOL_CALLS,
                 tool_calls=(
                     ToolCall(

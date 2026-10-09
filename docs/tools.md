@@ -23,6 +23,179 @@ aviso para revisarla y deshacerla; una skill nueva fuera de `/learn`, una skill
 instalada o creada por el dueño y cualquier contenido peligroso esperan
 aprobación. Reenviar el mismo contenido devuelve `status: unchanged`.
 
+## Esperas y relecturas (2026-10-08)
+
+Una auditoría de sesiones reales encontró dos desperdicios generales: esperas a
+ciegas por la shell para que arrancara un servidor (`ping -n 6 127.0.0.1`,
+`Start-Sleep`, `timeout /t`, `sleep`: 73 llamadas, ~24 minutos) y el mismo
+archivo sin cambios leído entero una y otra vez (36 relecturas en un turno, 73 en
+una sesión), cada una reenviando todo su texto al modelo.
+
+### `wait.for`
+
+Herramienta núcleo (siempre expuesta, namespace `wait`) que espera **una**
+condición y vuelve en cuanto se cumple:
+
+- `port` (+ `host`, por defecto `localhost`): el puerto TCP acepta conexiones.
+- `url`: la URL responde con un estado entre `status_min` y `status_max` (por
+  defecto 200–499: un 404 ya demuestra que el servidor está arriba; 502/503 son un
+  proxy o un servidor arrancando). GET sin seguir redirecciones.
+- `output` (+ `handle`, `regex`): el texto (o la regex) aparece en la salida de un
+  proceso de `process.start` o `shell.exec` con `background=true`.
+- `file`: el archivo existe.
+
+`handle` junto a `port`, `url` o `file` corta la espera si ese proceso termina.
+`timeout_s` por defecto 60, máximo 600; `interval_s` 0,1–10 (0,5 por defecto);
+ningún sondeo bloquea más de 3 s, y la cancelación del turno la despierta al
+instante. Devuelve `condition`, `target`, `ready`, `state` (`ready`,
+`timed_out`, `exited`), `elapsed_s`, `checks`, `last` (estado HTTP, error de
+conexión, línea encontrada, tamaño del archivo), `process` (`exit_code` y la cola
+de la salida si terminó) y `timeout` cuando se agota. Una condición mal formada
+se rechaza antes de la política (`INVALID_ARGUMENT`).
+
+Política: nunca más débil que la herramienta que haría la comprobación. Un puerto
+o una URL son `network.outbound` en modo lectura, como un GET de `http.request`
+(local permitido; internet según `network.mode`, y marca el turno como que leyó
+contenido externo); un archivo es `fs.read`; vigilar un handle es
+`process.local`. Las descripciones de `shell.exec` y `process.start` y la
+referencia `efficiency.md` del manual remiten a `wait.for` en vez de dormir.
+
+### Relecturas sin cambios
+
+`fs.read` y `fs.read_lines` responden `unchanged: true` con una nota (sin
+`text`, con `sha256`/`size_bytes` o el rango y `total_lines`/`next_line`) cuando
+el modelo todavía ve exactamente ese texto en un resultado anterior de la
+conversación. `fresh: true` fuerza el texto completo. La comprobación es sobre la
+conversación, no sobre contadores (`tools/read_cache.py`):
+
+- La caché es por `AgentContext` (un subagente tiene la suya) y llega a los
+  handlers como `ToolContext.reads`; sin `AgentLoop` (tests, hosts sin bucle) se
+  lee siempre entero.
+- El resultado anterior debe seguir en el historial, llegar intacto a la próxima
+  petición según `settle.py` (`settled_boundary` / `kept_intact`: dentro de las
+  rondas que se conservan o por debajo de `MIN_CHARS`) y contener **el mismo
+  texto** que la lectura nueva, que se hace siempre: un archivo escrito por
+  Rinari o cambiado en disco no coincide y se lee entero. Un resultado recortado,
+  derramado a artefacto o redactado tampoco coincide.
+- Un rango de `fs.read_lines` cuenta si está entero dentro de un rango anterior o
+  de un `fs.read` completo del mismo archivo; las lecturas en lote (`paths`) se
+  recuerdan por archivo.
+- La compactación (`compact_revision`) o un historial más corto vacían la caché.
+- Textos de menos de 512 caracteres se envían siempre: la nota costaría lo mismo.
+
+## Documentos de oficina (2026-10-07)
+
+Servicio documental del Engine (`src/rinari/documents`) para PPTX, XLSX, DOCX y
+PDF. Las herramientas son perezosas: las activan las skills `rinari-presentations`,
+`rinari-spreadsheets`, `rinari-documents`, `rinari-pdf` y `rinari-artifact-review`.
+
+- Todo archivo es una **revisión inmutable** en el Artifact Store (`documents`);
+  crear o editar produce otra con su padre. El original nunca se toca y solo
+  `documents.finalize` con `save_to` escribe en el proyecto, sin sobrescribir.
+- `documents.capabilities` dice qué se puede hacer aquí y por qué no: render con
+  Office local (COM, instancia propia, macros fuera) o LibreOffice; recálculo
+  solo con Excel; redacción con `raster-pdfium`.
+- `documents.inspect` / `documents.read`: inventario y contenido acotado con
+  identificadores estables (diapositiva y `shape_id`, bloque de Word, rango de
+  hoja con fórmula y caché por separado, página de PDF y campos de formulario).
+- `documents.templates` y `documents.create`: DeckSpec (pptx), WorkbookSpec
+  (xlsx), ReportSpec (docx y pdf desde el mismo spec) o plantilla Word con
+  contexto (sandbox Jinja, variables estrictas). Esquemas cerrados.
+- `documents.edit`: operaciones tipadas `pptx.*`, `xlsx.*`, `docx.*`, `pdf.*` con
+  precondiciones (`expected_*`, `REVISION_CONFLICT`) y diff de preservación por
+  partes OOXML (`preserve_strict` por defecto).
+- `documents.render`, `documents.review`, `documents.validate`, `documents.diff`,
+  `documents.finalize`: el informe va por dimensión (`structure`, `layout`,
+  `content`, `preservation`, `formulas`, `fields`, `forms`, `text_layer`,
+  `visual`, `redaction`) con evidencia; lo visual solo pasa si `documents.review`
+  cubrió cada página renderizada de esa revisión exacta.
+- `spreadsheets.query`: datasets DuckDB (CSV, TSV, Parquet, JSON, XLSX) y una
+  sola `SELECT` con el acceso externo desactivado; resultados grandes como
+  dataset derivado o CSV protegido contra inyección de fórmulas.
+- `spreadsheets.recalculate`: recálculo certificado con Excel; sin Excel, las
+  fórmulas quedan con su resultado pendiente (nunca un 0 inventado).
+- `pdf.redact`: rasteriza solo las páginas afectadas, reescribe el archivo y
+  verifica con otra librería que nada se recupera; si algo se recupera, falla.
+- Trabajos (`documents.job.get` / `.cancel`): proceso hijo cancelable; un
+  reinicio deja los activos como `interrupted`; cancelar termina solo el proceso
+  de Office que arrancó el trabajo.
+
+## Parámetros desconocidos (2026-10-06)
+
+Una herramienta nativa rechaza, antes de ejecutar nada, cualquier parámetro que su
+schema no declare (`INVALID_ARGUMENT`, `details.unknown_arguments` y `accepted`). El
+mensaje nombra el parámetro parecido y su significado: `timeout_ms` junto a
+`timeout_s` en `shell.exec` sugiere `timeout_s` (segundos). Antes se aceptaba y se
+ignoraba, y el comando moría a los 60 s por defecto. Las variantes con un único
+significado se normalizan antes de esta comprobación (ver «Tolerancia de
+argumentos»). Las herramientas de MCP, plugins y OpenAPI conservan su
+propio schema. `shell.exec` y `process.wait` devuelven `timeout`
+(`requested_s`, `effective_s`, `source`: `argument`, `default` o `deadline`); el
+límite de la herramienta (600 s) acota la espera, y para trabajos más largos se
+usa `background=true` con `process.wait`.
+
+## Tolerancia de argumentos (2026-10-08)
+
+Una auditoría de sesiones reales (varios proveedores, modelos locales de llama.cpp
+incluidos) encontró llamadas perdidas por variantes previsibles. Una herramienta
+nativa puede declarar `ToolDefinition.normalize`: el runtime la aplica **antes**
+de validar y de clasificar, así que la política y las aprobaciones deciden sobre la
+llamada canónica. Solo se reescriben equivalencias exactas; si hay dos variantes, la
+canónica ya está o el valor no es numérico, la llamada sigue su curso y la
+validación la rechaza. Nunca se inventa una ruta, un destino ni un valor. Cada
+reescritura deja una nota en `ToolResult.notes` (sale como `notes` en la
+observación del modelo, p. ej. `used timeout_s=300 (received timeout_ms=300000)`)
+y un evento `ToolArgumentsNormalized` con la herramienta, las notas y el
+`tool_call_id`, para medirlas.
+
+- `shell.exec` / `process.wait`: `timeout_ms` → `timeout_s` (÷1000) y `timeout` →
+  `timeout_s` (misma unidad), solo sin `timeout_s`. `process.start` no tiene
+  timeout y sigue rechazándolo.
+- `shell.exec` / `process.start`: con `command` y `argv` a la vez se ejecuta `argv`
+  (la forma literal, la que clasifica la política) y se descarta `command`.
+- `fs.patch`: `{path, edits[, expected_hash]}` → `{files: [{path, edits[, expected_hash]}]}`.
+  Con `replace_all`, `old_string` o `files` al lado no se toca.
+- `fs.read_lines`: `start_line`/`end_line` → `start`/`end`.
+- `fs.read` no tiene rango: `start`, `end`, `start_line`, `end_line`, `offset` o
+  `limit` devuelven `INVALID_ARGUMENT` con la llamada exacta a `fs.read_lines`.
+
+Otras correcciones del mismo lote:
+
+- `fs.read_lines` devuelve `text` con filas `N| línea` (más `start_line`,
+  `end_line`, `total_lines`, `next_line`) en vez de un objeto por línea; el
+  prefijo `N| ` no forma parte del archivo.
+- `fs.search_text` acepta `regex` (por defecto `false`) y `max_results`; en los dos
+  modos ignora mayúsculas y devuelve rutas absolutas. Si la búsqueda literal no
+  encuentra nada y el patrón parece una regex, `note` lo dice. `search.regex` sigue
+  siendo la búsqueda regex sensible a mayúsculas.
+- `fs.write` crea las carpetas que faltan cuando quedan estrictamente dentro de una
+  raíz de escritura concedida (las lista en `created_dirs`); fuera de ellas —por
+  ejemplo, una escritura aprobada fuera del workspace— responde `NOT_FOUND` y pide
+  revisar la ruta o pasar `create_parents=true`. Escribir sobre una carpeta es
+  `INVALID_ARGUMENT`.
+- `fs.glob` / `search.files` aceptan `include_dirs` (por defecto `false`); las
+  carpetas terminan en el separador del sistema. Si no hay archivos pero sí
+  carpetas que coinciden, `note` lo indica.
+- `memory.recall` con `scope=project` en una sesión sin proyecto busca en la memoria
+  del usuario y lo dice en `notes` (leer no cambia nada). `memory.remember`,
+  `memory.update` y `memory.forget` con `scope=project` sin proyecto responden
+  `INVALID_ARGUMENT` con la salida (`scope=user` o abrir la carpeta como proyecto):
+  archivar un dato del proyecto como memoria personal lo llevaría a todos los chats.
+- `memory.propose {text, topic, kind?: environment|workflow|preference|fact, scope?: user|project}`
+  guarda un dato estable aprendido trabajando (hosts, puertos, rutas, cómo se arranca o
+  prueba un proyecto, comandos que funcionan en esta máquina) sin citar al dueño. Según
+  el ajuste `learned_facts` (`ask` por defecto, `auto`) queda como propuesta en el chat
+  o se guarda con procedencia `learned:session/<id>`; lo sensible y lo aprendido tras
+  leer contenido externo siempre es propuesta. `scope=project` sin proyecto pasa a
+  `user` con una nota. Rechaza secretos (también las formas que oculta el redactor) y
+  responde `already_known`, `already_proposed`, `declined` o `forgotten` en vez de
+  duplicar. Un subagente no propone: lo reporta en su resultado. Detalle en
+  `docs/harness.md` §73.1.
+- Skills: un `# Procedure` vacío seguido de encabezados de su mismo nivel
+  (`## Procedure` + `## Paso 1`) los adopta como subsecciones; `##`/`###` bajo
+  `# Procedure` ya eran contenido. Si aun así falta el procedimiento, el error
+  incluye un `SKILL.md` mínimo válido.
+
 ## Contexto de imágenes (Hermes, 2026-09-12)
 
 `fs.read_image` carga la referencia solicitada mediante la política visual del
@@ -68,6 +241,7 @@ por operación y conserva un derivado recuperable; reproducir historia no lo rea
 - `process.list`
 - `process.inspect`
 - `process.wait`
+- `wait.for` — espera un puerto, una URL, una línea en la salida de un handle o un archivo (ver «Esperas y relecturas»).
 - `process.signal`
 - `process.kill`
 - `process.stdin`
@@ -103,6 +277,9 @@ PTY (Windows) `pty.start` devuelve `DEPENDENCY_ERROR` señalando `process.*`
 - `fs.read_image` — view local PNG/JPEG/WebP pixels through the session's vision adapter;
   preserves an immutable artifact for history and the desktop image viewer. List folders
   first, then inspect up to four images per batch. Filesystem permissions apply.
+- `fs.read_pdf_pages` — show pages of a PDF (local path or attached `artifact://`) as
+  images, up to four per call, for charts, tables, layout, scans or pages beyond the
+  20 prepared with the attachment. Renders are cached as derived artifacts.
 - `fs.read_lines`
 - `fs.read_binary`
 - `fs.head`
@@ -201,6 +378,7 @@ PTY (Windows) `pty.start` devuelve `DEPENDENCY_ERROR` señalando `process.*`
 - `artifact.delete`
 - `artifact.list`
 - `artifact.metadata`
+- `artifact.export`: copia los bytes originales de un artefacto de la sesión (por ejemplo, un adjunto) a un archivo real, para programas o subidas que necesitan una ruta. Pasa por la política de escritura y nunca sobrescribe.
 
 ### Artifact Search
 - `artifact.search`
@@ -1802,6 +1980,19 @@ always exposed so the model can always recover the on-demand
 ecosystem. The intended flow is search, then activate exactly what the
 task needs:
 
+The schema cost counts what providers receive per tool: name,
+description and input schema (counting only the schema under-estimated
+it by ~40%, so the budget never bound). Besides browser/MCP/OpenAPI/
+plugins, rarely used native packs are on demand (`always_loaded=False`):
+`documents.*`, `rinari.*`, `lsp.*`, `pty.*`, `context.*`, `ssh.*`,
+`artifact.metadata` and `artifact.export`. `artifact.read` stays core
+because every spilled observation points at it. On-demand tools become
+visible through `capability.search` with `load=true`,
+`capability.activate`, a skill that requires them, a subagent definition
+that names them, or by being called by exact name (the registry resolves
+calls; the tool then stays visible as recently used). A destination-bound
+remote operation keeps `ssh.inspect` core, since it is its only tool.
+
 - `capability.search` — rank capabilities across native, plugin, MCP,
   OpenAPI and the browser fallback (typed connector first, browser
   DOM last; exact name matches win outright).
@@ -1909,6 +2100,30 @@ in the schema and handler; local shell/filesystem/extension/agent tools and exec
 hooks are unavailable for that operation. This is an initial read-only Linux inspection
 contract, not general remote shell or a PC runner. See `durable-operations.md` for dispatch.
 
+### `ssh.run` (2026-10-08)
+
+`ssh.run({target_id, script, shell?, timeout_s?})` runs a script on the same
+registered destinations and static aliases, over the same pinned connection
+(`StrictHostKeyChecking=yes`, no agent, no forwarding, `BatchMode`). The script
+travels on stdin to `bash -s` (default) or `sh -s`: it is never parsed by a local
+shell and needs no quoting, which replaces the fragile `shell.exec "ssh host '...'"`
+(cmd → ssh → bash nesting). CRLF line endings are normalized to LF; scripts are
+capped at 64 KiB; `timeout_s` defaults to 60 and accepts up to 600. Output is
+bounded like `shell.exec` (stdout/stderr, `truncated`, full capture spilled to
+artifacts) and streams live to the activity. A non-zero exit is the script's
+answer (`ok=true`, `exit_code`); exit 255 with an OpenSSH diagnostic is a
+transport failure (`AUTH_REQUIRED` for host key or authentication, otherwise
+`NETWORK_ERROR`). A timeout or cancellation does not guarantee that the remote
+side stopped.
+
+Policy: it classifies as two actions, `network.outbound` (mode `send`, target the
+destination host) and `shell.exec` (`ssh <host> '<script>`), so it is never freer
+than running ssh through the shell: read-only denies it, a peer-originated turn
+denies it, workspace allows it on the LAN and asks for an internet host, and every
+shell rule applies.
+An unknown destination is rejected before any approval is requested.
+Destination-bound operations do not register it.
+
 ## Tool efficiency contract (2026-09-10, local implementation)
 
 CLI inspection and Engine `tool.list` share the 106 built-in definitions. Inspection
@@ -1927,7 +2142,8 @@ an additional outer retry. Long model observations remain valid JSON.
 
 `fs.write` and `fs.patch` accept `expected_hash` (SHA-256, or `missing` for creation)
 and replace a file atomically. Reads return a hash only when the content is complete.
-`fs.read_lines` streams to the requested range; unknown total line counts are null.
+`fs.read_lines` streams to the requested range and returns `N| text` rows in `text`;
+unknown total line counts are null.
 `fs.list` supports offset/limit/revision and reports a next offset. `fs.diff` refuses
 to claim a complete comparison when either input exceeds its reading limit.
 
@@ -1953,7 +2169,8 @@ the last 256 requests and are not durable exactly-once guarantees across restart
   validates all files/permissions before mutation. Each file is bounded to 1 MiB.
   Failures trigger conflict-aware rollback with explicit restoration status;
   this is not an OS-level multi-file transaction.
-- `fs.glob` / `search.files` share traversal, ignore and pagination semantics.
+- `fs.glob` / `search.files` share traversal, ignore and pagination semantics;
+  `include_dirs=true` also matches folders.
   Literal and regex searches share bounded workers; regex runs in a cancellable
   subprocess, with ripgrep when available and a bounded Python fallback.
 - `shell.exec` and `process.start` accept `argv` for literal arguments.

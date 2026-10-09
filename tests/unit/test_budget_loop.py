@@ -314,6 +314,26 @@ def test_spawn_child_ledger() -> None:
     assert parent.tool_calls == 4
 
 
+def test_child_calls_do_not_use_up_the_parent_ceilings() -> None:
+    parent = BudgetMeter(TurnBudgetLimits(max_model_calls=3, max_tool_calls=3), FakeClock())
+    child = parent.spawn_child()
+    for _ in range(5):
+        child.note_model_call()
+        child.note_tool_call("fs.read")
+    assert parent.model_calls == 5 and parent.tool_calls == 5
+    assert parent.own_model_calls == 0 and parent.own_tool_calls == 0
+    assert parent.first_exhausted() is None
+    assert parent.allows_tool("fs.read")
+    parent.reserve_model_call(model_only=True)
+    # The child stops at its own ceiling, not because of the parent's spend.
+    assert child.first_exhausted() == "model-calls"
+    with pytest.raises(ValueError):
+        child.reserve_model_call(model_only=True)
+    sibling = parent.spawn_child()
+    sibling.reserve_model_call(model_only=True)
+    assert sibling.first_exhausted_in_chain() is None
+
+
 def test_spawn_child_depth_relativized() -> None:
     parent = BudgetMeter(TurnBudgetLimits(), FakeClock())
     child = parent.spawn_child(depth=2)
@@ -489,6 +509,9 @@ def test_loop_nudge_then_stop_in_real_turn(env) -> None:
     result = loop.turn(env["ctx"], "Read a.txt", budget=meter, loop=LoopDetector())
     assert result.kind == "loop"
     assert result.tool_calls == 4  # check runs after each execution
+    # Machine-readable cause, so a client does not show the English content.
+    assert result.stop_detail["loop"] == "same-tool-args"
+    assert result.stop_detail["subject"]
     assert len(model.requests) == 4
     # the nudge reached the model conversation before the 4th call
     joined = " ".join(m.content for m in model.requests[3].messages)
@@ -588,3 +611,41 @@ def test_independent_rewrite_targets_do_not_share_escalation():
         assert det.check().action == NUDGE
     det.record_tool("fs.write", {"path": "b.py", "content": "1"})
     assert det.check().action == STOP
+
+
+def test_one_new_identical_error_after_a_nudge_does_not_stop_the_turn():
+    """The nudge's own errors stay in the tail: one more identical error, even
+    after a successful call in between, used to stop the turn at once."""
+    det = LoopDetector(repeats=3)
+    for _ in range(3):
+        det.begin_response()
+        det.record_error("fs.patch", "INVALID_ARGUMENTS", "old_string not found")
+    assert det.check().action == NUDGE
+    det.begin_response()
+    det.record_tool("fs.read", {"path": "a.py"})
+    assert det.check() is None
+    det.begin_response()
+    det.record_error("fs.patch", "INVALID_ARGUMENTS", "old_string not found")
+    assert det.check() is None
+    det.begin_response()
+    det.record_error("fs.patch", "INVALID_ARGUMENTS", "old_string not found")
+    assert det.check() is None
+    det.begin_response()
+    det.record_error("fs.patch", "INVALID_ARGUMENTS", "old_string not found")
+    signal = det.check()
+    assert signal is not None and signal.kind == "same-error" and signal.action == STOP
+
+
+def test_identical_errors_in_the_nudged_response_do_not_count_toward_the_stop():
+    det = LoopDetector(repeats=3)
+    det.begin_response()
+    for _ in range(3):
+        det.record_error("web.fetch", "TIMEOUT", "timed out")
+    assert det.check().action == NUDGE
+    # The rest of that same response had not read the nudge yet.
+    for _ in range(3):
+        det.record_error("web.fetch", "TIMEOUT", "timed out")
+        assert det.check() is None
+    det.begin_response()
+    det.record_error("web.fetch", "TIMEOUT", "timed out")
+    assert det.check() is None

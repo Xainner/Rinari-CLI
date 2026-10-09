@@ -1851,18 +1851,33 @@ unless explicitly attached.
 # 35. Project Prompt Stack
 
 ```text
+system prompt (cached prefix: changes only with the session's configuration)
 1. Harness Constitution
-2. Runtime Policy Snapshot
+2. Runtime Policy Snapshot (mode, permission profile)
 3. Canonical Soul
 4. User Preferences
 5. Project instruction chain
-6. Active skills
-7. Task graph state
-8. Project environment snapshot
-9. relevant project memory
-10. recent/compacted conversation
-11. retrieved files/evidence/tool results
+6. Skill catalog and active skills
+7. Compact state, pinned context
+8. Stable environment facts (date, timezone, OS, shell, model, trust)
+
+history
+9. recent/compacted conversation and tool results
+
+turn context (closes every request; rebuilt per call, never stored)
+10. Task graph state
+11. relevant memory (ranked against the latest message)
+12. Project environment snapshot (repository scan)
+13. on-demand identity, retrieved evidence
 ```
+
+Provider prompt caches reuse the longest identical prefix. Anything that
+changes as the work progresses (`cachePolicy: "turn"`) used to sit before the
+history and invalidated the cached conversation on every turn of a PROJECT
+session. The turn context travels as a harness note (`origin.kind = harness`,
+`source = turn-context`) after the history: a user-role message for every
+adapter, joined as its own text block to the last user turn on Anthropic,
+whose message cache breakpoint stays on the block before it.
 
 ---
 
@@ -1880,9 +1895,11 @@ type PromptSegment = {
     | "project-instruction"
     | "skill"
     | "task-state"
+    | "compact-state"
     | "environment"
-    | "history"
     | "memory"
+    | "pinned-context"
+    | "history"
     | "evidence"
 
   authority: number
@@ -1902,7 +1919,9 @@ type PromptSegment = {
 }
 ```
 
-Prompt assembly must be centralized.
+Prompt assembly must be centralized. `cachePolicy` decides placement:
+`stable` and `session` segments form the system prompt, `turn` segments form
+the turn context after the history (section 35).
 
 ---
 
@@ -2910,7 +2929,7 @@ Threshold example:
 
 ```toml
 [context]
-artifact_output_threshold_kb = 64
+artifact_output_threshold_kb = 16
 ```
 
 If exceeded:
@@ -3142,6 +3161,61 @@ persist
 ```
 
 Do not automatically remember every model inference.
+
+## 73.1 Learned facts (`memory.propose`, `learned_memory_v1`)
+
+What the owner states ("remember that…") keeps going through
+`memory.remember` / the end-of-turn capture, tied to the owner's message.
+Facts Rinari *learns while working* — hosts, ports and paths of this machine
+(`environment`), how a project is started, built or tested and commands that
+work here (`workflow`), inferred preferences or other stable facts — go through
+`memory.propose {text, topic, kind?, scope?}`: one short fact (≤ 600 chars) per
+call, no owner quote needed. The constitution asks for it only for stable
+facts, never for one-off details, guesses or secrets.
+
+```text
+memory.propose
+  → secret check (memory patterns + history redactor shapes) → refused
+  → forgotten earlier (suppression hash)          → status "forgotten"
+  → same/similar live record (≥ 0.9 similarity)   → "already_known"
+  → same/similar pending | declined proposal      → "already_proposed" | "declined"
+  → setting learned_facts = auto
+      and not personal-sensitive
+      and turn started by the owner, nothing external read
+                                                 → saved, provenance learned:session/<id>,
+                                                   activity memory.remembered
+  → otherwise                                    → pending candidate (classification
+                                                   learned | learned_sensitive),
+                                                   activity memory.candidate.created
+```
+
+- Setting: `memory.settings.get` / `memory.settings.set {learned_facts: "ask"|"auto"}`,
+  default `ask`, stored per installation in `config_values` (`memory.learned_facts`).
+- Cards: `memory.candidate.created {candidate_id, topic, text, kind, scope, reason,
+  sensitive}`, `memory.remembered {memory_id, topic, text, kind, scope}` and
+  `memory.candidate.resolved {candidate_id, status: approved|denied, memory_id?}`
+  are turn activity. Resolution is appended to the turn that showed the card,
+  live or finished. `memory.remember` also announces its pending sensitive
+  proposals and its saves with the same events.
+- `memory.candidate.resolve {id, decision, text?, topic?}` approves an edited
+  version (secret-checked again). Proposals the model wrote (`learned*`,
+  `agent_sensitive`) can be answered while a turn runs; learned records can be
+  edited or forgotten during a turn too. Undoing a learned fact leaves a
+  suppression hash so it is not learned again.
+- Candidate rows keep `scope` and `project_root` (migration 0044); project
+  records gained `revision` and are listed/edited through `memory.list|search
+  {scope: user|project|all, kind?, project_root?}`, `memory.update` and
+  `memory.forget` by id.
+- Prompt: `environment`/`workflow` records (user + current project) form a
+  "Known environment and workflows" list at the top of the memory note —
+  listed whatever the message says, at most 20 lines / 2,500 chars.
+- Recall: user, project, pattern and episodic search rank by query terms
+  (accent- and case-folded, stopwords dropped; distinct terms hit, then field
+  weight, then recency), with or without a project. No FTS index: the bundled
+  SQLite build is not guaranteed to ship FTS5 and the corpus is small.
+- Deleting a conversation tombstones only the owner's messages (the memory
+  sources); migration 0045 drops the old per-message rows of other roles and
+  of conversations already gone, whose `deleted` control row remains.
 
 ---
 
@@ -4325,6 +4399,13 @@ tool calls
 cost
 wall time
 ```
+
+The model-call and tool-call ceilings are emergency brakes for one runaway
+loop, so each agent counts only its own calls; an agent without its own
+ceiling gets the spawning turn's. A subagent's calls still show in the parent
+turn's usage, and cost, wall time and spawn limits apply to the aggregate.
+Reaching a ceiling pauses the turn as recoverable: the desktop offers
+«Continuar».
 
 No recursive agent explosion.
 

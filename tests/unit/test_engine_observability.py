@@ -224,3 +224,19 @@ def test_artifact_export_neutralizes_traversal_names(services, server, tmp_path)
     assert exported.parent == dest
     assert exported.read_bytes() == b"x"
     assert not (tmp_path / "evil.md").exists()
+
+
+def test_artifact_resolve_gives_the_host_a_playable_file(services, server, tmp_path) -> None:
+    """An audio/video artifact plays in the desktop: the host gets the approved
+    path and the kind from its first bytes, never the content."""
+    session_id = _make_session(server, "m", tmp_path)
+    audio = services.artifacts.create(session_id, "media", "voz.mp3", b"ID3" + b"\x00" * 600_000)
+    result = _ok(server.handle_line(_req("r1", "artifact.resolve", {"uri": audio.uri()})))
+    assert result["kind"] == "audio"
+    assert result["mime"] == "audio/mpeg"
+    assert result["size"] == 600_003
+    assert result["name"] == "voz.mp3"
+    assert Path(result["path"]).read_bytes()[:3] == b"ID3"
+    assert "text" not in result
+    missing = _err(server.handle_line(_req("r2", "artifact.resolve", {"uri": "artifact://x/n/y"})))
+    assert missing["code"] == "NOT_FOUND"

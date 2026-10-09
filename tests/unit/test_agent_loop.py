@@ -528,6 +528,24 @@ def test_malformed_tool_arguments_never_execute(env) -> None:
     assert "INVALID_ARGUMENT" in tools_msgs[0].content
 
 
+def test_invalid_patch_arguments_say_where_they_broke_and_how_to_retry(env) -> None:
+    raw = '{"path": "a.py", "edits": [{"old_string": "x", "new_string": "unterminated'
+    bad = ToolCall(
+        id="tc1", name="fs.patch", arguments={}, raw_arguments=raw, arguments_invalid=True
+    )
+    model = FakeModel(
+        scripted=[
+            ModelResponse(content="", tool_calls=(bad,), stop_reason=StopReason.TOOL_CALLS),
+            ModelResponse(content="recovered"),
+        ]
+    )
+    AgentLoop(model, env["runtime"], env["assembler"]).turn(env["ctx"], "patch it")
+    observation = next(m for m in env["ctx"].history if m.role == "tool").content
+    assert f"of {len(raw)})" in observation
+    assert "line 1 column" in observation
+    assert "split the patch" in observation and "fs.write" in observation
+
+
 def test_max_tokens_truncation(env) -> None:
     model = FakeModel(
         scripted=[ModelResponse(content="partial", stop_reason=StopReason.MAX_TOKENS)]
@@ -763,3 +781,268 @@ def test_final_projection_failure_keeps_completed_observation(env, monkeypatch):
     tools = [message for message in env["ctx"].history if message.role == "tool"]
     assert len(tools) == 1 and "Verified original" in tools[0].content
     assert len(model.requests) == 1
+
+
+def _opening_loop(env, scripted):
+    model = FakeModel(scripted=scripted)
+    activity: list[tuple[str, dict]] = []
+    events: list[str] = []
+    loop = AgentLoop(
+        model,
+        env["runtime"],
+        env["assembler"],
+        event_sink=lambda sid, t, p: events.append(t),
+        activity_sink=lambda name, payload: activity.append((name, payload)),
+        require_opening=True,
+    )
+    return model, loop, activity, events
+
+
+def test_first_tool_batch_waits_for_an_opening_sentence(env) -> None:
+    listing = {"path": str(env["root"])}
+    model, loop, activity, events = _opening_loop(
+        env,
+        [
+            ModelResponse(content="", tool_calls=(ToolCall("l1", "fs.list", listing),)),
+            ModelResponse(
+                content="Voy a revisar la estructura del proyecto.",
+                tool_calls=(ToolCall("l2", "fs.list", listing),),
+            ),
+            ModelResponse(content="Tiene una carpeta src."),
+        ],
+    )
+    result = loop.turn(env["ctx"], "Revisa el proyecto")
+    assert result.content == "Tiene una carpeta src."
+    # The silent batch never ran; the announced one did, after its text.
+    requested = [p["tool_call_id"] for name, p in activity if name == "tool.requested"]
+    assert requested == ["l2"]
+    order = [name for name, _ in activity if name in {"model.content.completed", "tool.requested"}]
+    assert order[:2] == ["model.content.completed", "tool.requested"]
+    reminder = model.requests[1].messages[-1]
+    assert reminder.origin == {"kind": "harness", "source": "opening"}
+    assert "none of those calls ran" in reminder.content
+    assert events.count("OpeningRequested") == 1
+
+
+def test_the_opening_is_asked_for_only_once(env) -> None:
+    listing = {"path": str(env["root"])}
+    model, loop, activity, _ = _opening_loop(
+        env,
+        [
+            ModelResponse(content="", tool_calls=(ToolCall("l1", "fs.list", listing),)),
+            ModelResponse(content="", tool_calls=(ToolCall("l2", "fs.list", listing),)),
+            ModelResponse(content="", tool_calls=(ToolCall("l3", "fs.list", listing),)),
+            ModelResponse(content="Listo."),
+        ],
+    )
+    loop.turn(env["ctx"], "Revisa el proyecto")
+    assert [p["tool_call_id"] for name, p in activity if name == "tool.requested"] == ["l2", "l3"]
+    assert len(model.requests) == 4
+
+
+def test_direct_answers_and_announced_work_need_no_extra_call(env) -> None:
+    listing = {"path": str(env["root"])}
+    model, loop, activity, events = _opening_loop(
+        env,
+        [
+            ModelResponse(
+                content="Primero miro src.", tool_calls=(ToolCall("l1", "fs.list", listing),)
+            ),
+            ModelResponse(content="", tool_calls=(ToolCall("l2", "fs.list", listing),)),
+            ModelResponse(content="Hecho."),
+        ],
+    )
+    loop.turn(env["ctx"], "Revisa el proyecto")
+    assert [p["tool_call_id"] for name, p in activity if name == "tool.requested"] == ["l1", "l2"]
+    assert "OpeningRequested" not in events
+    assert len(model.requests) == 3
+
+
+# -- transient model failures are retried (usage report 2026-10-08) -----------
+
+
+@dataclass
+class FlakyStreamModel(FakeModel):
+    """Fails its first calls with the given errors, streaming a bit first."""
+
+    failures: list[BaseException] = field(default_factory=list)
+
+    def invoke_stream(self, request: ModelRequest, on_delta) -> ModelResponse:
+        if self.failures:
+            self.requests.append(request)
+            on_delta("partial answer that ")
+            raise self.failures.pop(0)
+        return super().invoke_stream(request, on_delta)
+
+
+def _activity_loop(env, model):
+    activity: list[tuple[str, dict]] = []
+    loop = AgentLoop(
+        model,
+        env["runtime"],
+        env["assembler"],
+        activity_sink=lambda event, payload: activity.append((event, payload)),
+    )
+    return loop, activity
+
+
+def test_a_cut_stream_is_retried_and_the_partial_text_is_dropped(env) -> None:
+    from rinari.providers.errors import ProviderError, ProviderErrorCode
+
+    model = FlakyStreamModel(
+        scripted=[ModelResponse(content="done")],
+        streaming=True,
+        failures=[
+            NetworkError(
+                "Response stream closed without a terminal event",
+                details={"kind": "STREAM_INTERRUPTED"},
+            ),
+            ProviderError("server error", code=ProviderErrorCode.SERVER_ERROR, retryable=True),
+        ],
+    )
+    loop, activity = _activity_loop(env, model)
+    budget = BudgetMeter(TurnBudgetLimits(), env["clock"])
+    streamed: list[str] = []
+    result = loop.turn(env["ctx"], "hello", on_delta=streamed.append, budget=budget)
+    assert result.kind == "answer" and result.content == "done"
+    assert len(model.requests) == 3
+    retries = [payload for event, payload in activity if event == "model.retrying"]
+    assert [(r["attempt"], r["max_attempts"], r["reason"]) for r in retries] == [
+        (2, 3, "STREAM_INTERRUPTED"),
+        (3, 3, "SERVER_ERROR"),
+    ]
+    assert {r["model_call_id"] for r in retries} == {"model_1"}
+    assert not any(event == "model.failed" for event, _ in activity)
+    # Each retry is a model call for the budget.
+    assert budget.own_model_calls == 3
+
+
+def test_a_timeout_gets_a_single_retry(env) -> None:
+    failure = NetworkError("Timed out", details={"kind": "TIMEOUT", "phase": "first_byte"})
+    model = FlakyStreamModel(
+        scripted=[],
+        streaming=True,
+        failures=[failure, NetworkError("Timed out", details={"kind": "TIMEOUT"})],
+    )
+    loop, activity = _activity_loop(env, model)
+    with pytest.raises(NetworkError):
+        loop.turn(env["ctx"], "hello", on_delta=lambda _t: None)
+    assert len(model.requests) == 2
+    assert sum(event == "model.retrying" for event, _ in activity) == 1
+    assert sum(event == "model.failed" for event, _ in activity) == 1
+
+
+def test_an_auth_or_quota_failure_is_not_retried(env) -> None:
+    from rinari.providers.errors import ProviderError, ProviderErrorCode
+
+    for code in (ProviderErrorCode.AUTH, ProviderErrorCode.QUOTA_EXHAUSTED):
+        model = FlakyStreamModel(
+            scripted=[], streaming=True, failures=[ProviderError("no", code=code)]
+        )
+        loop, activity = _activity_loop(env, model)
+        with pytest.raises(ProviderError):
+            loop.turn(env["ctx"], "hello", on_delta=lambda _t: None)
+        assert len(model.requests) == 1
+        assert not any(event == "model.retrying" for event, _ in activity)
+
+
+def test_cancelling_during_the_retry_wait_stops_promptly(env, monkeypatch) -> None:
+    monkeypatch.setattr("rinari.runtime.agent.MODEL_RETRY_DELAYS_S", (30.0, 30.0))
+    from rinari.providers.errors import ProviderError, ProviderErrorCode
+
+    token = CancellationToken()
+    model = FlakyStreamModel(
+        scripted=[ModelResponse(content="never")],
+        streaming=True,
+        failures=[ProviderError("busy", code=ProviderErrorCode.SERVER_ERROR, retryable=True)],
+    )
+    loop, _activity = _activity_loop(env, model)
+    timer = threading.Timer(0.2, token.cancel)
+    timer.start()
+    with pytest.raises(CancelledError):
+        loop.turn(env["ctx"], "hello", on_delta=lambda _t: None, cancel=token)
+    timer.cancel()
+    assert len(model.requests) == 1
+
+
+def test_a_budget_stop_says_which_limit_and_its_value(env) -> None:
+    model = FakeModel(
+        scripted=[
+            ModelResponse(
+                content="",
+                stop_reason=StopReason.TOOL_CALLS,
+                tool_calls=(ToolCall(id=f"c{i}", name="fs.list", arguments={"path": "."}),),
+            )
+            for i in range(3)
+        ]
+    )
+    loop = AgentLoop(model, env["runtime"], env["assembler"])
+    budget = BudgetMeter(TurnBudgetLimits(max_model_calls=2), env["clock"])
+    result = loop.turn(env["ctx"], "list", budget=budget)
+    assert result.kind == "budget" and result.recoverable
+    assert result.stop_detail == {"budget": "model-calls", "limit": 2}
+
+
+# -- custom model with empty arguments (ses_01M4E01RQQCNMQMDGZ0FCHAVTY) --------
+
+
+def test_identical_calls_in_one_response_are_nudged_not_stopped(env) -> None:
+    """llama.cpp sent four process.start calls with {} in a single response.
+
+    The detector nudged on the third and stopped on the fourth, before the
+    model could read the nudge. Now the model gets its next response.
+    """
+    empty = tuple(ToolCall(id=f"e{i}", name="process.start", arguments={}) for i in range(4))
+    fixed = ToolCall(id="ok", name="fs.list", arguments={"path": "."})
+    model = FakeModel(
+        scripted=[
+            ModelResponse(content="", stop_reason=StopReason.TOOL_CALLS, tool_calls=empty),
+            ModelResponse(content="", stop_reason=StopReason.TOOL_CALLS, tool_calls=(fixed,)),
+            ModelResponse(content="recovered"),
+        ]
+    )
+    loop = AgentLoop(model, env["runtime"], env["assembler"])
+    result = loop.turn(env["ctx"], "render it")
+    assert result.kind == "answer" and result.content == "recovered"
+    notes = [m for m in env["ctx"].history if (m.origin or {}).get("source") == "loop-detector"]
+    assert len(notes) == 1
+    errors = [m.content for m in env["ctx"].history if m.role == "tool"][:4]
+    assert all("provide exactly one of: command | argv" in text for text in errors)
+
+
+def test_repeating_after_the_nudge_still_stops(env) -> None:
+    empty = tuple(ToolCall(id=f"e{i}", name="process.start", arguments={}) for i in range(4))
+    again = (ToolCall(id="again", name="process.start", arguments={}),)
+    model = FakeModel(
+        scripted=[
+            ModelResponse(content="", stop_reason=StopReason.TOOL_CALLS, tool_calls=empty),
+            ModelResponse(content="", stop_reason=StopReason.TOOL_CALLS, tool_calls=again),
+            ModelResponse(content="never"),
+        ]
+    )
+    loop = AgentLoop(model, env["runtime"], env["assembler"])
+    result = loop.turn(env["ctx"], "render it")
+    assert result.kind == "loop"
+
+
+def test_a_final_answer_in_another_script_is_rewritten_once(env) -> None:
+    chinese = "服务器报告显示内存使用率很高、建议重启服务并检查日志文件以找出问题原因。" * 2
+    model = FakeModel(
+        scripted=[
+            ModelResponse(content=chinese),
+            ModelResponse(content="El informe muestra memoria alta; conviene reiniciar."),
+        ]
+    )
+    loop = AgentLoop(model, env["runtime"], env["assembler"])
+    result = loop.turn(env["ctx"], "¿Qué dice el informe del servidor?")
+    assert result.content.startswith("El informe")
+    notes = [m for m in env["ctx"].history if (m.origin or {}).get("source") == "language"]
+    assert len(notes) == 1 and len(model.requests) == 2
+
+
+def test_the_language_rewrite_is_asked_only_once(env) -> None:
+    chinese = "服务器报告显示内存使用率很高、建议重启服务并检查日志文件以找出问题原因。" * 2
+    model = FakeModel(scripted=[ModelResponse(content=chinese), ModelResponse(content=chinese)])
+    loop = AgentLoop(model, env["runtime"], env["assembler"])
+    result = loop.turn(env["ctx"], "¿Qué dice el informe del servidor?")
+    assert result.kind == "answer" and len(model.requests) == 2

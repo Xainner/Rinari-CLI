@@ -42,13 +42,16 @@ from rinari.providers.adapters.http import (
     decode_json,
     iter_model_lines,
     open_model_stream,
+    openai_cache_key,
     provider_error,
     sanitize_tool_name,
     send_request,
     session_affinity_headers,
+    stream_close_details,
     stream_timeout_error,
 )
 from rinari.shared.errors import NetworkError, ProviderModelError
+from rinari.tools.schema import wire_input_schema
 
 
 class OpenAIResponsesAdapter(ProviderAdapter):
@@ -152,7 +155,11 @@ class OpenAIResponsesAdapter(ProviderAdapter):
             "POST",
             url,
             headers=headers,
-            json_body=self._responses_payload(request, stream=False, tool_aliases=tool_aliases),
+            json_body=openai_cache_key(
+                self._responses_payload(request, stream=False, tool_aliases=tool_aliases),
+                url,
+                request,
+            ),
             timeout=MODEL_CALL_TIMEOUT,
         )
         if response.status_code in (401, 403):
@@ -176,6 +183,8 @@ class OpenAIResponsesAdapter(ProviderAdapter):
             **session_affinity_headers(url, request.session_id),
         }
         acc = _ResponsesStreamAccumulator()
+        stream_stats: dict[str, Any] = {}
+        done_seen = False
         headers_received = False
         saw_payload = False
         stream_started_at = time.monotonic()
@@ -192,7 +201,11 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                 stream_started_at,
                 "POST",
                 url,
-                json=self._responses_payload(request, stream=True, tool_aliases=tool_aliases),
+                json=openai_cache_key(
+                    self._responses_payload(request, stream=True, tool_aliases=tool_aliases),
+                    url,
+                    request,
+                ),
                 headers=headers,
             ) as response:
                 headers_received = True
@@ -200,17 +213,33 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                     raise auth_failure(response, url, model=request.model)
                 if response.status_code >= 400:
                     raise provider_error(response, url, model=request.model)
-                for line in iter_model_lines(response, request, stream_started_at):
+                for line in iter_model_lines(response, request, stream_started_at, stream_stats):
                     if not line or not line.startswith("data:"):
                         continue
                     saw_payload = True
                     last_activity_at = time.monotonic()
                     data = line[5:].strip()
                     if data == "[DONE]":
+                        done_seen = True
                         break
                     acc.update(_parse_sse_payload(data, url), on_delta)
                     if acc._completed is not None:
                         break
+                if acc._completed is None:
+                    raise NetworkError(
+                        "Response stream closed without a terminal event",
+                        details={
+                            "kind": "STREAM_INTERRUPTED",
+                            **stream_close_details(
+                                response,
+                                stream_stats,
+                                transport="responses",
+                                url=url,
+                                started_at=stream_started_at,
+                                done_seen=done_seen,
+                            ),
+                        },
+                    )
         except (NetworkError, ProviderModelError) as exc:
             exc.details.update(
                 {
@@ -276,7 +305,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                     "type": "function",
                     "name": _wire_tool_name(tool.name, tool_aliases),
                     "description": tool.description,
-                    "parameters": tool.parameters,
+                    "parameters": wire_input_schema(tool.parameters),
                 }
                 for tool in request.tools
             ]
@@ -388,9 +417,18 @@ def _function_call_from_responses(raw: Any) -> ToolCall | None:
 def _usage_from_responses(raw: Any) -> Usage:
     if not isinstance(raw, dict):
         return Usage()
+    inputs = raw.get("input_tokens_details")
+    outputs = raw.get("output_tokens_details")
     return Usage(
         input_tokens=_optional_int(raw.get("input_tokens")),
         output_tokens=_optional_int(raw.get("output_tokens")),
+        # Without these the cache looked unused and reasoning invisible.
+        cached_input_tokens=_optional_int(
+            inputs.get("cached_tokens") if isinstance(inputs, dict) else None
+        ),
+        reasoning_tokens=_optional_int(
+            outputs.get("reasoning_tokens") if isinstance(outputs, dict) else None
+        ),
     )
 
 
@@ -430,16 +468,22 @@ def _response_from_responses(data: Any, url: str) -> ModelResponse:
     status = data.get("status")
     incomplete = data.get("incomplete_details") or {}
     if status in {"failed", "cancelled"}:
-        raise ProviderModelError(
-            "Provider response " + status,
-            details={
-                "kind": "RESPONSE_" + status.upper(),
-                "response_id": data.get("id"),
-                "partial_text": "".join(content_parts),
-                "provider_error": data.get("error"),
-                "partial": bool(content_parts),
-            },
-        )
+        details = {
+            "kind": "RESPONSE_" + status.upper(),
+            "response_id": data.get("id"),
+            "partial_text": "".join(content_parts),
+            "provider_error": data.get("error"),
+            "partial": bool(content_parts),
+        }
+        if status == "failed" and data.get("error"):
+            # Same taxonomy as an HTTP error: the provider's code decides
+            # whether this was a quota, a rate limit or an outage.
+            from rinari.providers.errors import classify_stream_error
+
+            error = classify_stream_error(data["error"])
+            error.details.update(details)
+            raise error
+        raise ProviderModelError("Provider response " + status, details=details)
     if status == "incomplete":
         # Never execute tools from an incomplete response, even syntactically valid ones.
         if incomplete.get("reason") != "max_output_tokens":
@@ -504,16 +548,21 @@ class _ResponsesStreamAccumulator:
         if self._completed is not None:
             return
         if event_type == "error":
-            raise ProviderModelError(
-                "Provider stream error",
-                details={
+            from rinari.providers.errors import classify_stream_error
+
+            error = classify_stream_error(
+                {k: event.get(k) for k in ("message", "code", "type") if event.get(k)}
+            )
+            error.details.update(
+                {
                     "kind": "RESPONSE_FAILED",
                     "provider_error": event.get("message"),
                     "partial_text": "".join(self._text_parts),
                     "response_id": self.response_id,
                     "partial": bool(self._text_parts),
-                },
+                }
             )
+            raise error
         if event_type == "response.output_text.delta":
             delta = event.get("delta")
             if isinstance(delta, str) and delta:

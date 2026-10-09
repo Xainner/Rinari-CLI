@@ -38,7 +38,7 @@ from rinari.shared.errors import (
     SandboxViolationError,
     ToolError,
 )
-from rinari.shared.redaction import Redactor
+from rinari.shared.redaction import Redactor, redact_value
 from rinari.tools.definition import (
     ArtifactRef,
     ToolContext,
@@ -48,7 +48,11 @@ from rinari.tools.definition import (
     ToolResult,
 )
 from rinari.tools.registry import ToolRegistry
-from rinari.tools.schema import validate_against
+from rinari.tools.schema import (
+    declared_properties,
+    unknown_arguments_message,
+    validate_against,
+)
 
 EventSink = Callable[[str, dict], None]
 # Network audit hook: (session_id, tool, host, action, reason) per gate
@@ -109,6 +113,20 @@ def _external_source(action, tool) -> str | None:
     return None
 
 
+# Inline limit for process output (`context.artifact_output_threshold_kb`).
+# 16 KiB is ~4k tokens: a whole test or build summary, a stack trace or a
+# compiler error block fit, while a 64 KiB log cost ~16k tokens and was
+# resent on every later request of the turn. Above it the model sees the head
+# and the tail (what ran, and how it ended) plus an artifact.read pointer to
+# the complete output.
+DEFAULT_OUTPUT_THRESHOLD_BYTES = 16 * 1024
+# Room a capped observation keeps for its result_ref/recovery pointer.
+_RECOVERY_METADATA_BYTES = 1024
+
+# Tools whose schema comes from outside Rinari keep their own contract.
+_DYNAMIC_SOURCES = frozenset({"plugin", "mcp", "openapi"})
+
+
 class ToolRuntime:
     def __init__(
         self,
@@ -119,7 +137,7 @@ class ToolRuntime:
         clock: Clock | None = None,
         redactor: Redactor | None = None,
         event_sink: EventSink | None = None,
-        spill_threshold_bytes: int = 64 * 1024,
+        spill_threshold_bytes: int = DEFAULT_OUTPUT_THRESHOLD_BYTES,
         network_event_log: NetworkEventLog | None = None,
     ) -> None:
         self.registry = registry
@@ -250,6 +268,53 @@ class ToolRuntime:
                 )
             arguments = {**arguments, "url": snapshot.url}
 
+        notes: tuple[str, ...] = ()
+        if tool.normalize is not None and tool.manifest.get("source") not in _DYNAMIC_SOURCES:
+            try:
+                arguments, rewritten = tool.normalize(arguments)
+            except ValueError as exc:
+                return self._error(ctx, ToolErrorCode.INVALID_ARGUMENT, str(exc))
+            notes = tuple(rewritten)
+            if notes:
+                # Persisted so the variants models send can be measured.
+                normalized = {"tool": tool_name, "notes": list(notes)}
+                if tool_call_id:
+                    normalized["tool_call_id"] = tool_call_id
+                self._event("ToolArgumentsNormalized", normalized)
+        prepared = self._authorize(tool, arguments, ctx, tool_call_id)
+        if not notes:
+            return prepared
+        if callable(prepared):
+            return lambda: self._with_notes(prepared(), notes)
+        return self._with_notes(prepared, notes)
+
+    def _with_notes(self, result: ToolResult, notes: tuple[str, ...]) -> ToolResult:
+        notes = tuple(self._redactor.redact(note) for note in notes)
+        full = result.full_observation
+        if full is not None:
+            # Round projection re-derives the observation from this copy.
+            full = dataclasses.replace(full, notes=(*notes, *full.notes))
+        return dataclasses.replace(result, notes=(*notes, *result.notes), full_observation=full)
+
+    def _authorize(self, tool: ToolDefinition, arguments: dict, ctx: ToolContext, tool_call_id):
+        """Validate, classify and gate already-normalized arguments."""
+        tool_name = tool.name
+        if tool.manifest.get("source") not in _DYNAMIC_SOURCES:
+            # A native tool ignores keys it does not declare. Running anyway
+            # hides a wrong call: timeout_ms instead of timeout_s ran with the
+            # 60 s default and the model blamed a fixed cap. Reject before any
+            # side effect and name the accepted keys so one retry fixes it.
+            declared = declared_properties(tool.input_schema)
+            unknown = (
+                [key for key in arguments if key not in declared] if declared is not None else []
+            )
+            if unknown:
+                return self._error(
+                    ctx,
+                    ToolErrorCode.INVALID_ARGUMENT,
+                    unknown_arguments_message(tool.name, tool.input_schema, unknown),
+                    details={"unknown_arguments": unknown, "accepted": sorted(declared or ())},
+                )
         errors = validate_against(tool.input_schema, arguments)
         if errors:
             return self._error(ctx, ToolErrorCode.INVALID_ARGUMENT, "; ".join(errors[:5]))
@@ -649,6 +714,7 @@ class ToolRuntime:
             data=data,
             presentation=presentation,
             captured_output=None,
+            notes=tuple(self._redactor.redact(note) for note in result.notes),
             error=(
                 dataclasses.replace(
                     result.error,
@@ -664,19 +730,12 @@ class ToolRuntime:
 
         from rinari.tools.observations import project_result
 
-        budget = ctx.observation_budget_bytes
-        threshold = (
-            min(self.spill_threshold_bytes, tool.max_output_bytes or self.spill_threshold_bytes)
-            if tool
-            else self.spill_threshold_bytes
-        )
+        budget = self._result_budget(tool, data, ctx.observation_budget_bytes)
         try:
             projected = project_result(
                 sanitized,
                 tool=tool.name if tool else "",
                 budget=budget - 128,
-                force=len(json.dumps(data, ensure_ascii=False, default=str).encode("utf-8"))
-                > threshold,
                 spill=lambda suffix, content: self._spill(f"{tool_call_id}-{suffix}", content, ctx),
             )
             return dataclasses.replace(projected, full_observation=sanitized)
@@ -696,8 +755,15 @@ class ToolRuntime:
         from rinari.tools.observations import allocate_budgets, project_result
 
         sources = [result.full_observation or result for call, result in entries]
+        # A result's demand is capped by its own inline limit, so a spilled
+        # command never takes round budget it would not use.
         sizes = [
-            len(source.to_model_text(call.name).encode("utf-8")) + 128
+            min(
+                len(source.to_model_text(call.name).encode("utf-8")) + 128,
+                self._result_budget(
+                    self.registry.get(call.name), source.data, ctx.observation_budget_bytes
+                ),
+            )
             for (call, _), source in zip(entries, sources, strict=True)
         ]
         budgets = allocate_budgets(sizes, ctx.observation_budget_bytes, ctx.round_observation_bytes)
@@ -732,6 +798,23 @@ class ToolRuntime:
                 "Executed actions must not be repeated."
             )
         return projected
+
+    def _result_budget(self, tool: ToolDefinition | None, data: Any, budget: int) -> int:
+        """Bytes one observation may take inline before its excess is spilled.
+
+        Process output (stdout/stderr) is capped by the configured artifact
+        output threshold, a tool by its own max_output_bytes; the cap bounds
+        the content and leaves room for the recovery metadata, so a capped
+        result still fits with its artifact.read pointer.
+        """
+        from rinari.tools.definition import _is_process_output
+
+        cap = tool.max_output_bytes if tool is not None and tool.max_output_bytes else None
+        if _is_process_output(data):
+            cap = min(cap or self.spill_threshold_bytes, self.spill_threshold_bytes)
+        if cap is None:
+            return budget
+        return min(budget, cap + _RECOVERY_METADATA_BYTES)
 
     def _spill(self, tool_call_id: str, payload: str | bytes, ctx: ToolContext) -> ArtifactRef:
         directory = ctx.artifact_root / ctx.session_id / "runtime"
@@ -781,7 +864,10 @@ class ToolRuntime:
 
     def _event(self, type_: str, payload: dict) -> None:
         if self._emit is not None:
-            self._emit(type_, self._redact_payload(payload))
+            # Events are stored and shown: besides the known provider keys,
+            # hide credentials recognizable by shape (a password typed into a
+            # command). The call itself already ran with the real arguments.
+            self._emit(type_, redact_value(payload, self._redactor.secrets))
 
     def _redact_payload(self, payload):
         if isinstance(payload, str):

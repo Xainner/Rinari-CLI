@@ -45,3 +45,40 @@ def test_transaction_rolls_back_on_error(db):
 def test_state_file_created(db):
     db.execute("CREATE TABLE t (id INTEGER)")
     assert db.path.exists()
+
+
+def test_close_waits_for_a_statement_running_in_another_thread(tmp_path) -> None:
+    import sqlite3
+    import threading
+    import time
+
+    db = Database(tmp_path / "race.db")
+    db.execute("CREATE TABLE t (x INTEGER)")
+    errors: list[BaseException] = []
+    stop = threading.Event()
+
+    def writer() -> None:
+        while not stop.is_set():
+            try:
+                db.execute("INSERT INTO t VALUES (1)")
+            except sqlite3.ProgrammingError:
+                return  # closed: a clean error, never a crash
+            except BaseException as exc:  # pragma: no cover - the failure being tested
+                errors.append(exc)
+                return
+
+    threads = [threading.Thread(target=writer) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    time.sleep(0.05)
+    db.close()
+    stop.set()
+    for thread in threads:
+        thread.join(5)
+    assert not errors
+    try:
+        db.execute("SELECT 1")
+    except sqlite3.ProgrammingError:
+        pass
+    else:  # pragma: no cover
+        raise AssertionError("a closed database must refuse statements")

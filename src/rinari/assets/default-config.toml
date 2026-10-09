@@ -30,7 +30,9 @@ max_turn_cost = 0
 
 [context]
 compact_at_percent = 80
-artifact_output_threshold_kb = 64
+# Command output (stdout/stderr) above this reaches the model as head + tail;
+# the complete output stays in an artifact the model reads with artifact.read.
+artifact_output_threshold_kb = 16
 
 [agents]
 enabled = true

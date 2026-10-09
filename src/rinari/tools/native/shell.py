@@ -13,8 +13,10 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from typing import Any
 
+from rinari.tools import normalize
 from rinari.tools.definition import (
     RISK_HIGH,
     SIDE_EFFECT_LOCAL_REVERSIBLE,
@@ -51,6 +53,68 @@ def resolve_argv(command: Any, env: dict[str, str]) -> Any:
     search = env.get("PATH") or env.get("Path") or os.environ.get("PATH", "")
     found = shutil.which(program, path=search)
     return [found, *command[1:]] if found else command
+
+
+SHELLS = ("default", "cmd", "powershell", "bash", "sh")
+
+
+def shell_argv(command: Any, shell: Any) -> Any:
+    """`command` run by the requested shell, as argv; unchanged for the default.
+
+    Models write bash or PowerShell while Windows runs cmd.exe: `;`, `| head`
+    and `$var` failed there. Choosing the shell is explicit and only wraps the
+    command at launch, so policy still classifies the command text itself.
+    Raises ValueError with what to do when the shell is not available.
+    """
+    if not isinstance(command, str) or shell in (None, "", "default"):
+        return command
+    import shutil
+
+    if shell == "powershell":
+        program = shutil.which("pwsh") or shutil.which("powershell")
+        if not program:
+            raise ValueError("PowerShell is not installed; use the default shell")
+        return [program, "-NoProfile", "-NonInteractive", "-Command", command]
+    if shell == "cmd":
+        if sys.platform != "win32":
+            raise ValueError("cmd is only available on Windows")
+        return [os.environ.get("COMSPEC") or "cmd.exe", "/d", "/s", "/c", command]
+    if shell in ("bash", "sh"):
+        program = _bash() if shell == "bash" else shutil.which("sh") or _bash()
+        if not program:
+            raise ValueError(f"{shell} is not installed; use the default shell")
+        return [program, "-c", command]
+    raise ValueError(f"shell must be one of {', '.join(SHELLS)}")
+
+
+def _bash() -> str | None:
+    import shutil
+
+    if sys.platform == "win32":
+        # Git for Windows' bash, not the WSL launcher in System32: that one
+        # runs inside a Linux distribution that cannot see this session's paths.
+        # Prefer the bin/bash.exe launcher: it sets up the PATH for grep,
+        # head and the other tools. git.exe lives in cmd/ or mingw64/bin/.
+        git = shutil.which("git")
+        if git:
+            base = os.path.dirname(os.path.dirname(git))
+            for root in (base, os.path.dirname(base)):
+                path = os.path.join(root, "bin", "bash.exe")
+                if os.path.isfile(path):
+                    return path
+        found = shutil.which("bash")
+        return found if found and "system32" not in found.lower() else None
+    return shutil.which("bash")
+
+
+SHELL_SCHEMA = {
+    "type": "string",
+    "enum": list(SHELLS),
+    "description": (
+        "Shell for `command`: default is cmd.exe on Windows and /bin/sh elsewhere; "
+        "powershell or bash run the command with that syntax."
+    ),
+}
 
 
 def _ok(data: Any) -> ToolResult:
@@ -168,6 +232,42 @@ class _BoundedBuffer:
         )
 
 
+def effective_timeout(requested: Any, default: float, ctx: ToolContext) -> dict[str, Any]:
+    """Seconds a wait may last and where that number came from.
+
+    The tool's own deadline (its timeout_ms metadata, narrowed by the turn)
+    caps the request: a handler that waits past it would outlive the limit
+    the runtime promised. ``source`` lets the model and the UI say why a
+    command stopped instead of guessing at a fixed cap.
+    """
+    try:
+        value = float(requested) if requested is not None else default
+        source = "argument" if requested is not None else "default"
+    except (TypeError, ValueError):
+        value, source = default, "default"
+    if ctx.deadline_at is not None:
+        remaining = max(0.0, ctx.deadline_at - time.time())
+        if remaining < value:
+            value, source = remaining, "deadline"
+    return {
+        "requested_s": requested if isinstance(requested, (int, float)) else None,
+        "effective_s": round(value, 3),
+        "source": source,
+    }
+
+
+def timeout_message(timeout: dict[str, Any]) -> str:
+    seconds = f"{timeout['effective_s']:.0f}s"
+    if timeout["source"] == "default":
+        return f"Command exceeded the default {seconds} (timeout_s was not set) and was terminated"
+    if timeout["source"] == "deadline":
+        return (
+            f"Command reached the tool's execution limit after {seconds} and was terminated; "
+            "use background=true and process.wait for longer work"
+        )
+    return f"Command exceeded timeout_s={seconds} and was terminated"
+
+
 def shell_exec(input: dict, ctx: ToolContext) -> ToolResult:
     command = input.get("argv") if "argv" in input else input.get("command")
     if isinstance(command, list):
@@ -183,14 +283,15 @@ def shell_exec(input: dict, ctx: ToolContext) -> ToolResult:
         from rinari.tools.native.process import process_start
 
         return process_start(input, ctx)
+    try:
+        command = shell_argv(command, input.get("shell"))
+    except ValueError as exc:
+        return _fail(ToolErrorCode.INVALID_ARGUMENT, str(exc))
     if ctx.cancellation is not None:
         ctx.cancellation.throw_if_cancelled()
 
-    timeout_s = input.get("timeout_s", DEFAULT_TIMEOUT_S)
-    try:
-        timeout_s = float(timeout_s)
-    except (TypeError, ValueError):
-        timeout_s = DEFAULT_TIMEOUT_S
+    timeout = effective_timeout(input.get("timeout_s"), DEFAULT_TIMEOUT_S, ctx)
+    timeout_s = timeout["effective_s"]
     env = dict(os.environ)
     if isinstance(input.get("env"), dict):
         env.update({str(k): str(v) for k, v in input["env"].items()})
@@ -294,13 +395,14 @@ def shell_exec(input: dict, ctx: ToolContext) -> ToolResult:
         "stdout": stdout.text(),
         "stderr": stderr.text(),
         "truncated": stdout.truncated or stderr.truncated,
+        "timeout": timeout,
     }
     if cancelled:
         result = _fail(ToolErrorCode.CANCELLED, "Command cancelled", data=data)
     elif timed_out:
         result = _fail(
             ToolErrorCode.TIMEOUT,
-            f"Command exceeded {timeout_s:.0f}s and was terminated",
+            timeout_message(timeout),
             retryable=True,
             data=data,
         )
@@ -321,9 +423,11 @@ def shell_tools() -> list[ToolDefinition]:
                 "Returns exit code and "
                 "bounded stdout/stderr. Use for builds, tests, git, and anything without a "
                 "dedicated structured tool. This is non-interactive (stdin is closed). "
-                "On Windows the command runs through the configured Windows command shell; "
-                "use Windows-compatible commands. Set a short explicit timeout for SSH and "
-                "network probes, and an explicit longer timeout for builds/tests."
+                "On Windows `command` runs in cmd.exe unless `shell` says otherwise: chain "
+                "with &&, there is no grep/head/tail; set shell=powershell or shell=bash to "
+                "write in those syntaxes. Set a short explicit timeout for SSH and network "
+                "probes, and an explicit longer timeout for builds/tests. To wait for a server, "
+                "port, file or log line use wait.for, never sleep, ping, timeout or Start-Sleep."
             ),
             input_schema={
                 "type": "object",
@@ -337,8 +441,13 @@ def shell_tools() -> list[ToolDefinition]:
                     },
                     "background": {"type": "boolean", "default": False},
                     "cwd": {"type": "string"},
-                    "timeout_s": {"type": "number", "minimum": 1},
+                    "timeout_s": {
+                        "type": "number",
+                        "minimum": 1,
+                        "description": "Seconds; default 60, max 600 (longer: background=true).",
+                    },
                     "env": {"type": "object"},
+                    "shell": SHELL_SCHEMA,
                 },
                 "oneOf": [{"required": ["command"]}, {"required": ["argv"]}],
             },
@@ -347,6 +456,7 @@ def shell_tools() -> list[ToolDefinition]:
             idempotent=False,
             timeout_ms=600_000,
             handler=shell_exec,
+            normalize=normalize.shell_exec,
             namespace="shell",
             manifest={
                 "notes": "executes with the session user; the policy engine decides allow/ask/deny"

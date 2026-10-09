@@ -40,6 +40,10 @@ class CodexResponsesAdapter(OpenAIResponsesAdapter):
         )
         payload["input"] = [item for item in payload["input"] if item.get("role") != "system"]
         payload["include"] = ["reasoning.encrypted_content"]
+        if request.session_id:
+            # Routes every call of a conversation to the same prompt cache;
+            # without it each call paid for its whole prefix again.
+            payload["prompt_cache_key"] = request.session_id
         payload.pop("max_output_tokens", None)
         payload.pop("temperature", None)
         return payload
@@ -204,6 +208,9 @@ class CopilotAdapter(OpenAICompatibleAdapter):
         owner = self
 
         class Messages(AnthropicAdapter):
+            # Copilot proxies Claude; breakpoints are its own business.
+            prompt_caching = False
+
             def request_headers(self, secret, request):
                 return {**owner.request_headers(secret, request), "anthropic-version": API_VERSION}
 

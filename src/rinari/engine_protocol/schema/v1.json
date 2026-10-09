@@ -250,9 +250,11 @@
       "type": "string",
       "enum": [
         "engine.info",
+        "engine.diagnostics",
         "runtime.snapshot.get",
         "session.move",
         "workspace.file.read",
+        "workspace.file.resolve",
         "workspace.file.watch",
         "workspace.file.unwatch",
         "workspace.preview.start",
@@ -401,6 +403,17 @@
         "artifact.list",
         "artifact.read",
         "artifact.export",
+        "artifact.resolve",
+        "documents.capabilities.get",
+        "documents.import",
+        "documents.inspect",
+        "documents.job.start",
+        "documents.job.get",
+        "documents.job.cancel",
+        "documents.preview.get",
+        "documents.range.get",
+        "documents.report.get",
+        "documents.revisions.list",
         "context.get",
         "memory.list",
         "memory.search",
@@ -410,6 +423,8 @@
         "memory.forget",
         "memory.candidates.list",
         "memory.candidate.resolve",
+        "memory.settings.get",
+        "memory.settings.set",
         "conversation.memory.status",
         "conversation.memory.exclude",
         "conversation.delete",
@@ -476,11 +491,15 @@
         "host.browser.request",
         "browser.control.changed",
         "turn.stopped",
+        "document.job.updated",
         "model.started",
         "model.content.delta",
         "model.content.completed",
         "model.completed",
         "model.failed",
+        "model.retrying",
+        "model.changed",
+        "session.renamed",
         "tool.requested",
         "tool.started",
         "tool.output.delta",
@@ -526,6 +545,7 @@
         "flow.invalidated",
         "provider.usage.updated",
         "provider.auth.updated",
+        "provider.reasoning.dropped",
         "skill.job.completed",
         "skill.job.failed",
         "skill.learned",
@@ -535,7 +555,10 @@
         "schedule.run.completed",
         "schedule.proposed",
         "steer.applied",
-        "steer.returned"
+        "steer.returned",
+        "memory.candidate.created",
+        "memory.candidate.resolved",
+        "memory.remembered"
       ]
     },
     "attachment": {
@@ -680,6 +703,19 @@
             "string",
             "null"
           ]
+        },
+        "keep_image": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "coverage": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": true
         }
       },
       "additionalProperties": false

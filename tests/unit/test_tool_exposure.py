@@ -155,3 +155,56 @@ def test_activation_tools_roundtrip(registry: ToolRegistry) -> None:
 
     err = tools["capability.activate"].handler({"names": ["browser.open"]}, NoExposure())
     assert not err.ok
+
+
+def test_schema_cost_counts_the_description_the_provider_also_receives() -> None:
+    from rinari.tools.exposure import _schema_tokens
+
+    terse = _tool("x.tool")
+    verbose = ToolDefinition(
+        name="x.tool",
+        description="d" * 4000,
+        input_schema={"type": "object", "properties": {}},
+    )
+    assert _schema_tokens(verbose) >= 1000 > _schema_tokens(terse) * 10
+
+
+def test_rarely_used_native_packs_are_on_demand_but_searchable() -> None:
+    from rinari.capability_search import capability_search_tool
+    from rinari.tools.native import all_native_tools
+
+    reg = ToolRegistry()
+    reg.register_all(all_native_tools())
+    reg.register(capability_search_tool(reg))
+    exposed = set(ToolExposure().exposed_names(reg))
+    on_demand = {"lsp.", "pty.", "context.", "artifact.metadata", "artifact.export"}
+    assert not {name for name in exposed if name.startswith(tuple(on_demand))}
+    # Every spilled observation points at artifact.read: it stays core.
+    assert {"artifact.read", "shell.exec", "fs.read", "capability.search"} <= exposed
+
+    class Ctx:
+        exposure = ToolExposure()
+        lsp = object()  # a session with a language server
+
+    found = reg.get("capability.search").handler({"query": "lsp definition", "load": True}, Ctx())
+    assert "lsp.definition" in found.data["loaded"]
+    assert "lsp.definition" in Ctx.exposure.exposed_names(reg)
+
+
+def test_a_child_agent_sees_the_on_demand_tools_its_definition_names() -> None:
+    from rinari.agents.definition import AgentDefinition
+    from rinari.agents.runtime import expose_allowlisted
+
+    reg = ToolRegistry()
+    reg.register_all(
+        [_tool("lsp.hover", always_loaded=False), _tool("pty.start", always_loaded=False)]
+    )
+    named = AgentDefinition(name="types", description="d", objective="o", tool_allowlist=("lsp.*",))
+    exposure = ToolExposure()
+    expose_allowlisted(named, reg, exposure)
+    assert exposure.exposed_names(reg) == ["lsp.hover"]
+    # No allowlist means "everything available", not "activate everything".
+    open_ended = AgentDefinition(name="any", description="d", objective="o")
+    exposure = ToolExposure()
+    expose_allowlisted(open_ended, reg, exposure)
+    assert exposure.exposed_names(reg) == []

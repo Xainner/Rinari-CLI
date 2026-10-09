@@ -30,6 +30,17 @@ round_observation_bytes = 262144
 
 Estas opciones pertenecen al Engine y se heredan en subagentes. No son límites de salida del modelo ni de concurrencia de visión. Un cambio de configuración se aplica al construir el contexto de una sesión.
 
+### Salida de comandos (2026-10-08)
+
+```toml
+[context]
+artifact_output_threshold_kb = 16
+```
+
+- Toda observación con `stdout`/`stderr` (`shell.exec`, `ssh.run`, `process.output`) se entrega en línea hasta este umbral (más ~1 KiB para el puntero de recuperación); por encima, el modelo recibe el principio y el final de cada flujo, con `[... N bytes omitted ...]` en medio, y `artifact.read {"uri": ...}` hacia la observación completa. Antes el ajuste no se leía y el corte real era 64 KiB. 16 KiB (~4k tokens) caben un resumen de tests o de build, una traza o un bloque de errores; la cola conserva el final, donde suelen estar el resumen y el error. Las líneas enormes sin saltos se cortan en trozos de 2000 caracteres para no perderlas enteras.
+- `max_output_bytes` de una herramienta sigue limitando su observación de la misma forma; el resto de herramientas solo se proyecta al superar `observation_bytes`.
+- `shell.exec` y `ssh.run` llegan al modelo como texto, no como JSON: una línea `exit_code: N (estado; task not verified)`, el error si lo hay, y secciones `--- stdout ---` / `--- stderr ---` sin escapar. El comando, el `cwd` y el `timeout` solo vuelven cuando algo falló (error o código distinto de 0). `data` y `presentation` no cambian: la actividad del escritorio sigue recibiendo el resultado estructurado completo. El artefacto `complete` guarda la observación en ese mismo formato.
+
 ## Componentes
 
 - `tools/observations.py`: proyección, recuperación y asignación de presupuestos.
@@ -161,10 +172,12 @@ Todos los productores nativos pasan por el contrato común. Elegibilidad explíc
 | `skills.read` | `serial` | `none` |
 | `skills.show` | `serial` | `none` |
 | `ssh.inspect` | `serial` | `none` |
+| `ssh.run` | `serial` | `remote-destructive` |
 | `user.ask` | `serial` | `none` |
 | `verify.evaluate` | `serial` | `none` |
 | `verify.plan` | `serial` | `none` |
 | `verify.record` | `serial` | `local-reversible` |
+| `wait.for` | `serial` | `none` |
 | `web.cite` | `serial` | `none` |
 | `web.download` | `serial` | `local-reversible` |
 | `web.extract_markdown` | `serial` | `none` |

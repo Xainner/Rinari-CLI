@@ -29,13 +29,16 @@ from rinari.providers.adapters.http import (
     decode_json,
     iter_model_lines,
     open_model_stream,
+    openai_cache_key,
     provider_error,
     sanitize_tool_name,
     send_request,
     session_affinity_headers,
+    stream_close_details,
     stream_timeout_error,
 )
 from rinari.shared.errors import InvalidUsageError, NetworkError, ProviderModelError
+from rinari.tools.schema import wire_input_schema
 
 
 class OpenAICompatibleAdapter(ProviderAdapter):
@@ -152,7 +155,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                     "function": {
                         "name": _wire_tool_name(tool.name, tool_aliases),
                         "description": tool.description,
-                        "parameters": tool.parameters,
+                        "parameters": wire_input_schema(tool.parameters),
                     },
                 }
                 for tool in request.tools
@@ -198,7 +201,9 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             "POST",
             url,
             headers=headers,
-            json_body=self._payload(request, stream=False, tool_aliases=tool_aliases),
+            json_body=openai_cache_key(
+                self._payload(request, stream=False, tool_aliases=tool_aliases), url, request
+            ),
             timeout=MODEL_CALL_TIMEOUT,
         )
         if response.status_code in (401, 403):
@@ -229,6 +234,8 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         calls = _ToolCallAccumulator()
         stop_reason = StopReason.END_TURN
         terminal_seen = False
+        done_seen = False
+        stream_stats: dict[str, Any] = {}
         stream_usage: dict[str, Any] | None = None
         headers_received = False
         saw_payload = False
@@ -250,7 +257,9 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                 stream_started_at,
                 "POST",
                 url,
-                json=self._payload(request, stream=True, tool_aliases=tool_aliases),
+                json=openai_cache_key(
+                    self._payload(request, stream=True, tool_aliases=tool_aliases), url, request
+                ),
                 headers=headers,
             ) as response:
                 headers_received = True
@@ -258,20 +267,20 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                     raise auth_failure(response, url, model=request.model)
                 if response.status_code >= 400:
                     raise provider_error(response, url, model=request.model)
-                for line in iter_model_lines(response, request, stream_started_at):
+                for line in iter_model_lines(response, request, stream_started_at, stream_stats):
                     if not line or not line.startswith("data:"):
                         continue
                     saw_payload = True
                     last_activity_at = time.monotonic()
                     data = line[5:].strip()
                     if data == "[DONE]":
+                        done_seen = True
                         break
                     chunk = _parse_sse_payload(data, url)
                     if chunk.get("error"):
-                        raise NetworkError(
-                            "Provider reported stream failure",
-                            details={"provider_error": chunk["error"]},
-                        )
+                        from rinari.providers.errors import classify_stream_error
+
+                        raise classify_stream_error(chunk["error"], model=request.model)
                     if isinstance(chunk.get("usage"), dict):
                         stream_usage = chunk["usage"]
                     choice = (chunk.get("choices") or [{}])[0]
@@ -285,6 +294,22 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                     if reason:
                         terminal_seen = True
                         stop_reason = _stop_reason_from_openai(reason)
+                if not terminal_seen:
+                    raise NetworkError(
+                        "Response stream closed without a terminal event",
+                        details={
+                            "kind": "STREAM_INTERRUPTED",
+                            **stream_close_details(
+                                response,
+                                stream_stats,
+                                transport="chat",
+                                url=url,
+                                started_at=stream_started_at,
+                                done_seen=done_seen,
+                                partial_tool_calls=bool(continuation_tools),
+                            ),
+                        },
+                    )
         except (NetworkError, ProviderModelError) as exc:
             exc.details.update(
                 {"partial_text": "".join(content_parts), "partial": bool(content_parts)}
@@ -316,15 +341,6 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                     "partial": bool(content_parts),
                 },
             ) from exc
-        if not terminal_seen:
-            raise NetworkError(
-                "Response stream closed without a terminal event",
-                details={
-                    "kind": "STREAM_INTERRUPTED",
-                    "partial_text": "".join(content_parts),
-                    "partial": bool(content_parts),
-                },
-            )
         tool_calls = () if stop_reason is StopReason.MAX_TOKENS else calls.finalize()
         if tool_calls and stop_reason is not StopReason.MAX_TOKENS:
             stop_reason = StopReason.TOOL_CALLS

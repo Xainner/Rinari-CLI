@@ -829,6 +829,8 @@ rinari engine --stdio
 - The first stdout line is the `hello` handshake (`rinari-engine`, protocol version, engine version, capabilities).
 - Every request carries an `id`; every response echoes it.
 - Unknown methods, duplicate request ids, malformed input, and broken frames return stable error envelopes without breaking the stream.
+- `engine.diagnostics` returns what a problem report needs, and never message or file contents, credentials, private endpoints, MCP commands or request parameters. It covers versions and platform, data sizes (session, message and event counts, the five largest sessions by id and bytes, database and artifact sizes), providers by product/type with the endpoint classified as `known`/`local`/`custom`, MCP and plugin state, and the latest 50 failed or slow (≥ 2 s) requests by method, code and duration. Each section degrades on its own. The desktop bundles it into "Exportar diagnóstico".
+- No stdout line exceeds 16 MiB, the desktop's line limit. `session.history` and `session.timeline` pages also stop at 8 MiB: older rows are left for `has_more`/`next_before_turn_index`, and a single row that is still too large has its long strings shortened (data URLs omitted). The stored data stays intact. A larger response becomes `RESPONSE_TOO_LARGE` for that request only. A larger event has its strings shortened, or is dropped if that is not enough. Each case is reported on stderr.
 
 Slice 1 methods: `engine.info`, `session.list`, `session.get`,
 `session.create`, `session.open`, `runtime.snapshot.get`.
@@ -858,6 +860,47 @@ Slice 5a adds `session.mode.set` (`ref`, `mode` plan/build/review):
 PLAN/REVIEW turns run under a READ_ONLY policy profile, BUILD under
 WORKSPACE; legacy modes keep workspace behavior. Emits
 `session.mode.changed`; the mode switch keeps session, tasks and context.
+`workspace.file.resolve` (`session_id`, `path`, `turn_id`) authorizes a file
+exactly like `workspace.file.read` (session root, turn provenance, private
+paths) but never reads it as text: it returns `path`, `name`, `size`, `kind`
+(`image`, `video`, `audio`, `pdf`, `text` or `binary`, from the first bytes),
+`mime` and `preview_limit`. The desktop uses it to play media, open a file
+with the system app or reveal it in its folder, at any size.
+`artifact.resolve` (`uri`) does the same for an artifact: `path` of its stored
+bytes, `name`, `size`, `kind` and `mime`, so an audio or video artifact plays
+in the desktop instead of being read as text.
+`session.open` also returns `branch_change` (`from`, `to`, `since`,
+`reference`, `session_id`) when a `[git-branch]` warning was produced. The
+reference is the branch last observed while Rinari worked in that git worktree
+(`reference: last_work`, written at the start and end of every turn, from any
+conversation), or the checkout the first time a worktree is seen
+(`first_seen`; that first sight is recorded silently). Each change is reported
+once. `sessions.git_branch` keeps the historical branch a conversation started on.
+Attachment references carry `coverage` for PDFs (`total_pages`,
+`prepared_pages`, `text_pages`, `ocr_pages`, `empty_pages`,
+`unprocessed_pages`, `failed_pages`, and `pages[]` with each page's `method`
+and `reason`) and accept `keep_image` with `ocr` on images: the OCR text and
+the pixels both reach the model (capability `reading_coverage_v1`). Every
+attachment, images included, is listed for the model with its artifact URI and
+sha256, so tools can reuse the original.
+`turn.stopped.details.stop` names a loop stop (`loop`: the detector kind,
+`subject`: what repeated), so clients word it in their language.
+A stream that ends without its terminal event fails with
+`STREAM_INTERRUPTED` and `close` (`eof` or `done_marker`), `transport`,
+`endpoint` (no query or credentials), `http_status`, `request_id`,
+`bytes_received`, `elapsed_s`, `idle_s` and `partial_tool_calls`.
+Every stored title emits `session.renamed` (`session_id`, `title`,
+`source`: `manual`, `generated` or `fallback`). The first message names the
+session through the model; when no usable title comes back, the trimmed
+message is a provisional `fallback` and later turns retry from that same
+message (three failures at most, each a `SessionTitleFailed` event with only
+its reason). A manual rename ends the retries.
+The first text of a turn written by a different model than the last one that
+wrote in the session is followed by `model.changed` (`after_model_call_id`,
+`previous`, `next`, each with `model_id`, `alias`, `provider_model_id`,
+`provider_alias` as named at that moment). A model that was selected but failed
+before writing does not count. The event is persisted with the turn, so
+`session.timeline` rebuilds it in place.
 Slice 6a adds project workspace reads: `task.tree/get`,
 `verification.latest/plan`, `checkpoint.list/show/restore`,
 `project.changes` (porcelain files + branch/head/dirty, `available:false`
@@ -893,7 +936,7 @@ profiles are cut by what cannot be undone. read-only reads anything (files
 and the internet) and never writes, runs or sends. workspace is free inside
 the project or chat folder, on localhost/LAN and reading the internet; it asks
 once to write or run outside, send data to an internet host (a request body or
-a non-GET method, `ssh.inspect` to a public host), call an MCP tool, interact
+a non-GET method, `ssh.inspect` or `ssh.run` to a public host), call an MCP tool, interact
 with a web page or `git push`. full-access asks for none of that. Every profile
 asks for the hard list (force push, deleting outside the project; never granted
 for good) and for system secrets (`~/.ssh`, GPG/cloud keys, OS and browser
@@ -1601,8 +1644,8 @@ rinari vision execution --provider opencode-go --inherit-timeouts
 ```
 
 These are shared streaming settings despite the historical `vision execution`
-command name. Agent exposes them under Settings → Vision and images → Model
-execution. Empty UI fields inherit. `--inherit-timeouts` clears the selected
+command name. Agent exposes them under Settings → Advanced → Model execution.
+Empty UI fields inherit. `--inherit-timeouts` clears the selected
 provider's overrides, or the global overrides without `--provider`.
 
 Precedence: installation → provider execution overrides → saved provider
@@ -1613,11 +1656,22 @@ fallback `RINARI_MODEL_STREAM_READ_TIMEOUT_SECONDS`, remain compatible and fill
 first-byte/inactivity values not specified by the new policy. Direct adapter
 callers without a policy retain the legacy 30-second read default.
 
+A self-hosted provider — any custom endpoint, whatever its domain, or one on
+this machine or the local network (localhost, a private address, `.local`) —
+starts from longer defaults: first byte 600 s, inactivity 300 s, total 3600 s,
+because a model the owner serves can read a long prompt for minutes before
+answering. Known cloud APIs from the provider catalog keep the ordinary
+defaults. Anything configured above still wins.
+
 First-byte includes waiting for response headers; inactivity measures raw bytes,
 including heartbeat traffic. The total bound also limits streams that send only
-heartbeats. A timeout is terminal with phase diagnostics; streaming requests and
-tools are never replayed automatically. Explicit continuation restores durable
-context. These settings do not change non-streaming call deadlines.
+heartbeats. The agent loop makes a failed model call again after a short wait
+when the failure is transient: a 5xx or overload, a rate limit, a cut stream or
+a lost connection (two retries), or a timeout (one retry). Clients get
+`model.retrying` and drop the text the failed attempt streamed. Tools are never
+replayed: the call is retried before any tool runs on its answer. Each retry
+counts as a model call. These settings do not change non-streaming call
+deadlines; non-streaming calls keep the router's own retries.
 
 ---
 
@@ -2504,7 +2558,14 @@ shows it and asks once, and `--yes` accepts exactly the reviewed content.
 
 Learned skills: `/learn [focus]` (terminal or desktop) pins the packaged
 `skill-author` skill and marks that turn as the owner's request; the skill it
-proposes with `skills.propose` is saved active. An update of a learned skill is
+proposes with `skills.propose` is saved active. Asking in plain words works too
+("crea una skill por cada una"): the model passes the owner's words in
+`owner_request`, and the Engine saves the skill active only when those words
+are in a message the owner wrote in that conversation (a subagent looks in the
+conversation that spawned it). Files, tool output, runtime notes, other agents
+and scheduled runs never count, and a turn another agent started cannot borrow
+them. A pending result says why in `pending_reason` (`needs_owner_approval`,
+`owner_request_not_found` or `review_flagged`). An update of a learned skill is
 also saved active in any turn: the owner is notified to review it, not to
 approve it. A new skill Rinari proposes on its own (setting
 `skills.auto_learn`, default `propose`), a change to an installed or
@@ -3518,10 +3579,15 @@ Shows prompt segment metadata:
 03 soul                  trusted         stable
 04 user-preferences      trusted         session
 05 project-instructions  scoped-trusted  session
-06 skill:fix-ci          scoped-trusted  turn
+06 skill:fix-ci          scoped-trusted  session
 07 task-state            trusted         turn
-08 environment           trusted         turn
+08 environment           trusted         session
+09 environment-current   trusted         turn
 ```
+
+`turn` segments are not part of the system prompt: they close each request
+after the history, so the cached prefix survives a changed task graph or
+repository scan.
 
 Optional rendering:
 

@@ -19,6 +19,7 @@ model I/O surfaces as a CancelledError at the next boundary.
 from __future__ import annotations
 
 import contextlib
+import json
 import queue
 import threading
 import time
@@ -32,7 +33,7 @@ from rinari.context.tokens import (
     estimate_tokens,
     pressure,
 )
-from rinari.models.types import ChatMessage, ModelRequest, StopReason, Usage
+from rinari.models.types import ChatMessage, ModelRequest, StopReason, ToolCall, Usage
 from rinari.prompts.assembler import AssemblerContext, PromptAssembler
 from rinari.runtime.budget import NETWORK_CALLS as NETWORK_CALLS_DIM
 from rinari.runtime.budget import TOOL_CALLS as TOOL_CALLS_DIM
@@ -70,9 +71,24 @@ def last_own_model_call(event_repo, session_id: str):
 EVENT_TOOL_COMPLETED = "ToolCompleted"
 EVENT_TURN_COMPLETED = "AgentTurnCompleted"
 EVENT_LOOP_DETECTED = "LoopDetected"
+EVENT_OPENING_REQUESTED = "OpeningRequested"
+# Sent when a task's first response calls tools without a word to the user.
+_OPENING_REMINDER = (
+    "Runtime: your last response called tools without telling the user what you are "
+    "about to do, so none of those calls ran. Write one or two sentences, in the user's "
+    "language, saying what you understood and what you will do first, and make the tool "
+    "calls you need in that same response. State intent, not findings you do not have yet."
+)
 
 DEFAULT_MAX_MODEL_CALLS = 500
 DEFAULT_MAX_TOOL_CALLS = 5000
+
+# A model call that failed in a known transient way is made again: a 5xx, a
+# rate limit, a cut stream or a lost connection. No tool has run on its
+# answer yet, so the retry repeats only the call itself. One delay per retry;
+# a timeout gets a single retry, since a slow server tends to stay slow.
+MODEL_RETRY_DELAYS_S: tuple[float, ...] = (2.0, 6.0)
+MAX_RETRY_AFTER_S = 60.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +109,9 @@ class TurnResult:
     governor: dict | None = None
     stop_reason: str | None = None
     recoverable: bool = False
+    # Machine-readable cause of a stop (e.g. the loop kind and its subject),
+    # so clients word it in their own language instead of showing `content`.
+    stop_detail: dict | None = None
 
 
 # `model_provider` exposes: capabilities() -> ProviderCapabilities,
@@ -128,6 +147,10 @@ class AgentContext:
     force_compaction: bool = False
     compaction_reason: str = "automatic"
     context_usage: dict = field(default_factory=dict)
+    # Model calls prepared so far and the one that last compacted, so an
+    # automatic compaction is not repeated every few calls.
+    prepared_calls: int = 0
+    compacted_at_call: int | None = None
     # Revision of the persisted projection this context runs on. A usage
     # anchor measured against another projection no longer calibrates it.
     compact_revision: int = 0
@@ -139,10 +162,16 @@ class AgentContext:
     pending_origin: dict[str, Any] | None = None
     allow_unconfirmed_vision: bool = False
     collect_subagent_results: Callable[[CancellationToken], str | None] | None = None
+    # Subagents that finished since the last look, worded for the model: the
+    # coordinator otherwise kept messaging agents that had already ended.
+    collect_agent_notices: Callable[[], list[str]] | None = None
     # Messages the owner sent while this turn runs (steering). Each call
     # hands over what arrived since the last one; the loop puts them in the
     # history after the current step and the model reads them next.
     collect_steering: Callable[[], list[ChatMessage]] | None = None
+    # Reads whose full text this conversation already holds (tools.read_cache);
+    # created on first use and cleared when compaction rewrites the history.
+    read_cache: Any = None
 
 
 class AgentLoop:
@@ -160,6 +189,7 @@ class AgentLoop:
         activity_sink: ActivityHook | None = None,
         reasoning_effort: str | None = None,
         prepare_context: Callable | None = None,
+        require_opening: bool = False,
     ) -> None:
         self._provider = model_provider
         self._tools = tool_runtime
@@ -172,6 +202,9 @@ class AgentLoop:
         self._activity_sink = activity_sink
         self._reasoning_effort = reasoning_effort
         self._prepare_context = prepare_context
+        # The user-facing loop opens each task with a sentence of intent
+        # before its first tool call (see `_OPENING_REMINDER`).
+        self._require_opening = require_opening
 
     @property
     def tool_registry(self):
@@ -236,6 +269,12 @@ class AgentLoop:
         tool_calls_rejected = 0
         tool_seq = 0
         total_usage: Usage | None = None
+        # Has the user seen any text from this turn? The first tool batch
+        # waits for it, once: a response with only tool calls is set aside
+        # and the model is asked for the opening.
+        opened = False
+        opening_asked = False
+        language_asked = False
         circuit_breaker = EmergencyCircuitBreaker(budget) if budget is not None else None
 
         # A present meter is authoritative for model-call iterations; the
@@ -261,10 +300,11 @@ class AgentLoop:
                         requested=tool_calls_requested,
                         rejected=tool_calls_rejected,
                         governor=governor,
+                        stop_detail=_budget_detail(budget, hit),
                     )
                 if (
                     budget.limits.max_model_calls is not None
-                    and budget.model_calls >= budget.limits.max_model_calls
+                    and budget.own_model_calls >= budget.limits.max_model_calls
                 ):
                     return self._stop(
                         ctx.session_id,
@@ -277,6 +317,7 @@ class AgentLoop:
                         requested=tool_calls_requested,
                         rejected=tool_calls_rejected,
                         governor=governor,
+                        stop_detail=_budget_detail(budget, "model-calls"),
                     )
                 budget.reserve_model_call(model_only=True)
             self._take_steering(ctx)
@@ -313,6 +354,16 @@ class AgentLoop:
 
             accepted_output = False
 
+            def restart_output() -> None:
+                # A retried call streams its answer from the start again.
+                nonlocal accepted_output
+                accepted_output = False
+
+            def call_model(current: ModelRequest, call_id: str = model_call_id) -> Any:
+                return self._call_with_retries(
+                    ctx, current, visible_delta, cancel, call_id, budget, restart_output
+                )
+
             def visible_delta(text: str, call_id: str = model_call_id) -> None:
                 nonlocal accepted_output
                 accepted_output = accepted_output or bool(text)
@@ -325,9 +376,7 @@ class AgentLoop:
 
             try:
                 try:
-                    response = self._invoke(
-                        ctx, request, self._guarded_delta(ctx, visible_delta), cancel
-                    )
+                    response = call_model(request)
                 except Exception as rejected:
                     from rinari.providers.errors import ProviderErrorCode
 
@@ -355,9 +404,7 @@ class AgentLoop:
                     )
                     if budget is not None:
                         budget.reserve_model_call(model_only=True)
-                    response = self._invoke(
-                        ctx, request, self._guarded_delta(ctx, visible_delta), cancel
-                    )
+                    response = call_model(request)
             except BaseException as exc:
                 error = {
                     "message": str(exc),
@@ -388,6 +435,16 @@ class AgentLoop:
                 if not response.has_tool_calls and ctx.collect_steering is not None
                 else []
             )
+            # A final answer in another script than the user writes in (a
+            # model drifted into Chinese for a Spanish speaker) is rewritten
+            # once in the user's language.
+            relanguage = (
+                not language_asked
+                and not response.has_tool_calls
+                and not subagent_results
+                and not steered
+                and _foreign_script(ctx.history, response.content)
+            )
             if response.content:
                 self._emit_activity(
                     "model.content.completed",
@@ -395,7 +452,7 @@ class AgentLoop:
                         "model_call_id": model_call_id,
                         "content": response.content,
                         "output_kind": "progress"
-                        if response.has_tool_calls or subagent_results or steered
+                        if response.has_tool_calls or subagent_results or steered or relanguage
                         else "final",
                         "duration_ms": duration_ms,
                     },
@@ -455,6 +512,25 @@ class AgentLoop:
             if self._prepare_context is None:
                 self._check_pressure(ctx, response, governor)
 
+            if (response.content or "").strip():
+                opened = True
+            elif (
+                self._require_opening
+                and response.has_tool_calls
+                and not opened
+                and not opening_asked
+            ):
+                # None of these calls ran: they are dropped with the response
+                # and the model asks for them again after the opening.
+                opening_asked = True
+                self._emit(
+                    ctx.session_id,
+                    EVENT_OPENING_REQUESTED,
+                    {"model_call_id": model_call_id, "tool_calls": len(response.tool_calls)},
+                )
+                ctx.history.append(ChatMessage.harness(_OPENING_REMINDER, "opening"))
+                continue
+
             if not response.has_tool_calls:
                 ctx.history.append(
                     ChatMessage.assistant(
@@ -474,6 +550,10 @@ class AgentLoop:
                 if steered:
                     self._append_steering(ctx, steered)
                 if subagent_results or steered:
+                    continue
+                if relanguage:
+                    language_asked = True
+                    ctx.history.append(ChatMessage.harness(_LANGUAGE_REMINDER, "language"))
                     continue
                 kind = "truncated" if response.stop_reason is StopReason.MAX_TOKENS else "answer"
                 self._emit_hook(
@@ -507,6 +587,7 @@ class AgentLoop:
                 )
             )
             looping_detected = False
+            loop.begin_response()
             round_tool_seq = tool_seq
 
             def prepare_call(
@@ -541,10 +622,7 @@ class AgentLoop:
                         ok=False,
                         error=ToolErrorInfo(
                             code=ToolErrorCode.INVALID_ARGUMENT,
-                            message=(
-                                f"Model emitted invalid JSON for arguments of "
-                                f"{call.name!r}; fix the arguments and retry"
-                            ),
+                            message=_invalid_arguments_message(call),
                             retryable=True,
                         ),
                     )
@@ -599,6 +677,8 @@ class AgentLoop:
                     }
                     if turn_index is not None:
                         trace["turn_index"] = turn_index
+                    from rinari.tools.read_cache import for_agent
+
                     call_context = replace(
                         ctx.tool_ctx,
                         observation_budget_bytes=min(
@@ -606,6 +686,7 @@ class AgentLoop:
                             ctx.tool_ctx.round_observation_bytes
                             // max(1, len(response.tool_calls)),
                         ),
+                        reads=for_agent(ctx),
                     )
                     from rinari.tools.scheduler import is_parallelizable
 
@@ -773,6 +854,7 @@ class AgentLoop:
                                 requested=tool_calls_requested,
                                 rejected=tool_calls_rejected,
                                 governor=governor,
+                                stop_detail={"loop": signal.kind, "subject": signal.detail},
                             )
                         else:
                             self._emit_activity(
@@ -810,6 +892,12 @@ class AgentLoop:
                         )
                     )
                 ctx.history.extend(round_nudges)
+                if ctx.collect_agent_notices is not None:
+                    with contextlib.suppress(Exception):
+                        ctx.history.extend(
+                            ChatMessage.harness(notice, "subagents")
+                            for notice in ctx.collect_agent_notices()
+                        )
 
             decision = governor.after_cycle(looping=looping_detected)
             self._emit_activity(
@@ -848,6 +936,9 @@ class AgentLoop:
                     requested=tool_calls_requested,
                     rejected=tool_calls_rejected,
                     governor=governor,
+                    # A machine-readable cause, so clients say it in the
+                    # user's language instead of showing this English text.
+                    stop_detail={"loop": "stagnation"},
                 )
 
             if budget is not None:
@@ -864,6 +955,7 @@ class AgentLoop:
                         requested=tool_calls_requested,
                         rejected=tool_calls_rejected,
                         governor=governor,
+                        stop_detail=_budget_detail(budget, hit),
                     )
 
         return self._stop(
@@ -878,6 +970,7 @@ class AgentLoop:
             requested=tool_calls_requested,
             rejected=tool_calls_rejected,
             governor=governor,
+            stop_detail={"budget": "model-calls", "limit": max_iters},
         )
 
     # -- internals ------------------------------------------------------------
@@ -907,7 +1000,16 @@ class AgentLoop:
         messages: list[ChatMessage] = []
         if bundle.system_prompt:
             messages.append(ChatMessage.system(bundle.system_prompt))
-        messages.extend(ctx.history)
+        from rinari.context.settle import settle_old_observations
+
+        messages.extend(settle_old_observations(ctx.history))
+        # Volatile state closes the request instead of opening it: the system
+        # prompt and the history stay a byte-identical prefix between calls
+        # and turns, which is what provider prompt caches reuse. The note is
+        # rebuilt per request and never enters ctx.history.
+        note = bundle.turn_context_message
+        if note is not None:
+            messages.append(note)
         exposure = getattr(ctx.tool_ctx, "exposure", None)
         if wire_tools is not None:
             pass
@@ -1051,6 +1153,55 @@ class AgentLoop:
                 value.details = {"partial_text": "".join(partial_text)}
             raise value
 
+    def _call_with_retries(
+        self,
+        ctx: AgentContext,
+        request: ModelRequest,
+        visible_delta: DeltaFn,
+        cancel: CancellationToken,
+        model_call_id: str,
+        budget: BudgetMeter | None,
+        restart_output: Callable[[], None],
+    ) -> Any:
+        """Invoke the model, retrying a transient failure after a short wait.
+
+        Each retry is a model call for the budget. `model.retrying` tells
+        clients to drop the text the failed attempt streamed: the retry
+        streams its answer from the beginning under the same call id.
+        """
+        retries = 0
+        while True:
+            try:
+                return self._invoke(ctx, request, self._guarded_delta(ctx, visible_delta), cancel)
+            except Exception as exc:
+                reason = _transient_failure(exc)
+                if reason is not None and not _streams(self._provider) and _router_retried(exc):
+                    # A non-streaming call was already retried by the router.
+                    reason = None
+                delays = MODEL_RETRY_DELAYS_S[:1] if reason == "TIMEOUT" else MODEL_RETRY_DELAYS_S
+                if reason is None or retries >= len(delays) or not _reserve_retry(budget):
+                    raise
+                retry_after = getattr(exc, "retry_after", None)
+                delay = (
+                    min(float(retry_after), MAX_RETRY_AFTER_S)
+                    if isinstance(retry_after, (int, float)) and retry_after > 0
+                    else delays[retries]
+                )
+                retries += 1
+                restart_output()
+                self._emit_activity(
+                    "model.retrying",
+                    {
+                        "model_call_id": model_call_id,
+                        "attempt": retries + 1,
+                        "max_attempts": len(delays) + 1,
+                        "delay_s": delay,
+                        "reason": reason,
+                        "message": str(exc)[:300],
+                    },
+                )
+                _cancellable_wait(delay, cancel)
+
     def _guarded_delta(self, ctx: AgentContext, on_delta: DeltaFn | None) -> DeltaFn | None:
         """Abort a live stream promptly on cancel (Â§8/Etapa D).
 
@@ -1101,6 +1252,7 @@ class AgentLoop:
         requested: int = 0,
         rejected: int = 0,
         governor: TurnGovernor | None = None,
+        stop_detail: dict | None = None,
     ) -> TurnResult:
         self._emit(
             session_id,
@@ -1118,6 +1270,7 @@ class AgentLoop:
             governor=governor.snapshot() if governor is not None else None,
             stop_reason=("emergency_limit" if kind == "budget" else kind),
             recoverable=kind in ("budget", "loop", "stagnation"),
+            stop_detail=stop_detail,
         )
 
     def _emit(self, session_id: str, event_type: str, payload: dict) -> None:
@@ -1139,6 +1292,33 @@ class AgentLoop:
             return
         with contextlib.suppress(Exception):
             self._activity_sink(event, payload)
+
+
+def _invalid_arguments_message(call: ToolCall) -> str:
+    """Where the arguments broke, so the retry can fix that spot.
+
+    "Invalid JSON" alone made models resend the same oversized patch: the
+    usual cause is a long edit cut off or mis-escaped mid-string.
+    """
+    message = f"Model emitted invalid JSON for arguments of {call.name!r}"
+    raw = call.raw_arguments
+    if isinstance(raw, str):
+        try:
+            json.loads(raw)
+        except json.JSONDecodeError as exc:
+            message += (
+                f": {exc.msg} at line {exc.lineno} column {exc.colno} "
+                f"(char {exc.pos} of {len(raw)})"
+            )
+        else:
+            message += ": the arguments must be a JSON object"
+    message += "; fix the arguments and retry"
+    if call.name in ("fs.patch", "fs.write"):
+        message += (
+            ". Long edits are where strings break: split the patch into smaller "
+            "fs.patch calls, or rewrite the whole file with fs.write"
+        )
+    return message
 
 
 def _turn_completed_payload(
@@ -1238,6 +1418,117 @@ _BUDGET_REASONS = {
     "cost": "cost limit reached",
     "wall-time": "wall-time limit reached",
 }
+
+
+_LANGUAGE_REMINDER = (
+    "[Runtime note, not from the user] Your last answer is not in the language the user "
+    "writes in. Write it again, complete, in the user's language. Do not explain the switch."
+)
+# Letters outside Latin that a reply to a Latin-script user should not be
+# made of: CJK, kana, hangul, Cyrillic, Arabic, Hebrew, Devanagari, Thai.
+_NON_LATIN = (
+    (0x0400, 0x04FF),
+    (0x0590, 0x05FF),
+    (0x0600, 0x06FF),
+    (0x0900, 0x097F),
+    (0x0E00, 0x0E7F),
+    (0x3040, 0x30FF),
+    (0x3400, 0x4DBF),
+    (0x4E00, 0x9FFF),
+    (0xAC00, 0xD7AF),
+)
+
+
+def _non_latin_share(text: str) -> tuple[int, float]:
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return 0, 0.0
+    other = sum(1 for c in letters if any(lo <= ord(c) <= hi for lo, hi in _NON_LATIN))
+    return len(letters), other / len(letters)
+
+
+def _foreign_script(history: Any, answer: str | None) -> bool:
+    """The answer is mostly in a script the user does not write in."""
+    user = next(
+        (
+            m.content
+            for m in reversed(list(history))
+            if m.role == "user" and (m.origin or {}).get("kind") != "harness" and m.content
+        ),
+        None,
+    )
+    if not user or not answer:
+        return False
+    user_letters, user_share = _non_latin_share(user)
+    answer_letters, answer_share = _non_latin_share(answer)
+    return user_letters >= 3 and user_share < 0.1 and answer_letters >= 40 and answer_share > 0.3
+
+
+def _transient_failure(exc: BaseException) -> str | None:
+    """The kind of a failure worth one more model call, or None."""
+    from rinari.providers.errors import ProviderError, ProviderErrorCode
+    from rinari.shared.errors import NetworkError
+
+    if isinstance(exc, ProviderError):
+        code = exc.error_code
+        if code in (ProviderErrorCode.STREAM_INTERRUPTED, ProviderErrorCode.TIMEOUT):
+            return str(code)
+        retryable = (
+            ProviderErrorCode.SERVER_ERROR,
+            ProviderErrorCode.RATE_LIMIT,
+            ProviderErrorCode.MODEL_UNAVAILABLE,
+        )
+        return str(code) if exc.retryable and code in retryable else None
+    if isinstance(exc, NetworkError):
+        kind = (getattr(exc, "details", None) or {}).get("kind")
+        return kind if kind in ("TIMEOUT", "STREAM_INTERRUPTED") else "NETWORK"
+    return None
+
+
+def _streams(provider: Any) -> bool:
+    try:
+        return bool(getattr(provider.capabilities(), "streaming", False))
+    except Exception:
+        return False
+
+
+def _router_retried(exc: BaseException) -> bool:
+    from rinari.providers.errors import RETRYABLE_MODEL_CODES, ProviderError
+
+    return isinstance(exc, ProviderError) and exc.error_code in RETRYABLE_MODEL_CODES
+
+
+def _reserve_retry(budget: BudgetMeter | None) -> bool:
+    if budget is None:
+        return True
+    try:
+        budget.reserve_model_call(model_only=True)
+    except ValueError:
+        return False
+    return True
+
+
+def _cancellable_wait(seconds: float, cancel: CancellationToken) -> None:
+    deadline = time.monotonic() + seconds
+    while True:
+        cancel.throw_if_cancelled("Model call cancelled")
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return
+        time.sleep(min(0.05, left))
+
+
+def _budget_detail(budget: BudgetMeter | None, hit: str) -> dict:
+    """Which ceiling stopped the turn, for clients to word it themselves."""
+    from rinari.runtime.budget import MODEL_CALLS, TOOL_CALLS, WALL_TIME
+
+    limits = budget.limits if budget is not None else None
+    limit = {
+        MODEL_CALLS: getattr(limits, "max_model_calls", None),
+        TOOL_CALLS: getattr(limits, "max_tool_calls", None),
+        WALL_TIME: getattr(limits, "max_wall_time_s", None),
+    }.get(hit)
+    return {"budget": hit, "limit": limit}
 
 
 def _budget_reason(name: str) -> str:

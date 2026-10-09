@@ -706,3 +706,82 @@ def test_a_file_the_running_turn_wrote_opens_before_the_turn_ends(desktop_runtim
         assert foreign["error"]["code"] == "PERMISSION_DENIED"
     finally:
         server._turns._turns.pop("turn_live", None)
+
+
+def test_resolve_reports_large_media_without_reading_it(desktop_runtime) -> None:
+    """Large media resolve to path, size and kind; `read` still refuses them."""
+    _services, server, primary, _other, workspace, _tmp = desktop_runtime
+    video = workspace / "out" / "promo.mp4"
+    video.parent.mkdir()
+    video.write_bytes(b"\x00\x00\x00\x18ftypisom" + b"\x00" * (2 * 1024 * 1024))
+    poster = workspace / "out" / "poster.png"
+    poster.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * (600 * 1024))
+    notes = workspace / "out" / "DELIVERY.md"
+    notes.write_text("# Entrega\n", encoding="utf-8")
+
+    def resolve(path):
+        return _request(server, "workspace.file.resolve", {"session_id": primary.id, "path": path})
+
+    result = resolve("out/promo.mp4")
+    assert result["ok"] is True, result
+    assert result["result"]["kind"] == "video"
+    assert result["result"]["mime"] == "video/mp4"
+    assert result["result"]["size"] == video.stat().st_size
+    assert result["result"]["path"] == str(video.resolve())
+    assert "content" not in result["result"]
+    assert resolve("out/poster.png")["result"]["kind"] == "image"
+    assert resolve("out/DELIVERY.md")["result"]["kind"] == "text"
+    read = _request(
+        server, "workspace.file.read", {"session_id": primary.id, "path": "out/promo.mp4"}
+    )
+    assert read["ok"] is False and read["error"]["code"] == "FILE_TOO_LARGE"
+
+
+def test_resolve_keeps_the_same_authorization_as_read(desktop_runtime) -> None:
+    _services, server, primary, _other, _workspace, tmp_path = desktop_runtime
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"\x89PNG\r\n\x1a\n")
+    denied = _request(
+        server, "workspace.file.resolve", {"session_id": primary.id, "path": str(outside)}
+    )
+    assert denied["ok"] is False and denied["error"]["code"] == "PERMISSION_DENIED"
+    missing = _request(
+        server, "workspace.file.resolve", {"session_id": primary.id, "path": "gone.mp4"}
+    )
+    assert missing["ok"] is False and missing["error"]["code"] == "NOT_FOUND"
+
+
+def test_file_kind_signatures() -> None:
+    from pathlib import Path
+
+    from rinari.engine_protocol.desktop import _file_kind
+
+    cases = {
+        b"RIFF\x00\x00\x00\x00WEBPVP8 ": "image",
+        b"RIFF\x00\x00\x00\x00WAVEfmt ": "audio",
+        b"\x1a\x45\xdf\xa3\x00": "video",
+        b"ID3\x03\x00": "audio",
+        b"\x00\x00\x00\x20ftypM4A ": "audio",
+        b"%PDF-1.7": "pdf",
+        b"PK\x03\x04\x00\x00": "binary",
+    }
+    for head, kind in cases.items():
+        assert _file_kind(Path("file.bin"), head)[0] == kind, head
+    assert _file_kind(Path("logo.svg"), b"<svg xmlns")[0] == "image"
+
+
+def test_artifacts_open_as_a_copy_and_only_from_their_session(desktop_runtime) -> None:
+    from rinari.engine_protocol.errors import EngineProtocolError
+
+    services, server, primary, other, _workspace, _tmp = desktop_runtime
+    uri = services.artifacts.create(
+        primary.id, "previews", "rev_1-office-render.pdf", b"%PDF-1.7 demo"
+    ).uri()
+    resolved = server._desktop.resolve_file({"session_id": primary.id, "path": uri})
+    assert resolved.provenance == "artifact"
+    assert resolved.path.read_bytes() == b"%PDF-1.7 demo"
+    stored = services.artifacts._storage_path(services.artifacts.meta(uri).storage_path)
+    assert resolved.path != stored
+    with pytest.raises(EngineProtocolError) as err:
+        server._desktop.resolve_file({"session_id": other.id, "path": uri})
+    assert err.value.code == "PERMISSION_DENIED"

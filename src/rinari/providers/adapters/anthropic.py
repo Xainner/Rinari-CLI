@@ -33,6 +33,7 @@ from rinari.providers.adapters.http import (
     sanitize_tool_name,
     send_request,
     session_affinity_headers,
+    stream_close_details,
     stream_timeout_error,
 )
 from rinari.providers.urls import api_url
@@ -47,6 +48,8 @@ class AnthropicAdapter(ProviderAdapter):
     type = "anthropic"
     default_max_tokens = DEFAULT_MAX_TOKENS
     tool_image_transport = "tool-result"
+    # Explicit prompt-cache breakpoints; a gateway that rejects them turns it off.
+    prompt_caching = True
 
     def __init__(self, *, client=None) -> None:
         super().__init__(client=client)
@@ -166,6 +169,7 @@ class AnthropicAdapter(ProviderAdapter):
         usage = Usage()
         stop_reason = StopReason.END_TURN
         terminal_seen = False
+        stream_stats: dict[str, Any] = {}
         headers_received = False
         saw_payload = False
         stream_started_at = time.monotonic()
@@ -194,7 +198,7 @@ class AnthropicAdapter(ProviderAdapter):
                     raise auth_failure(response, url, model=request.model)
                 if response.status_code >= 400:
                     raise provider_error(response, url, model=request.model)
-                for line in iter_model_lines(response, request, stream_started_at):
+                for line in iter_model_lines(response, request, stream_started_at, stream_stats):
                     if not line:
                         continue
                     saw_payload = True
@@ -205,10 +209,9 @@ class AnthropicAdapter(ProviderAdapter):
                         terminal_seen = True
                         break
                     elif event_type == "error":
-                        raise NetworkError(
-                            "Provider reported stream failure",
-                            details={"provider_error": event.get("error")},
-                        )
+                        from rinari.providers.errors import classify_stream_error
+
+                        raise classify_stream_error(event.get("error"), model=request.model)
                     elif event_type == "message_start":
                         usage = _usage_from_anthropic(_event_message(event).get("usage"))
                     elif event_type == "content_block_start":
@@ -249,6 +252,23 @@ class AnthropicAdapter(ProviderAdapter):
                             output_tokens=output_tokens,
                             cached_input_tokens=usage.cached_input_tokens,
                         )
+                if not terminal_seen:
+                    raise NetworkError(
+                        "Response stream closed without a terminal event",
+                        details={
+                            "kind": "STREAM_INTERRUPTED",
+                            **stream_close_details(
+                                response,
+                                stream_stats,
+                                transport="anthropic",
+                                url=url,
+                                started_at=stream_started_at,
+                                partial_tool_calls=any(
+                                    block.get("type") == "tool_use" for block in blocks.values()
+                                ),
+                            ),
+                        },
+                    )
         except (NetworkError, ProviderModelError) as exc:
             exc.details.update(
                 {"partial_text": "".join(content_parts), "partial": bool(content_parts)}
@@ -280,15 +300,6 @@ class AnthropicAdapter(ProviderAdapter):
                     "partial": bool(content_parts),
                 },
             ) from exc
-        if not terminal_seen:
-            raise NetworkError(
-                "Response stream closed without a terminal event",
-                details={
-                    "kind": "STREAM_INTERRUPTED",
-                    "partial_text": "".join(content_parts),
-                    "partial": bool(content_parts),
-                },
-            )
         tool_calls = () if stop_reason is StopReason.MAX_TOKENS else calls.finalize()
         if tool_calls and stop_reason is not StopReason.MAX_TOKENS:
             stop_reason = StopReason.TOOL_CALLS
@@ -296,10 +307,15 @@ class AnthropicAdapter(ProviderAdapter):
         for block in blocks.values():
             raw = block.pop("_json", None)
             if raw is not None:
+                # Same rule as the accumulator: a call without arguments streams
+                # `partial_json: ""`, and unparseable input still is a call the
+                # loop answers. Dropping the block here left a tool_result
+                # without its tool_use, which the API rejects with HTTP 400.
                 try:
-                    block["input"] = json.loads(raw)
+                    parsed = json.loads(raw or "{}")
                 except ValueError:
-                    continue
+                    parsed = {}
+                block["input"] = parsed if isinstance(parsed, dict) else {}
             if stop_reason is StopReason.MAX_TOKENS and block.get("type") == "tool_use":
                 continue
             preserved.append(block)
@@ -322,7 +338,8 @@ class AnthropicAdapter(ProviderAdapter):
         stream: bool,
         tool_aliases: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        system, messages = _convert_to_anthropic(request.messages, tool_aliases)
+        conversation, notes = _split_turn_context(request.messages)
+        system, messages = _convert_to_anthropic(conversation, tool_aliases)
         payload: dict[str, Any] = {
             "model": request.model,
             "max_tokens": request.max_tokens or DEFAULT_MAX_TOKENS,
@@ -365,46 +382,121 @@ class AnthropicAdapter(ProviderAdapter):
                 payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
         # json_response: Anthropic has no native JSON mode; the runtime checks
         # capabilities.structured_output before requesting it.
+        if self.prompt_caching:
+            _mark_cache_breakpoints(payload)
+        # After the breakpoints: the note changes on every call, so the cached
+        # prefix must end before it for the next call to read it back.
+        _append_turn_context(payload, notes)
         return payload
 
 
 # -- helpers -----------------------------------------------------------------
 
+_EPHEMERAL = {"type": "ephemeral"}
+# Blocks that may carry a cache breakpoint (thinking blocks may not).
+_CACHEABLE_BLOCKS = frozenset({"text", "image", "document", "tool_use", "tool_result"})
+
+
+def _mark_cache_breakpoints(payload: dict[str, Any]) -> None:
+    """Ask Anthropic to cache the prompt prefix: tools, system and history.
+
+    Anthropic caches nothing without `cache_control`, so every call paid for
+    the whole system prompt, tool schemas and conversation again. Three of
+    the four allowed breakpoints: the last tool, the system prompt and the
+    last block of the newest message; each call then reads the prefix the
+    previous one wrote. Copies what it marks: message blocks can belong to
+    a stored continuation.
+    """
+    tools = payload.get("tools")
+    if tools:
+        tools[-1] = {**tools[-1], "cache_control": _EPHEMERAL}
+    system = payload.get("system")
+    if isinstance(system, str) and system:
+        payload["system"] = [{"type": "text", "text": system, "cache_control": _EPHEMERAL}]
+    messages = payload.get("messages") or []
+    if not messages:
+        return
+    last = messages[-1]
+    content = last.get("content")
+    if isinstance(content, str):
+        if content:
+            blocks = [{"type": "text", "text": content, "cache_control": _EPHEMERAL}]
+            messages[-1] = {**last, "content": blocks}
+        return
+    if not isinstance(content, list):
+        return
+    for index in range(len(content) - 1, -1, -1):
+        block = content[index]
+        if isinstance(block, dict) and block.get("type") in _CACHEABLE_BLOCKS:
+            marked = list(content)
+            marked[index] = {**block, "cache_control": _EPHEMERAL}
+            messages[-1] = {**last, "content": marked}
+            return
+
+
+def _split_turn_context(
+    messages: tuple[ChatMessage, ...],
+) -> tuple[tuple[ChatMessage, ...], list[str]]:
+    """The conversation, and the trailing turn-context notes that close it."""
+    end = len(messages)
+    while end and messages[end - 1].is_turn_context:
+        end -= 1
+    return messages[:end], [m.content or "" for m in messages[end:] if m.content]
+
+
+def _append_turn_context(payload: dict[str, Any], notes: list[str]) -> None:
+    """Close the request with the notes, as their own text blocks.
+
+    A separate block (never concatenated into the previous text) keeps the
+    block that carries the breakpoint identical between calls. Roles must
+    alternate, so after a user turn (the owner's message or tool results)
+    the note joins it; otherwise it opens a user turn of its own.
+    """
+    if not notes:
+        return
+    blocks = [{"type": "text", "text": note} for note in notes]
+    messages = payload.setdefault("messages", [])
+    if messages and messages[-1].get("role") == "user":
+        last = messages[-1]
+        existing = last.get("content")
+        messages[-1] = {**last, "content": (_as_blocks(existing) if existing else []) + blocks}
+    else:
+        messages.append({"role": "user", "content": blocks})
+
 
 def _anthropic_input_schema(schema: dict[str, Any]) -> dict[str, Any]:
-    """Return an Anthropic-compatible wire schema without weakening Rinari.
+    """Anthropic rejects root combinators; see `wire_input_schema`."""
+    from rinari.tools.schema import wire_input_schema
 
-    Anthropic rejects ``oneOf``, ``anyOf`` and ``allOf`` at the root of a
-    tool input schema.  The wire schema therefore becomes a permissive
-    projection while ToolRuntime continues to validate model arguments
-    against the original definition before executing anything.  Simple
-    required-field alternatives are retained as model-facing guidance.
+    return wire_input_schema(schema)
+
+
+def _replayed_blocks(
+    message: ChatMessage, tool_aliases: dict[str, str] | None
+) -> list[dict[str, Any]]:
+    """Signed blocks as received, plus any tool_use the capture lost.
+
+    Every tool_result that follows needs its tool_use in this message.
+    Sessions saved before the capture fix lack argument-less calls and would
+    fail with HTTP 400 on every retry; the call itself is in `tool_calls`.
     """
-    wire = dict(schema)
-    notes: list[str] = []
-    labels = {
-        "oneOf": "Provide exactly one of",
-        "anyOf": "Provide at least one of",
-        "allOf": "Satisfy all of",
+    blocks = list(message.continuation["blocks"])
+    present = {
+        block.get("id")
+        for block in blocks
+        if isinstance(block, dict) and block.get("type") == "tool_use"
     }
-    for keyword, label in labels.items():
-        clauses = wire.pop(keyword, None)
-        if not isinstance(clauses, list):
-            continue
-        alternatives: list[str] = []
-        for clause in clauses:
-            required = clause.get("required") if isinstance(clause, dict) else None
-            if isinstance(required, list) and all(isinstance(item, str) for item in required):
-                alternatives.append(" + ".join(required))
-        if alternatives and len(alternatives) == len(clauses):
-            notes.append(f"{label}: " + "; ".join(alternatives) + ".")
-        else:
-            notes.append(f"{label} the alternatives defined by Rinari validation.")
-    if notes:
-        existing = wire.get("description")
-        prefix = f"{existing.strip()} " if isinstance(existing, str) and existing.strip() else ""
-        wire["description"] = prefix + " ".join(notes)
-    return wire
+    for tc in message.tool_calls:
+        if tc.id not in present:
+            blocks.append(
+                {
+                    "type": "tool_use",
+                    "id": tc.id,
+                    "name": _wire_tool_name(tc.name, tool_aliases),
+                    "input": tc.arguments,
+                }
+            )
+    return blocks
 
 
 def _wire_tool_name(name: str, tool_aliases: dict[str, str] | None) -> str:
@@ -462,7 +554,9 @@ def _convert_to_anthropic(
             continue
         if message.role == "assistant":
             if message.continuation and message.continuation.get("protocol") == "anthropic":
-                converted.append({"role": "assistant", "content": message.continuation["blocks"]})
+                converted.append(
+                    {"role": "assistant", "content": _replayed_blocks(message, tool_aliases)}
+                )
                 continue
             if message.tool_calls:
                 blocks: list[dict[str, Any]] = []

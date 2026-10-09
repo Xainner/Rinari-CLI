@@ -40,6 +40,7 @@ from rinari.models.types import ChatMessage
 from rinari.policy.approvals import ApprovalRequest
 from rinari.shared.clock import now_iso
 from rinari.shared.errors import CancelledError, RinariError
+from rinari.shared.redaction import redact_value
 from rinari.storage.records import SessionEventRecord
 
 logger = logging.getLogger(__name__)
@@ -103,6 +104,8 @@ class _ActiveTurn:
     # Slash command that started the turn (`learn`…); becomes turn_command.
     command: str = ""
     activity_lock: Any = field(default_factory=threading.RLock)
+    # The first visible text of the turn decides `model.changed`, once.
+    model_notice_checked: bool = False
     terminal_emitted: bool = False
     preparation_stage: str | None = None
     activities: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -142,6 +145,10 @@ class _PendingApproval:
     choices: tuple[str, ...] = DECISIONS
     rule_id: str = "default"
     reusable: bool = True
+
+
+# Events whose text is the owner's, not the model's or a tool's.
+_OWNER_TEXT_EVENTS = ("steer.", "question.")
 
 
 def _safe_detail(value: Any) -> Any:
@@ -242,6 +249,13 @@ class TurnManager:
         self.peers = PeerBroker(self)
         # A new engine process never replays deliveries accepted by an older one.
         self.peers.on_engine_start()
+        # Nor leaves its turns open: one that died mid-turn is closed now.
+        self.reconcile_orphan_turns()
+        try:
+            # Cheap housekeeping: lock files of sessions deleted long ago.
+            services.sessions.sweep_turn_locks()
+        except Exception:
+            logger.exception("turn lock sweep failed")
 
     def set_browser_registry(self, registry: Any) -> None:
         """Registry de contextos de browser nativo, puesta por el servidor."""
@@ -293,6 +307,31 @@ class TurnManager:
                 for turn in self._turns.values()
             )
 
+    def reconcile_orphan_turns(self, session_id: str | None = None) -> list[str]:
+        """Close turns a dead engine process left without a terminal event.
+
+        Best effort: a failure here must never keep the engine from starting
+        or a session from opening.
+        """
+        from rinari.engine_protocol.orphans import reconcile
+
+        def is_live(turn_id: str) -> bool:
+            with self._lock:
+                turn = self._turns.get(turn_id)
+                return turn is not None and not turn.done.is_set()
+
+        try:
+            with self._lock:
+                return reconcile(
+                    self._services,
+                    is_live=is_live,
+                    emit=lambda name, payload: self._emit(event(name, payload)),
+                    session_id=session_id,
+                )
+        except Exception:
+            logger.exception("orphaned turn reconciliation failed")
+            return []
+
     def conflicts_with_changeset(self, changeset: dict[str, Any]) -> bool:
         """Return whether undo would race an active turn in its session/project."""
         with self._lock:
@@ -333,6 +372,42 @@ class TurnManager:
         }
         self._persist_activity(event_name, safe)
         self._emit(event(event_name, safe))
+
+    def emit_memory_resolution(self, candidate: dict[str, Any]) -> bool:
+        """`memory.candidate.resolved` on the turn that showed the proposal.
+
+        A live turn takes it as ordinary activity (the card updates in place);
+        a finished one gets it appended, so a reloaded timeline shows the card
+        as resolved. Candidates no turn announced (message-derived ones) emit
+        nothing: the desktop refetches the list. Returns whether it emitted.
+        """
+        session_id = str(candidate.get("session_id") or "")
+        turn_id = None
+        for row in self._services.ctx.db.query(
+            "SELECT turn_id, payload_json FROM session_events WHERE session_id = ? "
+            "AND type = 'memory.candidate.created' AND turn_id IS NOT NULL ORDER BY seq DESC",
+            (session_id,),
+        ):
+            if _json_payload(row["payload_json"]).get("candidate_id") == candidate.get("id"):
+                turn_id = str(row["turn_id"])
+                break
+        if turn_id is None:
+            return False
+        status = {"accepted": "approved", "denied": "denied"}.get(str(candidate.get("status")))
+        if status is None:
+            return False
+        payload: dict[str, Any] = {"candidate_id": candidate["id"], "status": status}
+        if candidate.get("memory_id"):
+            payload["memory_id"] = candidate["memory_id"]
+        with self._lock:
+            live = self._turns.get(turn_id)
+        if live is not None and not live.done.is_set():
+            self._activity_cb(live)("memory.candidate.resolved", payload)
+        else:
+            self.emit_persisted_activity(
+                "memory.candidate.resolved", session_id=session_id, turn_id=turn_id, payload=payload
+            )
+        return True
 
     def runtime_state(self) -> dict[str, Any]:
         """Presentation-safe live state used to recover after a UI reload."""
@@ -791,6 +866,7 @@ class TurnManager:
                         "details": {
                             "content": result.content,
                             "governor": result.governor,
+                            "stop": result.stop_detail,
                         },
                         "usage": result.budget,
                     },
@@ -1340,6 +1416,12 @@ class TurnManager:
                 if event_name == "agent.activity"
                 else event_name
             )
+            if not effective_event.startswith(_OWNER_TEXT_EVENTS):
+                # The desktop shows, stores and exports these payloads
+                # (timeline, history, diagnostics): a credential in a command
+                # or an output is hidden once, here. The owner's own words
+                # (steering, answers) are shown as written.
+                payload = redact_value(payload)
             safe = {**payload, "turn_id": turn.turn_id, "session_id": turn.session_id}
             if event_name != "usage.updated":
                 safe["workspace_root"] = self._services.sessions.show(turn.session_id).current_cwd
@@ -1382,6 +1464,9 @@ class TurnManager:
                     current = {**current, "content": str(current.get("content") or "") + delta}
                 elif effective_event == "model.content.completed":
                     current = {**current, "content": str(safe.get("content") or "")}
+                elif effective_event == "model.retrying":
+                    # The retry streams its answer again from the start.
+                    current = {**current, "content": ""}
                 elif effective_event == "tool.output.delta":
                     stream = safe.get("stream")
                     delta = str(safe.get("delta") or "")
@@ -1414,6 +1499,20 @@ class TurnManager:
             ):
                 self._persist_activity(event_name, safe)
             self._emit(event(event_name, safe))
+            if (
+                event_name == "model.content.completed"
+                and not turn.model_notice_checked
+                and str(safe.get("content") or "").strip()
+            ):
+                turn.model_notice_checked = True
+                try:
+                    notice = self._model_change_notice(turn, safe)
+                except Exception:
+                    # A notice is presentation; it never breaks the turn.
+                    logger.exception("model change notice failed")
+                    notice = None
+                if notice is not None:
+                    _on_activity("model.changed", notice)
 
         def _serialized(event_name: str, payload: dict[str, Any]) -> None:
             # Preparation and cancellation can race on separate workers. Keep
@@ -1432,6 +1531,72 @@ class TurnManager:
                     turn.terminal_event = event_name
 
         return _serialized
+
+    def _model_change_notice(
+        self, turn: _ActiveTurn, completed: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """`model.changed` when this turn's first text comes from another model.
+
+        It compares the model that writes now with the last one that wrote
+        text in the session: a model that was selected but failed before
+        writing never counts, so A, then B failing, then C writing reads
+        "A → C". Both sides are stored as they are named today, so the notice
+        keeps its names after a model is renamed or removed.
+        """
+        call_id = completed.get("model_call_id")
+        with self._lock:
+            current = (turn.activities.get(f"model:{call_id}") or {}).get("model")
+        if not isinstance(current, str) or not current:
+            return None
+        db = self._services.ctx.db
+        last = db.query_one(
+            "SELECT turn_id, payload_json FROM session_events WHERE session_id = ? "
+            "AND type = 'model.content.completed' AND turn_id IS NOT NULL AND turn_id != ? "
+            "ORDER BY seq DESC LIMIT 1",
+            (turn.session_id, turn.turn_id),
+        )
+        if last is None:
+            return None
+        previous_call = _json_payload(last["payload_json"]).get("model_call_id")
+        previous = None
+        for row in db.query(
+            "SELECT payload_json FROM session_events WHERE session_id = ? AND turn_id = ? "
+            "AND type = 'model.started' ORDER BY seq",
+            (turn.session_id, last["turn_id"]),
+        ):
+            started = _json_payload(row["payload_json"])
+            if started.get("model_call_id") == previous_call:
+                previous = started.get("model")
+        if not isinstance(previous, str) or not previous or previous == current:
+            return None
+        return {
+            "after_model_call_id": call_id,
+            "previous": self._model_snapshot(turn.session_id, previous),
+            "next": self._model_snapshot(turn.session_id, current),
+        }
+
+    def _model_snapshot(self, session_id: str, model_id: str) -> dict[str, Any]:
+        ctx = self._services.ctx
+        model = ctx.model_repo.get(model_id)
+        if model is None:
+            # Gone from the catalog: the last notice that named it, if any.
+            row = ctx.db.query_one(
+                "SELECT payload_json FROM session_events WHERE session_id = ? "
+                "AND type = 'model.changed' ORDER BY seq DESC LIMIT 1",
+                (session_id,),
+            )
+            named = _json_payload(row["payload_json"]).get("next") if row else None
+            if isinstance(named, dict) and named.get("model_id") == model_id:
+                return named
+            return {"model_id": model_id}
+        provider = ctx.provider_repo.get(model.provider_id)
+        return {
+            "model_id": model.id,
+            "alias": model.alias,
+            "provider_model_id": model.provider_model_id,
+            "provider_id": model.provider_id,
+            "provider_alias": provider.alias if provider is not None else None,
+        }
 
     def _activity_key(self, turn: _ActiveTurn, event_name: str, payload: dict[str, Any]) -> str:
         if event_name == "usage.updated":
@@ -1454,6 +1619,11 @@ class TurnManager:
             return f"question:{payload['request_id']}"
         if payload.get("approval_id"):
             return f"approval:{payload['approval_id']}"
+        if event_name.startswith("memory.candidate.") and payload.get("candidate_id"):
+            # created and resolved update one card in the timeline.
+            return f"memory-candidate:{payload['candidate_id']}"
+        if event_name == "memory.remembered" and payload.get("memory_id"):
+            return f"memory:{payload['memory_id']}"
         if event_name.startswith("turn.changes."):
             change_id = payload.get("id") or payload.get("changeset_id") or turn.turn_id
             return f"changeset:{change_id}"
@@ -1554,14 +1724,19 @@ class TurnManager:
                 turn_id = owner.turn_id
                 token = token or getattr(owner.session, "token", None)
         approval_id = self._services.ctx.ids.new("apr")
+        # What the card shows (the command, its target) is display only: the
+        # decision binds to the request itself, so a credential typed into the
+        # command is hidden here as in the timeline.
+        target = redact_value(request.target)
+        description = redact_value(request.description)
         pending = _PendingApproval(
             approval_id=approval_id,
             session_id=request.session_id,
             turn_id=turn_id,
             capability=request.capability,
-            target=request.target,
+            target=target,
             risk=request.risk,
-            description=request.description,
+            description=description,
             choices=request.choices,
             rule_id=request.rule_id,
             reusable=request.reusable,
@@ -1573,9 +1748,9 @@ class TurnManager:
             "approval_id": approval_id,
             "tool": request.capability,
             "capability": request.capability,
-            "target": request.target,
+            "target": target,
             "risk": request.risk,
-            "description": request.description,
+            "description": description,
             "choices": list(request.choices),
             "rule_id": request.rule_id,
             "reusable": request.reusable,
@@ -1700,3 +1875,11 @@ class TurnManager:
             pending.decision = decision
             pending.decided.set()
         return {"status": "resolved", "approval_id": approval_id, "decision": decision}
+
+
+def _json_payload(raw: Any) -> dict[str, Any]:
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}

@@ -57,6 +57,19 @@ CAPABILITIES: dict[str, bool] = {
     # Exact turn provenance authorizes external previews; a bounded Engine
     # watcher invalidates open tabs without sending file bytes in events.
     "workspace_file_watch_v1": True,
+    # `workspace.file.resolve`: the authorized path, size and kind of a file
+    # without reading it, so media and binaries open at any size.
+    "workspace_file_resolve_v1": True,
+    "artifact_resolve_v1": True,
+    # Attachment preparation reports per-page coverage and accepts
+    # keep_image (OCR text plus the pixels of the same image).
+    "reading_coverage_v1": True,
+    # Servicio documental: trabajos (render…), revisiones inmutables,
+    # previews por revisión y lectura acotada; PPTX como adjunto.
+    "document_jobs_v1": True,
+    "document_revisions_v1": True,
+    "document_preview_v1": True,
+    "pptx_attachment_v1": True,
     "interactive_questions_v1": True,
     "chat": True,
     "projects": True,
@@ -81,6 +94,10 @@ CAPABILITIES: dict[str, bool] = {
     "selective_memory_v1": True,
     "memory_privacy_v1": True,
     "personal_memory_controls_v1": True,
+    # memory.propose (learned facts), memory.settings.get/set, candidate
+    # cards (memory.candidate.created/resolved, memory.remembered), project
+    # records in memory.list/search/update/forget.
+    "learned_memory_v1": True,
     # Peer messaging between agent sessions (Boards): untrusted data, per-target
     # consent, provenance ceiling in the receiving turn.
     "session_peer_messaging_v1": True,

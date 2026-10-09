@@ -68,21 +68,25 @@ def test_destination_and_installations_are_independent(tmp_path):
         pass
 
 
-def test_budget_reservations_are_atomic_across_children():
+def test_budget_reservations_are_atomic_across_threads():
     parent = BudgetMeter(TurnBudgetLimits(max_model_calls=3), SystemClock())
-    children = [parent.spawn_child() for _ in range(10)]
+    child = parent.spawn_child()
+    others = [parent.spawn_child() for _ in range(4)]
 
-    def reserve(child):
+    def reserve(meter):
         try:
-            child.reserve_model_call()
-            child.note_usage(Usage(2, 3))
+            meter.reserve_model_call()
+            meter.note_usage(Usage(2, 3))
             return True
         except ValueError:
             return False
 
     with ThreadPoolExecutor() as executor:
-        assert sum(executor.map(reserve, children)) == 3
-    assert (parent.model_calls, parent.input_tokens, parent.output_tokens) == (3, 6, 9)
+        # One meter's own ceiling holds under concurrent reservations.
+        assert sum(executor.map(reserve, [child] * 10)) == 3
+        # Each child has its own ceiling; the parent's ledger stays exact.
+        assert sum(executor.map(reserve, others * 2)) == 8
+    assert (parent.model_calls, parent.input_tokens, parent.output_tokens) == (11, 22, 33)
 
 
 def test_generation_inherits_model_and_explicit_request_wins(tmp_path):

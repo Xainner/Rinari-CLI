@@ -7,7 +7,7 @@ import pytest
 from rinari.application.provider_service import AddProviderInput
 from rinari.application.services import build_services
 from rinari.models.router import ModelRouter
-from rinari.models.types import ChatMessage, ModelRequest
+from rinari.models.types import ChatMessage, ModelRequest, ToolCall
 from rinari.providers.adapters.anthropic import AnthropicAdapter
 from rinari.providers.adapters.subscriptions import (
     CODEX_CLIENT_VERSION,
@@ -18,7 +18,6 @@ from rinari.providers.auth import ProviderAuthService
 from rinari.providers.catalog import PROVIDER_CATALOG, product_for
 from rinari.providers.metadata import model_metadata
 from rinari.providers.usage import ProviderUsageService, amount, percent
-from rinari.shared.errors import InvalidUsageError
 
 
 def setup(app_ctx, handler, *, product="opencode-go", alias="account", auth="api-key"):
@@ -234,8 +233,20 @@ def test_claude_reasoning_and_signed_continuation_scoped_and_persisted(app_ctx):
     other = replace(p, id="other-account")
     prepared = router.generation_request(other, m, follow)
     assert all(msg.continuation is None for msg in prepared.messages)
-    with pytest.raises(InvalidUsageError):
-        router.invoke(p, m.id, replace(request, reasoning_effort="xhigh"))
+    # A level the model does not offer no longer ends the turn: the call goes
+    # without it and says so.
+    dropped = []
+    router.invoke(
+        p,
+        m.id,
+        replace(
+            request,
+            reasoning_effort="xhigh",
+            usage_observer=lambda name, payload: dropped.append((name, payload)),
+        ),
+    )
+    assert "output_config" not in calls[-1] or "effort" not in calls[-1]["output_config"]
+    assert [name for name, _ in dropped if name == "provider.reasoning.dropped"]
 
 
 def test_claude_stream_preserves_thinking_and_signature():
@@ -280,6 +291,110 @@ def test_claude_stream_preserves_thinking_and_signature():
         "thinking": "private",
         "signature": "signature",
     }
+
+
+def _stream_client(events, seen=None):
+    def handler(req):
+        if seen is not None:
+            seen.append(json.loads(req.content))
+        return httpx.Response(200, text="\n\n".join("data: " + json.dumps(e) for e in events))
+
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def _tool_use_events(index, call_id, name, partial_json):
+    return [
+        {
+            "type": "content_block_start",
+            "index": index,
+            "content_block": {"type": "tool_use", "id": call_id, "name": name, "input": {}},
+        },
+        {
+            "type": "content_block_delta",
+            "index": index,
+            "delta": {"type": "input_json_delta", "partial_json": partial_json},
+        },
+        {"type": "content_block_stop", "index": index},
+    ]
+
+
+def test_claude_stream_keeps_argument_less_and_unparseable_tool_use_in_continuation():
+    # El caso de ses_01M4D87JTM5J8JFHKER69XQ1H7: tres llamadas en paralelo y la
+    # última sin argumentos. La API la transmite con `partial_json: ""`; la
+    # continuación la perdía y el turno siguiente fallaba con HTTP 400
+    # («unexpected tool_use_id found in tool_result blocks»).
+    events = [
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "thinking", "thinking": "", "signature": ""},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "signature_delta", "signature": "sig"},
+        },
+        *_tool_use_events(1, "toolu_caps", "documents_capabilities", '{"kind": "pptx"}'),
+        *_tool_use_events(2, "toolu_templates", "documents_templates", ""),
+        *_tool_use_events(3, "toolu_broken", "skills_read", '{"name": '),
+        {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {}},
+        {"type": "message_stop"},
+    ]
+    result = AnthropicAdapter(client=_stream_client(events)).invoke_stream(
+        ModelRequest(model="claude-haiku-5-5", messages=()), "key", None, lambda _: None
+    )
+    called = [tc.id for tc in result.tool_calls]
+    replayed = [b for b in result.continuation["blocks"] if b["type"] == "tool_use"]
+    assert called == ["toolu_caps", "toolu_templates", "toolu_broken"]
+    assert [b["id"] for b in replayed] == called
+    assert [b["input"] for b in replayed] == [{"kind": "pptx"}, {}, {}]
+    assert result.tool_calls[2].arguments_invalid
+
+
+def test_claude_replay_repairs_continuation_saved_without_a_tool_use():
+    # Sesiones guardadas antes del arreglo: la continuación firmada no tiene el
+    # tool_use, pero `tool_calls` sí. Sin reparar, cada reintento repite el 400.
+    seen = []
+    events = [
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "ok"}},
+        {"type": "message_stop"},
+    ]
+    signed = [
+        {"type": "thinking", "thinking": "", "signature": "sig"},
+        {"type": "tool_use", "id": "toolu_caps", "name": "documents_capabilities", "input": {}},
+    ]
+    assistant = ChatMessage.assistant(
+        "",
+        (
+            ToolCall(id="toolu_caps", name="documents.capabilities", arguments={}),
+            ToolCall(id="toolu_templates", name="documents.templates", arguments={}),
+        ),
+        continuation={"protocol": "anthropic", "blocks": signed},
+    )
+    request = ModelRequest(
+        model="claude-haiku-5-5",
+        messages=(
+            ChatMessage.user("deck"),
+            assistant,
+            ChatMessage.tool_result("toolu_caps", "documents.capabilities", "caps"),
+            ChatMessage.tool_result("toolu_templates", "documents.templates", "themes"),
+        ),
+    )
+    AnthropicAdapter(client=_stream_client(events, seen)).invoke_stream(
+        request, "key", None, lambda _: None
+    )
+    replayed = seen[0]["messages"][1]["content"]
+    # La firma y el orden recibido se conservan; solo se añade lo perdido.
+    assert replayed[:2] == signed
+    assert replayed[2] == {
+        "type": "tool_use",
+        "id": "toolu_templates",
+        "name": "documents_templates",
+        "input": {},
+    }
+    results = [b["tool_use_id"] for b in seen[0]["messages"][2]["content"]]
+    assert results == ["toolu_caps", "toolu_templates"]
 
 
 def test_device_login_cancel_and_completed_credentials_never_exposed(app_ctx):
@@ -735,8 +850,9 @@ def test_gemini_stream_signature_survives_tool_continuation(app_ctx):
         == "opaque-signed"
     )
     assert calls[0]["reasoning_effort"] == "high"
-    with pytest.raises(InvalidUsageError):
-        router.invoke(p, m.id, replace(req, reasoning_effort="medium"))
+    # An unsupported level is dropped for the call instead of ending the turn.
+    router.invoke(p, m.id, replace(req, reasoning_effort="medium"))
+    assert "reasoning_effort" not in calls[-1]
 
 
 @pytest.mark.parametrize("endpoint", ["/v1/messages", "/responses", "/chat/completions"])

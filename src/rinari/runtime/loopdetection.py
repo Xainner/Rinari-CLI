@@ -16,7 +16,9 @@ Detectors (harness.md loop-detection list):
                             multi-agent runtime feeds it for free)
     force strategy change   first hit injects a harness nudge telling the model
                             to change approach; a second hit of the same kind
-                            stops the turn (kind="loop")
+                            stops the turn (kind="loop"). For same-error the
+                            second hit needs `repeats` new identical errors
+                            made after the model read the nudge
 
 The detector is per-turn: it never carries state across turns, so the same
 legitimate action in successive user turns is not a loop.
@@ -113,6 +115,10 @@ class LoopDetector:
         self._window = max(4, window)
         self._actions: list[str] = []  # canonical tool and arguments
         self._errors: list[tuple[str, str]] = []  # (signature, tool)
+        # (serial, response) of each entry in `_errors`, aligned with it: a
+        # stop after a nudge counts only errors the model made after reading it.
+        self._error_origins: list[tuple[int, int | None]] = []
+        self._nudged_at_error: dict[tuple[str, object], int] = {}
         self._denials: dict[str, int] = {}
         # Per file: the states its writes produced, and how many writes brought
         # it back to one of them.
@@ -120,13 +126,21 @@ class LoopDetector:
         self._rewrites: dict[tuple[str, str], int] = {}
         self._last_rewrite: tuple[str, str] | None = None
         self._subagents: list[str] = []
-        self._nudged: set[tuple[str, object]] = set()
+        # Identity -> the model response whose calls earned the nudge. A stop
+        # needs the model to have read it, so never in that same response.
+        # Without begin_response() (direct callers) every check stands alone.
+        self._nudged: dict[tuple[str, object], int | None] = {}
+        self._response: int | None = None
         self._action_serial = 0
         self._error_serial = 0
         self._subagent_serial = 0
         self._reported: dict[tuple[str, object], object] = {}
 
     # -- recorders -----------------------------------------------------------
+
+    def begin_response(self) -> None:
+        """The calls that follow come from a new model response."""
+        self._response = (self._response or 0) + 1
 
     def record_tool(self, name: str, arguments: object) -> None:
         self._action_serial += 1
@@ -147,6 +161,8 @@ class LoopDetector:
         signature = _error_signature(code, message)
         self._errors.append((signature, name))
         del self._errors[: -self._window]
+        self._error_origins.append((self._error_serial, self._response))
+        del self._error_origins[: -self._window]
         if code == "APPROVAL_DENIED":
             self._denials[name] = self._denials.get(name, 0) + 1
 
@@ -186,12 +202,50 @@ class LoopDetector:
             )
             if self._reported.get(identity) == evidence:
                 continue
+            nudged = identity in self._nudged
+            nudged_in = self._nudged.get(identity)
+            if nudged and self._response is not None and nudged_in == self._response:
+                # Repeated inside the response that was just nudged (a model
+                # can emit four identical calls at once): the nudge has not
+                # reached it yet, so this is not a second offence.
+                continue
+            if (
+                not nudged
+                and self._response is not None
+                and self._response in self._nudged.values()
+            ):
+                # One nudge per response: the same repetition also trips
+                # same-error, and one note covers both.
+                self._reported[identity] = evidence
+                self._mark_nudged(identity)
+                continue
+            if nudged and kind == KIND_SAME_ERROR and not self._repeated_since_nudge(identity):
+                # The tail still holds the errors that earned the nudge: one
+                # new identical error (even after successful calls) is not
+                # the model ignoring it. It needs `repeats` fresh ones.
+                continue
             self._reported[identity] = evidence
-            action = STOP if identity in self._nudged else NUDGE
+            action = STOP if nudged else NUDGE
             if action == NUDGE:
-                self._nudged.add(identity)
+                self._mark_nudged(identity)
             return LoopSignal(kind=kind, detail=detail, action=action)
         return None
+
+    def _mark_nudged(self, identity: tuple[str, object]) -> None:
+        self._nudged[identity] = self._response
+        self._nudged_at_error[identity] = self._error_serial
+
+    def _repeated_since_nudge(self, identity: tuple[str, object]) -> bool:
+        since = self._nudged_at_error.get(identity, 0)
+        nudged_in = self._nudged.get(identity)
+        fresh = sum(
+            1
+            for entry, (serial, response) in zip(self._errors, self._error_origins, strict=True)
+            if entry == identity[1]
+            and serial > since
+            and (response is None or response != nudged_in)
+        )
+        return fresh >= self._repeats
 
     def nudge_text(self, signal: LoopSignal) -> str:
         return (

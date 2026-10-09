@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import codecs
+import hashlib
 import mimetypes
+import shutil
 from pathlib import Path
 
 from rinari.tools.definition import (
     RISK_LOW,
+    RISK_MEDIUM,
+    SIDE_EFFECT_LOCAL_REVERSIBLE,
     SIDE_EFFECT_NONE,
     ClassifiedAction,
     ToolContext,
@@ -80,7 +84,8 @@ def artifact_read(input: dict, ctx: ToolContext) -> ToolResult:
                 text += decoder.decode(extra, final=not extra)
         if "\0" in text:
             return _error(
-                ToolErrorCode.INVALID_ARGUMENT, "Artifact is binary; use export to open it."
+                ToolErrorCode.INVALID_ARGUMENT,
+                "Artifact is binary; use artifact.export to copy it to a file.",
             )
     except UnicodeDecodeError:
         return _error(
@@ -128,6 +133,89 @@ def artifact_metadata(input: dict, ctx: ToolContext) -> ToolResult:
     )
 
 
+def _plain_name(path: Path) -> str:
+    """Stored name without the content-hash prefix attachments carry."""
+    head, sep, rest = path.name.partition("-")
+    if sep and rest and len(head) == 64 and all(c in "0123456789abcdef" for c in head):
+        return rest
+    return path.name
+
+
+def _export_target(input: dict) -> str:
+    return str(input.get("path") or "")
+
+
+def _free_path(dest: Path) -> Path:
+    if not dest.exists():
+        return dest
+    for index in range(1, 1000):
+        candidate = dest.with_name(f"{dest.stem} ({index}){dest.suffix}")
+        if not candidate.exists():
+            return candidate
+    raise FileExistsError(str(dest))
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def artifact_export(input: dict, ctx: ToolContext) -> ToolResult:
+    """Copy an artifact's original bytes to a real file a program can open.
+
+    Attachments live in the artifact store, outside the workspace; an
+    uploader or converter needs a path. The copy is the stored original (not
+    the JPEG sent for vision), checked against its recorded hash, written
+    where the write policy allows. An existing file is never overwritten.
+    """
+    path, error = _path_for(input.get("uri"), ctx)
+    if error is not None:
+        return error
+    target = input.get("path") or _plain_name(path)
+    if not isinstance(target, str):
+        return _error(ToolErrorCode.INVALID_ARGUMENT, "path must be a string")
+    try:
+        dest = ctx.sandbox.resolve(target, base=ctx.cwd)
+        if dest.is_dir():
+            dest = dest / _plain_name(path)
+        ctx.sandbox.assert_writable(dest)
+    except Exception as exc:  # SandboxViolationError
+        return _error(ToolErrorCode.SANDBOX_VIOLATION, getattr(exc, "message", str(exc)))
+    expected = None
+    store = ctx.artifact_store
+    if store is not None:
+        try:
+            expected = store.meta(input["uri"]).sha256
+        except Exception:
+            expected = None
+    try:
+        actual = _sha256(path)
+        if expected is not None and actual != expected:
+            return _error(
+                ToolErrorCode.CONFLICT,
+                "The stored artifact no longer matches its recorded hash; nothing was copied.",
+            )
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest = _free_path(dest)
+        shutil.copyfile(path, dest)
+    except OSError as exc:
+        return _error(ToolErrorCode.PERMISSION_DENIED, f"Export failed: {exc.__class__.__name__}")
+    return ToolResult(
+        ok=True,
+        data={
+            "uri": input["uri"],
+            "path": str(dest),
+            "name": dest.name,
+            "size_bytes": dest.stat().st_size,
+            "mime_type": mimetypes.guess_type(dest.name)[0] or "application/octet-stream",
+            "sha256": actual,
+        },
+    )
+
+
 def artifact_tools() -> list[ToolDefinition]:
     return [
         ToolDefinition(
@@ -171,6 +259,31 @@ def artifact_tools() -> list[ToolDefinition]:
             handler=artifact_metadata,
             classify=lambda _: ClassifiedAction("state.read"),
             namespace="artifact",
+            # Rarely needed: on demand through capability.search. artifact.read
+            # stays core because every spilled observation points at it.
+            always_loaded=False,
+        ),
+        ToolDefinition(
+            name="artifact.export",
+            description=(
+                "Copy an artifact:// original of this session (e.g. an attachment) to a file "
+                "for programs or uploads. path: file or folder (default: working directory). "
+                "Never overwrites."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "uri": {"type": "string"},
+                    "path": {"type": "string"},
+                },
+                "required": ["uri"],
+            },
+            risk=RISK_MEDIUM,
+            side_effects=SIDE_EFFECT_LOCAL_REVERSIBLE,
+            handler=artifact_export,
+            classify=lambda a: ClassifiedAction("fs.write", _export_target(a) or "."),
+            namespace="artifact",
+            always_loaded=False,
         ),
     ]
 

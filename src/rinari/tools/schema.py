@@ -9,6 +9,7 @@ enough for model-supplied arguments.
 
 from __future__ import annotations
 
+import difflib
 import math
 import re
 from typing import Any
@@ -22,6 +23,65 @@ _TYPE_NAMES = {
     "number": (int, float),
     "null": type(None),
 }
+
+
+_COMBINATOR_LABELS = {
+    "oneOf": "Provide exactly one of",
+    "anyOf": "Provide at least one of",
+    "allOf": "Satisfy all of",
+}
+
+
+def wire_input_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """The schema sent to a model provider, without weakening Rinari.
+
+    Combinators next to `properties` do not survive every backend: Anthropic
+    rejects them at the root, and llama.cpp's grammar builder handles them
+    before their sibling properties, so the model can only emit `{}`. The
+    wire copy drops them and says the requirement in the description;
+    ToolRuntime still validates arguments against the original schema.
+    Nested object nodes with their own properties get the same treatment;
+    a plain type union (`oneOf` of types, no properties) is kept.
+    """
+    return _project(schema, root=True)
+
+
+def _project(schema: Any, *, root: bool = False) -> Any:
+    if not isinstance(schema, dict):
+        return schema
+    wire = dict(schema)
+    if isinstance(wire.get("properties"), dict):
+        wire["properties"] = {key: _project(sub) for key, sub in wire["properties"].items()}
+    if isinstance(wire.get("items"), dict):
+        wire["items"] = _project(wire["items"])
+    if not (root or isinstance(wire.get("properties"), dict)):
+        return wire
+    notes: list[str] = []
+    for keyword, label in _COMBINATOR_LABELS.items():
+        clauses = wire.pop(keyword, None)
+        if not isinstance(clauses, list):
+            continue
+        alternatives = _required_alternatives(clauses)
+        if alternatives is not None:
+            notes.append(f"{label}: " + "; ".join(alternatives) + ".")
+        else:
+            notes.append(f"{label} the alternatives defined by Rinari validation.")
+    if notes:
+        existing = wire.get("description")
+        prefix = f"{existing.strip()} " if isinstance(existing, str) and existing.strip() else ""
+        wire["description"] = prefix + " ".join(notes)
+    return wire
+
+
+def _required_alternatives(clauses: list[Any]) -> list[str] | None:
+    """`["command", "argv"]` for clauses that only list required keys."""
+    alternatives: list[str] = []
+    for clause in clauses:
+        required = clause.get("required") if isinstance(clause, dict) else None
+        if not (isinstance(required, list) and all(isinstance(i, str) for i in required)):
+            return None
+        alternatives.append(" + ".join(required))
+    return alternatives
 
 
 def validate_against(schema: dict[str, Any], value: Any) -> list[str]:
@@ -38,7 +98,17 @@ def _validate(schema: dict[str, Any], value: Any, path: str, errors: list[str]) 
         if keyword in schema:
             matches = sum(not validate_against(branch, value) for branch in schema[keyword])
             if matches == 0 or (keyword == "oneOf" and matches != 1):
-                errors.append(f"{path}: does not match {keyword}")
+                alternatives = _required_alternatives(schema[keyword])
+                if alternatives is None:
+                    errors.append(f"{path}: does not match {keyword}")
+                else:
+                    # Say what to send: "does not match oneOf" taught a
+                    # model nothing it could correct.
+                    which = "exactly one" if keyword == "oneOf" else "at least one"
+                    got = "more than one" if matches > 1 else "none"
+                    errors.append(
+                        f"{path}: provide {which} of: {' | '.join(alternatives)} (got {got})"
+                    )
                 return
     for branch in schema.get("allOf", []):
         _validate(branch, value, path, errors)
@@ -134,3 +204,57 @@ def _expected(schema: Any) -> str:
         return " (one of: " + ", ".join(str(value) for value in enum) + ")"
     kind = schema.get("type")
     return f" ({kind})" if isinstance(kind, str) else ""
+
+
+def declared_properties(schema: Any) -> set[str] | None:
+    """Top-level argument names a schema declares, or None if it accepts any key.
+
+    Properties declared only inside anyOf/oneOf/allOf branches count too. An
+    explicit truthy ``additionalProperties`` (or a schema that declares no
+    properties at all) means the tool takes free-form keys.
+    """
+    if not isinstance(schema, dict):
+        return None
+    additional = schema.get("additionalProperties")
+    if additional is not None and additional is not False:
+        return None
+    names: set[str] = set()
+    declares = False
+    if isinstance(schema.get("properties"), dict):
+        names.update(schema["properties"])
+        declares = True
+    for keyword in ("anyOf", "oneOf", "allOf"):
+        for branch in schema.get(keyword, ()) or ():
+            if not isinstance(branch, dict):
+                continue
+            branch_additional = branch.get("additionalProperties")
+            if branch_additional is not None and branch_additional is not False:
+                return None
+            if isinstance(branch.get("properties"), dict):
+                names.update(branch["properties"])
+                declares = True
+    return names if declares else None
+
+
+def unknown_arguments_message(tool_name: str, schema: dict[str, Any], unknown: list[str]) -> str:
+    """Name the unknown arguments, the closest accepted one and its meaning."""
+    accepted = sorted(declared_properties(schema) or ())
+    props: dict[str, Any] = {}
+    for source in [schema, *(schema.get(k, ()) or () for k in ("anyOf", "oneOf", "allOf"))]:
+        branches = source if isinstance(source, (list, tuple)) else [source]
+        for branch in branches:
+            if isinstance(branch, dict) and isinstance(branch.get("properties"), dict):
+                props.update(branch["properties"])
+    parts = []
+    for name in unknown:
+        hint = ""
+        match = difflib.get_close_matches(name, accepted, n=1, cutoff=0.6)
+        if match:
+            described = props.get(match[0], {})
+            description = described.get("description") if isinstance(described, dict) else None
+            meaning = f": {description}" if description else ""
+            hint = f" (did you mean {match[0]!r}{meaning})"
+        parts.append(f"{name!r}{hint}")
+    noun = "parameter" if len(unknown) == 1 else "parameters"
+    takes = f"Accepted: {', '.join(accepted)}." if accepted else "It takes no parameters."
+    return f"{tool_name} does not accept {noun} {', '.join(parts)}; nothing was run. {takes}"

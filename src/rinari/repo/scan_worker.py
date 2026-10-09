@@ -12,9 +12,11 @@ from pathlib import Path
 
 def scan(config):
     pattern = config["pattern"]
+    # Older manifests carry no ignore_case: literal searches ignored case.
+    ignore_case = config.get("ignore_case", config["literal"])
     regex = re.compile(
         re.escape(pattern) if config["literal"] else pattern,
-        re.IGNORECASE if config["literal"] else 0,
+        re.IGNORECASE if ignore_case else 0,
     )
     matches = []
     backend = (
@@ -37,7 +39,9 @@ def scan(config):
                 "2M",
             ]
             if config["literal"]:
-                argv += ["--fixed-strings", "--ignore-case"]
+                argv.append("--fixed-strings")
+            if ignore_case:
+                argv.append("--ignore-case")
             result = subprocess.run(
                 [*argv, "--", pattern, *batch],
                 capture_output=True,
