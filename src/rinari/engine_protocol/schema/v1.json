@@ -425,6 +425,8 @@
         "memory.candidate.resolve",
         "memory.settings.get",
         "memory.settings.set",
+        "memory.export",
+        "memory.import",
         "conversation.memory.status",
         "conversation.memory.exclude",
         "conversation.delete",

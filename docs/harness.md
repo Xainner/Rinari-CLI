@@ -3213,6 +3213,39 @@ memory.propose
   (accent- and case-folded, stopwords dropped; distinct terms hit, then field
   weight, then recency), with or without a project. No FTS index: the bundled
   SQLite build is not guaranteed to ship FTS5 and the corpus is small.
+
+## 73.2 Portable memory (`memory.export` / `memory.import`, `memory_portability_v1`)
+
+The owner moves what Rinari remembers to another installation with one JSON
+file (desktop: Settings → Memory → Export / Import).
+
+- `memory.export {}` → `{bundle, digest, count}`. `bundle` is
+  `{format: "rinari-memory", version: 1, exported_at, records, suppressions}`:
+  live user and project records (`scope, kind, topic, text, provenance,
+  confidence, created_at, updated_at, project_root?`) and the content
+  suppressions (`topic_hash, text_hash, created_at`) of what was forgotten.
+  Source quotes, session links, candidates and conversation controls stay on
+  the machine (`memory.ledger.*` is the same-installation backup); no
+  credential is ever part of memory. `digest` is SHA-256 over the canonical
+  JSON (sorted keys, integral floats as integers so a JavaScript round-trip
+  keeps it).
+- `memory.import {bundle, digest, dry_run?}` → `{dry_run, total, imported,
+  skipped_duplicates, skipped_suppressed, skipped_conflicts, rejected,
+  sensitive, suppressions_added}`. The desktop previews with `dry_run: true`
+  and the owner confirms. A changed file (digest mismatch), another format or
+  version, or more than 5,000 records / 50,000 suppressions is refused whole.
+- Additive: nothing is deleted or superseded. Per record: secret checks of a
+  learned fact (credential patterns, history-redactor shapes, `[REDACTED]`)
+  and kind/size validation → `rejected`; text forgotten here or suppressed by
+  the bundle → `skipped_suppressed`; same text in the same store (and project
+  root) → `skipped_duplicates`; another text under a kind + topic already in
+  use → `skipped_conflicts` (the local record wins). Suppressions are added
+  unless a live record here still has that text. Personal-data records are
+  imported on the owner's confirmation, as when written in the panel, and
+  counted in `sensitive`. Imported records get new ids and keep their
+  provenance (a `learned:` fact stays a learned fact) and dates. Project
+  records keep their `project_root` path. Writing waits for active turns
+  (`TURN_RUNNING`); a preview does not.
 - Deleting a conversation tombstones only the owner's messages (the memory
   sources); migration 0045 drops the old per-message rows of other roles and
   of conversations already gone, whose `deleted` control row remains.
