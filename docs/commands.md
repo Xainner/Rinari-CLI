@@ -3018,6 +3018,10 @@ composer (`command.list`); `/help` prints it. Kinds:
 /<skill> [text]  every enabled skill is a command (a built-in keeps its name)
 /tasks           the task tree (it was /plan before modes were commands)
 /learn [focus]   save what was done here as a skill (saved active)
+/lesson [focus]  save what the last turn taught: 1-3 rules into the skill
+                 that does that job (or memory); never a new skill
+/merge-skills a b [...]  merge the owner's skills into one (waits for approval;
+                 the merged ones are turned off, undo turns them back on)
 ```
 
 The Engine expands `mode`, `turn` and `skill` commands itself

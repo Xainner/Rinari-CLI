@@ -111,6 +111,9 @@ CAPABILITIES: dict[str, bool] = {
     # speech.* local dictation (whisper.cpp): status, settings, model jobs,
     # transcription as a job with speech.transcribed / speech.failed.
     "speech_dictation_v1": True,
+    # Near-duplicate gate (SIMILAR_EXISTS), skill.proposed / skill.proposal.resolved
+    # chat cards, /lesson and /merge-skills, skill.duplicates.list/dismiss.
+    "skill_manager_v1": True,
     # command.list + session.turn.start `command` (slash commands, skills too).
     "slash_commands_v1": True,
     # /learn + skills.propose, pending approvals, revert, auto_learn setting.
