@@ -258,6 +258,37 @@ class ToolRuntime:
                 )
             arguments = {**arguments, "url": snapshot.url}
 
+        notes: tuple[str, ...] = ()
+        if tool.normalize is not None and tool.manifest.get("source") not in _DYNAMIC_SOURCES:
+            try:
+                arguments, rewritten = tool.normalize(arguments)
+            except ValueError as exc:
+                return self._error(ctx, ToolErrorCode.INVALID_ARGUMENT, str(exc))
+            notes = tuple(rewritten)
+            if notes:
+                # Persisted so the variants models send can be measured.
+                normalized = {"tool": tool_name, "notes": list(notes)}
+                if tool_call_id:
+                    normalized["tool_call_id"] = tool_call_id
+                self._event("ToolArgumentsNormalized", normalized)
+        prepared = self._authorize(tool, arguments, ctx, tool_call_id)
+        if not notes:
+            return prepared
+        if callable(prepared):
+            return lambda: self._with_notes(prepared(), notes)
+        return self._with_notes(prepared, notes)
+
+    def _with_notes(self, result: ToolResult, notes: tuple[str, ...]) -> ToolResult:
+        notes = tuple(self._redactor.redact(note) for note in notes)
+        full = result.full_observation
+        if full is not None:
+            # Round projection re-derives the observation from this copy.
+            full = dataclasses.replace(full, notes=(*notes, *full.notes))
+        return dataclasses.replace(result, notes=(*notes, *result.notes), full_observation=full)
+
+    def _authorize(self, tool: ToolDefinition, arguments: dict, ctx: ToolContext, tool_call_id):
+        """Validate, classify and gate already-normalized arguments."""
+        tool_name = tool.name
         if tool.manifest.get("source") not in _DYNAMIC_SOURCES:
             # A native tool ignores keys it does not declare. Running anyway
             # hides a wrong call: timeout_ms instead of timeout_s ran with the
@@ -673,6 +704,7 @@ class ToolRuntime:
             data=data,
             presentation=presentation,
             captured_output=None,
+            notes=tuple(self._redactor.redact(note) for note in result.notes),
             error=(
                 dataclasses.replace(
                     result.error,

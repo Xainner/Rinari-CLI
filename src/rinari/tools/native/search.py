@@ -53,6 +53,7 @@ def search_files(input: dict, ctx: ToolContext) -> ToolResult:
                 ctx,
                 limit=min(500, max(1, int(input.get("limit", 500)))),
                 offset=max(0, int(input.get("offset", 0))),
+                include_dirs=bool(input.get("include_dirs", False)),
             )
         )
     except ValueError as exc:
@@ -133,7 +134,10 @@ def search_tools() -> list[ToolDefinition]:
         ToolDefinition(
             name="search.files",
             concurrency="local-read",
-            description="Exact file search by glob pattern (e.g. **/*.py, tests/test_*.py).",
+            description=(
+                "Exact file search by glob pattern (e.g. **/*.py, tests/test_*.py). "
+                "Folders match only with include_dirs=true."
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -141,6 +145,10 @@ def search_tools() -> list[ToolDefinition]:
                     "path": {"type": "string"},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 500},
                     "offset": {"type": "integer", "minimum": 0},
+                    "include_dirs": {
+                        "type": "boolean",
+                        "description": "Also match folders (default false: files only).",
+                    },
                 },
                 "required": ["pattern"],
             },
@@ -152,7 +160,11 @@ def search_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="search.regex",
-            description="Regular-expression search across text files (per-line matches).",
+            description=(
+                "Case-sensitive regular-expression search across text files (per-line "
+                "matches). For case-insensitive text use fs.search_text (regex=true for "
+                "a regex)."
+            ),
             input_schema={
                 "type": "object",
                 "properties": {

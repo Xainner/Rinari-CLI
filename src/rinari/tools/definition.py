@@ -99,6 +99,10 @@ class ToolResult:
     full_observation: Any = field(default=None, repr=False, compare=False)
     # Validated, immutable image references; never serialized as model text.
     images: tuple[Any, ...] = ()
+    # Short runtime remarks for the model, e.g. how its arguments were
+    # normalized. Serialized next to the data so the model learns the
+    # canonical spelling instead of repeating the variant.
+    notes: tuple[str, ...] = ()
 
     def to_model_text(self, tool: str | None = None) -> str:
         """Serialize the model observation without dropping evidence.
@@ -112,6 +116,8 @@ class ToolResult:
         envelope: dict[str, Any] = {"ok": self.ok}
         if tool is not None:
             envelope["tool"] = tool
+        if self.notes:
+            envelope["notes"] = list(self.notes)
         process = self.data if isinstance(self.data, dict) else {}
         if "exit_code" in process:
             code = process["exit_code"]
@@ -339,6 +345,13 @@ class ToolDefinition:
     # peer message to a session outside the group). It never replaces the
     # checks the handler performs after approval: state can change in between.
     precheck: Callable[[dict, ToolContext], ToolResult | None] | None = None
+    # Exact argument equivalences (timeout_ms -> timeout_s, a single-file
+    # fs.patch spelled with top-level edits...). Runs before validation and
+    # classification so policy decides on the canonical call. Returns the new
+    # arguments and one note per rewrite; raising ValueError rejects the call
+    # with that message. It must never guess a path, a target or a missing
+    # value: anything ambiguous is left for validation to reject.
+    normalize: Callable[[dict], tuple[dict, list[str]]] | None = None
     always_loaded: bool = True
     concurrency: str = "serial"
     namespace: str = "core"

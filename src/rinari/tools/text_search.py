@@ -10,7 +10,14 @@ from rinari.tools.definition import ToolErrorCode, ToolErrorInfo, ToolResult
 from rinari.tools.native.shell import shell_exec
 
 
-def search_text(root, arguments, ctx, *, literal=False):
+def search_text(root, arguments, ctx, *, literal=False, ignore_case=None, relative=None):
+    """Search ``root``; by default literal means case-insensitive, absolute paths.
+
+    ``ignore_case`` and ``relative`` default to the historical pairing of each
+    mode, so fs.search_text can switch to a regex without changing its shape.
+    """
+    ignore_case = literal if ignore_case is None else ignore_case
+    relative = not literal if relative is None else relative
     paths = []
     for path in [root] if root.is_file() else walk_files(root, arguments.get("include"), 5001):
         if ctx.cancellation:
@@ -26,6 +33,7 @@ def search_text(root, arguments, ctx, *, literal=False):
         "paths": paths[:5000],
         "pattern": arguments["pattern"],
         "literal": literal,
+        "ignore_case": ignore_case,
         "limit": min(200, max(1, int(arguments.get("max_results", 100)))),
     }
     with tempfile.TemporaryDirectory(prefix="rinari-search-") as folder:
@@ -50,7 +58,7 @@ def search_text(root, arguments, ctx, *, literal=False):
         )
     data = json.loads(result.data["stdout"])
     data["truncated"] |= len(paths) > 5000
-    if not literal:
+    if relative:
         for row in data["matches"]:
             row["file"] = (
                 Path(row["file"]).relative_to(root).as_posix() if root.is_dir() else root.name

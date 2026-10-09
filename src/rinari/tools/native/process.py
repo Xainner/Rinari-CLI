@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 
+from rinari.tools import normalize
 from rinari.tools.definition import (
     RISK_HIGH,
     RISK_LOW,
@@ -452,6 +453,7 @@ def process_tools() -> list[ToolDefinition]:
             idempotent=False,
             timeout_ms=30_000,
             handler=process_start,
+            normalize=normalize.process_start,
             classify=_classify_shell_like,
             namespace="process",
         ),
@@ -474,6 +476,7 @@ def process_tools() -> list[ToolDefinition]:
             idempotent=True,
             timeout_ms=600_000,
             handler=process_wait,
+            normalize=normalize.process_wait,
             classify=_classify_process_local,
             namespace="process",
         ),
