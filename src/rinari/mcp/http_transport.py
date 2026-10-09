@@ -56,6 +56,10 @@ def safe_url(url: str) -> str:
     return f"{parts.scheme}://{host}{parts.path}"
 
 
+def _origin(url: httpx.URL) -> tuple[str, str, int]:
+    return url.scheme, url.host, url.port or (443 if url.scheme == "https" else 80)
+
+
 def _is_tls_error(exc: BaseException) -> bool:
     seen: set[int] = set()
     current: BaseException | None = exc
@@ -92,6 +96,25 @@ class StreamableHttpTransport(McpTransport):
         self._protocol_version: str | None = None
         self._lock = threading.Lock()
         self._closed = False
+        if client is not None:
+            client.event_hooks = {
+                **client.event_hooks,
+                "request": [*client.event_hooks.get("request", []), self._same_origin_only],
+            }
+
+    def _same_origin_only(self, request: httpx.Request) -> None:
+        # Redirects are followed only within the configured origin: httpx
+        # strips `Authorization` on a cross-origin redirect but forwards every
+        # other header, and a secret header (an API key under any name) must
+        # never reach a host the owner did not configure.
+        if _origin(request.url) != _origin(httpx.URL(self._url)):
+            raise TransportError(
+                "TRANSPORT_HTTP",
+                f"{safe_url(self._url)} redirected to another origin "
+                f"({safe_url(str(request.url))}); not followed so its credentials stay "
+                "with the configured server. Use the final URL.",
+                hint="check_url_or_network",
+            )
 
     # -- introspection (tests/diagnostics; never secrets) ---------------------
 
@@ -111,6 +134,7 @@ class StreamableHttpTransport(McpTransport):
         self._client = httpx.Client(
             verify=self._verify,
             follow_redirects=True,
+            event_hooks={"request": [self._same_origin_only]},
             timeout=httpx.Timeout(
                 self._timeout_s, connect=min(self._timeout_s, _CONNECT_TIMEOUT_CAP_S)
             ),
@@ -125,7 +149,7 @@ class StreamableHttpTransport(McpTransport):
             return
         if self._session_id is not None:
             # 405 or unreachable: the server ends the session on its own.
-            with contextlib.suppress(httpx.HTTPError):
+            with contextlib.suppress(httpx.HTTPError, TransportError):
                 client.delete(self._url, headers=self._request_headers(), timeout=5.0)
         self._session_id = None
         if self._owns_client:
@@ -180,7 +204,7 @@ class StreamableHttpTransport(McpTransport):
                     timeout=min(self._timeout_s, 10.0),
                 )
                 response.close()
-            except httpx.HTTPError:
+            except (httpx.HTTPError, TransportError):
                 pass  # Notifications are fire-and-forget.
 
     def _post_request(self, payload: str, expected: Any, timeout_s: float) -> McpMessage:

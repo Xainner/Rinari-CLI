@@ -38,6 +38,7 @@ class FakeRemote:
         self.mode = "json"  # json | sse
         self.token: str | None = TOKEN
         self.required_header: tuple[str, str] | None = None
+        self.redirect_to: str | None = None  # POST /moved answers 307 here
         self.stall_s = 0.0
         self.expire_next = False
         self.session = "sess-1"
@@ -106,6 +107,9 @@ def _handler(remote: FakeRemote):
             msg = json.loads(self.rfile.read(length) or b"{}")
             with remote.lock:
                 remote.requests.append({"headers": dict(self.headers), "body": msg})
+            if self.path == "/moved" and remote.redirect_to:
+                self._send(307, headers={"Location": remote.redirect_to})
+                return
             if self.path == "/legacy":
                 self._send(405)
                 return
@@ -258,6 +262,47 @@ def test_unreachable_host() -> None:
         client.connect()
     assert excinfo.value.code == "MCP_UNREACHABLE"
     assert excinfo.value.hint == "check_url_or_network"
+
+
+def _serve(state: FakeRemote):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _handler(state))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_address[1]}/mcp"
+
+
+def test_redirect_to_another_origin_is_not_followed_with_secrets(remote) -> None:
+    # httpx only strips Authorization on a cross-origin redirect; a secret
+    # header under any other name would reach the new host.
+    other = FakeRemote()
+    other.token = None
+    server, other_url = _serve(other)
+    try:
+        remote.redirect_to = other_url
+        transport = StreamableHttpTransport(
+            remote.base + "/moved",
+            headers={"Authorization": f"Bearer {TOKEN}", "X-Api-Key": HEADER_SECRET},
+            timeout_s=5.0,
+        )
+        client = McpClient(transport, 5.0)
+        with pytest.raises(McpError) as excinfo:
+            client.connect()
+        assert excinfo.value.hint == "check_url_or_network"
+        assert "another origin" in excinfo.value.message
+        assert HEADER_SECRET not in excinfo.value.message
+        assert TOKEN not in excinfo.value.message
+        assert other.requests == []
+        client.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_redirect_within_the_same_origin_is_followed(remote) -> None:
+    remote.redirect_to = remote.url
+    client = _client(remote.base + "/moved")
+    assert client.connect() == {"name": "remote-fake", "version": "1.2.3"}
+    assert remote.requests[-1]["headers"]["Authorization"] == f"Bearer {TOKEN}"
+    client.close()
 
 
 def test_expired_session_disconnects_client(remote) -> None:
