@@ -423,6 +423,8 @@
         "memory.forget",
         "memory.candidates.list",
         "memory.candidate.resolve",
+        "memory.settings.get",
+        "memory.settings.set",
         "conversation.memory.status",
         "conversation.memory.exclude",
         "conversation.delete",
@@ -552,7 +554,10 @@
         "schedule.run.completed",
         "schedule.proposed",
         "steer.applied",
-        "steer.returned"
+        "steer.returned",
+        "memory.candidate.created",
+        "memory.candidate.resolved",
+        "memory.remembered"
       ]
     },
     "attachment": {

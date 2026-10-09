@@ -260,7 +260,9 @@ def test_forget_and_delete_redact_source_turn_and_survive_restart(tmp_path, monk
         memory = MemoryService(reopened)
         assert memory.conversation_control("forgotten")["mode"] == "deleted"
         assert memory.repo.source_suppressed("forgotten", "owner")
-        assert memory.repo.source_suppressed("forgotten", "reply")
+        # Only owner messages are memory sources: the reply needs no
+        # tombstone, and its turn is still hidden through the owner's.
+        assert not memory.repo.source_suppressed("forgotten", "reply")
         assert memory.repo.source_suppressed("forgotten", "keep")
         assert memory.capture_owner_message("forgotten", "owner", text) is None
         visible, redacted = memory.redact_history(reopened.message_repo.list("forgotten"))

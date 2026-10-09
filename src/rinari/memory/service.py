@@ -16,20 +16,43 @@ Design rules (AGENTS.md 21, harness.md section 69):
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import json
 import re
+import unicodedata
 from dataclasses import dataclass
 
 from rinari.application.context import AppContext
 from rinari.shared.clock import now_iso
 from rinari.shared.errors import ConflictError, InvalidUsageError, NotFoundError
+from rinari.shared.redaction import REDACTED, redact_text
+from rinari.storage.repositories.memory import PROJECT_KINDS, USER_KINDS
 
 MEM_MAX_TEXT = 4096
 MEM_MAX_SUMMARY = 400
 MEM_MAX_PROVENANCE = 256
 MEM_PROMPT_MAX_CHARS = 12000
 MEM_SOURCE_QUOTE_MAX = 4096
+
+# Learned facts (memory.propose): what Rinari learns while working, not what
+# the owner dictated. One short fact per record keeps the prompt list compact.
+LEARNED_FACTS_KEY = "memory.learned_facts"
+LEARNED_FACTS_MODES = ("ask", "auto")
+LEARNED_KINDS = ("environment", "workflow", "preference", "fact")
+LEARNED_PROVENANCE_PREFIX = "learned:"
+MEM_LEARNED_MAX_TEXT = 600
+# Facts the model needs before it acts (hosts, ports, how to start things)
+# ride in their own short list so ranking against the message never drops them.
+CONTEXT_KINDS = ("environment", "workflow")
+MEM_CONTEXT_MAX_ITEMS = 20
+MEM_CONTEXT_MAX_CHARS = 2500
+MEM_CONTEXT_LINE_MAX = 300
+_SIMILAR_RATIO = 0.9
+# Candidates the model wrote itself: their text lives in the row, so the owner
+# can approve them without re-reading a message (and during a turn).
+MODEL_CANDIDATE_CLASSES = ("agent_sensitive", "learned", "learned_sensitive")
+_SENSITIVE_CLASSES = ("sensitive", "agent_sensitive", "learned_sensitive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +117,77 @@ def _normalize_text(text: str) -> str:
     return " ".join(text.strip().lower().split())
 
 
+def _fold(value: str) -> str:
+    """Casefold and drop accents, so `configuración` finds `configuracion`."""
+    decomposed = unicodedata.normalize("NFKD", (value or "").casefold())
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+
+
+# Words that carry no meaning for recall in the two languages Rinari is used
+# in most; without them "el servidor de la casa" ranks by "servidor", "casa".
+_STOPWORD_TEXT = (
+    "a al como con de del el en es la las lo los para por que se su un una y "
+    "an and are as at be by for from how in is it of on or that the this to was what with"
+)
+_STOPWORDS = frozenset(_STOPWORD_TEXT.split())
+_MAX_QUERY_TERMS = 12
+
+
+def query_terms(query: str) -> tuple[str, ...]:
+    tokens = re.findall(r"\w{2,}", _fold(query))
+    return tuple(dict.fromkeys(t for t in tokens if t not in _STOPWORDS))[:_MAX_QUERY_TERMS]
+
+
+def _term_in(term: str, haystack: str) -> bool:
+    # Short terms (ip, db, ssh) match at a word start only: as substrings
+    # they would hit half the corpus ("ip" in "script").
+    if len(term) <= 3:
+        return re.search(rf"(?<!\w){re.escape(term)}", haystack) is not None
+    return term in haystack
+
+
+def rank_by_terms(
+    rows: list[dict], query: str, fields: dict[str, int], *, limit: int
+) -> list[dict]:
+    """Rows that match the query terms, best first; recency breaks ties.
+
+    `rows` arrive newest first. Ranking is by how many distinct terms a row
+    contains, then by the weighted fields they hit, then by recency. A query
+    with no meaningful terms keeps plain recency order. A whole-query match
+    was the only thing the old LIKE found, so it still earns a bonus.
+    """
+    terms = query_terms(query)
+    if not terms:
+        return rows[:limit]
+    phrase = " ".join(_fold(query).split())
+    scored: list[tuple[int, int, int, dict]] = []
+    for index, row in enumerate(rows):
+        hits = 0
+        score = 0
+        haystacks = {name: _fold(str(row.get(name) or "")) for name in fields}
+        for term in terms:
+            matched = False
+            for name, weight in fields.items():
+                if _term_in(term, haystacks[name]):
+                    score += weight
+                    matched = True
+            hits += int(matched)
+        if not hits:
+            continue
+        if len(terms) > 1 and any(phrase in haystacks[name] for name in fields):
+            score += 2
+        scored.append((-hits, -score, index, row))
+    scored.sort(key=lambda item: item[:3])
+    return [item[3] for item in scored[:limit]]
+
+
+def _similar(a: str, b: str) -> bool:
+    left, right = _fold(_normalize_text(a)), _fold(_normalize_text(b))
+    if left == right:
+        return True
+    return difflib.SequenceMatcher(None, left, right).ratio() >= _SIMILAR_RATIO
+
+
 def _suppression_hashes(topic: str, text: str) -> tuple[str, str]:
     """Return minimal hashes used to keep an explicitly forgotten pair out."""
     return (
@@ -119,6 +213,17 @@ def find_sensitive_match(text: str, known_secrets: list[str] | tuple[str, ...] =
     return None
 
 
+def candidate_view(row: dict | None) -> dict | None:
+    """Candidate as the desktop reads it: store scope and sensitivity are
+    explicit, so a card never has to decode the classification."""
+    if row is None:
+        return None
+    view = dict(row)
+    view["scope"] = view.get("scope") or "user"
+    view["sensitive"] = view.get("classification") in _SENSITIVE_CLASSES
+    return view
+
+
 class MemoryService:
     def __init__(self, ctx: AppContext) -> None:
         self._ctx = ctx
@@ -141,7 +246,14 @@ class MemoryService:
             }
             for source in self.repo.sources_for_memory(row["id"])
         ]
+        view["scope"] = "user"
         return view
+
+    @staticmethod
+    def _project_view(row: dict | None) -> dict | None:
+        if row is None:
+            return None
+        return {**row, "scope": "project"}
 
     # -- internals -------------------------------------------------------------
 
@@ -332,8 +444,8 @@ class MemoryService:
         confidence: float = 1.0,
         source: dict | None = None,
     ) -> dict:
-        if kind not in ("preference", "rule", "fact"):
-            raise InvalidUsageError("user memory kind must be preference, rule, or fact")
+        if kind not in USER_KINDS:
+            raise InvalidUsageError(f"user memory kind must be one of: {', '.join(USER_KINDS)}")
         return self._remember(
             store="user",
             root=None,
@@ -348,11 +460,13 @@ class MemoryService:
     def search_user(
         self, query: str = "", *, kind: str | None = None, limit: int = 20
     ) -> list[dict]:
-        rows = self.repo.user_search(query, kind=kind, limit=limit)
-        return [self._user_view(row) for row in rows]
+        rows = [row for row in self.repo.user_live() if kind is None or row["kind"] == kind]
+        ranked = rank_by_terms(rows, query, {"topic": 3, "text": 2}, limit=max(1, min(limit, 200)))
+        return [self._user_view(row) for row in ranked]
 
-    def list_user(self, *, limit: int = 100) -> list[dict]:
-        return [self._user_view(row) for row in self.repo.user_live()[: max(1, min(limit, 500))]]
+    def list_user(self, *, limit: int = 100, kind: str | None = None) -> list[dict]:
+        rows = [row for row in self.repo.user_live() if kind is None or row["kind"] == kind]
+        return [self._user_view(row) for row in rows[: max(1, min(limit, 500))]]
 
     def get_user(self, memory_id: str) -> dict | None:
         return self._user_view(self.repo.user_get(memory_id))
@@ -766,7 +880,11 @@ class MemoryService:
         )
 
     def list_candidates(self, *, status: str | None = "pending", limit: int = 100) -> list[dict]:
-        rows = self.repo.candidates(status=status, limit=limit)
+        if status == "resolved":
+            rows = self.repo.candidates(status=("accepted", "denied"), limit=limit)
+        else:
+            rows = self.repo.candidates(status=None if status == "all" else status, limit=limit)
+        rows = [candidate_view(row) for row in rows]
         # The owner panel may preview a pending candidate, but the durable
         # row keeps no copy of sensitive/unknown text before consent.
         for row in rows:
@@ -782,9 +900,36 @@ class MemoryService:
                 row["text"] = source.content if source is not None else ""
         return rows
 
-    def resolve_candidate(self, candidate_id: str, decision: str) -> dict:
+    def resolve_candidate(
+        self,
+        candidate_id: str,
+        decision: str,
+        *,
+        text: str | None = None,
+        topic: str | None = None,
+    ) -> dict:
+        """Approve or decline a pending candidate.
+
+        With `text`/`topic` the owner approves an edited version: it goes
+        through the same secret checks as anything the model writes.
+        """
         if decision not in ("allow_once", "deny"):
             raise InvalidUsageError("candidate decision must be allow_once or deny")
+        if decision == "deny" and (text is not None or topic is not None):
+            raise InvalidUsageError("text and topic only apply when approving a candidate")
+        if text is not None:
+            text = self._bounded(text, "text", MEM_MAX_TEXT)
+            self._check_learned_secret(text, "text")
+        if topic is not None:
+            topic = self._bounded(topic, "topic", 128)
+            self._check_learned_secret(topic, "topic")
+        return candidate_view(
+            self._resolve_candidate_row(candidate_id, decision, text=text, topic=topic)
+        )
+
+    def _resolve_candidate_row(
+        self, candidate_id: str, decision: str, *, text: str | None, topic: str | None
+    ) -> dict:
         with self.repo._db.transaction():
             candidate = self.repo.candidate_get(candidate_id)
             if candidate is None:
@@ -799,6 +944,8 @@ class MemoryService:
             control = self.repo.control(candidate["session_id"])
             if control is not None and control.get("mode") != "auto":
                 raise InvalidUsageError("memory extraction is excluded for this conversation")
+            if candidate.get("classification") in ("learned", "learned_sensitive"):
+                return self._accept_learned(candidate, text=text, topic=topic)
             if self.repo.source_suppressed(candidate["session_id"], candidate["message_id"]):
                 self.repo.candidate_resolve(
                     candidate_id, status="denied", memory_id=None, resolved_at=self._now()
@@ -810,54 +957,43 @@ class MemoryService:
             )
             if source_message is None:
                 raise MemoryNotFoundError("source message not found")
+            quote = source_message.content or ""
+            source = {
+                "session_id": candidate["session_id"],
+                "message_id": candidate["message_id"],
+                "source_hash": hashlib.sha256(_normalize_text(quote).encode("utf-8")).hexdigest(),
+                "quote": "",
+            }
+            provenance = f"session:{candidate['session_id']}/message:{candidate['message_id']}"
             if candidate.get("classification") == "agent_sensitive":
                 # A proposal the model wrote in the owner's turn: the owner
-                # approves exactly the text shown, not a re-parse of the message.
-                quote = source_message.content or ""
+                # approves exactly the text shown (or their edit of it), not a
+                # re-parse of the message.
                 result = self.remember_user(
-                    candidate["text"],
+                    text if text is not None else candidate["text"],
                     kind=candidate["kind"],
-                    topic=candidate["topic"],
-                    provenance=(
-                        f"session:{candidate['session_id']}/message:{candidate['message_id']}"
-                    ),
+                    topic=topic if topic is not None else candidate["topic"],
+                    provenance=provenance,
                     confidence=float(candidate["confidence"]),
-                    source={
-                        "session_id": candidate["session_id"],
-                        "message_id": candidate["message_id"],
-                        "source_hash": hashlib.sha256(
-                            _normalize_text(quote).encode("utf-8")
-                        ).hexdigest(),
-                        "quote": "",
-                    },
+                    source=source,
                 )
-                self.repo.candidate_resolve(
-                    candidate_id,
-                    status="accepted",
-                    memory_id=result["id"],
-                    resolved_at=self._now(),
-                )
-                return self.repo.candidate_get(candidate_id)
-            parsed = self._candidate_from_text(source_message.content or "")
-            if parsed is None:
-                raise InvalidUsageError("source message is no longer an eligible memory candidate")
-            quote = source_message.content or ""
-            source_hash = hashlib.sha256(_normalize_text(quote).encode("utf-8")).hexdigest()
-            result = self.remember_user(
-                parsed.text,
-                kind=parsed.kind,
-                topic=(
+            else:
+                parsed = self._candidate_from_text(quote)
+                if parsed is None:
+                    raise InvalidUsageError(
+                        "source message is no longer an eligible memory candidate"
+                    )
+                default_topic = (
                     candidate["topic"] if candidate["topic"].startswith("source:") else parsed.topic
-                ),
-                provenance=f"session:{candidate['session_id']}/message:{candidate['message_id']}",
-                confidence=float(candidate["confidence"]),
-                source={
-                    "session_id": candidate["session_id"],
-                    "message_id": candidate["message_id"],
-                    "source_hash": source_hash,
-                    "quote": "",
-                },
-            )
+                )
+                result = self.remember_user(
+                    text if text is not None else parsed.text,
+                    kind=parsed.kind,
+                    topic=topic if topic is not None else default_topic,
+                    provenance=provenance,
+                    confidence=float(candidate["confidence"]),
+                    source=source,
+                )
             self.repo.candidate_resolve(
                 candidate_id,
                 status="accepted",
@@ -865,6 +1001,196 @@ class MemoryService:
                 resolved_at=self._now(),
             )
             return self.repo.candidate_get(candidate_id)
+
+    # -- learned facts ---------------------------------------------------------
+
+    def learned_facts_mode(self) -> str:
+        """`ask` (default): learned facts wait for approval. `auto`: saved."""
+        value = self._ctx.config_repo.get(LEARNED_FACTS_KEY)
+        return value if value in LEARNED_FACTS_MODES else "ask"
+
+    def set_learned_facts_mode(self, mode: str) -> str:
+        from rinari.storage.records import ConfigValue
+
+        if mode not in LEARNED_FACTS_MODES:
+            raise InvalidUsageError("learned_facts must be ask or auto")
+        self._ctx.config_repo.set(
+            ConfigValue(key=LEARNED_FACTS_KEY, value=mode, updated_at=self._now())
+        )
+        return mode
+
+    def _check_learned_secret(self, text: str, field: str = "text") -> None:
+        """Memory's credential patterns plus the history redactor's.
+
+        A learned command is the likeliest place for a secret to slip in
+        (`mysql -p...`, `user:pass@host`, `--token x`): whatever the redactor
+        would hide is refused instead of stored.
+        """
+        reason = find_sensitive_match(text)
+        if reason is None and (REDACTED in text or redact_text(text) != text):
+            reason = "contains a credential"
+        if reason is not None:
+            raise InvalidUsageError(
+                f"memory {field} {reason}; secrets must never be stored in memory. "
+                "Name where the secret lives (an environment variable, the credential "
+                "store) instead of its value",
+            )
+
+    @staticmethod
+    def learned_needs_consent(topic: str, text: str) -> bool:
+        """Personal-data check for learned facts.
+
+        The owner-consent markers include `dirección`, which in Spanish is
+        also how an IP or server address is named, and `documento`, the
+        Documents folder: those infrastructure phrasings are not personal data.
+        """
+        value = f"{topic} {text}".casefold()
+        value = re.sub(
+            r"direcci[oó]n(?:es)?\s+(?:ip|mac|de\s+red|del?\s+(?:servidor|host|equipo|"
+            r"api|repositorio|servicio|proxy|gateway))",
+            " ",
+            value,
+        )
+        value = re.sub(r"documentos?[\\/]|[\\/]documentos?\b", " ", value)
+        return MemoryService.requires_owner_consent("", value)
+
+    def _learned_store_rows(self, scope: str, project_root: str | None) -> list[dict]:
+        rows = list(self.repo.user_live())
+        if scope == "project" and project_root:
+            rows += self.repo.project_live(project_root)
+        return rows
+
+    def propose_learned(
+        self,
+        session_id: str,
+        *,
+        text: str,
+        topic: str,
+        kind: str = "fact",
+        scope: str = "user",
+        project_root: str | None = None,
+        trusted: bool = True,
+        untrusted_reason: str = "",
+    ) -> dict:
+        """Keep a fact learned while working, or propose it to the owner.
+
+        `ask` mode, sensitive personal data and untrusted turns (external
+        content read, not started by the owner) produce a pending candidate;
+        `auto` mode saves the rest at once with `learned:` provenance, which
+        the owner can undo. Duplicates, declined and forgotten facts are
+        reported, never stored again.
+        """
+        if not self.extraction_allowed(session_id):
+            raise InvalidUsageError("memory is excluded for this conversation")
+        if kind not in LEARNED_KINDS:
+            raise InvalidUsageError(f"kind must be one of: {', '.join(LEARNED_KINDS)}")
+        if scope not in ("user", "project"):
+            raise InvalidUsageError("scope must be user or project")
+        if scope == "project" and not project_root:
+            raise InvalidUsageError("project scope needs a project")
+        text = self._bounded(text, "text", MEM_LEARNED_MAX_TEXT)
+        topic = self._bounded(topic, "topic", 128)
+        self._check_learned_secret(text)
+        self._check_learned_secret(topic, "topic")
+        _, text_hash = _suppression_hashes(topic, text)
+        if self.repo.suppression_exists(text_hash):
+            return {"status": "forgotten"}
+        for row in self._learned_store_rows(scope, project_root):
+            if _similar(row["text"], text):
+                view = (
+                    self._project_view(row)
+                    if row.get("project_root") is not None
+                    else self._user_view(row)
+                )
+                return {"status": "already_known", "memory": view}
+        for row in self.repo.candidates(status=("pending", "denied"), limit=500):
+            if row.get("classification") not in MODEL_CANDIDATE_CLASSES or not row.get("text"):
+                continue
+            if (row.get("scope") or "user") != scope or (
+                scope == "project" and row.get("project_root") != project_root
+            ):
+                continue
+            if _similar(row["text"], text):
+                status = "already_proposed" if row["status"] == "pending" else "declined"
+                return {"status": status, "candidate": candidate_view(row)}
+        sensitive = self.learned_needs_consent(topic, text)
+        provenance = f"{LEARNED_PROVENANCE_PREFIX}session/{session_id}"
+        if self.learned_facts_mode() == "auto" and not sensitive and trusted:
+            if scope == "project":
+                result = self.remember_project(
+                    str(project_root),
+                    text,
+                    kind=kind if kind in PROJECT_KINDS else "fact",
+                    topic=topic,
+                    provenance=provenance,
+                    confidence=0.9,
+                )
+                record = self._project_view(self.repo.project_get(str(project_root), result["id"]))
+            else:
+                result = self.remember_user(
+                    text, kind=kind, topic=topic, provenance=provenance, confidence=0.9
+                )
+                record = self.get_user(result["id"])
+            return {"status": "saved", "action": result["action"], "memory": record}
+        if sensitive:
+            reason = "sensitive personal data requires owner approval"
+        elif not trusted:
+            reason = untrusted_reason or "learned in a turn the owner did not start"
+        else:
+            reason = "learned facts wait for the owner's approval"
+        candidate_id = self._ctx.ids.new("mem-candidate")
+        self.repo.candidate_insert(
+            {
+                "id": candidate_id,
+                "session_id": session_id,
+                # Not the owner message: a candidate row on that message would
+                # stop the end-of-turn capture of what the owner stated.
+                "message_id": "",
+                "topic": topic,
+                "text": text,
+                "kind": kind,
+                "confidence": 0.9,
+                "classification": "learned_sensitive" if sensitive else "learned",
+                "reason": reason,
+                "status": "pending",
+                "memory_id": None,
+                "created_at": self._now(),
+                "resolved_at": None,
+                "scope": scope,
+                "project_root": project_root if scope == "project" else None,
+            }
+        )
+        return {
+            "status": "pending",
+            "candidate": candidate_view(self.repo.candidate_get(candidate_id)),
+        }
+
+    def _accept_learned(self, candidate: dict, *, text: str | None, topic: str | None) -> dict:
+        text = text if text is not None else candidate["text"]
+        topic = topic if topic is not None else candidate["topic"]
+        provenance = f"{LEARNED_PROVENANCE_PREFIX}session/{candidate['session_id']}"
+        if candidate.get("scope") == "project" and candidate.get("project_root"):
+            kind = candidate["kind"] if candidate["kind"] in PROJECT_KINDS else "fact"
+            result = self.remember_project(
+                candidate["project_root"],
+                text,
+                kind=kind,
+                topic=topic,
+                provenance=provenance,
+                confidence=float(candidate["confidence"]),
+            )
+        else:
+            result = self.remember_user(
+                text,
+                kind=candidate["kind"],
+                topic=topic,
+                provenance=provenance,
+                confidence=float(candidate["confidence"]),
+            )
+        self.repo.candidate_resolve(
+            candidate["id"], status="accepted", memory_id=result["id"], resolved_at=self._now()
+        )
+        return self.repo.candidate_get(candidate["id"])
 
     def exclude_conversation(self, session_id: str) -> dict:
         now = self._now()
@@ -887,6 +1213,9 @@ class MemoryService:
 
     def conversation_control(self, session_id: str) -> dict:
         return self.repo.control(session_id) or {"session_id": session_id, "mode": "auto"}
+
+    def session_exists(self, session_id: str) -> bool:
+        return self._ctx.session_repo.get(session_id) is not None
 
     def extraction_allowed(self, session_id: str) -> bool:
         control = self.repo.control(session_id)
@@ -933,8 +1262,11 @@ class MemoryService:
         now = self._now()
         excluded = self.exclude_conversation(session_id)
         with self.repo._db.transaction():
+            # Only the owner's messages are memory sources: a tombstone per
+            # assistant/tool message only grew the ledger (thousands of rows).
             for message in self._ctx.message_repo.list(session_id):
-                self.repo.source_suppression_insert(session_id, message.id, now)
+                if message.role == "user":
+                    self.repo.source_suppression_insert(session_id, message.id, now)
             episodic = self.repo.delete_episodic_for_session(session_id)
             self.repo.set_control(session_id, "deleted", now)
             # Keep the minimal source suppression tombstones and deleted
@@ -1106,7 +1438,10 @@ class MemoryService:
                     messages = self._ctx.message_repo.list(session_id)
                     if mode == "deleted":
                         for message in messages:
-                            self.repo.source_suppression_insert(session_id, message.id, self._now())
+                            if message.role == "user":
+                                self.repo.source_suppression_insert(
+                                    session_id, message.id, self._now()
+                                )
                     source_rows_for_session = self.repo.sources_for_session(
                         session_id, live_only=True
                     )
@@ -1176,8 +1511,10 @@ class MemoryService:
         provenance: str = "agent",
         confidence: float = 1.0,
     ) -> dict:
-        if kind not in ("fact", "rule", "convention"):
-            raise InvalidUsageError("project memory kind must be fact, rule, or convention")
+        if kind not in PROJECT_KINDS:
+            raise InvalidUsageError(
+                f"project memory kind must be one of: {', '.join(PROJECT_KINDS)}"
+            )
         root = self._require(project_root, "project_root")
         return self._remember(
             store="project",
@@ -1197,10 +1534,30 @@ class MemoryService:
         kind: str | None = None,
         limit: int = 20,
     ) -> list[dict]:
-        return self.repo.project_search(project_root, query, kind=kind, limit=limit)
+        rows = [
+            row
+            for row in self.repo.project_live(project_root)
+            if kind is None or row["kind"] == kind
+        ]
+        ranked = rank_by_terms(rows, query, {"topic": 3, "text": 2}, limit=max(1, min(limit, 200)))
+        return [self._project_view(row) for row in ranked]
 
-    def list_project(self, project_root: str, *, limit: int = 100) -> list[dict]:
-        return self.repo.project_live(project_root)[: max(1, min(limit, 500))]
+    def list_project(
+        self, project_root: str | None, *, limit: int = 100, kind: str | None = None
+    ) -> list[dict]:
+        """Live project records; `project_root=None` lists every project."""
+        rows = (
+            self.repo.project_live(project_root) if project_root else self.repo.project_all_live()
+        )
+        rows = [row for row in rows if kind is None or row["kind"] == kind]
+        return [self._project_view(row) for row in rows[: max(1, min(limit, 500))]]
+
+    def get_any(self, memory_id: str) -> dict | None:
+        """A live user or project record by id, with its `scope`."""
+        row = self.get_user(memory_id)
+        if row is not None:
+            return row
+        return self._project_view(self.repo.project_get_by_id(memory_id))
 
     def update_project(
         self,
@@ -1212,13 +1569,19 @@ class MemoryService:
         confidence: float | None = None,
         provenance: str | None = None,
         expected_version: str | None = None,
+        expected_revision: int | None = None,
     ) -> dict:
         with self.repo._db.transaction():
             existing = self.repo.project_get(project_root, memory_id)
             if existing is None:
-                raise InvalidUsageError(f"project memory not found: {memory_id}")
+                raise MemoryNotFoundError(f"project memory not found: {memory_id}")
             if expected_version is not None and existing.get("updated_at") != expected_version:
-                raise InvalidUsageError("memory version conflict; recall the current record")
+                raise MemoryConflictError("memory version conflict; recall the current record")
+            if (
+                expected_revision is not None
+                and int(existing.get("revision", 1)) != expected_revision
+            ):
+                raise MemoryConflictError("memory revision conflict; recall the current record")
             fields: dict = {}
             if text is not None:
                 text = self._bounded(text, "text", MEM_MAX_TEXT)
@@ -1241,10 +1604,28 @@ class MemoryService:
             fields = {k: v for k, v in fields.items() if existing.get(k) != v}
             if fields:
                 self.repo.project_update(project_root, memory_id, fields, self._now())
-            return self.repo.project_get(project_root, memory_id)
+            return self._project_view(self.repo.project_get(project_root, memory_id))
 
-    def forget_project(self, project_root: str, memory_id: str) -> bool:
-        return self.repo.project_delete(project_root, memory_id)
+    def forget_project(
+        self, project_root: str, memory_id: str, *, expected_revision: int | None = None
+    ) -> bool:
+        with self.repo._db.transaction():
+            existing = self.repo.project_get(project_root, memory_id)
+            if existing is None:
+                return False
+            if (
+                expected_revision is not None
+                and int(existing.get("revision", 1)) != expected_revision
+            ):
+                raise MemoryConflictError("memory revision conflict; recall the current record")
+            if str(existing.get("provenance") or "").startswith(LEARNED_PROVENANCE_PREFIX):
+                # Undoing a learned fact must stick: the model would otherwise
+                # learn it again in the next session that runs into it.
+                topic_hash, text_hash = _suppression_hashes(existing["topic"], existing["text"])
+                self.repo.suppression_insert(
+                    topic_hash=topic_hash, text_hash=text_hash, created_at=self._now()
+                )
+            return self.repo.project_delete(project_root, memory_id)
 
     # -- episodic memory -------------------------------------------------------------
 
@@ -1288,9 +1669,12 @@ class MemoryService:
     def search_episodic(
         self, project_root: str = "", query: str = "", *, limit: int = 10
     ) -> list[dict]:
-        if not project_root:
-            return self.repo.episodic_list(limit=limit)
-        return self.repo.episodic_search(project_root, query, limit=limit)
+        # Ranked by the query in both paths: without a project the old code
+        # ignored the query and returned the newest rows.
+        rows = self.repo.episodic_window(project_root or None)
+        return rank_by_terms(
+            rows, query, {"summary": 2, "outcome": 1}, limit=max(1, min(limit, 100))
+        )
 
     def list_episodic(self, project_root: str | None = None, *, limit: int = 20) -> list[dict]:
         return self.repo.episodic_list(project_root, limit=limit)
@@ -1338,7 +1722,8 @@ class MemoryService:
     def search_pattern(
         self, query: str = "", *, scope: str | None = None, limit: int = 10
     ) -> list[dict]:
-        return self.repo.pattern_search(query, scope=scope, limit=limit)
+        rows = self.repo.pattern_list(scope=scope, limit=200)
+        return rank_by_terms(rows, query, {"topic": 3, "text": 2}, limit=max(1, min(limit, 100)))
 
     def list_pattern(self, *, scope: str | None = None, limit: int = 20) -> list[dict]:
         return self.repo.pattern_list(scope=scope, limit=limit)
@@ -1368,6 +1753,37 @@ class MemoryService:
         recent = [row for row in ranked if self._prompt_rank(row, tokens)[0] == 0]
         return (matched + recent)[:15]
 
+    def _context_lines(self, project_root: str | None, query: str) -> tuple[list[str], set[str]]:
+        """Compact "known environment" list: environment/workflow records.
+
+        These are what the model needs before acting (where a server lives,
+        how a project starts), so they are listed whatever the message says,
+        relevant first, and bounded in count and characters.
+        """
+        rows = [(row, False) for row in self.repo.user_live() if row["kind"] in CONTEXT_KINDS]
+        if project_root:
+            rows += [
+                (row, True)
+                for row in self.repo.project_live(project_root)
+                if row["kind"] in CONTEXT_KINDS
+            ]
+        tokens = self._prompt_tokens(query)
+        rows.sort(key=lambda item: self._prompt_rank(item[0], tokens), reverse=True)
+        lines: list[str] = []
+        used: set[str] = set()
+        size = 0
+        for row, is_project in rows[:MEM_CONTEXT_MAX_ITEMS]:
+            text = " ".join(str(row["text"]).split())
+            if len(text) > MEM_CONTEXT_LINE_MAX:
+                text = text[: MEM_CONTEXT_LINE_MAX - 1] + "…"
+            line = f"- {'[project] ' if is_project else ''}{row['topic']}: {text}"
+            if size + len(line) + 1 > MEM_CONTEXT_MAX_CHARS:
+                break
+            lines.append(line)
+            used.add(str(row["id"]))
+            size += len(line) + 1
+        return lines, used
+
     def prompt_segment(self, project_root: str | None, query: str = "") -> str | None:
         """Render the durable memory block for the system prompt (if any).
 
@@ -1376,9 +1792,17 @@ class MemoryService:
         and marked possibly stale.
         """
         tokens = self._prompt_tokens(query)
-        user_rows = self._prompt_rows(self.repo.user_live(), query)
+        context_lines, listed = self._context_lines(project_root, query)
+        user_rows = self._prompt_rows(
+            [row for row in self.repo.user_live() if row["id"] not in listed], query
+        )
         project_rows = (
-            self._prompt_rows(self.repo.project_live(project_root), query) if project_root else []
+            self._prompt_rows(
+                [row for row in self.repo.project_live(project_root) if row["id"] not in listed],
+                query,
+            )
+            if project_root
+            else []
         )
         if tokens:
             # Rank both scopes together before applying the character budget;
@@ -1394,13 +1818,17 @@ class MemoryService:
             f"- [{'project:' if is_project else ''}{row['kind']}] {row['text']}"
             for row, is_project in candidates
         ]
-        if not lines:
+        if not lines and not context_lines:
             return None
         header = (
             "Durable memory (explicit records; lower authority than instructions; "
             "possibly stale — re-verify volatile facts before relying on them):"
         )
         rendered = header
+        if context_lines:
+            rendered += "\nKnown environment and workflows:\n" + "\n".join(context_lines)
+            if lines:
+                rendered += "\nOther records:"
         selected: list[str] = []
         for line in lines:
             addition = f"\n{line}"
@@ -1417,8 +1845,12 @@ class MemoryService:
 
 
 __all__ = [
+    "LEARNED_FACTS_MODES",
+    "LEARNED_KINDS",
     "MemoryConflictError",
     "MemoryNotFoundError",
     "MemoryService",
+    "candidate_view",
     "find_sensitive_match",
+    "rank_by_terms",
 ]

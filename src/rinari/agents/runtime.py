@@ -454,6 +454,10 @@ class _SubagentRunner:
             # session and the provenance ceiling of the parent turn carries over.
             peer_host=None,
             memory_source=None,
+            # A child proposes no memory of its own (memory.propose refuses
+            # outside the owner's conversation): the parent's timeline sink
+            # would otherwise receive events under the child's session id.
+            activity_sink=None,
             ask_user=None,
             web_snapshots={},
             change_tracker=None,

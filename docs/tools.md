@@ -181,6 +181,16 @@ Otras correcciones del mismo lote:
   `memory.update` y `memory.forget` con `scope=project` sin proyecto responden
   `INVALID_ARGUMENT` con la salida (`scope=user` o abrir la carpeta como proyecto):
   archivar un dato del proyecto como memoria personal lo llevaría a todos los chats.
+- `memory.propose {text, topic, kind?: environment|workflow|preference|fact, scope?: user|project}`
+  guarda un dato estable aprendido trabajando (hosts, puertos, rutas, cómo se arranca o
+  prueba un proyecto, comandos que funcionan en esta máquina) sin citar al dueño. Según
+  el ajuste `learned_facts` (`ask` por defecto, `auto`) queda como propuesta en el chat
+  o se guarda con procedencia `learned:session/<id>`; lo sensible y lo aprendido tras
+  leer contenido externo siempre es propuesta. `scope=project` sin proyecto pasa a
+  `user` con una nota. Rechaza secretos (también las formas que oculta el redactor) y
+  responde `already_known`, `already_proposed`, `declined` o `forgotten` en vez de
+  duplicar. Un subagente no propone: lo reporta en su resultado. Detalle en
+  `docs/harness.md` §73.1.
 - Skills: un `# Procedure` vacío seguido de encabezados de su mismo nivel
   (`## Procedure` + `## Paso 1`) los adopta como subsecciones; `##`/`###` bajo
   `# Procedure` ya eran contenido. Si aun así falta el procedimiento, el error

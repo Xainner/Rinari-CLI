@@ -404,6 +404,10 @@ class ToolContext:
     # model cannot set this through a tool schema; the session host may attach
     # it only after validating a persisted owner message.
     memory_source: dict[str, str] | None = None
+    # Turn activity sink `(event, payload)` of the host (desktop timeline),
+    # for tools whose result the owner acts on in the chat, such as a memory
+    # proposal card. None outside a desktop turn (CLI, tests).
+    activity_sink: Any = None
     tool_call_id: str = ""
     # ReadView (tools.read_cache) of the agent conversation running this call:
     # fs.read / fs.read_lines answer an unchanged re-read with a pointer to the
