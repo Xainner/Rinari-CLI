@@ -2910,7 +2910,7 @@ Threshold example:
 
 ```toml
 [context]
-artifact_output_threshold_kb = 64
+artifact_output_threshold_kb = 16
 ```
 
 If exceeded:

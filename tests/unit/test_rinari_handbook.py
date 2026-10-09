@@ -63,6 +63,7 @@ def test_the_handbook_is_valid_small_and_ships_its_references(app_ctx):
         "references/efficiency.md",
         "references/engine.md",
         "references/recipes.md",
+        "references/remote.md",
     ]
 
 

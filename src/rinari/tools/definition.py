@@ -113,6 +113,8 @@ class ToolResult:
         """
         import json
 
+        if tool in COMMAND_OUTPUT_TOOLS and _is_process_output(self.data):
+            return self._command_text(tool)
         envelope: dict[str, Any] = {"ok": self.ok}
         if tool is not None:
             envelope["tool"] = tool
@@ -153,9 +155,105 @@ class ToolResult:
             )
         return text
 
+    def _command_text(self, tool: str) -> str:
+        """Process output as plain text sections, for the model.
+
+        The JSON envelope escaped every newline and quote of stdout/stderr and
+        repeated the command and working directory the model had just sent:
+        about 14% of shell output tokens were envelope. Evidence is the same:
+        status, error, exit code, both streams, truncation and recovery
+        pointers. The command and cwd come back only when something failed,
+        where the resolved form helps diagnose it.
+        """
+        import json
+
+        data = self.data
+        code = data.get("exit_code")
+        failed = not self.ok or (code is not None and code != 0)
+        lines: list[str] = []
+        if not self.ok:
+            err = self.error
+            name = err.code.value if err is not None else "UNKNOWN"
+            retry = " (retryable)" if err is not None and err.retryable else ""
+            lines.append(f"error: {name}{retry}: {err.message if err else 'unknown error'}")
+            if err is not None and err.details is not None:
+                lines.append(
+                    "error_details: " + json.dumps(err.details, ensure_ascii=False, default=str)
+                )
+        status = "running" if code is None else "exited_zero" if code == 0 else "failed"
+        timing = f", {round(self.duration_ms)} ms" if self.duration_ms else ""
+        lines.append(f"exit_code: {code} ({status}; task not verified{timing})")
+        # Rendered below, echoes of the request, or bookkeeping the model
+        # cannot act on.
+        hidden = {
+            "exit_code",
+            "stdout",
+            "stderr",
+            "running",
+            "truncated",
+            "delivery_partial",
+            "source_partial",
+            "result_ref",
+            "recovery",
+            "target_id",
+            "revision",
+            "shell",
+        }
+        if not failed or tool != "shell.exec":
+            # shell.exec reports the resolved command (shell wrapper included);
+            # ssh.run's is only a display of the script the model wrote.
+            hidden.add("command")
+        if not failed:
+            hidden |= {"cwd", "timeout"}
+        recovery = data.get("recovery")
+        if isinstance(recovery, dict) and recovery.get("uri"):
+            source = " (the capture itself was cut)" if data.get("source_partial") else ""
+            lines.append(
+                "partial: head and tail shown; full result with artifact.read "
+                f'{{"uri": "{recovery["uri"]}"}}{source}'
+            )
+        if data.get("truncated"):
+            lines.append("truncated: output exceeded the capture limit")
+        for key, value in data.items():
+            if key in hidden or value is None:
+                continue
+            rendered = (
+                value
+                if isinstance(value, str)
+                else json.dumps(value, ensure_ascii=False, default=str)
+            )
+            lines.append(f"{key}: {rendered}")
+        named = recovery.get("uri") if isinstance(recovery, dict) else None
+        others = [a.uri for a in self.artifacts if a.uri != named]
+        if others:
+            lines.append("artifacts: " + " ".join(others))
+        streams = [
+            (name, data.get(name))
+            for name in ("stdout", "stderr")
+            if isinstance(data.get(name), str) and data.get(name)
+        ]
+        for name, text in streams:
+            lines.append(f"--- {name} ---")
+            lines.append(text.removesuffix("\n"))
+        if not streams:
+            lines.append("(no output)")
+        return "\n".join(lines)
+
     @staticmethod
     def truncation_mark() -> str:
         return "\n[output truncated]"
+
+
+# Tools whose observation is process output: the model reads them as plain
+# text sections (ToolResult._command_text) instead of a JSON envelope.
+COMMAND_OUTPUT_TOOLS = frozenset({"shell.exec", "ssh.run"})
+
+
+def _is_process_output(data: Any) -> bool:
+    """A result that carries a process's stdout/stderr (not a background handle)."""
+    return isinstance(data, dict) and any(
+        isinstance(data.get(key), str) for key in ("stdout", "stderr")
+    )
 
 
 class ClassifiedAction:

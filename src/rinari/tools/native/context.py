@@ -163,6 +163,8 @@ def context_list_pins(input: dict, ctx: ToolContext) -> ToolResult:
 
 
 def context_tools() -> list[ToolDefinition]:
+    # On demand (always_loaded=False): seldom called, and pinned context reaches
+    # the prompt without these schemas; capability.search exposes them.
     return [
         ToolDefinition(
             name="context.retrieve",
@@ -187,6 +189,7 @@ def context_tools() -> list[ToolDefinition]:
             handler=context_retrieve,
             classify=_classify_read,
             namespace="context",
+            always_loaded=False,
         ),
         ToolDefinition(
             name="context.pin",
@@ -213,6 +216,7 @@ def context_tools() -> list[ToolDefinition]:
             handler=context_pin,
             classify=_classify_write,
             namespace="context",
+            always_loaded=False,
         ),
         ToolDefinition(
             name="context.unpin",
@@ -232,6 +236,7 @@ def context_tools() -> list[ToolDefinition]:
             handler=context_unpin,
             classify=_classify_write,
             namespace="context",
+            always_loaded=False,
         ),
         ToolDefinition(
             name="context.list_pins",
@@ -250,5 +255,6 @@ def context_tools() -> list[ToolDefinition]:
             handler=context_list_pins,
             classify=_classify_read,
             namespace="context",
+            always_loaded=False,
         ),
     ]

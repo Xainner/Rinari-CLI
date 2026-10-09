@@ -5,7 +5,12 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 
-from rinari.tools.definition import ToolErrorCode, ToolErrorInfo, ToolResult
+from rinari.tools.definition import (
+    COMMAND_OUTPUT_TOOLS,
+    ToolErrorCode,
+    ToolErrorInfo,
+    ToolResult,
+)
 
 
 def project_result(result: ToolResult, *, tool: str, budget: int, spill, force=False) -> ToolResult:
@@ -65,11 +70,16 @@ def project_result(result: ToolResult, *, tool: str, budget: int, spill, force=F
     artifacts = list(result.artifacts)
 
     def save(value, suffix):
-        ref = spill(suffix, json.dumps(value, ensure_ascii=False, default=str))
+        text = (
+            value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+        )
+        ref = spill(suffix, text)
         artifacts.append(ref)
         return ref.uri
 
-    uri = save(json.loads(result.to_model_text(tool)), "complete")
+    # The complete observation, exactly as the model would have read it: JSON
+    # for most tools, plain sections for command output.
+    uri = save(result.to_model_text(tool), "complete")
     projected = {
         "result_ref": uri,
         "delivery_partial": True,
@@ -82,7 +92,11 @@ def project_result(result: ToolResult, *, tool: str, budget: int, spill, force=F
         ),
         "recovery": {"tool": "artifact.read", "uri": uri, "start_byte": 0},
     }
-    for key in ("path", "uri", "exit_code", "running", "sha256"):
+    kept = ("path", "uri", "exit_code", "running", "sha256")
+    if tool in COMMAND_OUTPUT_TOOLS:
+        # A failed command's text reports where and how it ran.
+        kept += ("command", "cwd", "timeout", "hint")
+    for key in kept:
         if key in data:
             projected[key] = data[key]
     slots = []
@@ -91,9 +105,17 @@ def project_result(result: ToolResult, *, tool: str, budget: int, spill, force=F
         for key in ("text", "stdout", "stderr", "lines", "entries", "matches", "value"):
             value = source.get(key)
             if isinstance(value, (str, list)):
-                units = value.splitlines(keepends=True) if isinstance(value, str) else value
-                target[key] = "" if isinstance(value, str) else []
-                slots.append((target, key, units, isinstance(value, str)))
+                is_text = isinstance(value, str)
+                ends = is_text and key in HEAD_TAIL_KEYS
+                if ends:
+                    units = _line_units(value)
+                elif is_text:
+                    units = value.splitlines(keepends=True)
+                else:
+                    units = value
+                target[key] = "" if is_text else []
+                # [target, key, units, is_text, head_and_tail, units_used]
+                slots.append([target, key, units, is_text, ends, 0])
 
     files = data.get("files")
     if isinstance(files, list) and all(isinstance(row, dict) for row in files):
@@ -132,26 +154,58 @@ def project_result(result: ToolResult, *, tool: str, budget: int, spill, force=F
         share = max(0, (budget - size(candidate)) // len(remaining))
         advanced = False
         pending = []
-        for target, key, units, is_text in remaining:
+        for slot in remaining:
+            target, key, units, is_text, ends, used = slot
             before = size(candidate)
-            old = target[key]
-            used = len(old.splitlines(keepends=True)) if is_text else len(old)
             low, high = used, len(units)
             while low < high:
                 mid = (low + high + 1) // 2
-                target[key] = "".join(units[:mid]) if is_text else units[:mid]
+                target[key] = _excerpt(units, mid, is_text, ends)
                 if size(candidate) <= min(budget, before + share):
                     low = mid
                 else:
                     high = mid - 1
-            target[key] = "".join(units[:low]) if is_text else units[:low]
+            target[key] = _excerpt(units, low, is_text, ends)
+            slot[5] = low
             advanced |= low > used
             if low < len(units):
-                pending.append((target, key, units, is_text))
+                pending.append(slot)
         if not advanced:
             break
         remaining = pending
     return candidate
+
+
+# Process output keeps its beginning and its end: the command's first lines
+# say what ran, the last ones carry the summary, the error and the exit
+# status. Every other text keeps its head (it continues with a cursor).
+HEAD_TAIL_KEYS = frozenset({"stdout", "stderr"})
+# A single huge line (minified JSON, a progress bar without newlines) must not
+# make the excerpt all-or-nothing.
+_MAX_UNIT_CHARS = 2000
+
+
+def _line_units(text: str) -> list[str]:
+    units = []
+    for line in text.splitlines(keepends=True):
+        units.extend(line[i : i + _MAX_UNIT_CHARS] for i in range(0, len(line), _MAX_UNIT_CHARS))
+    return units
+
+
+def _excerpt(units, count, is_text, head_and_tail):
+    if not is_text:
+        return units[:count]
+    if not head_and_tail or count >= len(units):
+        return "".join(units[:count])
+    if not count:
+        return ""
+    head = units[: (count + 1) // 2]
+    tail = units[len(units) - count // 2 :] if count // 2 else []
+    omitted = sum(len(unit.encode("utf-8")) for unit in units[len(head) : len(units) - len(tail)])
+    joined = "".join(head)
+    if joined and not joined.endswith("\n"):
+        joined += "\n"
+    return joined + f"[... {omitted} bytes omitted ...]\n" + "".join(tail)
 
 
 def allocate_budgets(sizes, per_result, per_round):

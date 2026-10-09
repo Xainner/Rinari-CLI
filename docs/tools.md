@@ -1909,6 +1909,19 @@ always exposed so the model can always recover the on-demand
 ecosystem. The intended flow is search, then activate exactly what the
 task needs:
 
+The schema cost counts what providers receive per tool: name,
+description and input schema (counting only the schema under-estimated
+it by ~40%, so the budget never bound). Besides browser/MCP/OpenAPI/
+plugins, rarely used native packs are on demand (`always_loaded=False`):
+`documents.*`, `rinari.*`, `lsp.*`, `pty.*`, `context.*`, `ssh.*`,
+`artifact.metadata` and `artifact.export`. `artifact.read` stays core
+because every spilled observation points at it. On-demand tools become
+visible through `capability.search` with `load=true`,
+`capability.activate`, a skill that requires them, a subagent definition
+that names them, or by being called by exact name (the registry resolves
+calls; the tool then stays visible as recently used). A destination-bound
+remote operation keeps `ssh.inspect` core, since it is its only tool.
+
 - `capability.search` — rank capabilities across native, plugin, MCP,
   OpenAPI and the browser fallback (typed connector first, browser
   DOM last; exact name matches win outright).
@@ -2015,6 +2028,30 @@ A destination-bound Engine operation registers only this tool with its target ID
 in the schema and handler; local shell/filesystem/extension/agent tools and execution
 hooks are unavailable for that operation. This is an initial read-only Linux inspection
 contract, not general remote shell or a PC runner. See `durable-operations.md` for dispatch.
+
+### `ssh.run` (2026-10-08)
+
+`ssh.run({target_id, script, shell?, timeout_s?})` runs a script on the same
+registered destinations and static aliases, over the same pinned connection
+(`StrictHostKeyChecking=yes`, no agent, no forwarding, `BatchMode`). The script
+travels on stdin to `bash -s` (default) or `sh -s`: it is never parsed by a local
+shell and needs no quoting, which replaces the fragile `shell.exec "ssh host '...'"`
+(cmd → ssh → bash nesting). CRLF line endings are normalized to LF; scripts are
+capped at 64 KiB; `timeout_s` defaults to 60 and accepts up to 600. Output is
+bounded like `shell.exec` (stdout/stderr, `truncated`, full capture spilled to
+artifacts) and streams live to the activity. A non-zero exit is the script's
+answer (`ok=true`, `exit_code`); exit 255 with an OpenSSH diagnostic is a
+transport failure (`AUTH_REQUIRED` for host key or authentication, otherwise
+`NETWORK_ERROR`). A timeout or cancellation does not guarantee that the remote
+side stopped.
+
+Policy: it classifies as two actions, `network.outbound` (mode `send`, target the
+destination host) and `shell.exec` (`ssh <host> '<script>`), so it is never freer
+than running ssh through the shell: read-only denies it, a peer-originated turn
+denies it, workspace allows it on the LAN and asks for an internet host, and every
+shell rule applies.
+An unknown destination is rejected before any approval is requested.
+Destination-bound operations do not register it.
 
 ## Tool efficiency contract (2026-09-10, local implementation)
 
