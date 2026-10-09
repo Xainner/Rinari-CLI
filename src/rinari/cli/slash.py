@@ -66,19 +66,25 @@ def _switch_mode(session: AgentSession, console: Console, name: str, text: str) 
     return _STAY
 
 
-def _learn(session: AgentSession, text: str) -> SlashOutcome:
+def _learn(session: AgentSession, text: str, command: str = "learn") -> SlashOutcome:
     """`/learn [focus]`: skill-author pinned, and the next turn marked as the
     owner's request, so what it proposes is saved active (the Engine decides)."""
     from rinari.cli import agent_runtime
-    from rinari.commands import expand_command
+    from rinari.commands import CommandError, expand_command
     from rinari.skills.manifest import SkillError
 
-    expanded = expand_command("learn", text)
+    root = session.record.project_root_snapshot
+    try:
+        expanded = expand_command(
+            command, text, session.services.skills, Path(root) if root else None
+        )
+    except CommandError as exc:
+        raise InvalidUsageError(exc.message) from None
     try:
         agent_runtime.pin_skill(session, expanded.skill)
     except SkillError as exc:
         raise InvalidUsageError(exc.message) from None
-    session.next_turn_command = "learn"
+    session.next_turn_command = command
     return SlashOutcome("turn", prompt=expanded.message)
 
 
@@ -231,8 +237,8 @@ def handle(session: AgentSession, console: Console, message: str) -> SlashOutcom
     if command == "/diff":
         _print_diff(session, console)
         return _STAY
-    if command == "/learn":
-        return _learn(session, rest)
+    if command in ("/learn", "/lesson", "/merge-skills"):
+        return _learn(session, rest, command[1:])
     if command == "/test":
         from rinari.commands import expand_command
 

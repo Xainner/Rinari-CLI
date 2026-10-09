@@ -34,6 +34,27 @@ LEARN_PROMPT = (
     "following the skill-author procedure, and save it with skills.propose."
 )
 LEARN_SKILL = "skill-author"
+LESSON_PROMPT = (
+    "Save what the last turn taught as a lesson. Write 1 to 3 short, checkable "
+    "rules: what went wrong or was learned, and what to do instead next time. "
+    "Find the skill that does this job (skills.list with a query). If it is one "
+    "of the owner's skills, propose an update of it with skills.propose and "
+    'update_of: add the rules under a "## Lecciones" section (create it if '
+    "missing, in the skill's language), raise the version, keep the rest intact. "
+    "If the job has no skill of the owner's, or only one of Rinari's own, save "
+    "each rule with memory.propose (kind workflow) instead. Never create a new "
+    "skill for a lesson. Then say in one line where it was saved."
+)
+MERGE_PROMPT = (
+    "Merge these skills into one: {names}. Read each one completely (skills.show, "
+    "and skills.read for its references). Write a single skill that covers every "
+    "case they cover without losing steps, checks or references: make what "
+    "differs a choice inside the procedure (the character, the backend, the "
+    "output type) and keep the newest way of doing each step. Propose it with "
+    "skills.propose passing replaces=[{quoted}]. Reuse the clearest of their "
+    "names or pick a new one. The owner approves it; the merged skills are then "
+    "turned off, not deleted. Then summarize what the merged skill keeps from each."
+)
 
 CLIENTS = ("cli", "desktop")
 
@@ -76,6 +97,8 @@ COMMANDS: tuple[CommandSpec, ...] = (
     CommandSpec("test", "turn", "Run the project's test suite", "[text]", template=TEST_PROMPT),
     CommandSpec("skill", "skill", "Use a skill for this request", "<name> [text]"),
     CommandSpec("learn", "learn", "Save what was done here as a skill", "[focus]"),
+    CommandSpec("lesson", "learn", "Save what the last turn taught as a lesson", "[focus]"),
+    CommandSpec("merge-skills", "learn", "Merge similar skills into one", "<skill> <skill> [...]"),
     CommandSpec("skills", "ui", "Open the skill library (terminal: list or search)", "[query]"),
     CommandSpec("compact", "ui", "Compact the context now"),
     CommandSpec("context", "ui", "Context usage and what fills it"),
@@ -164,6 +187,11 @@ def expand_command(name: str, text: str = "", skills=None, project: Path | None 
         if not message:
             raise CommandError("TEXT_REQUIRED", f"/{name} needs text to start a turn")
         return ExpandedCommand(message, mode=spec.mode)
+    if spec.kind == "learn" and name == "lesson":
+        message = f"{LESSON_PROMPT} Focus: {text}" if text else LESSON_PROMPT
+        return ExpandedCommand(message, skill=LEARN_SKILL)
+    if spec.kind == "learn" and name == "merge-skills":
+        return ExpandedCommand(_merge_message(text, skills, project), skill=LEARN_SKILL)
     if spec.kind == "learn":
         message = f"{LEARN_PROMPT} Focus: {text}" if text else LEARN_PROMPT
         return ExpandedCommand(message, skill=LEARN_SKILL)
@@ -178,6 +206,20 @@ def expand_command(name: str, text: str = "", skills=None, project: Path | None 
         raise CommandError("SKILL_NOT_FOUND", f"no enabled skill named {skill!r}")
     rest = rest.strip()
     return ExpandedCommand(rest or SKILL_PROMPT.format(name=skill), skill=skill)
+
+
+def _merge_message(text: str, skills, project: Path | None) -> str:
+    """`/merge-skills a b`: at least two different installed skills, by name."""
+    names = list(dict.fromkeys(text.replace(",", " ").split()))
+    if len(names) < 2:
+        raise CommandError("TEXT_REQUIRED", "/merge-skills needs at least two skill names")
+    known = {row["name"] for row in skills.summaries(project)} if skills else set()
+    missing = [name for name in names if name not in known]
+    if missing:
+        raise CommandError("SKILL_NOT_FOUND", f"no enabled skill named {missing[0]!r}")
+    return MERGE_PROMPT.format(
+        names=", ".join(names), quoted=", ".join(f'"{name}"' for name in names)
+    )
 
 
 __all__ = [

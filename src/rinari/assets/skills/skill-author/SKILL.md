@@ -1,7 +1,7 @@
 ---
 name: skill-author
 description: Turn what worked in this conversation into a reusable skill and save it with skills.propose (what /learn runs). Use when the owner asks to learn, remember a procedure or save something as a skill.
-version: 1.3.0
+version: 1.4.0
 risk: low
 can_delegate: false
 triggers:
@@ -48,6 +48,9 @@ required_tools:
 # Failure handling
 - SENSITIVE_CONTENT: replace the secret with a placeholder and propose again.
 - ALREADY_EXISTS: read that skill with skills.show and propose a new version with update_of.
+- SIMILAR_EXISTS: an installed skill already does a close job (`details.similar` names it and what they share). Read it; if it is the same job, improve it with update_of. Only if it truly is a different job, propose again with distinct_from = {that name: why it is different}; it then waits for the owner. `validate_draft` lists the same `similar` skills before you propose.
+- Lessons (/lesson): add the rules under a "## Lecciones" section of the skill that does the job, as an update; never a new skill for a lesson.
+- Merges (/merge-skills): one skill that keeps every case, step and reference of the merged ones, proposed with replaces=[their names]; it waits for the owner, who can undo it.
 - NAME_TAKEN: the name belongs to one of Rinari's own skills; choose another.
 - NAME_INVALID: fix the lowercase, hyphenated name. SKILL_NOT_FOUND on an update: inspect the library before deciding whether this is a new skill. Name conflicts, invalid references and secrets return tool errors; content issues return a successful validation report with `valid=false`.
 - SKILL_INVALID: inspect `details.issues` and the field/code, not guesses about encoding. MISSING_PROCEDURE means add the section; EMPTY_PROCEDURE means the section exists but needs steps. TOOL_NOT_FOUND means correct the required tool name, using the suggestion when present. Then validate the draft again.

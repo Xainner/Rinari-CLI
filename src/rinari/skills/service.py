@@ -22,6 +22,7 @@ skills validate/test` can render a report.
 from __future__ import annotations
 
 import contextlib
+import json
 import re
 import shutil
 import tempfile
@@ -73,6 +74,8 @@ _REFERENCE_SUFFIXES = (
 _REFERENCE_LINES = 400
 _REFERENCE_MAX_BYTES = 512 * 1024
 _EDITABLE_ORIGINS = ("installed", "learned")
+#: Pairs of skills the owner said are not duplicates ("a|b", sorted).
+DUPLICATES_DISMISSED_KEY = "skills.duplicates.dismissed"
 # A quote shorter than this could match almost any message by accident.
 MIN_OWNER_QUOTE = 12
 # Spaces and the quotation marks a model may wrap a quote in (ASCII,
@@ -651,6 +654,77 @@ class SkillService:
             name, skill_md, references, known=self._known_tools(), **kwargs
         )
 
+    # -- overlap between skills (rinari.skills.similarity) -----------------------------
+
+    def similarity_index(self, project: Path | None = None):
+        from rinari.skills.similarity import SimilarityIndex, SkillText
+
+        return SimilarityIndex(
+            SkillText(m.name, m.description, tuple(m.triggers), m.body, m.source)
+            for m in self.discover(project).values()
+        )
+
+    def similar_skills(
+        self,
+        draft: SkillManifest,
+        project: Path | None = None,
+        *,
+        exclude: tuple[str, ...] = (),
+    ) -> list[dict]:
+        """Enabled skills whose purpose is close to this draft, best first."""
+        from rinari.skills.similarity import SkillText
+
+        candidate = SkillText(draft.name, draft.description, tuple(draft.triggers), draft.body)
+        return [
+            s.to_dict()
+            for s in self.similarity_index(project).similar_to(candidate, exclude=exclude)
+        ]
+
+    def duplicate_pairs(self, project: Path | None = None) -> list[dict]:
+        """Pairs of the owner's own skills that look like the same job.
+
+        Only user and project skills: Rinari's own skills are not the owner's
+        to merge. Pairs the owner said are different stay hidden.
+        """
+        index = self.similarity_index(project)
+        own = [m.name for m in self.discover(project).values() if m.source != "packaged"]
+        dismissed = self._dismissed_pairs()
+        out = []
+        for a, b in index.pairs(among=own):
+            if _pair_key(a.name, b.name) in dismissed:
+                continue
+            out.append(
+                {
+                    "skills": [a.name, b.name],
+                    "score": round(a.score, 3),
+                    "shared": list(a.shared),
+                }
+            )
+        return out
+
+    def dismiss_duplicate(self, a: str, b: str) -> list[str]:
+        from rinari.storage.records import ConfigValue
+
+        if not a or not b or a == b:
+            raise SkillError("SKILL_INVALID", "two different skill names are required")
+        dismissed = self._dismissed_pairs() | {_pair_key(a, b)}
+        self._ctx.config_repo.set(
+            ConfigValue(
+                key=DUPLICATES_DISMISSED_KEY,
+                value=json.dumps(sorted(dismissed)),
+                updated_at=self._now(),
+            )
+        )
+        return sorted(dismissed)
+
+    def _dismissed_pairs(self) -> set[str]:
+        raw = self._ctx.config_repo.get(DUPLICATES_DISMISSED_KEY)
+        try:
+            values = json.loads(raw) if raw else []
+        except (TypeError, ValueError):
+            return set()
+        return {v for v in values if isinstance(v, str)} if isinstance(values, list) else set()
+
     def auto_learn(self) -> str:
         from rinari.skills.learning import AUTO_LEARN_KEY
 
@@ -877,3 +951,7 @@ def _name_like(name: str) -> bool:
 
 
 __all__ = ["SkillService"]
+
+
+def _pair_key(a: str, b: str) -> str:
+    return "|".join(sorted((a, b)))

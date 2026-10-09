@@ -37,9 +37,16 @@ def skill_error(exc: SkillError) -> EngineProtocolError:
 
 
 class SkillMethods:
-    def __init__(self, services, emit: Callable[[dict], None]) -> None:
+    def __init__(
+        self,
+        services,
+        emit: Callable[[dict], None],
+        resolve: Callable[..., bool] | None = None,
+    ) -> None:
         self._services = services
         self._emit = emit
+        # Marks the chat card of a proposal as approved, rejected or undone.
+        self._resolve = resolve or (lambda *_a, **_k: False)
         self._jobs: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
 
@@ -101,13 +108,38 @@ class SkillMethods:
 
     def pending_approve(self, params: dict[str, Any]) -> dict[str, Any]:
         result = self._call(self._skills.learning.approve, _name(params))
-        return {"skill": self._call(self._skills.detail, result["name"])}
+        self._resolve(result["name"], "approved", {"turned_off": result.get("turned_off", [])})
+        return {
+            "skill": self._call(self._skills.detail, result["name"]),
+            # A merge turns the skills it replaces off; the client says which.
+            "turned_off": result.get("turned_off", []),
+        }
 
     def pending_reject(self, params: dict[str, Any]) -> dict[str, Any]:
-        return {"rejected": self._call(self._skills.learning.reject, _name(params))}
+        name = _name(params)
+        rejected = self._call(self._skills.learning.reject, name)
+        if rejected:
+            self._resolve(name, "rejected")
+        return {"rejected": rejected}
 
     def revert(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self._call(self._skills.learning.revert, _name(params))
+        result = self._call(self._skills.learning.revert, _name(params))
+        self._resolve(result["name"], "undone", {"turned_on": result.get("turned_on", [])})
+        return result
+
+    def duplicates_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        return {"pairs": self._call(self._skills.duplicate_pairs, _project(params))}
+
+    def duplicates_dismiss(self, params: dict[str, Any]) -> dict[str, Any]:
+        names = params.get("skills")
+        if (
+            not isinstance(names, list)
+            or len(names) != 2
+            or not all(isinstance(n, str) and n for n in names)
+        ):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'skills' must be two skill names.")
+        self._call(self._skills.dismiss_duplicate, names[0], names[1])
+        return {"pairs": self._call(self._skills.duplicate_pairs, _project(params))}
 
     def settings_get(self, params: dict[str, Any]) -> dict[str, Any]:
         return {"auto_learn": self._skills.auto_learn()}
