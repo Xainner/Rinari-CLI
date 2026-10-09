@@ -1,11 +1,13 @@
-"""Custom Soul storage (Soul 3.0).
+"""Custom Soul storage (Soul 3.0 store; bundled default Soul 4.0).
 
 Each soul is a directory `<home>/souls/<id>/` with `soul.toml` (id, name,
 version, description) and `identity.md` (the injected persona text).
 The bundled default ships inside package assets and is never mutated;
-user souls live only in the home directory. Activation is a single
-`active_soul` pointer file; scopes beyond global (project/session) are
-explicitly out of scope until the engine owns them (see debt log).
+user souls live only in the home directory, so a new bundled version never
+overwrites an explicit custom Soul. Activation is a single `active_soul`
+pointer file (sessions can pin their own). The character intensity
+(minimal | balanced | full) lives in `<home>/soul_settings.toml` and applies
+to whichever Soul is in effect.
 
 Soul is voice only. It cannot change tool permissions, approvals, security
 policy, secret handling, verification truth, or execution state: those are
@@ -24,6 +26,7 @@ from typing import Any
 import tomli_w
 
 from rinari.shared.errors import ConflictError, InvalidUsageError, NotFoundError
+from rinari.soul.intensity import DEFAULT_INTENSITY, INTENSITIES, validate_intensity
 
 SOURCE_BUNDLED = "bundled"
 SOURCE_CUSTOM = "custom"
@@ -116,6 +119,7 @@ class SoulStore:
     def __init__(self, home: Path) -> None:
         self._dir = Path(home) / "souls"
         self._active_file = Path(home) / "active_soul"
+        self._settings_file = Path(home) / "soul_settings.toml"
 
     def list(self) -> list[SoulDefinition]:
         souls: dict[str, SoulDefinition] = {}
@@ -260,6 +264,30 @@ class SoulStore:
         self._active_file.parent.mkdir(parents=True, exist_ok=True)
         self._active_file.write_text(soul_id + "\n", encoding="utf-8")
         return definition
+
+    # -- character intensity --------------------------------------------------
+
+    def character_intensity(self) -> str:
+        """Configured intensity; the default when unset or unreadable."""
+        if not self._settings_file.is_file():
+            return DEFAULT_INTENSITY
+        try:
+            data = tomllib.loads(self._settings_file.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+            return DEFAULT_INTENSITY
+        value = data.get("character_intensity") if isinstance(data, dict) else None
+        return value if value in INTENSITIES else DEFAULT_INTENSITY
+
+    def set_character_intensity(self, level: Any) -> str:
+        try:
+            level = validate_intensity(level)
+        except ValueError as exc:
+            raise InvalidUsageError(str(exc)) from exc
+        self._settings_file.parent.mkdir(parents=True, exist_ok=True)
+        self._settings_file.write_text(
+            tomli_w.dumps({"character_intensity": level}), encoding="utf-8"
+        )
+        return level
 
     @staticmethod
     def _bundled_dirs() -> dict[str, Path]:

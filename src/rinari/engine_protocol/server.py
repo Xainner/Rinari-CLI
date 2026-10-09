@@ -303,6 +303,8 @@ class EngineServer:
         self._dispatcher.register("soul.remove", self._soul_remove)
         self._dispatcher.register("soul.activate", self._soul_activate)
         self._dispatcher.register("soul.get_effective", self._soul_get_effective)
+        self._dispatcher.register("soul.settings.get", self._soul_settings_get)
+        self._dispatcher.register("soul.settings.set", self._soul_settings_set)
         self._dispatcher.register("session.soul.set", self._session_soul_set)
         self._dispatcher.register("session.soul.clear", self._session_soul_clear)
         self._dispatcher.register("mcp.list", self._mcp_list)
@@ -2361,6 +2363,28 @@ class EngineServer:
         except NotFoundError:
             return {"soul_id": None, "source": "default"}
         return {"soul_id": DEFAULT_SOUL_ID, "source": "default"}
+
+    def _soul_settings_view(self) -> dict[str, Any]:
+        from rinari.soul.intensity import DEFAULT_INTENSITY, INTENSITIES
+
+        return {
+            "character_intensity": self._soul_store().character_intensity(),
+            "options": list(INTENSITIES),
+            "default": DEFAULT_INTENSITY,
+        }
+
+    def _soul_settings_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        _ = params
+        return {"settings": self._soul_settings_view()}
+
+    def _soul_settings_set(self, params: dict[str, Any]) -> dict[str, Any]:
+        level = (params or {}).get("character_intensity")
+        if not isinstance(level, str) or not level:
+            raise EngineProtocolError(
+                INVALID_PARAMS, "Param 'character_intensity' must be minimal, balanced or full."
+            )
+        self._soul_store().set_character_intensity(level)
+        return {"settings": self._soul_settings_view()}
 
     def _soul_get_effective(self, params: dict[str, Any]) -> dict[str, Any]:
         ref = params.get("ref")

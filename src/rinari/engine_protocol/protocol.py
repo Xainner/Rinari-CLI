@@ -131,6 +131,9 @@ CAPABILITIES: dict[str, bool] = {
     # env/header secrets in the CredentialStore, mcp.update, mcp.probe and the
     # structured mcp.test diagnosis (code, http_status, hint, latency_ms).
     "mcp_remote_v1": True,
+    # soul.settings.get/set: character intensity (minimal | balanced | full),
+    # separate from Soul selection; bundled default Soul 4.0.
+    "soul_character_intensity_v1": True,
 }
 
 

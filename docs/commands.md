@@ -914,9 +914,14 @@ resolves assigned model → fallback → parent caller, and the stored
 effort (when set) reaches the invocation through the existing
 `reasoning_effort` call path.
 Slice 8a adds Soul 3.0: `soul.list/get/create/update/remove/activate`,
-`~/souls/<id>/{soul.toml,identity.md}` store, bundled `rinari-default` 3.0,
-global activation; legacy `~/soul.md` keeps working (active > legacy >
-bundled). Main-agent prompt uses the active soul; subagents stay functional.
+`~/souls/<id>/{soul.toml,identity.md}` store, bundled `rinari-default`
+(4.0 since 2026-10-09, see docs/soul.md), global activation; legacy
+`~/soul.md` keeps working (active > legacy > bundled). Main-agent prompt uses
+the active soul; subagents stay functional. `soul.settings.get` →
+`{settings: {character_intensity, options, default}}` and `soul.settings.set
+{character_intensity: "minimal" | "balanced" | "full"}` (same result;
+anything else is `INVALID_PARAMS`; capability `soul_character_intensity_v1`)
+scale how much of whichever Soul is in effect shows; default `balanced`.
 Slice 9 adds the ecosystem surface: `mcp.list/get/create/remove/enable/disable/test`
 (remote servers, `mcp.update` and `mcp.probe`: see `mcp_remote_v1` below)
 (plain secrets rejected, test failures reported not raised), `plugin.list/get/enable/disable/diagnostics`

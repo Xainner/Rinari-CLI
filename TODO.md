@@ -825,6 +825,13 @@ Todo con tests deterministas.
 - [x] loader de Constitution.
 - [x] hashes/version metadata.
 - [x] tests de resolution/fallback.
+- [x] Soul 4.0 (2026-10-09): voz reconocible del default `rinari-default` (aperturas y
+  cierres en personaje variados, reacciones en primera persona, burla ligera, celos
+  de broma en una línea, ejemplos buenos/malos), zonas sin personalidad (código,
+  comandos, diffs, estado, verificación, errores) y modo serio; mismas invariantes.
+  Intensidad del personaje `minimal | balanced | full` en `soul_settings.toml`,
+  aplicada a la Soul vigente (`soul.settings.get/set`,
+  `soul_character_intensity_v1`). Una Soul propia o `~/soul.md` nunca se pisa.
 
 ## Project Detector
 

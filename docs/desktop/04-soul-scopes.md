@@ -9,6 +9,10 @@
 > the pin (`build_assembler_context`); subagents stay functional
 > (`soul=""`, pinned). Project-level default deferred: no project config
 > surface exists yet, and inventing one here would bypass trust.
+>
+> Update (2026-10-09): the bundled default is Soul 4.0, and the character
+> intensity (`soul.settings.get/set`: minimal | balanced | full) scales
+> whichever Soul is in effect, pinned or global (see docs/soul.md).
 
 ## What Code needs
 

@@ -60,7 +60,8 @@
     "turnTokenUsage",
     "mcpSecretState",
     "mcpServer",
-    "mcpTestResult"
+    "mcpTestResult",
+    "soulSettings"
   ],
   "$defs": {
     "webPreview": {
@@ -338,6 +339,8 @@
         "soul.remove",
         "soul.activate",
         "soul.get_effective",
+        "soul.settings.get",
+        "soul.settings.set",
         "session.soul.set",
         "session.soul.clear",
         "mcp.list",
@@ -3845,6 +3848,34 @@
       "required": [
         "ok",
         "tools"
+      ]
+    },
+    "soulSettings": {
+      "type": "object",
+      "description": "soul.settings.get/set: character intensity, separate from Soul selection.",
+      "properties": {
+        "character_intensity": {
+          "type": "string",
+          "enum": [
+            "minimal",
+            "balanced",
+            "full"
+          ]
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "default": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "character_intensity",
+        "options",
+        "default"
       ]
     }
   }

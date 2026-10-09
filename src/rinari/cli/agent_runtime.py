@@ -194,6 +194,13 @@ def build_assembler_context(
     else:
         soul = load_active_soul(services.ctx.home).text
     canonical, extended = split_soul(soul)
+    # Character intensity (Soul 4.0) scales whichever Soul is in effect.
+    from rinari.soul.intensity import intensity_instructions
+    from rinari.soul.store import SoulStore
+
+    if canonical:
+        level = SoulStore(services.ctx.home).character_intensity()
+        canonical = f"{canonical}\n\n{intensity_instructions(level)}"
     root = Path(record.project_root_snapshot) if record.project_root_snapshot else None
     environment: dict = {
         "cwd": record.current_cwd,
