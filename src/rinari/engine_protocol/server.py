@@ -317,6 +317,9 @@ class EngineServer:
         self._dispatcher.register("plugin.enable", self._plugin_enable)
         self._dispatcher.register("plugin.disable", self._plugin_disable)
         self._dispatcher.register("plugin.diagnostics", self._plugin_diagnostics)
+        from rinari.engine_protocol.speech import SpeechMethods
+
+        SpeechMethods(self._services, self._turns.emit_external).register(self._dispatcher)
         from rinari.engine_protocol.skills import SkillMethods
 
         self._skills = SkillMethods(self._services, self._turns.emit_external)
