@@ -35,7 +35,7 @@ from rinari.tools.definition import (
     ToolResult,
 )
 
-from .shell import _BoundedBuffer, _kill_tree
+from .shell import SHELL_SCHEMA, _BoundedBuffer, _kill_tree, shell_argv
 
 MAX_PROCESS_OUTPUT_BYTES = 512 * 1024
 DEFAULT_WAIT_TIMEOUT_S = 60.0
@@ -299,7 +299,11 @@ def process_start(input: dict, ctx: ToolContext) -> ToolResult:
             cwd = str(resolved)
         except Exception as exc:
             return _fail(ToolErrorCode.SANDBOX_VIOLATION, getattr(exc, "message", str(exc)))
-    handle_id = registry.start(command, cwd=cwd or str(ctx.cwd), env=env)
+    try:
+        launched = shell_argv(command, input.get("shell"))
+    except ValueError as exc:
+        return _fail(ToolErrorCode.INVALID_ARGUMENT, str(exc))
+    handle_id = registry.start(launched, cwd=cwd or str(ctx.cwd), env=env)
     handle = registry.get(handle_id)
     pid = handle.process.pid if handle is not None else None
     return _ok({"handle": handle_id, "pid": pid, "command": command, "running": True})
@@ -439,6 +443,7 @@ def process_tools() -> list[ToolDefinition]:
                     },
                     "cwd": {"type": "string"},
                     "env": {"type": "object"},
+                    "shell": SHELL_SCHEMA,
                 },
                 "oneOf": [{"required": ["command"]}, {"required": ["argv"]}],
             },

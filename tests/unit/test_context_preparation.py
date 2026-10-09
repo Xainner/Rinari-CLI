@@ -399,3 +399,32 @@ def test_manual_compaction_does_not_publish_a_summary_that_is_not_smaller(app_ct
     assert events[-1]["skip_reason"] == "summary_not_smaller"
     assert ctx.history == original
     assert not app_ctx.session_repo.get(ctx.session_id).compact_state
+
+
+def test_an_automatic_compaction_is_not_repeated_a_few_calls_later(app_ctx):
+    """Seen: 8 compactions in 10 minutes, each followed by re-reading files."""
+    from rinari.context.preparation import MIN_CALLS_BETWEEN_COMPACTIONS
+
+    service, ctx, caller, _calls, rebuild = setup(app_ctx)
+    events = []
+
+    def emit(_event, payload):
+        events.append(payload.get("status"))
+
+    prepare(service, ctx, rebuild(ctx), caller, rebuild, emit, CancellationToken())
+    assert events.count("completed") == 1
+    assert ctx.compacted_at_call == 1
+    # The work refills the context past the threshold, below the window.
+    from rinari.context.preparation import input_budget, resolve_window
+
+    window = input_budget(app_ctx, caller, rebuild(ctx), resolve_window(app_ctx, caller))
+    while request_size(rebuild(ctx)) < window * 0.85:
+        ctx.history.append(ChatMessage(role="user", content="new " + "y" * 100))
+    request = rebuild(ctx)
+    assert request_size(request) < window * 0.95
+    assert prepare(service, ctx, request, caller, rebuild, emit, CancellationToken()) is request
+    assert events.count("completed") == 1
+    # Enough calls later it may compact again.
+    ctx.prepared_calls += MIN_CALLS_BETWEEN_COMPACTIONS
+    prepare(service, ctx, rebuild(ctx), caller, rebuild, emit, CancellationToken())
+    assert events.count("started") == 2

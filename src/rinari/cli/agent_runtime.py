@@ -142,6 +142,43 @@ def project_instructions(
     )
 
 
+def _runtime_facts(services: ServiceContainer, record: SessionRecord) -> dict[str, str]:
+    """What the model cannot know by itself: today, where it runs, who it is.
+
+    Without them a model answered with its training date and its base model's
+    name. Day granularity keeps the system prompt — and the provider's prompt
+    cache — stable through the day; it is refreshed every turn.
+    """
+    import os
+    import platform
+    from datetime import datetime
+
+    now = datetime.fromtimestamp(services.ctx.clock.now()).astimezone()
+    offset = now.strftime("%z")
+    facts = {
+        "today": f"{now:%Y-%m-%d} ({now:%A})",
+        "timezone": f"{now.tzname() or 'local'} (UTC{offset[:3]}:{offset[3:]})",
+        "os": f"{platform.system()} {platform.release()}".strip(),
+    }
+    if os.name == "nt":
+        facts["shell"] = (
+            "shell.exec `command` runs in cmd.exe: chain with &&, not a semicolon; "
+            'no grep, head or tail; set "shell": "powershell" or "bash" for those syntaxes'
+        )
+    else:
+        facts["shell"] = f"shell.exec `command` runs in {os.environ.get('SHELL') or '/bin/sh'}"
+    try:
+        provider = services.providers.get(record.provider_id)
+        model = services.models.resolve(record.model_id, record.provider_id)
+    except Exception:
+        return facts
+    facts["model"] = (
+        f"{model.alias} ({model.provider_model_id}) via {provider.alias}; "
+        "this is the model answering now"
+    )
+    return facts
+
+
 def build_assembler_context(
     services: ServiceContainer,
     record: SessionRecord,
@@ -158,7 +195,11 @@ def build_assembler_context(
         soul = load_active_soul(services.ctx.home).text
     canonical, extended = split_soul(soul)
     root = Path(record.project_root_snapshot) if record.project_root_snapshot else None
-    environment: dict = {"cwd": record.current_cwd, "version": __version__}
+    environment: dict = {
+        "cwd": record.current_cwd,
+        "version": __version__,
+        **_runtime_facts(services, record),
+    }
     instructions: tuple[ProjectInstruction, ...] = ()
     project_trusted = True
     if root is not None and root.is_dir():
@@ -1656,10 +1697,89 @@ def _turn_requested_mutation(session: AgentSession, turn_index: int) -> bool:
         payload = event.payload or {}
         if event.type != "ToolRequested" or payload.get("turn_index") != turn_index:
             continue
-        tool = session.loop.tool_registry.get(str(payload.get("tool") or ""))
+        name = str(payload.get("tool") or "")
+        if name.split(".", 1)[0] in _BOOKKEEPING_NAMESPACES:
+            continue
+        tool = session.loop.tool_registry.get(name)
         if tool is not None and tool.side_effects != SIDE_EFFECT_NONE:
             return True
     return False
+
+
+# Tools that only change Rinari's own records (memory, evidence, skills,
+# subagents…): "remember this" is not an implementation to verify.
+_BOOKKEEPING_NAMESPACES = frozenset(
+    {
+        "verify",
+        "memory",
+        "context",
+        "skills",
+        "agent",
+        "session",
+        "schedule",
+        "capability",
+        "user",
+        "rinari",
+    }
+)
+_CODE_SUFFIXES = frozenset(
+    {
+        ".py",
+        ".js",
+        ".jsx",
+        ".ts",
+        ".tsx",
+        ".mjs",
+        ".cjs",
+        ".java",
+        ".kt",
+        ".go",
+        ".rs",
+        ".c",
+        ".cc",
+        ".cpp",
+        ".h",
+        ".hpp",
+        ".cs",
+        ".rb",
+        ".php",
+        ".swift",
+        ".scala",
+        ".dart",
+        ".lua",
+        ".vue",
+        ".svelte",
+        ".sh",
+        ".ps1",
+        ".sql",
+    }
+)
+
+
+def _required_evidence(session: AgentSession, turn_index: int) -> tuple[str, ...]:
+    """Tests are required when the turn edited source code; otherwise any check.
+
+    The gate always asked for a test: a turn that edited a video script, a
+    document or a server config could never be more than PARTIAL, however
+    well it was checked.
+    """
+    try:
+        events = session.services.ctx.event_repo.list(session.record.id)
+    except Exception:
+        return ("test",)
+    for event in events:
+        payload = event.payload or {}
+        if event.type != "ToolRequested" or payload.get("turn_index") != turn_index:
+            continue
+        if payload.get("tool") not in ("fs.write", "fs.patch"):
+            continue
+        arguments = payload.get("arguments") or {}
+        paths = [arguments.get("path")] + [
+            item.get("path") for item in arguments.get("files") or [] if isinstance(item, dict)
+        ]
+        if any(isinstance(p, str) and Path(p).suffix.lower() in _CODE_SUFFIXES for p in paths):
+            return ("test",)
+    return ()
 
 
 def _claims_completion(content: str) -> bool:
@@ -1862,6 +1982,12 @@ def _run_turn_unlocked(
     if memory != base.memory:
         base = replace(base, memory=memory)
         session.context.assembler_base = base
+    # The date, the model (it can be switched mid-session) and the rest of
+    # the runtime facts follow the turn, not the session's creation.
+    environment = {**(base.environment or {}), **_runtime_facts(services, session.record)}
+    if environment != base.environment:
+        base = replace(base, environment=environment)
+        session.context.assembler_base = base
     before = len(session.context.history)
     dropped_before = session.context.dropped_total
     runtime = services.ctx.config.config.runtime
@@ -2031,7 +2157,12 @@ def _run_turn_unlocked(
     finalizable_kind = result.kind in ("answer", "truncated", "budget", "loop")
     if finalizable_kind and not read_only and should_finalize:
         validation_after = _validation_ids(session)
-        result = _finalize_turn(session, result, validation_after - validation_before)
+        result = _finalize_turn(
+            session,
+            result,
+            validation_after - validation_before,
+            _required_evidence(session, turn_index),
+        )
     if session.context.compacted:
         session.context.compacted = False
         result = replace(result, compacted=True)
@@ -2094,7 +2225,10 @@ def _new_history(context: AgentContext, before: int, dropped_before: int) -> lis
 
 
 def _finalize_turn(
-    session: AgentSession, result: TurnResult, validation_ids: set[str]
+    session: AgentSession,
+    result: TurnResult,
+    validation_ids: set[str],
+    required_kinds: tuple[str, ...] = ("test",),
 ) -> TurnResult:
     """Finalize transition (phase 3): evaluate the completion gate from
     persisted validation evidence and make the outcome observable.
@@ -2112,7 +2246,9 @@ def _finalize_turn(
     if callable(session.activity_sink):
         session.activity_sink("verification.started", {"record_ids": sorted(validation_ids)})
     try:
-        decision = services.verification.evaluate(root, record_ids=validation_ids)
+        decision = services.verification.evaluate(
+            root, record_ids=validation_ids, required_kinds=required_kinds
+        )
     except RinariError:
         if callable(session.activity_sink):
             session.activity_sink("verification.failed", {"error": "verification unavailable"})

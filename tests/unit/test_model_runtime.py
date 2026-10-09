@@ -433,7 +433,9 @@ def test_anthropic_converts_messages() -> None:
     adapter.invoke(request, "key", None)
 
     body = json.loads(seen[0].content)
-    assert body["system"] == "constitución"
+    assert body["system"] == [
+        {"type": "text", "text": "constitución", "cache_control": {"type": "ephemeral"}}
+    ]
     assert body["max_tokens"] == 8192
     assert body["messages"][0] == {"role": "user", "content": "hola"}
     assert body["messages"][1] == {"role": "assistant", "content": "ok"}
@@ -443,7 +445,8 @@ def test_anthropic_converts_messages() -> None:
         "content": [
             {"type": "text", "text": "otra"},
             {"type": "tool_result", "tool_use_id": "tu_1", "content": "archivo"},
-            {"type": "text", "text": "listo"},
+            # The newest block carries the prompt-cache breakpoint.
+            {"type": "text", "text": "listo", "cache_control": {"type": "ephemeral"}},
         ],
     }
 
@@ -464,7 +467,12 @@ def test_anthropic_tools_in_payload() -> None:
     # F3: the adapter alone sanitize-falls-back (invoked without the router's
     # alias map); dotted names must never reach the official wire.
     assert body["tools"] == [
-        {"name": "fs_read", "description": "lee", "input_schema": {"type": "object"}}
+        {
+            "name": "fs_read",
+            "description": "lee",
+            "input_schema": {"type": "object"},
+            "cache_control": {"type": "ephemeral"},
+        }
     ]
 
 

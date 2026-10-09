@@ -1,5 +1,6 @@
 """Pre-dispatch semantic compaction, shared by all session hosts."""
 
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -80,6 +81,11 @@ def summary_problem(response) -> str | None:
     return None
 
 
+# Automatic compactions closer than this (in model calls) wait for the window
+# itself to fill instead of the threshold.
+MIN_CALLS_BETWEEN_COMPACTIONS = 6
+
+
 def prepare(service, ctx, request, caller, rebuild, emit, cancel):
     """Persist a verified replacement before changing the running projection."""
     config = service._ctx.config.config
@@ -93,7 +99,22 @@ def prepare(service, ctx, request, caller, rebuild, emit, cancel):
     points = thresholds(window, config.context.compact_at_percent)
     threshold = config.context.compact_at_percent / 100
     force = getattr(ctx, "force_compaction", False)
+    calls = getattr(ctx, "prepared_calls", 0) + 1
+    with contextlib.suppress(AttributeError):
+        ctx.prepared_calls = calls
     if used < window * threshold and not force:
+        return request
+    last = getattr(ctx, "compacted_at_call", None)
+    if (
+        not force
+        and ctx.compaction_reason == "automatic"
+        and last is not None
+        and calls - last < MIN_CALLS_BETWEEN_COMPACTIONS
+        and used < window * 0.95
+    ):
+        # It just compacted and the work refilled the window within a few
+        # calls (seen: 8 compactions in 10 minutes, each re-reading the same
+        # files). Keep going until the window itself is at risk.
         return request
     if not config.runtime.safeguards.context_compaction and ctx.compaction_reason != "manual":
         if used >= window or force:
@@ -342,6 +363,8 @@ def prepare(service, ctx, request, caller, rebuild, emit, cancel):
         ctx.dropped_total = 0
         ctx.context_usage = {}
         ctx.compact_revision = state["revision"]
+        with contextlib.suppress(AttributeError):
+            ctx.compacted_at_call = calls
         status(
             "completed",
             after_tokens=after,

@@ -146,6 +146,10 @@ class AgentContext:
     force_compaction: bool = False
     compaction_reason: str = "automatic"
     context_usage: dict = field(default_factory=dict)
+    # Model calls prepared so far and the one that last compacted, so an
+    # automatic compaction is not repeated every few calls.
+    prepared_calls: int = 0
+    compacted_at_call: int | None = None
     # Revision of the persisted projection this context runs on. A usage
     # anchor measured against another projection no longer calibrates it.
     compact_revision: int = 0
@@ -266,6 +270,7 @@ class AgentLoop:
         # and the model is asked for the opening.
         opened = False
         opening_asked = False
+        language_asked = False
         circuit_breaker = EmergencyCircuitBreaker(budget) if budget is not None else None
 
         # A present meter is authoritative for model-call iterations; the
@@ -426,6 +431,16 @@ class AgentLoop:
                 if not response.has_tool_calls and ctx.collect_steering is not None
                 else []
             )
+            # A final answer in another script than the user writes in (a
+            # model drifted into Chinese for a Spanish speaker) is rewritten
+            # once in the user's language.
+            relanguage = (
+                not language_asked
+                and not response.has_tool_calls
+                and not subagent_results
+                and not steered
+                and _foreign_script(ctx.history, response.content)
+            )
             if response.content:
                 self._emit_activity(
                     "model.content.completed",
@@ -433,7 +448,7 @@ class AgentLoop:
                         "model_call_id": model_call_id,
                         "content": response.content,
                         "output_kind": "progress"
-                        if response.has_tool_calls or subagent_results or steered
+                        if response.has_tool_calls or subagent_results or steered or relanguage
                         else "final",
                         "duration_ms": duration_ms,
                     },
@@ -531,6 +546,10 @@ class AgentLoop:
                 if steered:
                     self._append_steering(ctx, steered)
                 if subagent_results or steered:
+                    continue
+                if relanguage:
+                    language_asked = True
+                    ctx.history.append(ChatMessage.harness(_LANGUAGE_REMINDER, "language"))
                     continue
                 kind = "truncated" if response.stop_reason is StopReason.MAX_TOKENS else "answer"
                 self._emit_hook(
@@ -913,6 +932,9 @@ class AgentLoop:
                     requested=tool_calls_requested,
                     rejected=tool_calls_rejected,
                     governor=governor,
+                    # A machine-readable cause, so clients say it in the
+                    # user's language instead of showing this English text.
+                    stop_detail={"loop": "stagnation"},
                 )
 
             if budget is not None:
@@ -974,7 +996,9 @@ class AgentLoop:
         messages: list[ChatMessage] = []
         if bundle.system_prompt:
             messages.append(ChatMessage.system(bundle.system_prompt))
-        messages.extend(ctx.history)
+        from rinari.context.settle import settle_old_observations
+
+        messages.extend(settle_old_observations(ctx.history))
         exposure = getattr(ctx.tool_ctx, "exposure", None)
         if wire_tools is not None:
             pass
@@ -1349,6 +1373,50 @@ _BUDGET_REASONS = {
     "cost": "cost limit reached",
     "wall-time": "wall-time limit reached",
 }
+
+
+_LANGUAGE_REMINDER = (
+    "[Runtime note, not from the user] Your last answer is not in the language the user "
+    "writes in. Write it again, complete, in the user's language. Do not explain the switch."
+)
+# Letters outside Latin that a reply to a Latin-script user should not be
+# made of: CJK, kana, hangul, Cyrillic, Arabic, Hebrew, Devanagari, Thai.
+_NON_LATIN = (
+    (0x0400, 0x04FF),
+    (0x0590, 0x05FF),
+    (0x0600, 0x06FF),
+    (0x0900, 0x097F),
+    (0x0E00, 0x0E7F),
+    (0x3040, 0x30FF),
+    (0x3400, 0x4DBF),
+    (0x4E00, 0x9FFF),
+    (0xAC00, 0xD7AF),
+)
+
+
+def _non_latin_share(text: str) -> tuple[int, float]:
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return 0, 0.0
+    other = sum(1 for c in letters if any(lo <= ord(c) <= hi for lo, hi in _NON_LATIN))
+    return len(letters), other / len(letters)
+
+
+def _foreign_script(history: Any, answer: str | None) -> bool:
+    """The answer is mostly in a script the user does not write in."""
+    user = next(
+        (
+            m.content
+            for m in reversed(list(history))
+            if m.role == "user" and (m.origin or {}).get("kind") != "harness" and m.content
+        ),
+        None,
+    )
+    if not user or not answer:
+        return False
+    user_letters, user_share = _non_latin_share(user)
+    answer_letters, answer_share = _non_latin_share(answer)
+    return user_letters >= 3 and user_share < 0.1 and answer_letters >= 40 and answer_share > 0.3
 
 
 def _transient_failure(exc: BaseException) -> str | None:

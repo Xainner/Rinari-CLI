@@ -241,6 +241,20 @@ STREAM_DEFAULTS = {"connect": 15.0, "first_byte": 120.0, "idle": 120.0, "total":
 SELF_HOSTED_STREAM_DEFAULTS = {"first_byte": 600.0, "idle": 300.0, "total": 3600.0}
 
 
+def openai_cache_key(payload: dict, url: str, request) -> dict:
+    """Route a conversation's calls to one prompt cache on OpenAI's own API.
+
+    Other OpenAI-compatible servers may reject an unknown field, so the key
+    goes only to api.openai.com; they cache by prefix on their own.
+    """
+    from urllib.parse import urlparse
+
+    session = getattr(request, "session_id", None)
+    if session and (urlparse(url).hostname or "").lower() == "api.openai.com":
+        payload.setdefault("prompt_cache_key", session)
+    return payload
+
+
 def is_local_endpoint(endpoint: str | None) -> bool:
     """Loopback, private network or a .local/.localhost name."""
     import ipaddress

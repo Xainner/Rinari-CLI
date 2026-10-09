@@ -1005,3 +1005,26 @@ def test_repeating_after_the_nudge_still_stops(env) -> None:
     loop = AgentLoop(model, env["runtime"], env["assembler"])
     result = loop.turn(env["ctx"], "render it")
     assert result.kind == "loop"
+
+
+def test_a_final_answer_in_another_script_is_rewritten_once(env) -> None:
+    chinese = "服务器报告显示内存使用率很高、建议重启服务并检查日志文件以找出问题原因。" * 2
+    model = FakeModel(
+        scripted=[
+            ModelResponse(content=chinese),
+            ModelResponse(content="El informe muestra memoria alta; conviene reiniciar."),
+        ]
+    )
+    loop = AgentLoop(model, env["runtime"], env["assembler"])
+    result = loop.turn(env["ctx"], "¿Qué dice el informe del servidor?")
+    assert result.content.startswith("El informe")
+    notes = [m for m in env["ctx"].history if (m.origin or {}).get("source") == "language"]
+    assert len(notes) == 1 and len(model.requests) == 2
+
+
+def test_the_language_rewrite_is_asked_only_once(env) -> None:
+    chinese = "服务器报告显示内存使用率很高、建议重启服务并检查日志文件以找出问题原因。" * 2
+    model = FakeModel(scripted=[ModelResponse(content=chinese), ModelResponse(content=chinese)])
+    loop = AgentLoop(model, env["runtime"], env["assembler"])
+    result = loop.turn(env["ctx"], "¿Qué dice el informe del servidor?")
+    assert result.kind == "answer" and len(model.requests) == 2

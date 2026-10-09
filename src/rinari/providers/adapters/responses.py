@@ -42,6 +42,7 @@ from rinari.providers.adapters.http import (
     decode_json,
     iter_model_lines,
     open_model_stream,
+    openai_cache_key,
     provider_error,
     sanitize_tool_name,
     send_request,
@@ -154,7 +155,11 @@ class OpenAIResponsesAdapter(ProviderAdapter):
             "POST",
             url,
             headers=headers,
-            json_body=self._responses_payload(request, stream=False, tool_aliases=tool_aliases),
+            json_body=openai_cache_key(
+                self._responses_payload(request, stream=False, tool_aliases=tool_aliases),
+                url,
+                request,
+            ),
             timeout=MODEL_CALL_TIMEOUT,
         )
         if response.status_code in (401, 403):
@@ -196,7 +201,11 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                 stream_started_at,
                 "POST",
                 url,
-                json=self._responses_payload(request, stream=True, tool_aliases=tool_aliases),
+                json=openai_cache_key(
+                    self._responses_payload(request, stream=True, tool_aliases=tool_aliases),
+                    url,
+                    request,
+                ),
                 headers=headers,
             ) as response:
                 headers_received = True
@@ -408,9 +417,18 @@ def _function_call_from_responses(raw: Any) -> ToolCall | None:
 def _usage_from_responses(raw: Any) -> Usage:
     if not isinstance(raw, dict):
         return Usage()
+    inputs = raw.get("input_tokens_details")
+    outputs = raw.get("output_tokens_details")
     return Usage(
         input_tokens=_optional_int(raw.get("input_tokens")),
         output_tokens=_optional_int(raw.get("output_tokens")),
+        # Without these the cache looked unused and reasoning invisible.
+        cached_input_tokens=_optional_int(
+            inputs.get("cached_tokens") if isinstance(inputs, dict) else None
+        ),
+        reasoning_tokens=_optional_int(
+            outputs.get("reasoning_tokens") if isinstance(outputs, dict) else None
+        ),
     )
 
 
