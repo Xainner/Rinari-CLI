@@ -111,6 +111,9 @@ CAPABILITIES: dict[str, bool] = {
     "session_pins_v1": True,
     # skill.* library: standard skills, reviewed installs, on/off, edit, import.
     "skill_library_v1": True,
+    # speech.* local dictation (whisper.cpp): status, settings, model jobs,
+    # transcription as a job with speech.transcribed / speech.failed.
+    "speech_dictation_v1": True,
     # Near-duplicate gate (SIMILAR_EXISTS), skill.proposed / skill.proposal.resolved
     # chat cards, /lesson and /merge-skills, skill.duplicates.list/dismiss.
     "skill_manager_v1": True,

@@ -4483,3 +4483,27 @@ documenta en [Ejecución de visión](vision-execution.md).
 ## Context compaction controls
 
 `rinari context settings` configures the shared threshold, optional summarizer and per-model window. `rinari context compact --session <id>` performs compaction without resuming the task. See [context-compaction.md](context-compaction.md) for the protocol, defaults and examples.
+
+## Local dictation (`speech.*`)
+
+The desktop composer can dictate: a microphone button, or Ctrl+Space held in
+the message box. Transcription is local with whisper.cpp; audio never leaves
+the machine.
+
+- The CLI binary ships with the packaged Engine (`<engine>/speech/whisper-cli`,
+  pinned in the Agent repo's `speech-manifest.json`, ~12 MB). `RINARI_WHISPER_BIN`
+  overrides it with an absolute path to a file named `whisper-cli(.exe)`.
+- Models are downloaded on first use into `~/.rinari/models/speech/`, checked
+  against a pinned size and SHA-256 (`rinari.speech.catalog`): `base` (~60 MB),
+  `small` (default, ~190 MB), `large-v3-turbo` (~575 MB).
+- Settings (`speech.settings.set`): `model`, `language` (`""` = the client's UI
+  language, `auto`, or a code) and `vocabulary` (names to spell right; "Rinari"
+  is always included as Whisper's prompt).
+- `speech.transcribe {audio: base64 WAV, language?}` takes mono 16 kHz 16-bit
+  PCM, 0.2 s to 5 min, and returns a `job_id` at once; the text arrives as
+  `speech.transcribed {job_id, text, model, language, audio_ms, elapsed_ms}` or
+  `speech.failed {job_id, error}`. `speech.model.download` reports
+  `speech.model.progress` and ends with `speech.model.ready` / `.failed`.
+  Both run off the request loop so turns keep streaming.
+
+Measured with `small` on a desktop CPU: 7.5 s of Spanish speech in ~2.8 s.

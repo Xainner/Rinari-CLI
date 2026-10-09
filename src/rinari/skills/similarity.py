@@ -168,7 +168,9 @@ class SimilarityIndex:
     def _compare(self, a: dict[str, float], b: dict[str, float]) -> tuple[float, tuple[str, ...]]:
         common = set(a) & set(b)
         score = sum(a[t] * b[t] for t in common)
-        shared = tuple(t for t in sorted(common, key=lambda t: -(a[t] * b[t]))[:_SHARED_SHOWN])
+        # Ties broken by the term itself: set order changes with the hash seed.
+        ranked = sorted(common, key=lambda t: (-(a[t] * b[t]), t))
+        shared = tuple(ranked[:_SHARED_SHOWN])
         return score, shared
 
     def similar_to(
