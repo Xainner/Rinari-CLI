@@ -405,6 +405,11 @@ class ToolContext:
     # it only after validating a persisted owner message.
     memory_source: dict[str, str] | None = None
     tool_call_id: str = ""
+    # ReadView (tools.read_cache) of the agent conversation running this call:
+    # fs.read / fs.read_lines answer an unchanged re-read with a pointer to the
+    # earlier result the model still sees. None reads normally (tests, hosts
+    # without an AgentLoop).
+    reads: Any = None
     artifact_store: Any = None
     vision_allowed: bool = False
     image_slots: int | None = None  # Deprecated compatibility field; no session quota.

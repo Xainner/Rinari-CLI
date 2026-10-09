@@ -1851,18 +1851,33 @@ unless explicitly attached.
 # 35. Project Prompt Stack
 
 ```text
+system prompt (cached prefix: changes only with the session's configuration)
 1. Harness Constitution
-2. Runtime Policy Snapshot
+2. Runtime Policy Snapshot (mode, permission profile)
 3. Canonical Soul
 4. User Preferences
 5. Project instruction chain
-6. Active skills
-7. Task graph state
-8. Project environment snapshot
-9. relevant project memory
-10. recent/compacted conversation
-11. retrieved files/evidence/tool results
+6. Skill catalog and active skills
+7. Compact state, pinned context
+8. Stable environment facts (date, timezone, OS, shell, model, trust)
+
+history
+9. recent/compacted conversation and tool results
+
+turn context (closes every request; rebuilt per call, never stored)
+10. Task graph state
+11. relevant memory (ranked against the latest message)
+12. Project environment snapshot (repository scan)
+13. on-demand identity, retrieved evidence
 ```
+
+Provider prompt caches reuse the longest identical prefix. Anything that
+changes as the work progresses (`cachePolicy: "turn"`) used to sit before the
+history and invalidated the cached conversation on every turn of a PROJECT
+session. The turn context travels as a harness note (`origin.kind = harness`,
+`source = turn-context`) after the history: a user-role message for every
+adapter, joined as its own text block to the last user turn on Anthropic,
+whose message cache breakpoint stays on the block before it.
 
 ---
 
@@ -1880,9 +1895,11 @@ type PromptSegment = {
     | "project-instruction"
     | "skill"
     | "task-state"
+    | "compact-state"
     | "environment"
-    | "history"
     | "memory"
+    | "pinned-context"
+    | "history"
     | "evidence"
 
   authority: number
@@ -1902,7 +1919,9 @@ type PromptSegment = {
 }
 ```
 
-Prompt assembly must be centralized.
+Prompt assembly must be centralized. `cachePolicy` decides placement:
+`stable` and `session` segments form the system prompt, `turn` segments form
+the turn context after the history (section 35).
 
 ---
 

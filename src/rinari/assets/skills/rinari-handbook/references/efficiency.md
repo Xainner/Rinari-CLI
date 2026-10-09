@@ -15,9 +15,10 @@ Every call costs a round trip and context. Before calling, know what you will do
 - `rinari.status` lists models only with `provider` or `include_models`; `rinari.turn` adds raw events only with `detail: "events"`.
 
 ## Do not repeat work
-- Never re-read a file or re-run a command whose result is already in context and has not changed.
+- Never re-read a file or re-run a command whose result is already in context and has not changed. A re-read of an unchanged file whose text you still have returns `unchanged: true` instead of the text; `fresh: true` forces it only when you truly need it again.
 - Parallelize independent reads in one step; chain only what depends on a previous result.
 - Background long processes (`shell.exec` with `background: true` or `process.start`) and read them with `process.output` instead of waiting in a loop.
+- Wait for a server, port, log line or file with `wait.for` (port, url, output + handle, file), never with `sleep`, `ping`, `timeout` or `Start-Sleep`: it returns as soon as the condition holds and says what it saw if it does not.
 
 ## Stop
 - Stop when the evidence answers the question; one more confirming call is waste.

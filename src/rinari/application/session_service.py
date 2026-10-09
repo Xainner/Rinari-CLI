@@ -41,6 +41,10 @@ EVENT_SESSION_FORKED = "SessionForked"
 EVENT_SESSION_CLOSED = "SessionClosed"
 EVENT_SESSION_RENAMED = "SessionRenamed"
 EVENT_SESSION_TITLE_FAILED = "SessionTitleFailed"
+# The first messages carried no topic (a greeting): the title waits for one.
+EVENT_SESSION_TITLE_DEFERRED = "SessionTitleDeferred"
+# What a title factory returns for a message with no topic.
+TITLE_NO_TOPIC = "NONE"
 # Who set a title. Only a fallback (the trimmed first message, stored when
 # the model gave no usable title) is ever replaced automatically.
 TITLE_SOURCE_MANUAL = "manual"
@@ -580,8 +584,17 @@ class SessionService:
                 self._default_title(cwd, SESSION_KIND_CHAT),
                 self._default_title(cwd, SESSION_KIND_PROJECT),
             }
-            if record.title not in defaults or self._ctx.message_repo.list(record.id):
+            if record.title not in defaults:
                 return record
+            if self._ctx.message_repo.list(record.id):
+                # Earlier messages had no topic ("Hola"): name it from this one.
+                deferred = sum(
+                    1
+                    for e in self._ctx.event_repo.list(record.id)
+                    if e.type == EVENT_SESSION_TITLE_DEFERRED
+                )
+                if not deferred:
+                    return record
             source_text = message
         else:
             last = renames[-1].payload or {}
@@ -613,7 +626,20 @@ class SessionService:
                 generated = (
                     generated.strip().strip('"').strip() if isinstance(generated, str) else ""
                 )
-                if not generated:
+                if generated.upper().rstrip(".") == TITLE_NO_TOPIC and not renames:
+                    deferrals = sum(
+                        1
+                        for e in self._ctx.event_repo.list(record.id)
+                        if e.type == EVENT_SESSION_TITLE_DEFERRED
+                    )
+                    if deferrals < TITLE_ATTEMPTS:
+                        # A greeting is not a topic: "Hola" made a poor title
+                        # for most sessions. Keep the default until one comes.
+                        with self._ctx.db.transaction():
+                            self._append_event(record.id, EVENT_SESSION_TITLE_DEFERRED, {})
+                        return self._resolve(ref)
+                    failure = "empty"
+                elif not generated:
                     failure = "empty"
                 elif len(generated) > 160 or "\n" in generated:
                     failure = "invalid"

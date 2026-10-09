@@ -1856,3 +1856,73 @@ def test_model_changed_notice_follows_the_models_that_wrote(
     assert len(stored) == 1 and stored[0].turn_id == notice["turn_id"]
     again = turn("mc4", None)
     assert not [e for e in again if e["event"] == "model.changed"]
+
+
+def test_command_secret_runs_for_real_but_is_hidden_from_storage_ui_and_later_turns(
+    server, services, tmp_path, monkeypatch
+):
+    from rinari.models.types import ToolCall
+
+    secret = "FakePass91x"
+    sid = _create_chat(server, tmp_path, "secret")
+    services.sessions.set_permission(sid, "full-access")
+    command = f"echo PASSWORD={secret}"
+    first = FakeModel(
+        [
+            ModelResponse(
+                content="Connecting the share.",
+                tool_calls=(ToolCall("secret-call", "shell.exec", {"command": command}),),
+                # A provider block echoing the call: signed blocks are never
+                # edited, so this one must be left out of storage.
+                continuation={
+                    "protocol": "anthropic",
+                    "blocks": [
+                        {"type": "thinking", "thinking": "run it", "signature": "sig"},
+                        {
+                            "type": "tool_use",
+                            "id": "secret-call",
+                            "name": "shell.exec",
+                            "input": {"command": command},
+                        },
+                    ],
+                },
+            ),
+            _answer(),
+        ]
+    )
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda *args: first)
+    assert server.handle_line(
+        _req("secret-start", "session.turn.start", {"session_id": sid, "message": "conecta"})
+    )["ok"]
+    events = _collect_until(server, sid)
+    assert any(e["event"] == "turn.completed" for e in events)
+
+    # The command ran with the real value: its output reached this turn.
+    observation = next(m for m in first.requests[-1].messages if m.role == "tool")
+    assert secret in observation.content
+    # The desktop never received it.
+    assert secret not in json.dumps(events)
+    requested = next(e for e in events if e["event"] == "tool.requested")
+    assert "[REDACTED]" in requested["payload"]["arguments"]
+    # Nor did the database: messages, tool calls or events.
+    rows = services.ctx.message_repo.list(sid)
+    stored = json.dumps(
+        [[r.content, r.tool_calls, r.continuation] for r in rows if r.role != "user"]
+    )
+    assert secret not in stored and "PASSWORD=[REDACTED]" in stored
+    assert all(r.continuation is None for r in rows if r.tool_calls)
+    assert secret not in json.dumps([e.payload for e in services.ctx.event_repo.list(sid)])
+
+    # The next turn replays the stored form: the model does not see it again.
+    second = FakeModel([_answer()])
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda *args: second)
+    assert server.handle_line(
+        _req("secret-next", "session.turn.start", {"session_id": sid, "message": "sigue"})
+    )["ok"]
+    _collect_until(server, sid)
+    replayed = second.requests[0].messages
+    assert secret not in json.dumps(
+        [[m.content, [c.arguments for c in m.tool_calls]] for m in replayed]
+    )
+    call = next(m for m in replayed if m.tool_calls)
+    assert call.tool_calls[0].arguments == {"command": "echo PASSWORD=[REDACTED]"}

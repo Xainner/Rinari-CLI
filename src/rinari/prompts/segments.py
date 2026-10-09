@@ -50,6 +50,14 @@ class SegmentTrust(StrEnum):
 
 
 class CachePolicy(StrEnum):
+    """How often a segment changes, which decides where it is rendered.
+
+    STABLE and SESSION segments form the system prompt, the prefix provider
+    caches reuse. TURN segments change as the work progresses and close the
+    request after the history instead (PromptBundle.turn_context), so a
+    change there never invalidates the cached conversation.
+    """
+
     STABLE = "stable"
     SESSION = "session"
     TURN = "turn"

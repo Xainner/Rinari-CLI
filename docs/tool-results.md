@@ -177,6 +177,7 @@ Todos los productores nativos pasan por el contrato común. Elegibilidad explíc
 | `verify.evaluate` | `serial` | `none` |
 | `verify.plan` | `serial` | `none` |
 | `verify.record` | `serial` | `local-reversible` |
+| `wait.for` | `serial` | `none` |
 | `web.cite` | `serial` | `none` |
 | `web.download` | `serial` | `local-reversible` |
 | `web.extract_markdown` | `serial` | `none` |

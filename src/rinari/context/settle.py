@@ -38,19 +38,40 @@ def settle_old_observations(
     min_chars: int = MIN_CHARS,
 ) -> list[ChatMessage]:
     """The history with large results of old tool rounds replaced by a note."""
-    rounds = [i for i, m in enumerate(history) if m.role == "assistant" and m.tool_calls]
-    settled = max(0, (len(rounds) - keep_rounds) // block_rounds * block_rounds)
-    if not settled:
+    boundary = settled_boundary(history, keep_rounds=keep_rounds, block_rounds=block_rounds)
+    if not boundary:
         return list(history)
-    # Tool results answer the round before them; everything before the first
-    # kept round belongs to a settled one.
-    boundary = rounds[settled]
     result: list[ChatMessage] = []
     for index, message in enumerate(history):
         if index < boundary and message.role == "tool" and len(message.content or "") >= min_chars:
             message = replace(message, content=_note(message))
         result.append(message)
     return result
+
+
+def settled_boundary(
+    history: Sequence[ChatMessage],
+    *,
+    keep_rounds: int = KEEP_ROUNDS,
+    block_rounds: int = BLOCK_ROUNDS,
+) -> int:
+    """Index of the first message the next request keeps intact (0: all of them).
+
+    Large tool results before it are settled into a note. The read cache asks
+    the same question so it never points the model at text it no longer sees.
+    """
+    rounds = [i for i, m in enumerate(history) if m.role == "assistant" and m.tool_calls]
+    settled = max(0, (len(rounds) - keep_rounds) // block_rounds * block_rounds)
+    # Tool results answer the round before them; everything before the first
+    # kept round belongs to a settled one.
+    return rounds[settled] if settled else 0
+
+
+def kept_intact(
+    message: ChatMessage, index: int, boundary: int, min_chars: int = MIN_CHARS
+) -> bool:
+    """Whether the message at `index` reaches the next request unchanged."""
+    return index >= boundary or message.role != "tool" or len(message.content or "") < min_chars
 
 
 def _note(message: ChatMessage) -> str:

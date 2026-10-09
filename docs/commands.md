@@ -3572,10 +3572,15 @@ Shows prompt segment metadata:
 03 soul                  trusted         stable
 04 user-preferences      trusted         session
 05 project-instructions  scoped-trusted  session
-06 skill:fix-ci          scoped-trusted  turn
+06 skill:fix-ci          scoped-trusted  session
 07 task-state            trusted         turn
-08 environment           trusted         turn
+08 environment           trusted         session
+09 environment-current   trusted         turn
 ```
+
+`turn` segments are not part of the system prompt: they close each request
+after the history, so the cached prefix survives a changed task graph or
+repository scan.
 
 Optional rendering:
 

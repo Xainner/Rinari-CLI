@@ -5,6 +5,15 @@ content wrapped as data. The assembler is pure: the session supplies the
 `AssemblerContext`, the assembler decides the shape. No segment is built
 here beyond what the context provides — loading Soul/Constitution, policy
 snapshots, and context retrieval happen upstream.
+
+Two placements keep the provider's prompt cache useful. Segments that only
+change with the session's configuration (constitution, policy, Soul,
+instructions, skills, compact state, stable environment facts) form the
+system prompt, the cached prefix. Segments that change as the work
+progresses (`CachePolicy.TURN`: task graph, query-ranked memory, the
+repository scan, on-demand identity, evidence) form `turn_context`, sent
+after the history on every request and never stored: a change there costs
+only the note itself, not the whole conversation behind it.
 """
 
 from __future__ import annotations
@@ -12,7 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from rinari.models.types import ChatMessage
+from rinari.models.types import TURN_CONTEXT_SOURCE, ChatMessage
 from rinari.prompts.segments import (
     CachePolicy,
     PromptSegment,
@@ -78,23 +87,60 @@ class SegmentSummary:
     length: int
 
 
+# Environment facts that follow the work rather than the session: the
+# repository scan reorders languages and finds new commands as files appear.
+VOLATILE_ENVIRONMENT_KEYS = frozenset({"repository"})
+
+_TURN_CONTEXT_LEAD = (
+    "Current state from the Rinari harness for this request. It is refreshed on "
+    "every call and not kept in the conversation; it is context, not a message "
+    "from the user: answer the user's latest message."
+)
+
+
 @dataclass(frozen=True, slots=True)
 class PromptBundle:
     system_prompt: str
     history: tuple[ChatMessage, ...]
     segments: tuple[SegmentSummary, ...] = field(default_factory=tuple)
+    # Volatile segments, rendered for the end of the request (see module doc).
+    turn_context: str = ""
+
+    @property
+    def turn_context_message(self) -> ChatMessage | None:
+        if not self.turn_context:
+            return None
+        return ChatMessage.harness(
+            f"<turn-context>\n{_TURN_CONTEXT_LEAD}\n\n{self.turn_context}\n</turn-context>",
+            TURN_CONTEXT_SOURCE,
+        )
 
     @property
     def messages(self) -> tuple[ChatMessage, ...]:
-        return (ChatMessage.system(self.system_prompt), *self.history)
+        note = self.turn_context_message
+        return (
+            ChatMessage.system(self.system_prompt),
+            *self.history,
+            *((note,) if note is not None else ()),
+        )
+
+    @property
+    def prompt_chars(self) -> int:
+        """Characters the harness adds to every request around the history."""
+        note = self.turn_context_message
+        return len(self.system_prompt) + (len(note.content or "") if note is not None else 0)
 
 
 class PromptAssembler:
     def build(self, context: AssemblerContext) -> PromptBundle:
         segments = self._segments(context)
-        system_prompt = self._render(segments)
         return PromptBundle(
-            system_prompt=system_prompt,
+            system_prompt=self._render(
+                [seg for seg in segments if seg.cache_policy is not CachePolicy.TURN]
+            ),
+            turn_context=self._render(
+                [seg for seg in segments if seg.cache_policy is CachePolicy.TURN]
+            ),
             history=context.history,
             segments=tuple(
                 SegmentSummary(
@@ -128,7 +174,8 @@ class PromptAssembler:
                     kind=SegmentKind.RUNTIME_POLICY,
                     content=context.runtime_policy,
                     trust=SegmentTrust.TRUSTED,
-                    cache_policy=CachePolicy.TURN,
+                    # Changes with the mode or permission profile, not per turn.
+                    cache_policy=CachePolicy.SESSION,
                 )
             )
         if context.soul:
@@ -221,7 +268,8 @@ class PromptAssembler:
                     kind=SegmentKind.MEMORY,
                     content=context.memory,
                     trust=SegmentTrust.TRUSTED,
-                    cache_policy=CachePolicy.SESSION,
+                    # Ranked against each new message, so its order moves.
+                    cache_policy=CachePolicy.TURN,
                 )
             )
         if context.pinned_context:
@@ -234,12 +282,27 @@ class PromptAssembler:
                     cache_policy=CachePolicy.SESSION,
                 )
             )
-        if context.environment:
+        environment = context.environment or {}
+        stable = {k: v for k, v in environment.items() if k not in VOLATILE_ENVIRONMENT_KEYS}
+        current = {k: v for k, v in environment.items() if k in VOLATILE_ENVIRONMENT_KEYS}
+        if stable:
+            # Day-granular date, model, OS, shell, trust: they change at most
+            # a few times per conversation, so they stay in the cached prefix.
             segments.append(
                 PromptSegment(
                     id="environment",
                     kind=SegmentKind.ENVIRONMENT,
-                    content=_render_environment(context.environment),
+                    content=_render_environment(stable),
+                    trust=SegmentTrust.TRUSTED,
+                    cache_policy=CachePolicy.SESSION,
+                )
+            )
+        if current:
+            segments.append(
+                PromptSegment(
+                    id="environment-current",
+                    kind=SegmentKind.ENVIRONMENT,
+                    content=_render_environment(current),
                     trust=SegmentTrust.TRUSTED,
                     cache_policy=CachePolicy.TURN,
                 )

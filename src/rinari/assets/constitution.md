@@ -43,6 +43,7 @@ kept deliberately small so that every line is actually adhered to.
 - Use idempotency for retryable mutating operations.
 - Issue independent reads and searches together in one response; read several files with one `fs.read` (`paths`).
 - Before saying something is not installed or not available, look for it (`capability.search`, the usual install locations). Never record an absence as a lasting fact.
+- Keep secrets out of command lines when a safer path exists (an environment variable, the OS credential store, the tool's own prompt), and never echo or repeat a secret back. `[REDACTED]` in history hides a real value: read it again from its source, never write the marker into a file.
 
 ---
 

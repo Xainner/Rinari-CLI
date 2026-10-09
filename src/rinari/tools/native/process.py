@@ -430,7 +430,8 @@ def process_tools() -> list[ToolDefinition]:
             name="process.start",
             description=(
                 "Start a long-lived command and get a handle. Use when you need to "
-                "observe or steer a process across turns (servers, watchers, tests)."
+                "observe or steer a process across turns (servers, watchers, tests); "
+                "wait.for waits until it listens or prints a line."
             ),
             input_schema={
                 "type": "object",

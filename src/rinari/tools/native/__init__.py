@@ -18,6 +18,7 @@ from rinari.tools.native.ptytools import pty_tools
 from rinari.tools.native.search import search_tools
 from rinari.tools.native.shell import shell_tools
 from rinari.tools.native.verify import verify_tools
+from rinari.tools.native.wait import wait_tools
 from rinari.tools.native.web import web_tools
 
 __all__ = ["all_native_tools"]
@@ -35,6 +36,7 @@ def all_native_tools() -> list[ToolDefinition]:
         *shell_tools(),
         *git_tools(),
         *process_tools(),
+        *wait_tools(),
         *lsp_tools(),
         *verify_tools(),
         *memory_tools(),

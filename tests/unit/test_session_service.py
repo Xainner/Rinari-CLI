@@ -405,3 +405,27 @@ def test_every_rename_is_published_with_its_source(app_ctx, services, home):
         {"session_id": record.id, "title": "Saludo inicial", "source": "generated"},
         {"session_id": record.id, "title": "A mano", "source": "manual"},
     ]
+
+
+def test_a_greeting_does_not_name_the_session_the_next_topic_does(services, home, app_ctx):
+    """53 of 56 real titles were the opening message trimmed, often "Hola"."""
+    _configure(services, home)
+    record = services.sessions.start(home).session
+    default = record.title
+
+    def factory(text: str) -> str:
+        return "NONE" if text.strip().lower() in {"hola", "hi"} else "Arreglar el build de la app"
+
+    after_hello = services.sessions.name_from_first_message(
+        record.id, "Hola", title_factory=factory
+    )
+    assert after_hello.title == default
+    _user_message(app_ctx, record.id, "Hola")
+    named = services.sessions.name_from_first_message(
+        record.id, "El build falla con un error de tipos en la app", title_factory=factory
+    )
+    assert named.title == "Arreglar el build de la app"
+    # A session that already had a topic is not renamed again.
+    _user_message(app_ctx, record.id, "El build falla con un error de tipos en la app")
+    again = services.sessions.name_from_first_message(record.id, "otra cosa", title_factory=factory)
+    assert again.title == "Arreglar el build de la app"

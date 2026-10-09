@@ -442,3 +442,48 @@ def test_notes_reach_the_model_in_compact_command_output() -> None:
     )
     text = result.to_model_text("shell.exec")
     assert "notes: used timeout_s=300 (received timeout_ms=300000)" in text
+
+
+def test_the_history_redaction_marker_is_never_written_into_a_file(project) -> None:
+    """A model rebuilding a .env from redacted history would write the marker."""
+    tmp_path, root, _ = project
+    ctx = _ctx(tmp_path, root)
+    runtime, _ = _runtime(ctx, tmp_path)
+    env = root / ".env.example"
+    env.write_text("API_URL=http://localhost\n", encoding="utf-8")
+
+    for name, args in (
+        ("fs.write", {"path": str(env), "content": "API_KEY=[REDACTED]\n"}),
+        (
+            "fs.patch",
+            {
+                "path": str(env),
+                "old_string": "API_URL",
+                "new_string": "API_KEY=[REDACTED]\nAPI_URL",
+            },
+        ),
+        (
+            "fs.patch",
+            {
+                "files": [
+                    {
+                        "path": str(env),
+                        "edits": [{"old_string": "API_URL", "new_string": "X=[REDACTED]\nAPI_URL"}],
+                    }
+                ]
+            },
+        ),
+    ):
+        result = runtime.execute(name, args, ctx, tool_call_id=name)
+        assert not result.ok and "[REDACTED]" in result.error.message, name
+    assert env.read_text(encoding="utf-8") == "API_URL=http://localhost\n"
+    # A file that already documents the marker can still be edited.
+    doc = root / "SECURITY.md"
+    doc.write_text("Secrets show as [REDACTED] in history.\n", encoding="utf-8")
+    ok = runtime.execute(
+        "fs.patch",
+        {"path": str(doc), "old_string": "history", "new_string": "stored history"},
+        ctx,
+        tool_call_id="d",
+    )
+    assert ok.ok, ok.error

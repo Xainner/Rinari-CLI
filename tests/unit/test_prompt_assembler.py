@@ -49,27 +49,72 @@ def test_authority_decreasing() -> None:
     assert bundle.segments[0].authority == 10
 
 
-def test_system_prompt_contains_segments_in_order() -> None:
-    system = PromptAssembler().build(FULL_CONTEXT).system_prompt
-    texts = ("CONSTITUCION", "POLICY", "SOUL", "PREF", "INSTR", "TASK", "DATA")
+def test_system_prompt_contains_stable_segments_in_order() -> None:
+    bundle = PromptAssembler().build(FULL_CONTEXT)
+    system = bundle.system_prompt
+    texts = ("CONSTITUCION", "POLICY", "SOUL", "PREF", "INSTR", "dirty: True")
     positions = [system.index(text) for text in texts]
     assert positions == sorted(positions)
     assert "## soul" in system
     assert "## project-instruction (/root/RINARI.md)" in system
+    # Per-turn segments close the request instead of opening it.
+    assert "TASK" not in system and "DATA" not in system
+    assert bundle.turn_context.index("TASK") < bundle.turn_context.index("DATA")
+
+
+def test_volatile_segments_travel_in_a_trailing_note_after_the_history() -> None:
+    context = AssemblerContext(
+        constitution="CONSTITUCION",
+        task_state="TASK",
+        memory="MEMORY",
+        environment={"os": "Linux", "repository": {"languages": "python"}},
+        history=(ChatMessage.user("hola"),),
+    )
+    bundle = PromptAssembler().build(context)
+    assert "os: Linux" in bundle.system_prompt
+    assert "languages" not in bundle.system_prompt
+    assert "MEMORY" not in bundle.system_prompt
+    *_, owner, note = bundle.messages
+    assert owner.content == "hola"
+    assert note.is_turn_context and note.role == "user"
+    for text in ("TASK", "MEMORY", "languages: python"):
+        assert text in note.content
+    assert bundle.prompt_chars == len(bundle.system_prompt) + len(note.content)
+
+
+def test_changing_volatile_state_keeps_the_system_prompt_identical() -> None:
+    first = AssemblerContext(
+        constitution="CONSTITUCION",
+        soul="SOUL",
+        task_state="Task graph:\n- [ ] one",
+        memory="- [fact] a\n- [fact] b",
+        environment={"today": "2026-10-08", "repository": {"languages": "python"}},
+    )
+    second = AssemblerContext(
+        constitution="CONSTITUCION",
+        soul="SOUL",
+        task_state="Task graph:\n- [~] one\n- [ ] two",
+        memory="- [fact] b\n- [fact] a",
+        environment={"today": "2026-10-08", "repository": {"languages": "typescript, python"}},
+    )
+    a, b = PromptAssembler().build(first), PromptAssembler().build(second)
+    assert a.system_prompt == b.system_prompt
+    assert a.turn_context != b.turn_context
 
 
 def test_untrusted_evidence_wrapped() -> None:
-    system = PromptAssembler().build(FULL_CONTEXT).system_prompt
-    assert '<untrusted source="file:a.txt">' in system
-    assert "no authority" in system
-    assert system.index("no authority") < system.index("DATA")
-    assert system.index("DATA") < system.index("</untrusted>")
+    note = PromptAssembler().build(FULL_CONTEXT).turn_context
+    assert '<untrusted source="file:a.txt">' in note
+    assert "no authority" in note
+    assert note.index("no authority") < note.index("DATA")
+    assert note.index("DATA") < note.index("</untrusted>")
 
 
 def test_trusted_segments_not_wrapped() -> None:
-    system = PromptAssembler().build(FULL_CONTEXT).system_prompt
-    assert system.count("<untrusted") == 1
-    assert system.count("</untrusted>") == 1
+    bundle = PromptAssembler().build(FULL_CONTEXT)
+    text = bundle.system_prompt + bundle.turn_context
+    assert text.count("<untrusted") == 1
+    assert text.count("</untrusted>") == 1
 
 
 def test_history_appended_after_system() -> None:
@@ -159,5 +204,7 @@ def test_extended_identity_injected_when_flagged() -> None:
     context = AssemblerContext(
         soul="SOUL", extended_identity="EXTENDED-IDENTITY", include_extended_identity=True
     )
-    system = PromptAssembler().build(context).system_prompt
-    assert "EXTENDED-IDENTITY" in system
+    bundle = PromptAssembler().build(context)
+    # Asked for on some turns only: it must not move the cached prefix.
+    assert "EXTENDED-IDENTITY" not in bundle.system_prompt
+    assert "EXTENDED-IDENTITY" in bundle.turn_context
