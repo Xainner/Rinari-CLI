@@ -607,6 +607,10 @@ def _apply(turn: _Turn, kind: str, payload: dict, created_at: str) -> None:
     elif kind == "turn.failed":
         turn.ended, turn.ended_at = "failed", at
         turn.end_error = _error_text(payload.get("error") or payload.get("message"))
+    elif kind == "TurnInterrupted" and (payload.get("code") or payload.get("message")):
+        # The terminal persists why its turn failed; older rows only a reason.
+        turn.ended, turn.ended_at = "failed", at
+        turn.end_error = _error_text(payload.get("message") or payload.get("code"))
     elif kind in ("turn.cancelled", "turn.stopped", "TurnInterrupted"):
         turn.ended, turn.ended_at = "cancelled", at
     elif kind == "governor.compact":
@@ -672,6 +676,8 @@ def _anomalies(turn: _Turn, outcome: str, failed_tools: int) -> list[str]:
 
 def _end_status(kind: str, payload: dict) -> str:
     if kind == "turn.failed":
+        return "failed"
+    if kind == "TurnInterrupted" and (payload.get("code") or payload.get("message")):
         return "failed"
     if kind in ("turn.cancelled", "turn.stopped", "TurnInterrupted"):
         return "cancelled"

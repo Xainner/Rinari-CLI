@@ -26,9 +26,10 @@ class TurnTokenTracker:
                 "input_tokens": 0,
                 "output_tokens": 0,
                 "source": "estimated",
-                # Subagent calls arrive with their agent id: they count toward
-                # the cost, not toward the size of this conversation.
-                "main": not payload.get("agent_id"),
+                # Subagent calls arrive with their agent id, and a compaction's
+                # summarizer calls with their purpose: they count toward the
+                # cost, not toward the size of this conversation.
+                "main": not payload.get("agent_id") and payload.get("purpose") != "compaction",
             },
         )
         complete = event == "usage.call.completed"

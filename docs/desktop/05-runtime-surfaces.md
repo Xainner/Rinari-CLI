@@ -84,7 +84,15 @@ surface: writes stay engine-side.
    `turn.completed` / `turn.cancelled` / `turn.failed`, delivered
    at-least-once per turn. If delivery is ever impossible (crash), the
    post-restart snapshot contains no trace of the turn, which the
-   desktop treats as "reconcile, don't invent".
+   desktop treats as "reconcile, don't invent". The next engine closes
+   such a turn itself (at start, and again on `session.open` /
+   `session.timeline`): it persists and emits `turn.failed` with
+   `error.code = "ENGINE_EXITED"`, `retryable: true` and
+   `details.reason = "engine_exited"`, and closes its open activities
+   with the usual events (`tool.cancelled`, `model.failed`,
+   `agent.failed`, `vision.failed`). Idempotent; a turn live in this
+   engine, or in a session whose turn lock another process holds, is
+   never touched (`engine_protocol/orphans.py`).
 3. **Busy truth**: while the engine owns an active turn for a session,
    the snapshot reports it — the desktop blocks conflicting turns on
    exactly this signal.

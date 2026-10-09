@@ -108,6 +108,34 @@ def configure(services, value):
     return settings(services)
 
 
+def remember_no_vision(services, model_id):
+    """Record that a model refused images, so later turns do not resend them.
+
+    It is the same override a user sets by hand (`rinari vision capability`),
+    so it is visible and reversible. Best effort: failing to remember must
+    not fail the turn that just recovered.
+    """
+    if not model_id:
+        return
+    try:
+        current = {key: value for key, value in settings(services).items() if key != "execution"}
+        overrides = dict(current.get("model_overrides") or {})
+        if overrides.get(model_id) is False:
+            return
+        for ref in list(overrides):
+            # A deleted model's override would make the whole write invalid.
+            try:
+                services.models.resolve(ref)
+            except Exception:
+                overrides.pop(ref)
+        overrides[model_id] = False
+        configure(services, {**current, "model_overrides": overrides})
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).warning("could not remember %s as without vision", model_id)
+
+
 class VisionCaller:
     """Route pixels once, retain canonical references, cache task-specific analysis."""
 
@@ -119,6 +147,7 @@ class VisionCaller:
         self.token = None
         self.budget_getter = lambda: None
         self._events_lock = threading.RLock()
+        self._withheld = set()  # image URIs already reported as not sent
 
     def _operation(self):
         from rinari.runtime.vision import resolve_visual_route
@@ -563,11 +592,29 @@ class VisionCaller:
                 raise errors[0]
         self._check()
         prepared = replace(request, messages=tuple(messages))
-        result = (
-            self.main.invoke(prepared)
-            if on_delta is None
-            else self.main.invoke_stream(prepared, on_delta)
-        )
+        if any(m.images for m in prepared.messages) and self._known_blind():
+            # Learned from an earlier rejection: do not pay for it again.
+            prepared = self._without_pixels(prepared, rejected=False)
+        streamed = False
+
+        def deliver(text):
+            nonlocal streamed
+            streamed = streamed or bool(text)
+            on_delta(text)
+
+        def call(current):
+            if on_delta is None:
+                return self.main.invoke(current)
+            return self.main.invoke_stream(current, deliver)
+
+        try:
+            result = call(prepared)
+        except Exception as exc:
+            if streamed or not self._rejects_pixels(exc, prepared):
+                raise
+            # Once: the retry carries no pixels, so it cannot fail this way again.
+            prepared = self._without_pixels(prepared, rejected=True, error=exc)
+            result = call(prepared)
         self._check()
         native = [
             {
@@ -589,6 +636,85 @@ class VisionCaller:
                 },
             )
         return result
+
+    def _main_vision(self):
+        overrides = settings(self.services).get("model_overrides", {})
+        return overrides.get(self.main.model_id, self.main.capabilities().vision)
+
+    def _known_blind(self):
+        """The main model is remembered (or declared) unable to read images."""
+        return settings(self.services).get("model_overrides", {}).get(self.main.model_id) is False
+
+    def _rejects_pixels(self, exc, request):
+        """The provider refused the images, not the request.
+
+        An explicit modality rejection always qualifies. A bare 400 qualifies
+        only while nobody knows whether this model sees images: endpoints
+        (llama.cpp, gateways, OAuth backends) often answer an image they cannot
+        read with an opaque 400, and the turn died on it. A model declared
+        with vision keeps its 400 as a real error.
+        """
+        from rinari.providers.errors import ProviderErrorCode
+
+        if not any(m.images for m in request.messages):
+            return False
+        details = getattr(exc, "details", None) or {}
+        if details.get("partial"):
+            return False
+        code = getattr(exc, "error_code", None)
+        if code == ProviderErrorCode.VISION_UNSUPPORTED:
+            return True
+        return (
+            code == ProviderErrorCode.SERVER_ERROR
+            and details.get("http_status") == 400
+            and self._main_vision() is None
+        )
+
+    def _without_pixels(self, request, *, rejected, error=None):
+        """The same request with its images retired, and the user told why."""
+        from rinari.models.visual_context import last_owner_message, retire_images
+
+        stripped = replace(
+            request,
+            messages=tuple(retire_images(m) if m.images else m for m in request.messages),
+        )
+        if rejected:
+            remember_no_vision(self.services, self.main.model_id)
+        # Say it once per image: history keeps resending the same pixels on
+        # every call, and older ones were already reported when they were new.
+        current = {
+            image.uri
+            for message in request.messages[max(0, last_owner_message(request.messages)) :]
+            for image in message.images
+        }
+        fresh = current - self._withheld
+        self._withheld |= current
+        if not rejected and not fresh:
+            return stripped
+        count = len(fresh or current)
+        model = None
+        with contextlib.suppress(Exception):
+            model = self.services.models.resolve(self.main.model_id)
+        self._emit(
+            "vision.failed",
+            {
+                "vision_id": uuid.uuid4().hex,
+                "attempt_id": 1,
+                "route": "conversation",
+                "model_id": self.main.model_id,
+                "model_name": getattr(model, "alias", None) or self.main.model_id,
+                "provider_name": getattr(self.main.provider, "alias", None),
+                "fallback": "without_images",
+                "images_withheld": count,
+                "reason": "vision_unsupported" if rejected else "known_without_vision",
+                "error": (
+                    "This model can't see images; continued without them. "
+                    "Configure a visual model in Vision settings to analyze them."
+                ),
+                **({"provider_error": str(error)[:300]} if error is not None else {}),
+            },
+        )
+        return stripped
 
     def invoke(self, request):
         return self._invoke(request)

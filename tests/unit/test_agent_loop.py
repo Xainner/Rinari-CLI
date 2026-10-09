@@ -528,6 +528,24 @@ def test_malformed_tool_arguments_never_execute(env) -> None:
     assert "INVALID_ARGUMENT" in tools_msgs[0].content
 
 
+def test_invalid_patch_arguments_say_where_they_broke_and_how_to_retry(env) -> None:
+    raw = '{"path": "a.py", "edits": [{"old_string": "x", "new_string": "unterminated'
+    bad = ToolCall(
+        id="tc1", name="fs.patch", arguments={}, raw_arguments=raw, arguments_invalid=True
+    )
+    model = FakeModel(
+        scripted=[
+            ModelResponse(content="", tool_calls=(bad,), stop_reason=StopReason.TOOL_CALLS),
+            ModelResponse(content="recovered"),
+        ]
+    )
+    AgentLoop(model, env["runtime"], env["assembler"]).turn(env["ctx"], "patch it")
+    observation = next(m for m in env["ctx"].history if m.role == "tool").content
+    assert f"of {len(raw)})" in observation
+    assert "line 1 column" in observation
+    assert "split the patch" in observation and "fs.write" in observation
+
+
 def test_max_tokens_truncation(env) -> None:
     model = FakeModel(
         scripted=[ModelResponse(content="partial", stop_reason=StopReason.MAX_TOKENS)]

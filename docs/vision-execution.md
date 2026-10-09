@@ -30,6 +30,21 @@ separación; no se copian sus límites, políticas de reintento ni proveedores.
   runtime. Los eventos de un caller se serializan, los resultados pueden terminar
   fuera de orden. Preparación, espera, análisis, parcial y estados terminales visibles.
 
+## Modelo que no ve imágenes
+
+Una petición con píxeles hacia el modelo de la conversación que falla con
+`VISION_UNSUPPORTED`, o con un 400 genérico mientras la visión del modelo es
+desconocida (sin capacidad ni override), se repite **una vez** con las imágenes
+retiradas (`retire_images`: el texto conserva la referencia para
+`fs.read_image`; el historial canónico no cambia). El modelo queda recordado
+como sin visión en `vision.json` (`model_overrides[<id>] = false`, el mismo
+override que `rinari vision capability`, visible y reversible), y las llamadas
+siguientes ya no envían píxeles a ese modelo. El usuario lo ve como
+`vision.failed` con `fallback: "without_images"` y el mensaje "This model can't
+see images; continued without them", una vez por imagen. Un 400 de un modelo
+declarado con visión sigue siendo un error real; nunca se reintenta tras salida
+parcial ni más de una vez.
+
 ## Configuración de cada instalación
 
 `model-execution.json` en el directorio de estado contiene:

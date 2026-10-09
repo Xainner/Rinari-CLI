@@ -243,3 +243,23 @@ def test_the_tools_answer_in_one_call_and_resolve_the_current_session(world):
     missing = tools["rinari.session"].handler({"session_id": "ses_gone"}, Ctx())
     assert missing.error.code.value == "NOT_FOUND"
     assert "rinari.sessions" in missing.error.message
+
+
+def test_a_terminal_turn_interrupted_by_a_provider_reads_as_failed_with_its_cause(world):
+    services, _model, session, event, _message = world
+    record = session("ses_cli_fail", "Terminal")
+    event(record.id, "AgentTurnStarted", {"preview": "hola", "turn_index": 0})
+    event(
+        record.id,
+        "TurnInterrupted",
+        {"reason": "ProviderError", "code": "RATE_LIMIT", "message": "HTTP 429: slow down"},
+    )
+    legacy = session("ses_cli_legacy", "Terminal")
+    event(legacy.id, "AgentTurnStarted", {"preview": "hola", "turn_index": 0})
+    event(legacy.id, "TurnInterrupted", {"reason": "ProviderError"})
+
+    view = Introspection(services).session(record.id)["turns"][-1]
+    assert view["outcome"] == "failed"
+    assert "slow down" in view["errors"][0]
+    # Rows written before the detail existed keep their old reading.
+    assert Introspection(services).session(legacy.id)["turns"][-1]["outcome"] == "cancelled"

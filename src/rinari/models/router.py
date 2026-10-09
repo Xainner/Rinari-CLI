@@ -8,6 +8,7 @@ references, resolves the credential, and dispatches the normalized
 
 from __future__ import annotations
 
+import contextlib
 import math
 import os
 import re
@@ -367,19 +368,36 @@ class ModelRouter:
         return levels if isinstance(levels, list) else None
 
     def _validate_reasoning(self, provider, model, request):
+        """The request with a reasoning effort this model can take, or none.
+
+        An effort the model does not accept used to end the turn before any
+        call. It is a preference, not the task: the call goes without it (the
+        model reasons at its default) and `provider.reasoning.dropped` says
+        so. Capabilities are often unknown or stale for custom and local
+        models, so this must never be fatal.
+        """
         effort = request.reasoning_effort
         if effort is None:
-            return
+            return request
         levels = effective_metadata(provider, model).get(
             "reasoning_levels"
         ) or self.reasoning_levels(model)
         if not self.capabilities(provider, model.id).reasoning_effort:
-            raise InvalidUsageError("This model does not support configurable reasoning.")
-        if levels is not None and effort not in levels:
-            raise InvalidUsageError(
-                f"Reasoning level {effort!r} is not supported by model {model.alias!r}.",
-                hint=f"Supported levels: {', '.join(levels)}",
+            reason = "This model does not support configurable reasoning."
+        elif levels is not None and effort not in levels:
+            reason = (
+                f"Reasoning level {effort!r} is not supported by model {model.alias!r} "
+                f"(supported: {', '.join(map(str, levels))})."
             )
+        else:
+            return request
+        if request.usage_observer is not None:
+            with contextlib.suppress(Exception):
+                request.usage_observer(
+                    "provider.reasoning.dropped",
+                    {"model": request.model, "effort": effort, "reason": reason},
+                )
+        return replace(request, reasoning_effort=None)
 
     def _resolve_model(self, provider: ProviderRecord, model_id: str | None):
         if model_id is None:
@@ -525,7 +543,7 @@ class ModelRouter:
     ) -> ModelResponse:
         model = self._resolve_model(provider, model_id)
         request = self.generation_request(provider, model, request)
-        self._validate_reasoning(provider, model, request)
+        request = self._validate_reasoning(provider, model, request)
         from rinari.models.visual_context import prepare_visual_payload
 
         constraints = {
@@ -584,7 +602,7 @@ class ModelRouter:
             limits.setdefault("idle", read)
         limits = validate_stream_timeouts({**limits, **(request.stream_timeouts or {})})
         request = replace(request, stream_timeouts=limits, stream_read_timeout_s=limits["idle"])
-        self._validate_reasoning(provider, model, request)
+        request = self._validate_reasoning(provider, model, request)
         from rinari.models.visual_context import prepare_visual_payload
 
         constraints = {

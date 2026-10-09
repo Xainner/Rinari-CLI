@@ -428,3 +428,42 @@ def test_an_automatic_compaction_is_not_repeated_a_few_calls_later(app_ctx):
     ctx.prepared_calls += MIN_CALLS_BETWEEN_COMPACTIONS
     prepare(service, ctx, rebuild(ctx), caller, rebuild, emit, CancellationToken())
     assert events.count("started") == 2
+
+
+def test_a_compactions_model_calls_reach_durable_usage_and_live_cost(app_ctx):
+    from rinari.engine_protocol.observability import usage_from_events
+    from rinari.engine_protocol.token_usage import TurnTokenTracker
+    from rinari.models.types import Usage
+    from rinari.models.usage_tracking import observe_call
+
+    service, ctx, caller, _calls, rebuild = setup(app_ctx)
+    tracker = TurnTokenTracker()
+    events = []
+
+    def invoke(request):
+        # What the router does for every call: report through the observer.
+        return observe_call(
+            request,
+            lambda _delta: ModelResponse(
+                content="Goal: continue. Earlier decision: keep the existing design.",
+                usage=Usage(input_tokens=1200, output_tokens=40, source="complete"),
+            ),
+        )
+
+    caller.invoke = invoke
+
+    def sink(name, payload):
+        events.append(name)
+        if name.startswith("usage.call."):
+            tracker.observe(name, payload)
+
+    prepare(service, ctx, rebuild(ctx), caller, rebuild, sink, CancellationToken())
+    usage = usage_from_events(app_ctx.event_repo.list(ctx.session_id))
+    assert usage["model_calls"] >= 1
+    assert usage["tokens"]["input"] >= 1200 and usage["tokens"]["output"] >= 40
+    invoked = app_ctx.event_repo.latest(ctx.session_id, ["ModelInvoked"]).payload
+    assert invoked["purpose"] == "compaction" and "context_anchor" not in invoked
+    snapshot = tracker.finish()
+    # Cost of the turn, but not the size of the conversation.
+    assert snapshot["input_tokens"] >= 1200
+    assert snapshot["context_tokens"] == 0

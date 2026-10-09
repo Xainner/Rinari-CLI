@@ -219,6 +219,33 @@ def prepare(service, ctx, request, caller, rebuild, emit, cancel):
             )
         meter = getattr(ctx.tool_ctx, "parent_budget", None)
 
+        def observe(event, data):
+            # The live turn usage counts the summarizer's tokens as cost; the
+            # tag keeps them out of the conversation's own size.
+            emit(event, {**data, "purpose": "compaction"} if event.startswith("usage.") else data)
+
+        def record_usage(response):
+            # usage.get, provider usage and metrics read `ModelInvoked`: without
+            # it a compaction's tokens never appeared anywhere durable. No
+            # context anchor, so it never calibrates the conversation estimate.
+            from rinari.runtime.agent import EVENT_MODEL_INVOKED, _usage_dict
+
+            provider = getattr(summary_caller, "provider", None)
+            service._persist_event(
+                ctx.session_id,
+                EVENT_MODEL_INVOKED,
+                {
+                    "purpose": "compaction",
+                    "compaction_id": identity,
+                    "provider_id": (response.provider_state or {}).get("provider_id")
+                    or getattr(provider, "id", None),
+                    "model_id": getattr(summary_caller, "model_id", None),
+                    "stop_reason": response.stop_reason.value,
+                    "tool_calls": [],
+                    "usage": _usage_dict(response.usage),
+                },
+            )
+
         def summarize(summary_request):
             # One retry: a model that answered with nothing, or spent its
             # output on reasoning, often summarizes on a second call (a manual
@@ -234,9 +261,16 @@ def prepare(service, ctx, request, caller, rebuild, emit, cancel):
                             "Turn budget exhausted during context compaction."
                         )
                     meter.reserve_model_call(model_only=True)
-                response = invoke_summary(summary_caller, summary_request, cancel)
+                # A fresh usage identity per call: a retry or repair is a
+                # second cost, not a correction of the first.
+                response = invoke_summary(
+                    summary_caller,
+                    dataclasses.replace(summary_request, usage_call_id=uuid4().hex),
+                    cancel,
+                )
                 if meter is not None:
                     meter.note_usage(response.usage)
+                record_usage(response)
                 problem = summary_problem(response)
                 if problem is None:
                     return response.content
@@ -272,7 +306,7 @@ def prepare(service, ctx, request, caller, rebuild, emit, cancel):
                     ),
                     cancellation=cancel,
                     session_id=ctx.session_id,
-                    usage_observer=emit,
+                    usage_observer=observe,
                 )
                 if request_size(summary_request) <= int(summary_window * 0.60):
                     break
