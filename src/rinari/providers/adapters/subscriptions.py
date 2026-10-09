@@ -208,6 +208,9 @@ class CopilotAdapter(OpenAICompatibleAdapter):
         owner = self
 
         class Messages(AnthropicAdapter):
+            # Copilot proxies Claude; breakpoints are its own business.
+            prompt_caching = False
+
             def request_headers(self, secret, request):
                 return {**owner.request_headers(secret, request), "anthropic-version": API_VERSION}
 

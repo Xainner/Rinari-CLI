@@ -170,3 +170,57 @@ def test_the_prompt_knows_today_where_it_runs_and_which_model_answers() -> None:
     # A model that cannot be resolved leaves the rest of the facts in place.
     services.models = SimpleNamespace(resolve=lambda *_a: (_ for _ in ()).throw(KeyError()))
     assert "model" not in _runtime_facts(services, record)
+
+
+def test_anthropic_marks_tools_system_and_newest_message_for_caching() -> None:
+    from rinari.models.types import ToolSchema
+    from rinari.providers.adapters.anthropic import AnthropicAdapter
+
+    blocks = [
+        {"type": "thinking", "thinking": "t", "signature": "s"},
+        {"type": "text", "text": "a"},
+    ]
+    signed = ChatMessage(
+        role="assistant", content="a", continuation={"protocol": "anthropic", "blocks": blocks}
+    )
+    request = ModelRequest(
+        model="claude-x",
+        messages=(ChatMessage.system("rules"), ChatMessage.user("hola"), signed),
+        tools=(
+            ToolSchema("fs.read", "read", {"type": "object"}),
+            ToolSchema("fs.list", "list", {"type": "object"}),
+        ),
+    )
+    payload = AnthropicAdapter()._payload(request, stream=True)
+    assert payload["system"] == [
+        {"type": "text", "text": "rules", "cache_control": {"type": "ephemeral"}}
+    ]
+    assert "cache_control" not in payload["tools"][0]
+    assert payload["tools"][-1]["cache_control"] == {"type": "ephemeral"}
+    last = payload["messages"][-1]["content"]
+    assert last[-1]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in last[0]  # thinking blocks may not carry one
+    assert "cache_control" not in blocks[-1], "the stored continuation must not change"
+
+
+def test_anthropic_caching_can_be_turned_off_for_a_proxy() -> None:
+    from rinari.providers.adapters.anthropic import AnthropicAdapter
+
+    class Proxy(AnthropicAdapter):
+        prompt_caching = False
+
+    request = ModelRequest(
+        model="claude-x", messages=(ChatMessage.system("r"), ChatMessage.user("h"))
+    )
+    assert Proxy()._payload(request, stream=True)["system"] == "r"
+
+
+def test_openai_gets_a_prompt_cache_key_and_other_servers_do_not() -> None:
+    from rinari.providers.adapters.http import openai_cache_key
+
+    request = ModelRequest(model="m", messages=(ChatMessage.user("h"),), session_id="ses_1")
+    assert openai_cache_key({}, "https://api.openai.com/v1/responses", request) == {
+        "prompt_cache_key": "ses_1"
+    }
+    assert openai_cache_key({}, "https://opencode.ai/zen/go/v1/chat/completions", request) == {}
+    assert openai_cache_key({}, "http://localhost:8080/v1/chat/completions", request) == {}

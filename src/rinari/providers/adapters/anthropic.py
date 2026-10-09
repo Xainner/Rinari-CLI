@@ -48,6 +48,8 @@ class AnthropicAdapter(ProviderAdapter):
     type = "anthropic"
     default_max_tokens = DEFAULT_MAX_TOKENS
     tool_image_transport = "tool-result"
+    # Explicit prompt-cache breakpoints; a gateway that rejects them turns it off.
+    prompt_caching = True
 
     def __init__(self, *, client=None) -> None:
         super().__init__(client=client)
@@ -374,10 +376,53 @@ class AnthropicAdapter(ProviderAdapter):
                 payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
         # json_response: Anthropic has no native JSON mode; the runtime checks
         # capabilities.structured_output before requesting it.
+        if self.prompt_caching:
+            _mark_cache_breakpoints(payload)
         return payload
 
 
 # -- helpers -----------------------------------------------------------------
+
+_EPHEMERAL = {"type": "ephemeral"}
+# Blocks that may carry a cache breakpoint (thinking blocks may not).
+_CACHEABLE_BLOCKS = frozenset({"text", "image", "document", "tool_use", "tool_result"})
+
+
+def _mark_cache_breakpoints(payload: dict[str, Any]) -> None:
+    """Ask Anthropic to cache the prompt prefix: tools, system and history.
+
+    Anthropic caches nothing without `cache_control`, so every call paid for
+    the whole system prompt, tool schemas and conversation again. Three of
+    the four allowed breakpoints: the last tool, the system prompt and the
+    last block of the newest message; each call then reads the prefix the
+    previous one wrote. Copies what it marks: message blocks can belong to
+    a stored continuation.
+    """
+    tools = payload.get("tools")
+    if tools:
+        tools[-1] = {**tools[-1], "cache_control": _EPHEMERAL}
+    system = payload.get("system")
+    if isinstance(system, str) and system:
+        payload["system"] = [{"type": "text", "text": system, "cache_control": _EPHEMERAL}]
+    messages = payload.get("messages") or []
+    if not messages:
+        return
+    last = messages[-1]
+    content = last.get("content")
+    if isinstance(content, str):
+        if content:
+            blocks = [{"type": "text", "text": content, "cache_control": _EPHEMERAL}]
+            messages[-1] = {**last, "content": blocks}
+        return
+    if not isinstance(content, list):
+        return
+    for index in range(len(content) - 1, -1, -1):
+        block = content[index]
+        if isinstance(block, dict) and block.get("type") in _CACHEABLE_BLOCKS:
+            marked = list(content)
+            marked[index] = {**block, "cache_control": _EPHEMERAL}
+            messages[-1] = {**last, "content": marked}
+            return
 
 
 def _anthropic_input_schema(schema: dict[str, Any]) -> dict[str, Any]:

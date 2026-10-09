@@ -29,6 +29,7 @@ from rinari.providers.adapters.http import (
     decode_json,
     iter_model_lines,
     open_model_stream,
+    openai_cache_key,
     provider_error,
     sanitize_tool_name,
     send_request,
@@ -200,7 +201,9 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             "POST",
             url,
             headers=headers,
-            json_body=self._payload(request, stream=False, tool_aliases=tool_aliases),
+            json_body=openai_cache_key(
+                self._payload(request, stream=False, tool_aliases=tool_aliases), url, request
+            ),
             timeout=MODEL_CALL_TIMEOUT,
         )
         if response.status_code in (401, 403):
@@ -254,7 +257,9 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                 stream_started_at,
                 "POST",
                 url,
-                json=self._payload(request, stream=True, tool_aliases=tool_aliases),
+                json=openai_cache_key(
+                    self._payload(request, stream=True, tool_aliases=tool_aliases), url, request
+                ),
                 headers=headers,
             ) as response:
                 headers_received = True
