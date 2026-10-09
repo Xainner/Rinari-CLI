@@ -373,6 +373,42 @@ class TurnManager:
         self._persist_activity(event_name, safe)
         self._emit(event(event_name, safe))
 
+    def emit_memory_resolution(self, candidate: dict[str, Any]) -> bool:
+        """`memory.candidate.resolved` on the turn that showed the proposal.
+
+        A live turn takes it as ordinary activity (the card updates in place);
+        a finished one gets it appended, so a reloaded timeline shows the card
+        as resolved. Candidates no turn announced (message-derived ones) emit
+        nothing: the desktop refetches the list. Returns whether it emitted.
+        """
+        session_id = str(candidate.get("session_id") or "")
+        turn_id = None
+        for row in self._services.ctx.db.query(
+            "SELECT turn_id, payload_json FROM session_events WHERE session_id = ? "
+            "AND type = 'memory.candidate.created' AND turn_id IS NOT NULL ORDER BY seq DESC",
+            (session_id,),
+        ):
+            if _json_payload(row["payload_json"]).get("candidate_id") == candidate.get("id"):
+                turn_id = str(row["turn_id"])
+                break
+        if turn_id is None:
+            return False
+        status = {"accepted": "approved", "denied": "denied"}.get(str(candidate.get("status")))
+        if status is None:
+            return False
+        payload: dict[str, Any] = {"candidate_id": candidate["id"], "status": status}
+        if candidate.get("memory_id"):
+            payload["memory_id"] = candidate["memory_id"]
+        with self._lock:
+            live = self._turns.get(turn_id)
+        if live is not None and not live.done.is_set():
+            self._activity_cb(live)("memory.candidate.resolved", payload)
+        else:
+            self.emit_persisted_activity(
+                "memory.candidate.resolved", session_id=session_id, turn_id=turn_id, payload=payload
+            )
+        return True
+
     def runtime_state(self) -> dict[str, Any]:
         """Presentation-safe live state used to recover after a UI reload."""
         with self._lock:
@@ -1583,6 +1619,11 @@ class TurnManager:
             return f"question:{payload['request_id']}"
         if payload.get("approval_id"):
             return f"approval:{payload['approval_id']}"
+        if event_name.startswith("memory.candidate.") and payload.get("candidate_id"):
+            # created and resolved update one card in the timeline.
+            return f"memory-candidate:{payload['candidate_id']}"
+        if event_name == "memory.remembered" and payload.get("memory_id"):
+            return f"memory:{payload['memory_id']}"
         if event_name.startswith("turn.changes."):
             change_id = payload.get("id") or payload.get("changeset_id") or turn.turn_id
             return f"changeset:{change_id}"

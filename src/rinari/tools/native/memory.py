@@ -9,9 +9,16 @@ by the service before storage.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
-from rinari.memory.service import MemoryConflictError, MemoryNotFoundError
+from rinari.memory.service import (
+    LEARNED_KINDS,
+    MEM_LEARNED_MAX_TEXT,
+    MemoryConflictError,
+    MemoryNotFoundError,
+    candidate_view,
+)
 from rinari.tools.definition import (
     RISK_LOW,
     SIDE_EFFECT_LOCAL_DESTRUCTIVE,
@@ -25,8 +32,10 @@ from rinari.tools.definition import (
     ToolResult,
 )
 
-_USER_KINDS = ["preference", "rule", "fact"]
-_PROJECT_KINDS = ["fact", "rule", "convention"]
+logger = logging.getLogger(__name__)
+
+_USER_KINDS = ["preference", "rule", "fact", "environment", "workflow"]
+_PROJECT_KINDS = ["fact", "rule", "convention", "environment", "workflow"]
 _SCOPES = ["user", "project", "pattern"]
 _RECALL_SCOPES = ["user", "project", "pattern", "episodic"]
 
@@ -107,6 +116,49 @@ def _owner_source(ctx: ToolContext) -> dict | None:
     return source
 
 
+def _emit(ctx: ToolContext, event_name: str, payload: dict) -> None:
+    """Tell the desktop timeline; presentation never fails the write."""
+    sink = getattr(ctx, "activity_sink", None)
+    if not callable(sink):
+        return
+    try:
+        sink(event_name, payload)
+    except Exception:
+        logger.exception("memory activity event failed")
+
+
+def emit_candidate_created(ctx: ToolContext, candidate: dict) -> None:
+    _emit(
+        ctx,
+        "memory.candidate.created",
+        {
+            "candidate_id": candidate["id"],
+            "topic": candidate["topic"],
+            "text": candidate["text"],
+            "kind": candidate["kind"],
+            "scope": candidate.get("scope") or "user",
+            "reason": candidate.get("reason") or "",
+            "sensitive": bool(candidate.get("sensitive")),
+        },
+    )
+
+
+def emit_remembered(ctx: ToolContext, record: dict | None) -> None:
+    if not record:
+        return
+    _emit(
+        ctx,
+        "memory.remembered",
+        {
+            "memory_id": record["id"],
+            "topic": record["topic"],
+            "text": record["text"],
+            "kind": record["kind"],
+            "scope": record.get("scope") or "user",
+        },
+    )
+
+
 def _remember_for_owner(
     service, input: dict, ctx: ToolContext, topic: str, text: str
 ) -> ToolResult:
@@ -156,6 +208,9 @@ def _remember_for_owner(
             "Sensitive personal data is not stored without the owner's approval: it was "
             "saved as a proposal for the owner to review. Tell the owner; do not retry."
         )
+        emit_candidate_created(ctx, candidate_view(result["candidate"]))
+    elif result.get("action") in ("created", "superseded"):
+        emit_remembered(ctx, service.get_user(result["id"]))
     return _ok(result)
 
 
@@ -241,7 +296,118 @@ def memory_remember(input: dict, ctx: ToolContext) -> ToolResult:
             )
     except Exception as exc:
         return _fail(ToolErrorCode.VALIDATION_FAILED, getattr(exc, "message", str(exc)))
+    if scope == "project" and result.get("action") in ("created", "superseded"):
+        emit_remembered(ctx, service.get_any(result["id"]))
     return _ok(result)
+
+
+_PROPOSE_MESSAGES = {
+    "saved": (
+        "Saved to memory. The owner sees it in the chat and can undo it; no need to mention "
+        "it unless it matters to the answer."
+    ),
+    "pending": (
+        "Proposed to the owner, who approves or declines it in the chat. Continue the task; "
+        "do not wait for the answer or propose it again."
+    ),
+    "already_known": "Already in memory; nothing to do.",
+    "already_proposed": "Already proposed and waiting for the owner; do not propose it again.",
+    "declined": "The owner declined this fact before; do not propose it again.",
+    "forgotten": "The owner removed this fact from memory; do not propose it again.",
+}
+
+
+def memory_propose(input: dict, ctx: ToolContext) -> ToolResult:
+    """A stable fact learned while working, kept or proposed to the owner.
+
+    Unlike scope=user remember, it needs no owner quote: what Rinari finds
+    out (a host, a port, how a project starts) is the point. The owner's
+    `learned_facts` setting decides between a proposal card and saving at
+    once; sensitive data and untrusted turns always become a proposal.
+    """
+    service = _service(ctx)
+    if service is None:
+        return _fail(ToolErrorCode.DEPENDENCY_ERROR, "memory service unavailable")
+    text = input.get("text")
+    topic = input.get("topic")
+    if not isinstance(text, str) or not text.strip():
+        return _fail(ToolErrorCode.INVALID_ARGUMENT, "text is required")
+    if len(text.strip()) > MEM_LEARNED_MAX_TEXT:
+        return _fail(
+            ToolErrorCode.INVALID_ARGUMENT,
+            f"text exceeds {MEM_LEARNED_MAX_TEXT} characters: keep one short fact per call",
+        )
+    if not isinstance(topic, str) or not topic.strip():
+        return _fail(ToolErrorCode.INVALID_ARGUMENT, "topic is required")
+    if len(topic.strip()) > 128:
+        return _fail(ToolErrorCode.INVALID_ARGUMENT, "topic exceeds 128 characters")
+    kind = input.get("kind", "fact")
+    if kind not in LEARNED_KINDS:
+        return _fail(
+            ToolErrorCode.INVALID_ARGUMENT, f"kind must be one of: {', '.join(LEARNED_KINDS)}"
+        )
+    scope = input.get("scope", "user")
+    if scope not in ("user", "project"):
+        return _fail(ToolErrorCode.INVALID_ARGUMENT, "scope must be user or project")
+    if not service.session_exists(ctx.session_id):
+        # A subagent runs under a child id with no conversation behind it.
+        return _fail(
+            ToolErrorCode.PERMISSION_DENIED,
+            "only the main conversation proposes memory: report the fact in your result "
+            "instead. Do not retry.",
+        )
+    notes: tuple[str, ...] = ()
+    root = None
+    if scope == "project":
+        root = _project_root(ctx) if kind != "preference" else None
+        if root is None:
+            notes = (
+                ("a preference belongs to the owner: proposed as a user fact",)
+                if kind == "preference"
+                else ("this session has no project: proposed as a user fact",)
+            )
+            scope = "user"
+    turn_state = getattr(ctx, "turn_state", None)
+    trusted = True
+    untrusted_reason = ""
+    if getattr(ctx, "origin_kind", "user") != "user":
+        trusted = False
+        untrusted_reason = "learned in a turn the owner did not start"
+    elif turn_state is not None and getattr(turn_state, "external_content", False):
+        # Text read from the web or an MCP server may be steering the model:
+        # what it learned after that waits for the owner even in auto mode.
+        trusted = False
+        untrusted_reason = "learned after reading content from outside this machine"
+    try:
+        result = service.propose_learned(
+            ctx.session_id,
+            text=text.strip(),
+            topic=topic.strip(),
+            kind=kind,
+            scope=scope,
+            project_root=str(root) if root is not None else None,
+            trusted=trusted,
+            untrusted_reason=untrusted_reason,
+        )
+    except Exception as exc:
+        message = getattr(exc, "message", str(exc))
+        return _fail(ToolErrorCode.VALIDATION_FAILED, f"{message} Do not retry with the same text.")
+    status = result["status"]
+    data: dict = {"status": status, "message": _PROPOSE_MESSAGES[status], "scope": scope}
+    record = result.get("memory")
+    candidate = result.get("candidate")
+    if record is not None:
+        data["id"] = record["id"]
+        data["scope"] = record.get("scope", scope)
+    elif candidate is not None:
+        data["id"] = candidate["id"]
+    if status == "saved":
+        data["action"] = result.get("action")
+        if result.get("action") in ("created", "superseded"):
+            emit_remembered(ctx, record)
+    elif status == "pending" and candidate is not None:
+        emit_candidate_created(ctx, candidate)
+    return ToolResult(ok=True, data=data, notes=notes)
 
 
 def memory_recall(input: dict, ctx: ToolContext) -> ToolResult:
@@ -451,7 +617,7 @@ def memory_tools() -> list[ToolDefinition]:
                     "scope": {"type": "string", "enum": _SCOPES},
                     "kind": {
                         "type": "string",
-                        "enum": [*_USER_KINDS, *_PROJECT_KINDS],
+                        "enum": list(dict.fromkeys([*_USER_KINDS, *_PROJECT_KINDS])),
                     },
                     "pattern_scope": {"type": "string", "enum": ["global", "user"]},
                     "topic": {"type": "string"},
@@ -466,6 +632,40 @@ def memory_tools() -> list[ToolDefinition]:
             idempotent=True,
             timeout_ms=15_000,
             handler=memory_remember,
+            classify=_classify_write,
+            namespace="memory",
+        ),
+        ToolDefinition(
+            name="memory.propose",
+            description=(
+                "Keep a stable fact you learned while working, so the owner does not have to "
+                "repeat it: environment/infrastructure (hosts, ports, paths, which machine "
+                "runs what), how a project is started, built or tested, a command that works "
+                "on this machine, or an owner preference you inferred. One short fact per "
+                "call, in your own words. Not for one-off details of this task, guesses, or "
+                "secrets (name where a secret lives, never its value). Depending on the "
+                "owner's setting it is saved at once or proposed for approval; the result "
+                "says which. scope=project only in a session with a project."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "maxLength": MEM_LEARNED_MAX_TEXT},
+                    "topic": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "description": "short label, e.g. 'saturno ssh' or 'dev server'",
+                    },
+                    "kind": {"type": "string", "enum": list(LEARNED_KINDS), "default": "fact"},
+                    "scope": {"type": "string", "enum": ["user", "project"], "default": "user"},
+                },
+                "required": ["text", "topic"],
+            },
+            risk=RISK_LOW,
+            side_effects=SIDE_EFFECT_LOCAL_REVERSIBLE,
+            idempotent=True,
+            timeout_ms=15_000,
+            handler=memory_propose,
             classify=_classify_write,
             namespace="memory",
         ),

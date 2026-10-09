@@ -8,6 +8,7 @@ roundtrips, provider/model reads. Envelope contract is unchanged.
 from __future__ import annotations
 
 import contextlib
+import logging
 import secrets
 import threading
 import time
@@ -59,6 +60,8 @@ from rinari.shared.errors import (
     PermissionDeniedError,
 )
 from rinari.soul.store import SoulStore
+
+logger = logging.getLogger(__name__)
 
 _TEXT_EXTENSIONS = {
     ".c",
@@ -364,6 +367,8 @@ class EngineServer:
         self._dispatcher.register("memory.forget", self._memory_forget)
         self._dispatcher.register("memory.candidates.list", self._memory_candidates_list)
         self._dispatcher.register("memory.candidate.resolve", self._memory_candidate_resolve)
+        self._dispatcher.register("memory.settings.get", self._memory_settings_get)
+        self._dispatcher.register("memory.settings.set", self._memory_settings_set)
         self._dispatcher.register("conversation.memory.status", self._conversation_memory_status)
         self._dispatcher.register("conversation.memory.exclude", self._conversation_memory_exclude)
         self._dispatcher.register("conversation.delete", self._conversation_delete)
@@ -875,34 +880,99 @@ class EngineServer:
             raise EngineProtocolError(INVALID_PARAMS, "Param 'id' must be a non-empty string.")
         return value
 
+    @staticmethod
+    def _memory_kind(params: dict[str, Any]) -> str | None:
+        from rinari.storage.repositories.memory import PROJECT_KINDS, USER_KINDS
+
+        kinds = tuple(dict.fromkeys((*USER_KINDS, *PROJECT_KINDS)))
+        kind = params.get("kind")
+        if kind is not None and kind not in kinds:
+            raise EngineProtocolError(
+                INVALID_PARAMS, f"Param 'kind' must be one of: {', '.join(kinds)}."
+            )
+        return kind
+
+    @staticmethod
+    def _memory_scope(params: dict[str, Any]) -> tuple[str, str | None]:
+        """`scope` user (default, as before) | project | all, and an optional
+        `project_root` that narrows project records to one project."""
+        scope = params.get("scope", "user")
+        if scope not in ("user", "project", "all"):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'scope' must be user, project or all.")
+        root = params.get("project_root")
+        if root is not None and (not isinstance(root, str) or not root or len(root) > 4096):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'project_root' must be a path.")
+        return scope, root
+
     def _memory_list(self, params: dict[str, Any]) -> dict[str, Any]:
-        self._memory_reject_unknown(params, {"limit"})
-        rows = self._services.memory.list_user(limit=self._memory_limit(params))
-        return {"scope": "user", "records": rows, "count": len(rows)}
+        self._memory_reject_unknown(params, {"limit", "kind", "scope", "project_root"})
+        limit = self._memory_limit(params)
+        kind = self._memory_kind(params)
+        scope, root = self._memory_scope(params)
+        memory = self._services.memory
+        rows: list[dict[str, Any]] = []
+        if scope in ("user", "all"):
+            rows += memory.list_user(limit=limit, kind=kind)
+        if scope in ("project", "all"):
+            rows += memory.list_project(root, limit=limit, kind=kind)
+        if scope == "all":
+            rows.sort(key=lambda row: str(row.get("updated_at") or ""), reverse=True)
+            rows = rows[:limit]
+        return {"scope": scope, "records": rows, "count": len(rows)}
 
     def _memory_search(self, params: dict[str, Any]) -> dict[str, Any]:
-        self._memory_reject_unknown(params, {"query", "kind", "limit"})
+        self._memory_reject_unknown(params, {"query", "kind", "limit", "scope", "project_root"})
         query = params.get("query", "")
         if not isinstance(query, str) or len(query) > 256:
             raise EngineProtocolError(
                 INVALID_PARAMS, "Param 'query' must be a string up to 256 chars."
             )
-        kind = params.get("kind")
-        if kind is not None and kind not in ("preference", "rule", "fact"):
-            raise EngineProtocolError(
-                INVALID_PARAMS, "Param 'kind' must be preference, rule, or fact."
-            )
+        kind = self._memory_kind(params)
         limit = self._memory_limit(params, 20)
-        rows = self._services.memory.search_user(query, kind=kind, limit=limit)
-        return {"scope": "user", "query": query, "records": rows, "count": len(rows)}
+        scope, root = self._memory_scope(params)
+        memory = self._services.memory
+        rows: list[dict[str, Any]] = []
+        if scope in ("user", "all"):
+            rows += memory.search_user(query, kind=kind, limit=limit)
+        if scope in ("project", "all"):
+            roots = (
+                [root]
+                if root
+                else sorted({str(row["project_root"]) for row in memory.list_project(None)})
+            )
+            for project_root in roots:
+                rows += memory.search_project(project_root, query, kind=kind, limit=limit)
+        if scope != "user":
+            from rinari.memory.service import rank_by_terms
+
+            rows = rank_by_terms(rows, query, {"topic": 3, "text": 2}, limit=limit)
+        return {"scope": scope, "query": query, "records": rows, "count": len(rows)}
 
     def _memory_get(self, params: dict[str, Any]) -> dict[str, Any]:
         self._memory_reject_unknown(params, {"id"})
         memory_id = self._memory_id(params)
-        row = self._services.memory.get_user(memory_id)
+        row = self._services.memory.get_any(memory_id)
         if row is None or row.get("superseded_by") is not None:
             raise EngineProtocolError("NOT_FOUND", "Personal memory record not found.")
-        return {"scope": "user", "record": row}
+        return {"scope": row["scope"], "record": row}
+
+    @staticmethod
+    def _learned_record(row: dict[str, Any] | None) -> bool:
+        from rinari.memory.service import LEARNED_PROVENANCE_PREFIX
+
+        return bool(row) and str(row.get("provenance") or "").startswith(LEARNED_PROVENANCE_PREFIX)
+
+    def _memory_settings_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        if params:
+            raise EngineProtocolError(INVALID_PARAMS, "memory.settings.get takes no parameters.")
+        return {"learned_facts": self._services.memory.learned_facts_mode()}
+
+    def _memory_settings_set(self, params: dict[str, Any]) -> dict[str, Any]:
+        self._memory_reject_unknown(params, {"learned_facts"})
+        mode = params.get("learned_facts")
+        if mode not in ("ask", "auto"):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'learned_facts' must be ask or auto.")
+        return {"learned_facts": self._services.memory.set_learned_facts_mode(mode)}
 
     def _memory_remember(self, params: dict[str, Any]) -> dict[str, Any]:
         if self._turns.has_active_turns():
@@ -955,7 +1025,14 @@ class EngineServer:
         return {"scope": "user", "record": row, "action": result.get("action", "created")}
 
     def _memory_update(self, params: dict[str, Any]) -> dict[str, Any]:
-        if self._turns.has_active_turns():
+        # A learned fact has no source message, so editing it cannot race
+        # the turn that is running: the owner corrects the card right away.
+        existing = (
+            self._services.memory.get_any(params.get("id"))
+            if isinstance(params.get("id"), str)
+            else None
+        )
+        if self._turns.has_active_turns() and not self._learned_record(existing):
             raise EngineProtocolError(
                 TURN_RUNNING,
                 "Finish active turns before changing durable personal memory.",
@@ -999,11 +1076,23 @@ class EngineServer:
         from rinari.memory.service import MemoryConflictError, MemoryNotFoundError
 
         try:
-            existing = self._services.memory.get_user(memory_id)
+            if existing is not None and existing.get("scope") == "project":
+                row = self._services.memory.update_project(
+                    existing["project_root"],
+                    memory_id,
+                    expected_revision=expected_revision,
+                    **fields,
+                )
+                return {"scope": "project", "record": row}
             row = self._services.memory.update_user(
                 memory_id,
                 expected_revision=expected_revision,
-                owner_consent=bool(existing and existing.get("provenance") == "panel"),
+                # The desktop is the owner: their edit of a record they made
+                # in the panel, or of a learned fact, is their consent.
+                owner_consent=bool(
+                    existing
+                    and (existing.get("provenance") == "panel" or self._learned_record(existing))
+                ),
                 **fields,
             )
         except MemoryConflictError as exc:
@@ -1015,7 +1104,13 @@ class EngineServer:
         return {"scope": "user", "record": row}
 
     def _memory_forget(self, params: dict[str, Any]) -> dict[str, Any]:
-        if self._turns.has_active_turns():
+        # Undoing a learned fact from its card happens while the turn runs.
+        target = (
+            self._services.memory.get_any(params.get("id"))
+            if isinstance(params.get("id"), str)
+            else None
+        )
+        if self._turns.has_active_turns() and not self._learned_record(target):
             raise EngineProtocolError(
                 TURN_RUNNING,
                 "Finish active turns before forgetting durable personal memory.",
@@ -1033,6 +1128,18 @@ class EngineServer:
             )
         from rinari.memory.service import MemoryConflictError
 
+        if target is not None and target.get("scope") == "project":
+            from rinari.memory.service import MemoryConflictError
+
+            try:
+                forgotten = self._services.memory.forget_project(
+                    target["project_root"], memory_id, expected_revision=expected_revision
+                )
+            except MemoryConflictError as exc:
+                raise EngineProtocolError("CONFLICT", exc.message) from exc
+            if not forgotten:
+                raise EngineProtocolError("NOT_FOUND", "Memory record not found.")
+            return {"scope": "project", "id": memory_id, "forgotten": True}
         try:
             existing = self._services.memory.get_user(memory_id)
             for source in self._services.memory.repo.sources_for_memory(memory_id, live_only=True):
@@ -1066,20 +1173,28 @@ class EngineServer:
         if unknown:
             raise EngineProtocolError(INVALID_PARAMS, "Unknown candidate parameter.")
         status = params.get("status", "pending")
-        if status is not None and status not in ("pending", "accepted", "denied"):
+        if status is not None and status not in (
+            "pending",
+            "accepted",
+            "denied",
+            "resolved",
+            "all",
+        ):
             raise EngineProtocolError(INVALID_PARAMS, "Invalid candidate status.")
         limit = self._memory_limit(params)
         rows = self._services.memory.list_candidates(status=status, limit=limit)
         return {"candidates": rows, "count": len(rows)}
 
     def _memory_candidate_resolve(self, params: dict[str, Any]) -> dict[str, Any]:
-        if self._turns.has_active_turns():
-            raise EngineProtocolError(
-                TURN_RUNNING,
-                "Finish active turns before resolving a memory candidate.",
-            )
+        from rinari.memory.service import MODEL_CANDIDATE_CLASSES, MemoryNotFoundError
+
         params = params or {}
-        if set(params) != {"id", "decision"}:
+        if not {"id", "decision"} <= set(params) or set(params) - {
+            "id",
+            "decision",
+            "text",
+            "topic",
+        }:
             raise EngineProtocolError(INVALID_PARAMS, "Candidate id and decision are required.")
         candidate_id = params.get("id")
         decision = params.get("decision")
@@ -1087,14 +1202,42 @@ class EngineServer:
             raise EngineProtocolError(INVALID_PARAMS, "Candidate id is required.")
         if decision not in ("allow_once", "deny"):
             raise EngineProtocolError(INVALID_PARAMS, "Decision must be allow_once or deny.")
-        from rinari.memory.service import MemoryNotFoundError
-
+        text = params.get("text")
+        topic = params.get("topic")
+        if text is not None and (not isinstance(text, str) or not text.strip() or len(text) > 4096):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'text' must be max 4096 chars.")
+        if topic is not None and (
+            not isinstance(topic, str) or not topic.strip() or len(topic) > 128
+        ):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'topic' must be max 128 chars.")
+        current = self._services.memory.repo.candidate_get(candidate_id)
+        # A proposal the model wrote carries its own text: the owner answers
+        # the card while the turn runs. One parsed from an owner message is
+        # re-read from that message, so it still waits for the turns to end.
+        model_written = bool(current) and current.get("classification") in MODEL_CANDIDATE_CLASSES
+        if self._turns.has_active_turns() and not model_written:
+            raise EngineProtocolError(
+                TURN_RUNNING,
+                "Finish active turns before resolving a memory candidate.",
+            )
         try:
-            row = self._services.memory.resolve_candidate(candidate_id, decision)
+            row = self._services.memory.resolve_candidate(
+                candidate_id, decision, text=text, topic=topic
+            )
         except MemoryNotFoundError as exc:
             raise EngineProtocolError("NOT_FOUND", exc.message) from exc
         except InvalidUsageError as exc:
             raise EngineProtocolError("INVALID_PARAMS", exc.message) from exc
+        if (
+            current is not None
+            and current.get("status") == "pending"
+            and row["status"] != "pending"
+        ):
+            try:
+                self._turns.emit_memory_resolution(row)
+            except Exception:
+                # The card refetches the list; a lost event is presentation.
+                logger.exception("memory.candidate.resolved event failed")
         return {"candidate": row}
 
     def _memory_ledger_export(self, params: dict[str, Any]) -> dict[str, Any]:

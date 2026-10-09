@@ -633,6 +633,7 @@ def build_agent_session(
         lsp=_build_lsp_manager(root),
         validation=services.verification,
         memory=services.memory,
+        activity_sink=activity_sink,
         context_retrieval=services.retrieval,
         project_trusted=_project_trusted(services, root),
         network=NetworkGuard(network_policy),

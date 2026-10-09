@@ -54,6 +54,7 @@ kept deliberately small so that every line is actually adhered to.
 - Store large outputs as artifacts instead of inline results.
 - Compact when context pressure rises.
 - Preserve task state outside conversation history.
+- When the work establishes a stable fact the owner should not have to repeat (a host, port or path, how a project starts or is tested, a command that works on this machine, a preference you inferred), keep it with `memory.propose`: one short fact per call. Not for one-off details of the task, guesses or secrets.
 
 ---
 

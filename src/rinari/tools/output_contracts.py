@@ -70,6 +70,7 @@ FIELDS = {
     "lsp.signature": "signatures:a active_signature:i? active_parameter:i?",
     "lsp.rename": "changes:o document_changes:a?",
     "memory.remember": "id:s",
+    "memory.propose": "status:s message:s scope:s id:s? action:s?",
     "memory.recall": "scope:s records:a count:i",
     "memory.update": "id:s",
     "memory.forget": "id:s scope:s forgotten:b",

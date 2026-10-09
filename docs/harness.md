@@ -3162,6 +3162,61 @@ persist
 
 Do not automatically remember every model inference.
 
+## 73.1 Learned facts (`memory.propose`, `learned_memory_v1`)
+
+What the owner states ("remember that…") keeps going through
+`memory.remember` / the end-of-turn capture, tied to the owner's message.
+Facts Rinari *learns while working* — hosts, ports and paths of this machine
+(`environment`), how a project is started, built or tested and commands that
+work here (`workflow`), inferred preferences or other stable facts — go through
+`memory.propose {text, topic, kind?, scope?}`: one short fact (≤ 600 chars) per
+call, no owner quote needed. The constitution asks for it only for stable
+facts, never for one-off details, guesses or secrets.
+
+```text
+memory.propose
+  → secret check (memory patterns + history redactor shapes) → refused
+  → forgotten earlier (suppression hash)          → status "forgotten"
+  → same/similar live record (≥ 0.9 similarity)   → "already_known"
+  → same/similar pending | declined proposal      → "already_proposed" | "declined"
+  → setting learned_facts = auto
+      and not personal-sensitive
+      and turn started by the owner, nothing external read
+                                                 → saved, provenance learned:session/<id>,
+                                                   activity memory.remembered
+  → otherwise                                    → pending candidate (classification
+                                                   learned | learned_sensitive),
+                                                   activity memory.candidate.created
+```
+
+- Setting: `memory.settings.get` / `memory.settings.set {learned_facts: "ask"|"auto"}`,
+  default `ask`, stored per installation in `config_values` (`memory.learned_facts`).
+- Cards: `memory.candidate.created {candidate_id, topic, text, kind, scope, reason,
+  sensitive}`, `memory.remembered {memory_id, topic, text, kind, scope}` and
+  `memory.candidate.resolved {candidate_id, status: approved|denied, memory_id?}`
+  are turn activity. Resolution is appended to the turn that showed the card,
+  live or finished. `memory.remember` also announces its pending sensitive
+  proposals and its saves with the same events.
+- `memory.candidate.resolve {id, decision, text?, topic?}` approves an edited
+  version (secret-checked again). Proposals the model wrote (`learned*`,
+  `agent_sensitive`) can be answered while a turn runs; learned records can be
+  edited or forgotten during a turn too. Undoing a learned fact leaves a
+  suppression hash so it is not learned again.
+- Candidate rows keep `scope` and `project_root` (migration 0044); project
+  records gained `revision` and are listed/edited through `memory.list|search
+  {scope: user|project|all, kind?, project_root?}`, `memory.update` and
+  `memory.forget` by id.
+- Prompt: `environment`/`workflow` records (user + current project) form a
+  "Known environment and workflows" list at the top of the memory note —
+  listed whatever the message says, at most 20 lines / 2,500 chars.
+- Recall: user, project, pattern and episodic search rank by query terms
+  (accent- and case-folded, stopwords dropped; distinct terms hit, then field
+  weight, then recency), with or without a project. No FTS index: the bundled
+  SQLite build is not guaranteed to ship FTS5 and the corpus is small.
+- Deleting a conversation tombstones only the owner's messages (the memory
+  sources); migration 0045 drops the old per-message rows of other roles and
+  of conversations already gone, whose `deleted` control row remains.
+
 ---
 
 # 74. Runtime Policy
