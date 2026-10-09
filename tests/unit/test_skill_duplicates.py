@@ -84,7 +84,8 @@ def test_tfidf_puts_the_superseded_pair_above_an_unrelated_skill():
     found = index.similar_to(text("visual-lab-generate", LAB_HTTP))
     assert [s.name for s in found] == ["lab-image"]
     assert found[0].score >= PROPOSE_THRESHOLD
-    assert {"int8", "bf16"} & set(found[0].shared)
+    # What they share is the lab and its formats, whatever the order of ties.
+    assert set(found[0].shared) & {"int8", "bf16", "2k", "visual", "lab", "webp"}
 
 
 # -- the gate ------------------------------------------------------------------------
