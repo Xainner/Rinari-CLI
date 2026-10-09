@@ -54,6 +54,35 @@ _SIMILAR_RATIO = 0.9
 MODEL_CANDIDATE_CLASSES = ("agent_sensitive", "learned", "learned_sensitive")
 _SENSITIVE_CLASSES = ("sensitive", "agent_sensitive", "learned_sensitive")
 
+# Portable memory (memory.export / memory.import): one JSON file the owner
+# saves and loads elsewhere. Bounded so an import fits one protocol line.
+MEMORY_BUNDLE_FORMAT = "rinari-memory"
+MEMORY_BUNDLE_VERSION = 1
+MEMORY_BUNDLE_MAX_RECORDS = 5000
+MEMORY_BUNDLE_MAX_SUPPRESSIONS = 50000
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+_BUNDLE_DATE = re.compile(r"\d{4}-\d{2}-\d{2}T[0-9:.+\-Z]{2,40}")
+_EPOCH = "1970-01-01T00:00:00Z"
+
+
+def _bundle_date(value: object) -> bool:
+    return isinstance(value, str) and _BUNDLE_DATE.fullmatch(value) is not None
+
+
+def _bundle_number(value: object) -> float | int:
+    number = round(float(value), 3) if isinstance(value, (int, float)) else 1.0
+    return int(number) if number.is_integer() else number
+
+
+def _canonical_numbers(value: object) -> object:
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, dict):
+        return {key: _canonical_numbers(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_canonical_numbers(item) for item in value]
+    return value
+
 
 @dataclass(frozen=True, slots=True)
 class MemoryCandidate:
@@ -1498,6 +1527,232 @@ class MemoryService:
             "watermark": applied,
             "imported": True,
         }
+
+    # -- portable memory bundle (memory.export / memory.import) ------------------
+
+    def export_bundle(self) -> dict:
+        """What Rinari remembers, to move to another installation.
+
+        Live user and project records with their provenance and dates, plus
+        the content suppressions (hashes of what was forgotten), so a fact
+        forgotten here stays forgotten there. Nothing tied to this machine's
+        conversations travels: no source quotes, session links, candidates
+        or conversation controls (those stay in `memory.ledger.*`), and
+        never a credential.
+        """
+        records = [self._bundle_record(row, "user") for row in self.repo.user_live()]
+        records += [self._bundle_record(row, "project") for row in self.repo.project_all_live()]
+        suppressions = [
+            dict(row)
+            for row in self.repo._db.query(
+                "SELECT topic_hash, text_hash, created_at FROM memory_suppressions "
+                "ORDER BY topic_hash, text_hash"
+            )
+        ]
+        return {
+            "format": MEMORY_BUNDLE_FORMAT,
+            "version": MEMORY_BUNDLE_VERSION,
+            "exported_at": self._now(),
+            "records": records,
+            "suppressions": suppressions,
+        }
+
+    @staticmethod
+    def _bundle_record(row: dict, scope: str) -> dict:
+        record = {
+            "scope": scope,
+            "kind": row["kind"],
+            "topic": row["topic"],
+            "text": row["text"],
+            "provenance": row.get("provenance") or "",
+            "confidence": _bundle_number(row.get("confidence", 1.0)),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+        if scope == "project":
+            record["project_root"] = row["project_root"]
+        return record
+
+    @staticmethod
+    def memory_bundle_digest(bundle: dict) -> str:
+        # Integral floats are written as integers: a desktop round-trip through
+        # JavaScript turns 1.0 into 1, and the digest must survive it.
+        return hashlib.sha256(
+            json.dumps(
+                _canonical_numbers(bundle),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+
+    def import_bundle(self, bundle: dict, digest: str, *, dry_run: bool = False) -> dict:
+        """Add the records of a bundle; never delete or replace anything.
+
+        Each record goes through the same secret checks as a learned fact
+        (credential patterns, redactor shapes, `[REDACTED]`). Already known
+        texts are duplicates; a different text under a topic this
+        installation already uses is a conflict and the local record wins;
+        forgotten texts (here or in the bundle) are not restored. Suppressions
+        are added unless a live record here still has that text: importing
+        never deletes. `dry_run` counts without writing, for the preview.
+        Personal-data records are imported because the owner confirms the
+        import, as when they write one in the panel; `sensitive` counts them.
+        """
+        records, suppressions = self._bundle_parts(bundle)
+        if not isinstance(digest, str) or digest != self.memory_bundle_digest(bundle):
+            raise InvalidUsageError("memory bundle digest mismatch; the file was changed")
+        summary = {
+            "dry_run": dry_run,
+            "total": len(records),
+            "imported": 0,
+            "skipped_duplicates": 0,
+            "skipped_suppressed": 0,
+            "skipped_conflicts": 0,
+            "rejected": 0,
+            "sensitive": 0,
+            "suppressions_added": 0,
+        }
+        with self.repo._db.transaction():
+            live = [(row, "user") for row in self.repo.user_live()]
+            live += [(row, "project") for row in self.repo.project_all_live()]
+            live_hashes = {_suppression_hashes(row["topic"], row["text"])[1] for row, _ in live}
+            texts: set[tuple] = set()
+            topics: set[tuple] = set()
+            for row, scope in live:
+                place = (scope, row.get("project_root"))
+                texts.add((*place, _fold(_normalize_text(row["text"]))))
+                topics.add((*place, row["kind"], _normalize_topic(row["topic"])))
+
+            forgotten: set[str] = set()
+            for row in suppressions:
+                if row["text_hash"] in live_hashes:
+                    continue
+                forgotten.add(row["text_hash"])
+                if not self.repo.suppression_exists(row["text_hash"]):
+                    summary["suppressions_added"] += 1
+                    if not dry_run:
+                        self.repo.suppression_insert(**row)
+
+            for raw in records:
+                try:
+                    record = self._bundle_entry(raw)
+                except InvalidUsageError:
+                    summary["rejected"] += 1
+                    continue
+                place = (record["scope"], record.get("project_root"))
+                _, text_hash = _suppression_hashes(record["topic"], record["text"])
+                text_key = (*place, _fold(_normalize_text(record["text"])))
+                topic_key = (*place, record["kind"], _normalize_topic(record["topic"]))
+                if text_hash in forgotten or self.repo.suppression_exists(text_hash):
+                    summary["skipped_suppressed"] += 1
+                    continue
+                if text_key in texts:
+                    summary["skipped_duplicates"] += 1
+                    continue
+                if topic_key in topics:
+                    summary["skipped_conflicts"] += 1
+                    continue
+                texts.add(text_key)
+                topics.add(topic_key)
+                summary["imported"] += 1
+                if self.requires_owner_consent(record["topic"], record["text"]):
+                    summary["sensitive"] += 1
+                if not dry_run:
+                    self._insert_bundle_record(record)
+            if not dry_run and summary["suppressions_added"]:
+                self.repo.ledger_advance()
+        return summary
+
+    @staticmethod
+    def _bundle_parts(bundle: object) -> tuple[list, list]:
+        if (
+            not isinstance(bundle, dict)
+            or bundle.get("format") != MEMORY_BUNDLE_FORMAT
+            or bundle.get("version") != MEMORY_BUNDLE_VERSION
+        ):
+            raise InvalidUsageError("not a Rinari memory export, or from a newer version")
+        records = bundle.get("records")
+        suppressions = bundle.get("suppressions", [])
+        if not isinstance(records, list) or not isinstance(suppressions, list):
+            raise InvalidUsageError("memory bundle records and suppressions must be lists")
+        if len(records) > MEMORY_BUNDLE_MAX_RECORDS:
+            raise InvalidUsageError(
+                f"memory bundle has more than {MEMORY_BUNDLE_MAX_RECORDS} records"
+            )
+        if len(suppressions) > MEMORY_BUNDLE_MAX_SUPPRESSIONS:
+            raise InvalidUsageError(
+                f"memory bundle has more than {MEMORY_BUNDLE_MAX_SUPPRESSIONS} suppressions"
+            )
+        clean: list[dict] = []
+        for row in suppressions:
+            if not isinstance(row, dict) or not all(
+                isinstance(row.get(key), str) and _HEX64.fullmatch(row[key])
+                for key in ("topic_hash", "text_hash")
+            ):
+                raise InvalidUsageError("memory bundle suppression row is invalid")
+            created_at = row.get("created_at")
+            clean.append(
+                {
+                    "topic_hash": row["topic_hash"],
+                    "text_hash": row["text_hash"],
+                    "created_at": created_at if _bundle_date(created_at) else _EPOCH,
+                }
+            )
+        return records, clean
+
+    def _bundle_entry(self, raw: object) -> dict:
+        """One bundle record, validated as a normal write would be."""
+        if not isinstance(raw, dict):
+            raise InvalidUsageError("memory record must be an object")
+        scope = raw.get("scope")
+        if scope not in ("user", "project"):
+            raise InvalidUsageError("memory record scope must be user or project")
+        kinds = USER_KINDS if scope == "user" else PROJECT_KINDS
+        if raw.get("kind") not in kinds:
+            raise InvalidUsageError("memory record kind is not valid for its scope")
+        topic = self._bounded(raw.get("topic"), "topic", 128)
+        text = self._bounded(raw.get("text"), "text", MEM_MAX_TEXT)
+        provenance = raw.get("provenance") or "import"
+        provenance = self._bounded(provenance, "provenance", MEM_MAX_PROVENANCE)
+        for value, field in ((topic, "topic"), (text, "text"), (provenance, "provenance")):
+            self._check_learned_secret(value, field)
+        record = {
+            "scope": scope,
+            "kind": raw["kind"],
+            "topic": topic,
+            "text": text,
+            "provenance": provenance,
+            "confidence": self._confidence(raw.get("confidence", 1.0)),
+        }
+        now = self._now()
+        created = raw.get("created_at")
+        updated = raw.get("updated_at")
+        record["created_at"] = created if _bundle_date(created) else now
+        record["updated_at"] = updated if _bundle_date(updated) else record["created_at"]
+        if scope == "project":
+            root = raw.get("project_root")
+            if not isinstance(root, str) or not root.strip() or len(root) > 4096:
+                raise InvalidUsageError("project memory record needs its project_root")
+            record["project_root"] = root
+        return record
+
+    def _insert_bundle_record(self, record: dict) -> None:
+        store = record["scope"]
+        row = {
+            "id": self._ctx.ids.new(f"mem-{store}"),
+            "kind": record["kind"],
+            "topic": record["topic"],
+            "text": record["text"],
+            "provenance": record["provenance"],
+            "confidence": record["confidence"],
+            "created_at": record["created_at"],
+            "updated_at": record["updated_at"],
+        }
+        if store == "user":
+            self.repo.user_insert(row)
+        else:
+            self.repo.project_insert({**row, "project_root": record["project_root"]})
 
     # -- project memory ------------------------------------------------------------
 
