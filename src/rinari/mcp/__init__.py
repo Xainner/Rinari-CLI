@@ -2,10 +2,9 @@
 
 Decision record (2026-08-17, see TODO.md "Registro de decisiones"):
 
-- v1 transport: **stdio** (newline-delimited JSON-RPC 2.0 over the
-  subprocess's stdin/stdout), the primary MCP transport. The transport layer
-  is an abstraction so an HTTP transport can be added without touching the
-  client or adapter.
+- Transports: **stdio** (newline-delimited JSON-RPC 2.0 over the
+  subprocess's stdin/stdout) and **Streamable HTTP** (MCP 2025-03-26, remote
+  servers; 2026-10-09). The legacy HTTP+SSE transport is not supported.
 - MCP servers are *external capability providers*, never privileged side
   channels. Their tools are normalized into `ToolDefinition`s and pass
   through the normal Policy Engine (mcp.read / mcp.call), approvals,
@@ -13,11 +12,13 @@ Decision record (2026-08-17, see TODO.md "Registro de decisiones"):
   AGENTS.md 18).
 - Namespacing: `mcp.<server>.<tool>`.
 - Project scope: project-local MCP definitions require project trust.
-- Secrets: server config may carry env-var references, never values.
+- Secrets: server config carries references only (`env://VAR`, or slots the
+  CredentialStore owns); literal tokens/headers/env values are stored there.
 """
 
 from rinari.mcp.adapter import mcp_tool_definitions
 from rinari.mcp.client import McpClient, McpError
+from rinari.mcp.http_transport import StreamableHttpTransport
 from rinari.mcp.protocol import (
     METHOD_INITIALIZE,
     METHOD_PROMPTS_GET,
@@ -52,6 +53,7 @@ __all__ = [
     "McpService",
     "McpTransport",
     "StdioTransport",
+    "StreamableHttpTransport",
     "mcp_tool_definitions",
     "parse_message",
     "request",

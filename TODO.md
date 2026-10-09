@@ -1895,6 +1895,18 @@ Tracing vía logs de proceso (`mcp.logs`). Cancellation tokenizado pendiente
 subprocess real. `rinari mcp list/add/remove/enable/disable/show/connect/
 disconnect/tools/resources/prompts/test/logs`.
 
+MCP remoto (2026-10-09, `mcp_remote_v1`): transporte Streamable HTTP
+(`http_transport.py`: POST JSON-RPC, respuesta JSON o SSE, `Mcp-Session-Id`,
+`MCP-Protocol-Version`, DELETE al cerrar, TLS verificado), autorización
+`none | bearer | headers`, headers propios y `env` de stdio. Los secretos
+(token, headers secretos, valores de `env`) van al CredentialStore bajo
+`mcp/<id>/<slot>` o quedan como `env://NAME`; la fila solo guarda referencias
+y las vistas solo `configured`. Nuevos `mcp.update` y `mcp.probe` (probar sin
+guardar, o como parche sobre un servidor guardado); `mcp.test` devuelve un
+diagnóstico estable (`code`, `http_status`, `hint`, `latency_ms`, conteos).
+El transporte HTTP+SSE heredado y OAuth quedan fuera (`MCP_TRANSPORT_UNSUPPORTED`,
+hint `oauth_required`).
+
 ## OpenAPI Runtime
 
 - [x] spec loader.

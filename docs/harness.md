@@ -4173,6 +4173,10 @@ config
 → pass through normal policy/runtime
 ```
 
+Transports: stdio and Streamable HTTP (remote servers with bearer or
+header authorization). Secrets of a server live in the credential store or as
+`env://` references; the server registry holds references only.
+
 MCP does not bypass:
 
 ```text

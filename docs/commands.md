@@ -918,6 +918,7 @@ Slice 8a adds Soul 3.0: `soul.list/get/create/update/remove/activate`,
 global activation; legacy `~/soul.md` keeps working (active > legacy >
 bundled). Main-agent prompt uses the active soul; subagents stay functional.
 Slice 9 adds the ecosystem surface: `mcp.list/get/create/remove/enable/disable/test`
+(remote servers, `mcp.update` and `mcp.probe`: see `mcp_remote_v1` below)
 (plain secrets rejected, test failures reported not raised), `plugin.list/get/enable/disable/diagnostics`
 (doctor merged into list), `tool.list` (native registry), `policy.get`
 (mode→profile mapping; souls/profiles never relax it). No engine-level
@@ -1044,6 +1045,54 @@ the task at once when the owner asked in their own turn (`origin_kind` user)
 and only proposes it otherwise (another pane, another task); either way it
 carries no grants, so a run asks for what it needs. The desktop receives it
 whole as a `schedule.proposed` event (`created`, and `task` when created).
+Remote MCP (`mcp_remote_v1`): servers are `transport: "stdio"` (a
+`command` array) or `"http"` (a `url`, http/https, no userinfo) speaking the
+Streamable HTTP transport of MCP 2025-03-26: one POST per JSON-RPC message
+with `Accept: application/json, text/event-stream`, a JSON body or an SSE
+stream as the answer, the `Mcp-Session-Id` from `initialize` resent on every
+request, `MCP-Protocol-Version` once negotiated and `DELETE` of the session on
+close; TLS is always verified. The legacy HTTP+SSE transport is not supported
+(`MCP_TRANSPORT_UNSUPPORTED`, hint `legacy_sse_unsupported`).
+`mcp.create {name, transport?, command?, url?, env?, env_refs?, auth?,
+headers?, timeout_s?}` and `mcp.update {name, …same fields}` share the shape:
+`auth = {kind: "none" | "bearer" | "headers", token?}`, `headers = {Name:
+"plain" | {value, secret?} | null}`, `env = {NAME: secret | null}` (stdio),
+`timeout_s` 1..300. A secret is a literal string, `{value}`, or `"env://NAME"`
+/ `{env: NAME}`; literals go to the credential store under
+`mcp/<server id>/<slot>` and the row keeps only the reference; `keyring://` or
+`file://` references from a client are refused (`INVALID_PARAMS`), so a server
+can never be pointed at another stored secret. Header names that look
+sensitive (auth, token, key, secret, password, cookie, session) default to
+`secret: true`. `mcp.update` merges `env`/`headers` per key (`null` removes
+one and retires its stored secret), replaces `auth` (`{kind: "bearer"}`
+without `token` keeps the stored token; `kind: "none"` clears it); switching
+transport drops the other transport's fields. Views (`mcp.list/get/create/
+update/enable/disable`) add `url`, `argv`, `timeout_s`, `auth {kind,
+token?}`, `headers [{name, secret, configured, value? | source, env_var?}]`,
+`env [{name, configured, source, env_var?}]` and `warnings`
+(`plain_http_remote`): flags and env-var names, never a value.
+`mcp.test {name}` connects with a fresh client (the cached connection used by
+turns is untouched; a disabled server can be tested) and `mcp.probe {name?,
+…fields}` tests a configuration without saving anything; with `name` the
+fields patch that saved server, so an edit form tests a new URL without
+re-typing a stored token. Both return `{test}` and never raise for connection
+problems: `{ok, server, transport, latency_ms, server_info {name, version},
+protocol_version, tools, names, resources, prompts}` (`resources`/`prompts`
+are null when the server does not advertise them) or `{ok: false, code,
+message, http_status, hint, retryable, latency_ms}`. Codes:
+`MCP_AUTH_REJECTED` (401/403), `MCP_NOT_FOUND` (404, or an unregistered
+name), `MCP_UNREACHABLE`, `MCP_TLS`, `MCP_TIMEOUT`, `MCP_PROTOCOL`,
+`MCP_HTTP_ERROR`, `MCP_TRANSPORT_UNSUPPORTED`, `MCP_SESSION_EXPIRED`,
+`MCP_SPAWN_FAILED`, `MCP_SECRET_MISSING`, `MCP_NOT_CONNECTED`,
+`MCP_DEPENDENCY` (a stdio server that exited). Hint keys: `check_credentials`,
+`oauth_required` (401 with an OAuth `resource_metadata` challenge and no
+token; OAuth is not implemented), `check_url_or_network`,
+`check_tls_certificate`, `server_slow_or_unresponsive`, `check_endpoint_path`,
+`server_not_registered`, `not_an_mcp_endpoint`, `initialize_rejected`,
+`server_error`, `request_rejected`, `legacy_sse_unsupported`,
+`session_expired`, `check_command_installed`, `server_exited`,
+`secret_missing`, `server_disabled`, `project_not_trusted`. Messages carry no
+header values, tokens or query strings.
 The envelope contract is unchanged across slices.
 
 ---
@@ -2665,6 +2714,23 @@ mcp logs
 ```
 
 Project-local MCP definitions require project trust.
+
+Transports: `stdio` (a command) and `http` (Streamable HTTP, MCP 2025-03-26):
+
+```text
+rinari mcp add github --url https://example.com/mcp --bearer          # token asked hidden
+rinari mcp add github --url https://example.com/mcp --bearer-env GH_MCP_TOKEN
+rinari mcp add api --url https://example.com/mcp \
+    --header "X-Team: core" --secret-header X-Api-Key                   # value asked hidden
+rinari mcp add local -- npx -y some-mcp-server
+```
+
+Tokens, secret headers and stdio env values never reach the database or the
+config file: they are stored in the OS credential store (file fallback) or
+kept as `env://NAME` references. `rinari mcp show` reports whether each one is
+configured, never its value. `rinari mcp test` reports the failure code, the
+HTTP status and a hint key (see the `engine` section, `mcp_remote_v1`). The
+legacy HTTP+SSE transport and OAuth authorization are not supported.
 
 All MCP calls should still pass through Rinari policy, tracing, schema validation, and result normalization where possible.
 

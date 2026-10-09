@@ -88,7 +88,7 @@ def build_services(
     retrieval = ContextRetrievalService(ctx, artifacts=artifacts, memory=memory)
     network = NetworkService(ctx)
     plugins = PluginService(ctx, trust)
-    mcp = McpService(ctx, trust)
+    mcp = McpService(ctx, trust, credentials=credentials)
     api = ApiService(ctx, trust)
     hooks = HookService(ctx, trust)
     skills = SkillService(ctx, trust, user_home=user_home)

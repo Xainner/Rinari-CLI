@@ -57,7 +57,10 @@
     "providerAuthSnapshot",
     "providerLocalUsage",
     "providerIdentity",
-    "turnTokenUsage"
+    "turnTokenUsage",
+    "mcpSecretState",
+    "mcpServer",
+    "mcpTestResult"
   ],
   "$defs": {
     "webPreview": {
@@ -340,10 +343,12 @@
         "mcp.list",
         "mcp.get",
         "mcp.create",
+        "mcp.update",
         "mcp.remove",
         "mcp.enable",
         "mcp.disable",
         "mcp.test",
+        "mcp.probe",
         "plugin.list",
         "plugin.get",
         "plugin.enable",
@@ -3530,6 +3535,317 @@
           "minimum": 0
         }
       }
+    },
+    "mcpSecretState": {
+      "type": "object",
+      "description": "State of a secret: never its value.",
+      "properties": {
+        "configured": {
+          "type": "boolean"
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "stored",
+            "env",
+            null
+          ]
+        },
+        "env_var": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "configured",
+        "source"
+      ]
+    },
+    "mcpServer": {
+      "type": "object",
+      "description": "mcp.list/get/create/update/enable/disable view. Secrets appear only as mcpSecretState (configured/source/env_var), never as values.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "transport": {
+          "type": "string",
+          "enum": [
+            "stdio",
+            "http"
+          ]
+        },
+        "command": {
+          "type": "string"
+        },
+        "argv": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "url": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "global",
+            "project"
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "connected": {
+          "type": "boolean"
+        },
+        "updated_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "timeout_s": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "auth": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "none",
+                "bearer",
+                "headers"
+              ]
+            },
+            "token": {
+              "$ref": "#/$defs/mcpSecretState"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        "headers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "secret": {
+                "type": "boolean"
+              },
+              "configured": {
+                "type": "boolean"
+              },
+              "value": {
+                "type": "string"
+              },
+              "source": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "env_var": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "secret",
+              "configured"
+            ]
+          }
+        },
+        "env": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "configured": {
+                "type": "boolean"
+              },
+              "source": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "env_var": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "configured"
+            ]
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "plain_http_remote"
+            ]
+          }
+        }
+      },
+      "required": [
+        "name",
+        "transport",
+        "scope",
+        "enabled",
+        "connected"
+      ]
+    },
+    "mcpTestResult": {
+      "type": "object",
+      "description": "mcp.test / mcp.probe diagnosis. Connection failures are reported here, never raised. `error` and `serverInfo` are legacy aliases.",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "server": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "transport": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "latency_ms": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "server_info": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "version": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "protocol_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tools": {
+          "type": "integer"
+        },
+        "names": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "resources": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "prompts": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "code": {
+          "type": "string",
+          "enum": [
+            "MCP_AUTH_REJECTED",
+            "MCP_UNREACHABLE",
+            "MCP_TLS",
+            "MCP_TIMEOUT",
+            "MCP_NOT_FOUND",
+            "MCP_PROTOCOL",
+            "MCP_HTTP_ERROR",
+            "MCP_TRANSPORT_UNSUPPORTED",
+            "MCP_SESSION_EXPIRED",
+            "MCP_SPAWN_FAILED",
+            "MCP_SECRET_MISSING",
+            "MCP_NOT_CONNECTED",
+            "MCP_DEPENDENCY"
+          ]
+        },
+        "error": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "http_status": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "hint": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "check_credentials",
+            "oauth_required",
+            "check_url_or_network",
+            "check_tls_certificate",
+            "server_slow_or_unresponsive",
+            "check_endpoint_path",
+            "server_not_registered",
+            "not_an_mcp_endpoint",
+            "initialize_rejected",
+            "server_error",
+            "request_rejected",
+            "legacy_sse_unsupported",
+            "session_expired",
+            "check_command_installed",
+            "server_exited",
+            "secret_missing",
+            "server_disabled",
+            "project_not_trusted",
+            null
+          ]
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ok",
+        "tools"
+      ]
     }
   }
 }

@@ -127,6 +127,10 @@ CAPABILITIES: dict[str, bool] = {
     # Permissions v3: profiles cut by what cannot be undone, "allow_project"
     # approvals ("always here"), permission.grants.list/revoke.
     "permissions_v3": True,
+    # Remote MCP servers: Streamable HTTP transport, auth (bearer/headers),
+    # env/header secrets in the CredentialStore, mcp.update, mcp.probe and the
+    # structured mcp.test diagnosis (code, http_status, hint, latency_ms).
+    "mcp_remote_v1": True,
 }
 
 

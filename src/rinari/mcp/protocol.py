@@ -115,9 +115,10 @@ def notification(method: str, params: dict[str, Any] | None = None) -> str:
     return json.dumps(payload, separators=(",", ":"))
 
 
-def initialize_params() -> dict[str, Any]:
+def initialize_params(protocol_version: str | None = None) -> dict[str, Any]:
+    """`initialize` params; transports may ask for a newer version (HTTP)."""
     return {
-        "protocolVersion": _PROTOCOL_VERSION,
+        "protocolVersion": protocol_version or _PROTOCOL_VERSION,
         "capabilities": {},
         "clientInfo": _CLIENT_INFO,
     }
