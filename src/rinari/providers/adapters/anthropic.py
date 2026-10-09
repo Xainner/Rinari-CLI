@@ -307,10 +307,15 @@ class AnthropicAdapter(ProviderAdapter):
         for block in blocks.values():
             raw = block.pop("_json", None)
             if raw is not None:
+                # Same rule as the accumulator: a call without arguments streams
+                # `partial_json: ""`, and unparseable input still is a call the
+                # loop answers. Dropping the block here left a tool_result
+                # without its tool_use, which the API rejects with HTTP 400.
                 try:
-                    block["input"] = json.loads(raw)
+                    parsed = json.loads(raw or "{}")
                 except ValueError:
-                    continue
+                    parsed = {}
+                block["input"] = parsed if isinstance(parsed, dict) else {}
             if stop_reason is StopReason.MAX_TOKENS and block.get("type") == "tool_use":
                 continue
             preserved.append(block)
@@ -432,6 +437,34 @@ def _anthropic_input_schema(schema: dict[str, Any]) -> dict[str, Any]:
     return wire_input_schema(schema)
 
 
+def _replayed_blocks(
+    message: ChatMessage, tool_aliases: dict[str, str] | None
+) -> list[dict[str, Any]]:
+    """Signed blocks as received, plus any tool_use the capture lost.
+
+    Every tool_result that follows needs its tool_use in this message.
+    Sessions saved before the capture fix lack argument-less calls and would
+    fail with HTTP 400 on every retry; the call itself is in `tool_calls`.
+    """
+    blocks = list(message.continuation["blocks"])
+    present = {
+        block.get("id")
+        for block in blocks
+        if isinstance(block, dict) and block.get("type") == "tool_use"
+    }
+    for tc in message.tool_calls:
+        if tc.id not in present:
+            blocks.append(
+                {
+                    "type": "tool_use",
+                    "id": tc.id,
+                    "name": _wire_tool_name(tc.name, tool_aliases),
+                    "input": tc.arguments,
+                }
+            )
+    return blocks
+
+
 def _wire_tool_name(name: str, tool_aliases: dict[str, str] | None) -> str:
     """Registry name -> wire name (F3).
 
@@ -487,7 +520,9 @@ def _convert_to_anthropic(
             continue
         if message.role == "assistant":
             if message.continuation and message.continuation.get("protocol") == "anthropic":
-                converted.append({"role": "assistant", "content": message.continuation["blocks"]})
+                converted.append(
+                    {"role": "assistant", "content": _replayed_blocks(message, tool_aliases)}
+                )
                 continue
             if message.tool_calls:
                 blocks: list[dict[str, Any]] = []
