@@ -14,7 +14,7 @@ from rinari.shared.errors import ConfigurationError
 def test_packaged_soul_loads(app_ctx):
     asset = load_soul(app_ctx.home)
     assert asset.source == SOURCE_PACKAGED
-    assert asset.version == "2.0"
+    assert asset.version == "4.0"
     assert asset.text.startswith("<!-- rinari-asset:")
     assert "# Canonical Soul" in asset.text
     assert "You are **Rinari**" in asset.text

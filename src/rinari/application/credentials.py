@@ -526,6 +526,18 @@ class CredentialStore:
             return self.keyring.store(f"providers/{provider_id}", secret)
         return self.files.store(f"providers/{provider_id}", secret)
 
+    def store_secret(self, key: str, secret: str) -> str:
+        """Store `secret` under `key` in the preferred backend; return its ref.
+
+        Generic slot for secrets that are not provider keys (for instance
+        `mcp/<server id>/auth-token`). Rewriting the same key replaces the
+        value with the backend's verified rotation; the ref stays the same.
+        """
+        parse_secret_ref(f"{FILE_SCHEME}{key}")  # same path rules for both backends
+        if self.keyring is not None:
+            return self.keyring.store(key, secret)
+        return self.files.store(key, secret)
+
     def resolve(self, ref: str) -> str:
         parsed = parse_secret_ref(ref)
         if parsed.scheme == "env":

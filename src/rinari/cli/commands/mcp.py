@@ -14,13 +14,20 @@ from rinari.cli.deps import is_json, services, with_error_handling
 from rinari.cli.output import emit_json, success_envelope
 from rinari.shared.errors import InvalidUsageError, RinariError
 
-app = typer.Typer(help="Manage MCP servers (stdio).", no_args_is_help=True)
+app = typer.Typer(help="Manage MCP servers (stdio and remote HTTP).", no_args_is_help=True)
 
 
 def _project() -> Path | None:
     from rinari.projects.detector import detect_project
 
     return detect_project(Path.cwd(), Path.home()).project_root
+
+
+def _safe_row(services_ctx, row: dict) -> dict:
+    """Row for --json output: the config as a view (flags, never secrets)."""
+    data = {k: v for k, v in row.items() if k != "config_json"}
+    data.update(services_ctx.mcp.view(row))
+    return data
 
 
 def _row(services_ctx, name: str, scope: str = "global") -> dict | None:
@@ -37,7 +44,7 @@ def mcp_list(ctx: typer.Context) -> None:
     with services(ctx) as s:
         rows = s.mcp.list()
         if is_json(ctx):
-            emit_json(success_envelope("mcp.list", {"servers": rows}))
+            emit_json(success_envelope("mcp.list", {"servers": [_safe_row(s, r) for r in rows]}))
             return
         if not rows:
             typer.echo("No MCP servers configured (rinari mcp add <name> -- command...).")
@@ -60,19 +67,71 @@ def mcp_add(
     env_ref: list[str] = typer.Option(
         None, "--env", help="Env reference KEY=env://PROCESS_VAR (repeatable)."
     ),
+    url: str = typer.Option(
+        None, "--url", help="Remote server URL (Streamable HTTP) instead of a command."
+    ),
+    bearer_env: str = typer.Option(
+        None, "--bearer-env", help="Bearer token from this environment variable (http)."
+    ),
+    bearer: bool = typer.Option(
+        False, "--bearer", help="Ask for a bearer token (hidden; stored securely)."
+    ),
+    header: list[str] = typer.Option(
+        None, "--header", help="Plain header 'Name: value' (repeatable, http)."
+    ),
+    secret_header: list[str] = typer.Option(
+        None,
+        "--secret-header",
+        help="Secret header: 'Name' (asked hidden) or 'Name=env://VAR' (repeatable).",
+    ),
+    timeout: float = typer.Option(None, "--timeout", help="Request timeout in seconds."),
     command: list[str] = typer.Argument(None, help="Command to spawn (stdio)."),
 ) -> None:
-    """Register an MCP server (stdio). Secrets only as env:// references."""
+    """Register an MCP server: a command (stdio) or a --url (remote).
+
+    Secrets are never written to the database: tokens and secret headers go
+    to the OS credential store (or stay as env:// references).
+    """
     if scope not in ("global", "project"):
         raise InvalidUsageError("--scope must be global or project")
-    if not command:
-        raise InvalidUsageError("provide the command: rinari mcp add <name> -- cmd [args...]")
+    if not command and not url:
+        raise InvalidUsageError(
+            "provide the command (rinari mcp add <name> -- cmd [args...]) or --url"
+        )
+    if command and url:
+        raise InvalidUsageError("use either a command or --url, not both")
     refs: dict[str, str] = {}
     for item in env_ref or []:
         if "=" not in item:
-            raise InvalidUsageError(f"--env expected KEY=env://VAR, got {item!r}")
+            raise InvalidUsageError("--env expected KEY=env://VAR")
         key, ref = item.split("=", 1)
         refs[key.strip()] = ref.strip()
+    auth: dict | None = None
+    headers: dict[str, dict] = {}
+    if url:
+        if bearer_env and bearer:
+            raise InvalidUsageError("use either --bearer or --bearer-env")
+        if bearer_env:
+            auth = {"kind": "bearer", "token": f"env://{bearer_env.strip()}"}
+        elif bearer:
+            auth = {"kind": "bearer", "token": typer.prompt("Bearer token", hide_input=True)}
+        for item in header or []:
+            if ":" not in item:
+                raise InvalidUsageError("--header expected 'Name: value'")
+            key, value = item.split(":", 1)
+            headers[key.strip()] = {"value": value.strip(), "secret": False}
+        for item in secret_header or []:
+            if "=" in item:
+                key, ref = item.split("=", 1)
+                headers[key.strip()] = {"value": ref.strip(), "secret": True}
+            else:
+                key = item.strip()
+                value = typer.prompt(f"Value for header {key}", hide_input=True)
+                headers[key] = {"value": value, "secret": True}
+        if auth is None and headers and any(h["secret"] for h in headers.values()):
+            auth = {"kind": "headers"}
+    elif bearer or bearer_env or header or secret_header:
+        raise InvalidUsageError("--bearer/--header/--secret-header apply to --url servers")
     project = _project() if scope == "project" else None
     with services(ctx) as s:
         if (
@@ -81,11 +140,23 @@ def mcp_add(
             and s.trust.status(project).state != "trusted"
         ):
             typer.echo(f"warning: {project} is not trusted; the server will stay inert")
-        row = s.mcp.add(name, list(command), scope=scope, env_refs=refs)
+        try:
+            row = s.mcp.add(
+                name,
+                list(command or []),
+                scope=scope,
+                env_refs=refs,
+                url=url,
+                auth=auth,
+                headers=headers or None,
+                timeout_s=timeout,
+            )
+        except ValueError as exc:
+            raise InvalidUsageError(str(exc)) from exc
         if is_json(ctx):
-            emit_json(success_envelope("mcp.add", row))
+            emit_json(success_envelope("mcp.add", _safe_row(s, row)))
             return
-        typer.echo(f"added MCP server {name} ({scope})")
+        typer.echo(f"added MCP server {name} ({scope}, {row['transport']})")
 
 
 @app.command("remove")
@@ -145,14 +216,28 @@ def mcp_show(ctx: typer.Context, name: str = typer.Argument(...)) -> None:
         if row is None:
             raise RinariError(f"MCP server not found: {name}")
         if is_json(ctx):
-            emit_json(success_envelope("mcp.show", row))
+            emit_json(success_envelope("mcp.show", _safe_row(s, row)))
             return
+        view = s.mcp.view(row)
         typer.echo(f"name:      {row['name']}")
         typer.echo(f"scope:     {row['scope']}")
         typer.echo(f"transport: {row['transport']}")
         typer.echo(f"command:   {row.get('command') or '-'}")
         typer.echo(f"url:       {row.get('url') or '-'}")
         typer.echo(f"enabled:   {'yes' if row['enabled'] else 'no'}")
+        if row["transport"] == "http":
+            token = view["auth"].get("token") or {}
+            state = "configured" if token.get("configured") else "missing"
+            suffix = f" ({state})" if view["auth"]["kind"] == "bearer" else ""
+            typer.echo(f"auth:      {view['auth']['kind']}{suffix}")
+            for h in view["headers"]:
+                shown = "<secret>" if h["secret"] else h.get("value")
+                typer.echo(f"header:    {h['name']}: {shown}")
+        for e in view["env"]:
+            source = f"env://{e['env_var']}" if e.get("env_var") else "<secret>"
+            typer.echo(f"env:       {e['name']}={source}")
+        for warning in view["warnings"]:
+            typer.echo(f"warning:   {warning}")
 
 
 @app.command("connect")
@@ -247,9 +332,12 @@ def mcp_test(ctx: typer.Context, name: str = typer.Argument(...)) -> None:
             emit_json(success_envelope("mcp.test", data))
             return
         if data.get("ok"):
-            typer.echo(f"OK: {data['tools']} tool(s) available")
+            typer.echo(f"OK: {data['tools']} tool(s) available ({data.get('latency_ms')} ms)")
         else:
-            typer.echo(f"FAIL [{data.get('error')}]: {data.get('message')}")
+            status = f" HTTP {data['http_status']}" if data.get("http_status") else ""
+            typer.echo(f"FAIL [{data.get('code')}{status}]: {data.get('message')}")
+            if data.get("hint"):
+                typer.echo(f"hint: {data['hint']}")
 
 
 @app.command("logs")

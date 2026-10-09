@@ -1,4 +1,4 @@
-"""MCP transports: the channel under the wire (stdio in v1).
+"""MCP transports: the channel under the wire.
 
 - `StdioTransport`: spawns the server as a subprocess and speaks
   newline-delimited JSON-RPC 2.0 on its stdin/stdout. A reader thread pumps
@@ -7,7 +7,8 @@
   callable. Used by tests (and future embedded servers) so the protocol,
   client and adapter are testable without spawning processes.
 
-Both satisfy the `McpTransport` contract: start / send / close.
+All satisfy the `McpTransport` contract: start / send / close. The remote
+Streamable HTTP transport lives in `http_transport.py`.
 """
 
 from __future__ import annotations
@@ -26,11 +27,23 @@ from .protocol import McpMessage, parse_message
 class TransportError(Exception):
     """Structured transport failure."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        http_status: int | None = None,
+        hint: str | None = None,
+    ) -> None:
         super().__init__(message)
         # TRANSPORT_START | TRANSPORT_CLOSED | TRANSPORT_TIMEOUT | TRANSPORT_IO
+        # HTTP: TRANSPORT_AUTH | TRANSPORT_UNREACHABLE | TRANSPORT_TLS
+        # | TRANSPORT_NOT_FOUND | TRANSPORT_SESSION_EXPIRED | TRANSPORT_HTTP
+        # | TRANSPORT_PROTOCOL | TRANSPORT_UNSUPPORTED
         self.code = code
         self.message = message
+        self.http_status = http_status
+        self.hint = hint
 
 
 class McpTransport:

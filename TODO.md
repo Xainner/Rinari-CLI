@@ -825,6 +825,13 @@ Todo con tests deterministas.
 - [x] loader de Constitution.
 - [x] hashes/version metadata.
 - [x] tests de resolution/fallback.
+- [x] Soul 4.0 (2026-10-09): voz reconocible del default `rinari-default` (aperturas y
+  cierres en personaje variados, reacciones en primera persona, burla ligera, celos
+  de broma en una línea, ejemplos buenos/malos), zonas sin personalidad (código,
+  comandos, diffs, estado, verificación, errores) y modo serio; mismas invariantes.
+  Intensidad del personaje `minimal | balanced | full` en `soul_settings.toml`,
+  aplicada a la Soul vigente (`soul.settings.get/set`,
+  `soul_character_intensity_v1`). Una Soul propia o `~/soul.md` nunca se pisa.
 
 ## Project Detector
 
@@ -1894,6 +1901,18 @@ Tracing vía logs de proceso (`mcp.logs`). Cancellation tokenizado pendiente
 (hoy: timeout del transporte). Verificado e2e con un MCP server stdio fake en
 subprocess real. `rinari mcp list/add/remove/enable/disable/show/connect/
 disconnect/tools/resources/prompts/test/logs`.
+
+MCP remoto (2026-10-09, `mcp_remote_v1`): transporte Streamable HTTP
+(`http_transport.py`: POST JSON-RPC, respuesta JSON o SSE, `Mcp-Session-Id`,
+`MCP-Protocol-Version`, DELETE al cerrar, TLS verificado), autorización
+`none | bearer | headers`, headers propios y `env` de stdio. Los secretos
+(token, headers secretos, valores de `env`) van al CredentialStore bajo
+`mcp/<id>/<slot>` o quedan como `env://NAME`; la fila solo guarda referencias
+y las vistas solo `configured`. Nuevos `mcp.update` y `mcp.probe` (probar sin
+guardar, o como parche sobre un servidor guardado); `mcp.test` devuelve un
+diagnóstico estable (`code`, `http_status`, `hint`, `latency_ms`, conteos).
+El transporte HTTP+SSE heredado y OAuth quedan fuera (`MCP_TRANSPORT_UNSUPPORTED`,
+hint `oauth_required`).
 
 ## OpenAPI Runtime
 

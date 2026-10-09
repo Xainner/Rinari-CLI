@@ -147,7 +147,7 @@ def test_list_contains_bundled_default(server) -> None:
     assert "rinari-default" in by_id
     default = by_id["rinari-default"]
     assert default["source"] == "bundled"
-    assert default["version"] == "3.0"
+    assert default["version"] == "4.0"
     assert result["active_id"] is None
     # Nothing was activated, and still the bundled default is the Soul in
     # use: the list says so instead of offering to activate it.

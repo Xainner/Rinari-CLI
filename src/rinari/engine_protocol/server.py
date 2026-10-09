@@ -303,15 +303,19 @@ class EngineServer:
         self._dispatcher.register("soul.remove", self._soul_remove)
         self._dispatcher.register("soul.activate", self._soul_activate)
         self._dispatcher.register("soul.get_effective", self._soul_get_effective)
+        self._dispatcher.register("soul.settings.get", self._soul_settings_get)
+        self._dispatcher.register("soul.settings.set", self._soul_settings_set)
         self._dispatcher.register("session.soul.set", self._session_soul_set)
         self._dispatcher.register("session.soul.clear", self._session_soul_clear)
         self._dispatcher.register("mcp.list", self._mcp_list)
         self._dispatcher.register("mcp.get", self._mcp_get)
         self._dispatcher.register("mcp.create", self._mcp_create)
+        self._dispatcher.register("mcp.update", self._mcp_update)
         self._dispatcher.register("mcp.remove", self._mcp_remove)
         self._dispatcher.register("mcp.enable", self._mcp_enable)
         self._dispatcher.register("mcp.disable", self._mcp_disable)
         self._dispatcher.register("mcp.test", self._mcp_test)
+        self._dispatcher.register("mcp.probe", self._mcp_probe)
         self._dispatcher.register("plugin.list", self._plugin_list)
         self._dispatcher.register("plugin.get", self._plugin_get)
         self._dispatcher.register("plugin.enable", self._plugin_enable)
@@ -2396,6 +2400,28 @@ class EngineServer:
             return {"soul_id": None, "source": "default"}
         return {"soul_id": DEFAULT_SOUL_ID, "source": "default"}
 
+    def _soul_settings_view(self) -> dict[str, Any]:
+        from rinari.soul.intensity import DEFAULT_INTENSITY, INTENSITIES
+
+        return {
+            "character_intensity": self._soul_store().character_intensity(),
+            "options": list(INTENSITIES),
+            "default": DEFAULT_INTENSITY,
+        }
+
+    def _soul_settings_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        _ = params
+        return {"settings": self._soul_settings_view()}
+
+    def _soul_settings_set(self, params: dict[str, Any]) -> dict[str, Any]:
+        level = (params or {}).get("character_intensity")
+        if not isinstance(level, str) or not level:
+            raise EngineProtocolError(
+                INVALID_PARAMS, "Param 'character_intensity' must be minimal, balanced or full."
+            )
+        self._soul_store().set_character_intensity(level)
+        return {"settings": self._soul_settings_view()}
+
     def _soul_get_effective(self, params: dict[str, Any]) -> dict[str, Any]:
         ref = params.get("ref")
         if not isinstance(ref, str) or not ref:
@@ -2423,37 +2449,83 @@ class EngineServer:
     # -- ecosystem (Phase 9) ----------------------------------------------------
 
     def _mcp_connected(self, name: str) -> bool:
-        client = self._services.mcp._clients.get(name)
-        return bool(client is not None and client.connected)
+        return self._services.mcp.is_connected(name)
+
+    def _mcp_view(self, row: dict, connected: bool | None = None) -> dict[str, Any]:
+        if connected is None:
+            connected = self._mcp_connected(row["name"])
+        return mcp_row_view(row, connected, self._services.mcp.view(row))
 
     def _mcp_list(self, params: dict[str, Any]) -> dict[str, Any]:
         scope = (params or {}).get("scope")
         rows = self._services.mcp.list(scope if isinstance(scope, str) else None)
-        return {"servers": [mcp_row_view(r, self._mcp_connected(r["name"])) for r in rows]}
+        return {"servers": [self._mcp_view(r) for r in rows]}
 
     def _mcp_get(self, params: dict[str, Any]) -> dict[str, Any]:
         name = (params or {}).get("name", "")
         row = self._services.mcp.show(name)
         if row is None:
             raise NotFoundError(f"Unknown MCP server: {name}.")
-        return {"server": mcp_row_view(row, self._mcp_connected(name))}
+        return {"server": self._mcp_view(row)}
+
+    @staticmethod
+    def _mcp_name(params: dict[str, Any], *, required: bool = True) -> str | None:
+        name = params.get("name")
+        if name is None and not required:
+            return None
+        if not isinstance(name, str) or not name.strip():
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'name' is required.")
+        return name
+
+    @staticmethod
+    def _mcp_fields(params: dict[str, Any]) -> dict[str, Any]:
+        """Configuration fields of create/update/probe (McpService validates them)."""
+        fields = (
+            "transport",
+            "command",
+            "url",
+            "env",
+            "env_refs",
+            "auth",
+            "headers",
+            "timeout_s",
+        )
+        return {key: params[key] for key in fields if key in params}
 
     def _mcp_create(self, params: dict[str, Any]) -> dict[str, Any]:
         params = params or {}
-        name = params.get("name", "")
-        command = params.get("command", [])
-        if not isinstance(name, str) or not name:
-            raise EngineProtocolError(INVALID_PARAMS, "Param 'name' is required.")
-        if not isinstance(command, list) or not all(isinstance(c, str) for c in command):
-            raise EngineProtocolError(INVALID_PARAMS, "Param 'command' must be a string array.")
-        env_refs = params.get("env_refs") or {}
-        if not isinstance(env_refs, dict):
-            raise EngineProtocolError(INVALID_PARAMS, "Param 'env_refs' must be an object.")
+        name = self._mcp_name(params)
+        fields = self._mcp_fields(params)
         try:
-            row = self._services.mcp.add(name, command, scope="global", env_refs=dict(env_refs))
+            row = self._services.mcp.add(
+                name,
+                fields.get("command"),
+                scope="global",
+                env_refs=fields.get("env_refs"),
+                transport=fields.get("transport"),
+                url=fields.get("url"),
+                env=fields.get("env"),
+                auth=fields.get("auth"),
+                headers=fields.get("headers"),
+                timeout_s=fields.get("timeout_s"),
+            )
         except ValueError as exc:
             raise EngineProtocolError(INVALID_PARAMS, str(exc)) from exc
-        return {"server": mcp_row_view(row, False)}
+        return {"server": self._mcp_view(row, False)}
+
+    def _mcp_update(self, params: dict[str, Any]) -> dict[str, Any]:
+        params = params or {}
+        name = self._mcp_name(params)
+        fields = self._mcp_fields(params)
+        if not fields:
+            raise EngineProtocolError(INVALID_PARAMS, "Nothing to update.")
+        try:
+            row = self._services.mcp.update(name, fields)
+        except LookupError:
+            raise NotFoundError(f"Unknown MCP server: {name}.") from None
+        except ValueError as exc:
+            raise EngineProtocolError(INVALID_PARAMS, str(exc)) from exc
+        return {"server": self._mcp_view(row, False)}
 
     def _mcp_remove(self, params: dict[str, Any]) -> dict[str, Any]:
         name = (params or {}).get("name", "")
@@ -2466,23 +2538,32 @@ class EngineServer:
         row = self._services.mcp.enable(name)
         if row is None:
             raise NotFoundError(f"Unknown MCP server: {name}.")
-        return {"server": mcp_row_view(row, self._mcp_connected(name))}
+        return {"server": self._mcp_view(row)}
 
     def _mcp_disable(self, params: dict[str, Any]) -> dict[str, Any]:
         name = (params or {}).get("name", "")
         row = self._services.mcp.disable(name)
         if row is None:
             raise NotFoundError(f"Unknown MCP server: {name}.")
-        return {"server": mcp_row_view(row, False)}
+        return {"server": self._mcp_view(row, False)}
 
     def _mcp_test(self, params: dict[str, Any]) -> dict[str, Any]:
-        from rinari.mcp.client import McpError
-
         name = (params or {}).get("name", "")
+        # Connection problems are the diagnosis: reported, never raised.
+        return {"test": self._services.mcp.test(name)}
+
+    def _mcp_probe(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Test an unsaved configuration (optionally a patch over `name`)."""
+        params = params or {}
+        name = self._mcp_name(params, required=False)
+        fields = self._mcp_fields(params)
         try:
-            return {"test": self._services.mcp.test(name)}
-        except McpError as exc:
-            raise EngineProtocolError(exc.code, exc.message) from exc
+            result = self._services.mcp.probe(fields, name=name)
+        except LookupError:
+            raise NotFoundError(f"Unknown MCP server: {name}.") from None
+        except ValueError as exc:
+            raise EngineProtocolError(INVALID_PARAMS, str(exc)) from exc
+        return {"test": result}
 
     def _plugin_list(self, params: dict[str, Any]) -> dict[str, Any]:
         diags = {r["name"]: r["diagnostics"] for r in self._services.plugins.doctor()}
