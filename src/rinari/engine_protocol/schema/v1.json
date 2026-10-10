@@ -7,6 +7,9 @@
     "attachment",
     "sessionSummary",
     "gitHead",
+    "projectFolder",
+    "projectFolderError",
+    "projectFolderCheck",
     "projectSummary",
     "usageSnapshot",
     "governorSnapshot",
@@ -515,7 +518,11 @@
         "session.move_profile",
         "followup.list",
         "followup.dismiss",
-        "followup.accept"
+        "followup.accept",
+        "project.folders.validate",
+        "project.create",
+        "project.folder.add",
+        "project.folder.remove"
       ]
     },
     "event": {
@@ -953,6 +960,12 @@
         },
         "git_head": {
           "$ref": "#/$defs/gitHead"
+        },
+        "folders": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/projectFolder"
+          }
         }
       },
       "additionalProperties": true
@@ -4210,6 +4223,125 @@
           "type": [
             "string",
             "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "projectFolder": {
+      "type": "object",
+      "required": [
+        "path",
+        "primary",
+        "position",
+        "exists"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "primary": {
+          "type": "boolean"
+        },
+        "position": {
+          "type": "integer"
+        },
+        "exists": {
+          "type": "boolean"
+        },
+        "git_head": {
+          "$ref": "#/$defs/gitHead"
+        },
+        "trust_state": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "projectFolderError": {
+      "type": "object",
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "NOT_FOUND",
+            "NOT_DIRECTORY",
+            "HOME",
+            "ENGINE_HOME",
+            "DUPLICATE",
+            "NESTED",
+            "IN_PROJECT",
+            "TOO_MANY"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "projectFolderCheck": {
+      "type": "object",
+      "required": [
+        "input",
+        "canonical_path",
+        "ok",
+        "error",
+        "trust_state"
+      ],
+      "properties": {
+        "input": {
+          "type": "string"
+        },
+        "canonical_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/projectFolderError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "trust_state": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "git_head": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/gitHead"
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       },

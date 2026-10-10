@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 
 from rinari.application.context import AppContext
 from rinari.application.project_service import ProjectService
@@ -127,7 +128,7 @@ class SessionService:
     ) -> StartedSession:
         cwd = Path(cwd).expanduser().resolve()
         detection = self.detect(cwd)
-        project_root = None if forced_chat else detection.project_root
+        project_root = None if forced_chat else self._project_root_for(cwd, detection)
         kind = SESSION_KIND_PROJECT if project_root is not None else SESSION_KIND_CHAT
 
         selection = self._providers.current()
@@ -191,7 +192,7 @@ class SessionService:
             if kind == SESSION_KIND_PROJECT and project_root is not None:
                 project = self._projects.upsert(project_root)
                 project_id = project.id
-                project_root_snapshot = str(project_root.resolve())
+                project_root_snapshot = project.canonical_root
             profile_id_for_new = self._profile_for(project_id, None)
             record = SessionRecord(
                 id=self._ctx.ids.new("ses"),
@@ -273,7 +274,7 @@ class SessionService:
     ) -> SessionRecord:
         cwd = Path(cwd).expanduser().resolve()
         detection = self.detect(cwd)
-        project_root = None if forced_chat else detection.project_root
+        project_root = None if forced_chat else self._project_root_for(cwd, detection)
         kind = SESSION_KIND_PROJECT if project_root is not None else SESSION_KIND_CHAT
         selection = self._providers.current()
         if selection is None or selection.model is None:
@@ -291,7 +292,8 @@ class SessionService:
         if project_root is not None:
             project = self._projects.upsert(project_root, rinari_profile_id=rinari_profile_id)
             project_id = project.id
-            project_root_snapshot = str(project_root.resolve())
+            # The project's primary folder, also when cwd is one of its others.
+            project_root_snapshot = project.canonical_root
         profile_for_new = self._profile_for(project_id, rinari_profile_id)
         explicit_mode = mode is not None
         normalized_mode = (mode or default_mode).strip().lower()
@@ -408,6 +410,20 @@ class SessionService:
         return StartedSession(session=record, created=True)
 
     # -- promotion ----------------------------------------------------------
+
+    def _project_root_for(self, cwd: Path, detection: Any) -> Path | None:
+        """The project root for `cwd`: a folder of a known project wins.
+
+        A project's extra folder (often its own repository, or a plain
+        folder with no markers) belongs to that project, not to a new one.
+        """
+        folders = getattr(self._projects, "folders", None)
+        owner_id = folders.owner_of(cwd) if folders is not None else None
+        if owner_id is not None:
+            owner = self._ctx.project_repo.get(owner_id)
+            if owner is not None and not owner.archived:
+                return Path(owner.canonical_root)
+        return detection.project_root
 
     # -- Rinari profiles ------------------------------------------------------
 

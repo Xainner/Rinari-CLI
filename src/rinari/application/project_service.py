@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from rinari.application.context import AppContext
+from rinari.application.project_folders import FolderCheck, ProjectFolders
 from rinari.projects.detector import is_home_root
 from rinari.projects.git import git_fingerprint
 from rinari.projects.git_head import HEADS
@@ -35,12 +36,23 @@ Stable instructions for Rinari in this repository.
 """
 
 
+class ProjectFolderError(InvalidUsageError):
+    """Folders that cannot be part of a project; carries the per-folder report."""
+
+    def __init__(self, checks: list[FolderCheck]) -> None:
+        failed = [check for check in checks if not check.ok]
+        reason = failed[0].message if failed else "invalid folder"
+        super().__init__(f"Project folders are not valid: {reason}.")
+        self.checks = checks
+
+
 class ProjectService:
     def __init__(self, ctx: AppContext) -> None:
         self._ctx = ctx
         # RinariProfileService, bound by build_services: new projects go to
         # the active profile (or the one asked for).
         self.profiles = None
+        self.folders = ProjectFolders(ctx)
 
     def _profile_for_new(self, requested: str | None) -> str:
         if self.profiles is None:
@@ -51,6 +63,15 @@ class ProjectService:
         canonical = str(Path(root).expanduser().resolve())
         now = now_iso(self._ctx.clock)
         existing = self._ctx.project_repo.get_by_root(canonical)
+        if existing is None:
+            # Opening one of a project's extra folders opens that project.
+            owner_id = self.folders.exact_owner(canonical)
+            owner = self._ctx.project_repo.get(owner_id) if owner_id else None
+            if owner is not None:
+                owner.updated_at = now
+                owner.last_opened_at = now
+                self._ctx.project_repo.update(owner)
+                return owner
         if existing is not None:
             existing.git_fingerprint = git_fingerprint(Path(canonical))
             existing.updated_at = now
@@ -70,7 +91,75 @@ class ProjectService:
             last_opened_at=now,
             rinari_profile_id=self._profile_for_new(rinari_profile_id),
         )
-        self._ctx.project_repo.insert(record)
+        with self._ctx.db.transaction():
+            self._ctx.project_repo.insert(record)
+            self.folders.ensure_primary(record.id, canonical)
+        return record
+
+    # -- several working folders ------------------------------------------------
+
+    def validate_folders(
+        self, paths: list[str], project_id: str | None = None
+    ) -> list[FolderCheck]:
+        return self.folders.validate(paths, project_id)
+
+    def create(
+        self,
+        *,
+        name: str,
+        description: str = "",
+        folders: list[str],
+        rinari_profile_id: str | None = None,
+    ) -> ProjectRecord:
+        """A project with its working folders (the first is the primary).
+
+        All or nothing: an invalid folder rejects the whole creation with
+        the report (ProjectFolderError). Trust is granted by the caller.
+        """
+        clean_name = (name or "").strip()
+        if not clean_name:
+            raise InvalidUsageError("Project name must not be empty.")
+        if not folders:
+            raise InvalidUsageError("A project needs at least one folder.")
+        checks = self.folders.validate(folders)
+        if not all(check.ok for check in checks):
+            raise ProjectFolderError(checks)
+        primary, *extras = [str(check.canonical_path) for check in checks]
+        now = self._now()
+        record = ProjectRecord(
+            id=self._ctx.ids.new("prj"),
+            canonical_root=primary,
+            git_fingerprint=git_fingerprint(Path(primary)),
+            metadata={},
+            created_at=now,
+            updated_at=now,
+            name=clean_name[:120],
+            description=(description or "").strip()[:500],
+            last_opened_at=now,
+            rinari_profile_id=self._profile_for_new(rinari_profile_id),
+        )
+        with self._ctx.db.transaction():
+            self._ctx.project_repo.insert(record)
+            self.folders.ensure_primary(record.id, primary)
+            for extra in extras:
+                self.folders.add(record.id, extra)
+        return record
+
+    def add_folder(self, project_id: str, path: str) -> ProjectRecord:
+        record = self.get(project_id)
+        checks = self.folders.validate([path], record.id)
+        if not checks[0].ok:
+            raise ProjectFolderError(checks)
+        self.folders.add(record.id, str(checks[0].canonical_path))
+        return record
+
+    def remove_folder(self, project_id: str, path: str) -> ProjectRecord:
+        record = self.get(project_id)
+        canonical = str(Path(path).expanduser().resolve())
+        if canonical == record.canonical_root:
+            raise ConflictError("The primary folder cannot be removed.")
+        if not self.folders.remove(record.id, canonical):
+            raise NotFoundError(f"Not a folder of this project: {canonical}")
         return record
 
     def get(self, project_id: str) -> ProjectRecord:

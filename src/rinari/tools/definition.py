@@ -363,6 +363,9 @@ class ToolContext:
     checklist: Any = None
     # FollowupService (rinari.followups): followup.suggest leaves notes.
     followups: Any = None
+    # A project's other trusted working folders (policy treats them as the
+    # project). Empty outside multi-folder projects.
+    extra_project_roots: tuple[Path, ...] = ()
     # Application-level ContextRetrievalService (rinari.context.retrieval);
     # None only when the session is not wired to the full service container.
     context_retrieval: Any = None
