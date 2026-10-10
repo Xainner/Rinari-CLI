@@ -15,10 +15,11 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 
 # Test knobs. Each one reproduces a failure the real CLI has shown.
 ENV_AUTH = "FAKE_CLAUDE_AUTH"  # subscription | console | logged_out | broken
-ENV_MODE = "FAKE_CLAUDE_MODE"  # ok | double | empty | hang | error | rate_limit | truncated
+ENV_MODE = "FAKE_CLAUDE_MODE"  # ok | double | empty | hang | error | rate_limit | truncated | tool
 ENV_TEXT = "FAKE_CLAUDE_TEXT"
 ENV_RECORD = "FAKE_CLAUDE_RECORD"  # path: dump argv + env + stdin for assertions
 ENV_VERSION = "FAKE_CLAUDE_VERSION"
@@ -236,6 +237,8 @@ def _print_mode(argv: list[str]) -> int:
             ),
         }
     )
+    if mode == "tool":
+        return _tool_generation(argv)
     turns = _user_turns(stdin_text) or [""]
     for number, turn_text in enumerate(turns):
         message_id = MESSAGE_ID if number == 0 else f"msg_fake_turn_{number}"
@@ -346,6 +349,65 @@ def _generation(text: str, message_id: str, mode: str) -> int | None:
         }
     )
     return None
+
+
+def _tool_generation(argv: list[str]) -> int:
+    """The model calls the first bridge tool; then the CLI waits on the MCP server.
+
+    Verified against 2.1.295: the tool_use block streams, the assistant event
+    carries it with its parsed input, message_delta says `tool_use`, and only
+    then does Claude Code call the server and wait for its answer. Here the
+    wait never ends, so only Rinari stopping the child ends this process.
+    """
+    config = json.loads(Path(argv[argv.index("--mcp-config") + 1]).read_text(encoding="utf-8"))
+    server = next(iter(config["mcpServers"].values()))
+    tools = json.loads(Path(server["args"][-1]).read_text(encoding="utf-8"))
+    name = "mcp__rinari__" + tools[0]["name"]
+    arguments = json.loads(os.environ.get("FAKE_CLAUDE_TOOL_INPUT", '{"path": "src"}'))
+    _stream(
+        {
+            "type": "message_start",
+            "message": {"id": MESSAGE_ID, "role": "assistant", "usage": {"input_tokens": 9}},
+        }
+    )
+    _stream(
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}
+    )
+    _stream(
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "Miro."},
+        }
+    )
+    block = {"type": "tool_use", "id": "toolu_fake_1", "name": name, "input": {}}
+    _stream({"type": "content_block_start", "index": 1, "content_block": block})
+    _stream(
+        {
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "input_json_delta", "partial_json": json.dumps(arguments)},
+        }
+    )
+    _emit(
+        {
+            "type": "assistant",
+            "message": {
+                "id": MESSAGE_ID,
+                "model": "claude-sonnet-4-6-20260219",
+                "content": [{**block, "input": arguments}],
+            },
+        }
+    )
+    _stream(
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": "tool_use"},
+            "usage": {"output_tokens": 12},
+        }
+    )
+    time.sleep(600)  # Claude Code waiting for the bridge to run the tool
+    return 0
 
 
 def _chunks(text: str) -> list[str]:
