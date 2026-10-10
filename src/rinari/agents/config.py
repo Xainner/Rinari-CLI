@@ -3,7 +3,8 @@
 Which model alias each built-in agent uses, plus an optional reasoning
 effort override. Stored as one TOML file in the Rinari home so CLI and
 desktop share it; resolution (alias → caller, tool capability checks,
-fallback chain) lives in `agent_runtime.caller_for_agent`, and the effort
+fallback chain) lives in `agent_runtime.caller_for_agent`, which prefers the
+conversation's Rinari profile assignment over this file, and the effort
 override flows through the existing `reasoning_effort` call path
 (turns → AgentLoop → ModelRequest).
 """
@@ -28,7 +29,8 @@ class AgentAssignment:
     effort: str | None = None
 
 
-def _coerce(value: Any) -> AgentAssignment:
+def coerce_assignment(value: Any) -> AgentAssignment:
+    """An assignment from loose data (agents.toml, a profile's agents map)."""
     if not isinstance(value, dict):
         return AgentAssignment()
     model = value.get("model")
@@ -58,7 +60,9 @@ class AgentConfigStore:
             return {}
         if not isinstance(raw, dict):
             return {}
-        return {name: _coerce(value) for name, value in raw.items() if isinstance(name, str)}
+        return {
+            name: coerce_assignment(value) for name, value in raw.items() if isinstance(name, str)
+        }
 
     def get(self, agent: str) -> AgentAssignment:
         return self.all().get(agent, AgentAssignment())

@@ -118,6 +118,7 @@ rinari
 │
 ├── config
 ├── profiles
+├── bundles
 ├── project
 ├── trust
 │
@@ -2086,6 +2087,41 @@ rinari profiles clone workspace my-workspace
 ```
 
 Profiles may bundle model/provider preferences without modifying underlying provider/model records.
+
+---
+
+## `bundles` (Rinari profiles as workspaces)
+
+Not the capability profiles above: a Rinari profile (soul, mode, per-agent
+models) is where projects and conversations live, the same profiles the
+desktop switches between (see "Rinari profiles as workspaces"). The active one
+is shared with the desktop (`<home>/active_profile`); the app picks up a change
+made here when its window regains focus.
+
+```text
+bundles list
+bundles activate <id>
+bundles create <id> --name NAME [--description D] [--soul ID] [--mode MODE]
+               [--agent NAME=MODEL[,FALLBACK]]... [--activate]
+bundles move-project <project-id | path> <id>
+bundles move-session <session> <id> [--with-project]
+```
+
+- `list` shows each profile with its projects (not archived) and open
+  conversations; `*` marks the active one (`--json`: `{profiles, active_id}`).
+- `activate` makes new projects and conversations go to that profile.
+- `create` validates `--agent`: a known agent and saved model aliases.
+- `move-project` takes the project id or any path inside one of its folders,
+  and moves the project with all its conversations.
+- `move-session` moves a conversation that is not in a project. One inside a
+  project has the project's profile: `--with-project` moves the whole project;
+  taking it out of the project first is done in the app.
+
+```bash
+rinari bundles create trabajo --name "Trabajo" --agent explore=fast --activate
+rinari bundles move-project ~/code/tienda trabajo
+rinari bundles list
+```
 
 ---
 
@@ -4598,9 +4634,16 @@ active, shared by the CLI and the desktop (`<home>/active_profile`):
   agents?}`, null clears) and never removed.
 - `profile_bundle.active` → `{active_id, profile}`;
   `profile_bundle.activate {id}` → `{active_id, previous_id, profile}` and
-  `profile_bundle.activated`. Its per-agent models apply; its soul and mode are
-  stamped on each new conversation (conversations of other profiles keep
-  theirs). `profile_bundle.apply` remains for older clients.
+  `profile_bundle.activated`. Its soul and mode are stamped on each new
+  conversation (conversations of other profiles keep theirs).
+  `profile_bundle.apply` remains for older clients.
+- Per-agent models belong to the conversation: when a subagent starts, its
+  model, fallback, effort and `enabled` come from the conversation's profile
+  (`agents` map), field by field, over the global `agents.toml`; a profile with
+  no entry for that agent uses the global one. Activating a profile changes
+  nothing global, so two conversations of different profiles running at once
+  (Boards) each use their own. `profile_bundle.create/update` reject an
+  unknown agent or model alias (`NOT_FOUND`).
 - New work goes to the active profile, or to `rinari_profile_id` in
   `session.create`, `project.add` and `project.open`. A project's conversations
   always have the project's profile (a different one is `INVALID_PARAMS`);
@@ -4693,6 +4736,17 @@ belongs to one project only.
   there and the policy treats it as inside the project (writes, commands run
   there, delete targets). An untrusted one stays outside until trusted.
   The model gets the working folders in its environment (`project_folders`).
+- Each trusted extra folder also brings its own configuration, under its own
+  trust (an untrusted primary does not hide a trusted extra folder, nor the
+  reverse):
+  - its RINARI.md chain (from the folder down to the cwd when the cwd is inside
+    it), labelled `folder <path>: ./RINARI.md` and prefixed with the folder it
+    governs; `project.intelligence` lists those scopes with `folder`;
+  - its `.rinari/hooks.json`: project hooks marked with `folder`, run only
+    while that folder is trusted, and enabled/disabled together with project
+    hooks of the same name (`rinari hooks list` shows the folder).
+  MCP servers and plugins are not per folder: project-scoped MCP servers
+  follow the primary folder's trust.
 - Opening one of a project's folders opens that project; a CLI session started
   inside an extra folder binds to the project (its primary root, cwd kept).
   Checkpoints, LSP and the index stay on the primary folder.

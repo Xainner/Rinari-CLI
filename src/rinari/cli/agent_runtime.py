@@ -21,6 +21,7 @@ from pathlib import Path
 import typer
 
 from rinari import __version__
+from rinari.agents.config import AgentAssignment, coerce_assignment
 from rinari.application.services import ServiceContainer
 from rinari.instructions.resolver import provenance_for, resolve_project_instructions
 from rinari.models.router import ModelRouter
@@ -142,6 +143,29 @@ def project_instructions(
     )
 
 
+def folder_instructions(
+    folders: tuple[Path, ...], cwd: Path | None
+) -> tuple[ProjectInstruction, ...]:
+    """The RINARI.md chain of each extra project folder, labelled and scoped.
+
+    Callers pass only trusted folders (`_extra_roots`): each one answers to
+    its own trust. A folder's files apply to work inside it, so every entry
+    says which folder it governs.
+    """
+    out: list[ProjectInstruction] = []
+    for folder in folders:
+        for entry in resolve_project_instructions(folder, cwd, trusted=True):
+            out.append(
+                ProjectInstruction(
+                    provenance=f"folder {folder}: {provenance_for(entry)}",
+                    content=(
+                        f"These instructions apply to work inside {folder}.\n\n{entry.content}"
+                    ),
+                )
+            )
+    return tuple(out)
+
+
 def _runtime_facts(services: ServiceContainer, record: SessionRecord) -> dict[str, str]:
     """What the model cannot know by itself: today, where it runs, who it is.
 
@@ -234,6 +258,8 @@ def build_assembler_context(
     instructions = project_instructions(
         services, root, Path(record.current_cwd), trusted=project_trusted
     )
+    if root is not None:
+        instructions += folder_instructions(extra_folders, Path(record.current_cwd))
     task_state = _task_state_text(services, root) if record.kind == "PROJECT" else None
     leftover = _checklist_text(services, record.id)
     if leftover:
@@ -526,8 +552,13 @@ def _extra_roots(services: ServiceContainer, record: SessionRecord) -> tuple[Pat
     """A project's other folders that are trusted and present: working folders."""
     if record.kind != "PROJECT" or not record.project_id:
         return ()
+    return trusted_extra_folders(services, record.project_id)
+
+
+def trusted_extra_folders(services: ServiceContainer, project_id: str) -> tuple[Path, ...]:
+    """The project's non-primary folders that exist and are trusted."""
     try:
-        folders = services.projects.folders.list(record.project_id)
+        folders = services.projects.folders.list(project_id)
     except Exception:
         return ()
     roots: list[Path] = []
@@ -654,7 +685,11 @@ def build_agent_session(
     live_sink = _live_output_sink(interactive if live_output is None else live_output)
     output_sink = _activity_output_sink(activity_sink, live_sink)
     network_policy = services.network.policy()
-    hook_engine = _build_hook_engine(services, root) if remote_target is None else None
+    hook_engine = (
+        _build_hook_engine(services, root, _extra_roots(services, record))
+        if remote_target is None
+        else None
+    )
     # model_caller is the eval seam: a scripted/caller-equivalent object that
     # satisfies invoke/invoke_stream/capabilities. Production never passes it.
     caller = model_caller if model_caller is not None else _caller_for(services, record)
@@ -911,7 +946,7 @@ def _build_orchestrator(
     config = SubagentRuntimeConfig(
         caller=caller,
         caller_for=lambda name: caller_for_agent(services, record, name),
-        effort_for=lambda name: effort_for_agent(services, name),
+        effort_for=lambda name: effort_for_agent(services, record, name),
         base_registry=None,
         parent_runtime=parent_runtime,
         activity_sink=activity_sink,
@@ -993,11 +1028,14 @@ def _mcp_tools(services: ServiceContainer, root: Path | None) -> list:
     return collected
 
 
-def _build_hook_engine(services: ServiceContainer, root: Path | None):
-    # Build the lifecycle hook engine from hooks.json (user/project) + plugins.
+def _build_hook_engine(
+    services: ServiceContainer, root: Path | None, folders: tuple[Path, ...] = ()
+):
+    # Build the lifecycle hook engine from hooks.json (user/project and the
+    # project's trusted extra folders) + plugins.
     # A failure here must not prevent session start; return None on error.
     try:
-        return services.hooks.build_engine(project=root, trace_sink=lambda d: None)
+        return services.hooks.build_engine(project=root, trace_sink=lambda d: None, folders=folders)
     except Exception:
         return None
 
@@ -1218,8 +1256,9 @@ def caller_for_agent(
     Chain: assigned model → fallback → parent. Entries that do not resolve
     or whose merged capabilities lack tool calls are skipped: a stale
     assignment degrades to the working default instead of breaking turns.
+    The assignment is the conversation's profile's (`assignment_for_agent`).
     """
-    assignment = services.agent_configs.get(agent_name)
+    assignment = assignment_for_agent(services, record, agent_name)
     if not assignment.enabled:
         return None
     router = ModelRouter(services.providers, services.models)
@@ -1238,13 +1277,51 @@ def caller_for_agent(
     return None
 
 
-def effort_for_agent(services: ServiceContainer, agent_name: str) -> str | None:
+def effort_for_agent(
+    services: ServiceContainer, record: SessionRecord, agent_name: str
+) -> str | None:
     """Per-agent reasoning effort override (docs/desktop 03-A).
 
-    None = inherit the session/turn effort. The store only ever holds
-    validated values, so no re-validation is needed here.
+    None = inherit the session/turn effort. Only validated values reach an
+    assignment (`coerce_assignment`), so no re-validation is needed here.
     """
-    return services.agent_configs.get(agent_name).effort
+    return assignment_for_agent(services, record, agent_name).effort
+
+
+def assignment_for_agent(
+    services: ServiceContainer, record: SessionRecord, agent_name: str
+) -> AgentAssignment:
+    """One agent's assignment for this conversation.
+
+    The conversation's Rinari profile wins field by field (model and fallback
+    together, effort, enabled) over the global `agents.toml`, so two
+    conversations of different profiles running at once each use their own
+    models. A profile without an entry for the agent, or one that can no
+    longer be read, leaves the global assignment.
+    """
+    assignment = services.agent_configs.get(agent_name)
+    raw = _profile_agents(services, record).get(agent_name)
+    if not isinstance(raw, dict):
+        return assignment
+    own = coerce_assignment(raw)
+    if own.model or own.fallback:
+        assignment = replace(assignment, model=own.model, fallback=own.fallback)
+    if own.effort:
+        assignment = replace(assignment, effort=own.effort)
+    if "enabled" in raw:
+        assignment = replace(assignment, enabled=own.enabled)
+    return assignment
+
+
+def _profile_agents(services: ServiceContainer, record: SessionRecord) -> dict:
+    profiles = getattr(services, "rinari_profiles", None)
+    profile_id = getattr(record, "rinari_profile_id", None)
+    if profiles is None or not profile_id:
+        return {}
+    try:
+        return profiles.store.get(profile_id).agents
+    except (RinariError, OSError, ValueError):
+        return {}
 
 
 # ---------------------------------------------------------------------------
