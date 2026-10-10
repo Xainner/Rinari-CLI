@@ -322,7 +322,7 @@ class TurnManager:
 
         try:
             with self._lock:
-                return reconcile(
+                reconciled = reconcile(
                     self._services,
                     is_live=is_live,
                     emit=lambda name, payload: self._emit(event(name, payload)),
@@ -331,6 +331,66 @@ class TurnManager:
         except Exception:
             logger.exception("orphaned turn reconciliation failed")
             return []
+        self._checklist_orphans(reconciled)
+        return reconciled
+
+    # -- live checklist ---------------------------------------------------------
+
+    def _checklist_service(self) -> Any:
+        return getattr(self._services, "checklist", None)
+
+    def _checklist_begin(self, turn: _ActiveTurn) -> None:
+        service = self._checklist_service()
+        if service is None:
+            return
+        try:
+            cleared = service.begin_turn(turn.session_id, turn.turn_id)
+        except Exception:
+            logger.exception("checklist rollover failed")
+            return
+        if cleared is not None:
+            self._activity_cb(turn)(
+                "checklist.updated", {"reason": "rollover", "checklist": cleared.as_dict()}
+            )
+
+    def _checklist_end(self, turn: _ActiveTurn) -> None:
+        service = self._checklist_service()
+        if service is not None:
+            with contextlib.suppress(Exception):
+                service.end_turn(turn.session_id)
+
+    def _checklist_settle(self, turn: _ActiveTurn, terminal: str, emit: Any) -> None:
+        service = self._checklist_service()
+        if service is None:
+            return
+        try:
+            settled = service.settle(turn.session_id, turn.turn_id, terminal.removeprefix("turn."))
+        except Exception:
+            logger.exception("checklist settle failed")
+            return
+        if settled is not None:
+            emit(
+                "checklist.updated",
+                {"reason": terminal.replace(".", "_"), "checklist": settled.as_dict()},
+            )
+
+    def _checklist_orphans(self, turn_ids: list[str]) -> None:
+        service = self._checklist_service()
+        if service is None or not turn_ids:
+            return
+        try:
+            settled = service.settle_orphans(turn_ids)
+        except Exception:
+            logger.exception("checklist orphan settle failed")
+            return
+        for checklist in settled:
+            with contextlib.suppress(Exception):
+                self.emit_persisted_activity(
+                    "checklist.updated",
+                    session_id=checklist.session_id,
+                    turn_id=str(checklist.turn_id),
+                    payload={"reason": "engine_restart", "checklist": checklist.as_dict()},
+                )
 
     def conflicts_with_changeset(self, changeset: dict[str, Any]) -> bool:
         """Return whether undo would race an active turn in its session/project."""
@@ -815,6 +875,7 @@ class TurnManager:
                 self._activity_cb(turn)("turn.changes.completed", changeset)
 
         try:
+            self._checklist_begin(turn)
             agent_session = self._prepare_session(turn, record, reasoning_effort)
             context = agent_session.context
             with self._lock:
@@ -986,6 +1047,7 @@ class TurnManager:
             self._local.turn_id = None
             self._local.token = None
             self._settle_steering(turn, leftover)
+            self._checklist_end(turn)
             self._start_next_queued(turn.session_id)
 
     def _prepare_session(self, turn: _ActiveTurn, record: Any, reasoning_effort: str | None) -> Any:
@@ -1430,6 +1492,9 @@ class TurnManager:
             persist_usage = payload.get("_checkpoint", False)
             payload = {key: value for key, value in payload.items() if key != "_checkpoint"}
             if event_name in {"turn.completed", "turn.failed", "turn.cancelled", "turn.stopped"}:
+                # The list ends in the state the outcome deserves, and the
+                # client hears it before the terminal event.
+                self._checklist_settle(turn, event_name, _on_activity)
                 update = turn.token_usage.finish()
                 if update is not None:
                     _on_activity("usage.updated", {**update, "_checkpoint": True})
@@ -1645,6 +1710,9 @@ class TurnManager:
             return f"vision:{payload['vision_id']}:{payload.get('attempt_id', 1)}"
         if event_name == "steer.applied":
             return f"steer:{payload.get('steer_id')}"
+        if event_name == "checklist.updated":
+            # One card per turn that updates in place.
+            return f"checklist:{turn.turn_id}"
         if payload.get("tool_call_id"):
             return f"tool:{payload['tool_call_id']}"
         if payload.get("model_call_id"):

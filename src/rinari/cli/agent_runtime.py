@@ -230,6 +230,9 @@ def build_assembler_context(
         services, root, Path(record.current_cwd), trusted=project_trusted
     )
     task_state = _task_state_text(services, root) if record.kind == "PROJECT" else None
+    leftover = _checklist_text(services, record.id)
+    if leftover:
+        task_state = f"{leftover}\n\n{task_state}" if task_state else leftover
     from rinari.prompts.modes import mode_instructions
 
     skills_tuple, catalog = _skill_prompt_parts(services, root, record)
@@ -385,6 +388,17 @@ def _pinned_context_text(
     try:
         return services.retrieval.pinned_block(session_id, str(root) if root is not None else None)
     except Exception:
+        return None
+
+
+def _checklist_text(services: ServiceContainer, session_id: str) -> str | None:
+    """A checklist an earlier turn left unfinished, for the model to reconcile."""
+    service = getattr(services, "checklist", None)
+    if service is None:
+        return None
+    try:
+        return service.render_for_prompt(session_id)
+    except Exception:  # context is best effort, never a failed turn
         return None
 
 
@@ -640,6 +654,7 @@ def build_agent_session(
         lsp=_build_lsp_manager(root),
         validation=services.verification,
         memory=services.memory,
+        checklist=getattr(services, "checklist", None),
         activity_sink=activity_sink,
         context_retrieval=services.retrieval,
         project_trusted=_project_trusted(services, root),

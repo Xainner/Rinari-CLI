@@ -62,7 +62,10 @@
     "mcpSecretState",
     "mcpServer",
     "mcpTestResult",
-    "soulSettings"
+    "soulSettings",
+    "checklistItem",
+    "checklistCounts",
+    "checklist"
   ],
   "$defs": {
     "webPreview": {
@@ -281,6 +284,8 @@
         "session.mode.set",
         "session.model.set",
         "session.permission.get",
+        "session.checklist.clear",
+        "session.checklist.get",
         "session.permission.set",
         "session.turn.start",
         "command.list",
@@ -586,7 +591,8 @@
         "steer.returned",
         "memory.candidate.created",
         "memory.candidate.resolved",
-        "memory.remembered"
+        "memory.remembered",
+        "checklist.updated"
       ]
     },
     "attachment": {
@@ -3883,6 +3889,119 @@
         "options",
         "default"
       ]
+    },
+    "checklistItem": {
+      "type": "object",
+      "required": [
+        "id",
+        "content",
+        "status"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "in_progress",
+            "completed",
+            "blocked"
+          ]
+        },
+        "active_form": {
+          "type": "string"
+        },
+        "blocked_reason": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "checklist": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "turn_id",
+        "revision",
+        "state",
+        "items",
+        "explanation",
+        "counts",
+        "updated_at"
+      ],
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "turn_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "active",
+            "open",
+            "interrupted",
+            "completed",
+            "cleared"
+          ]
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/checklistItem"
+          }
+        },
+        "explanation": {
+          "type": "string"
+        },
+        "counts": {
+          "$ref": "#/$defs/checklistCounts"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "checklistCounts": {
+      "type": "object",
+      "required": [
+        "pending",
+        "in_progress",
+        "completed",
+        "blocked",
+        "total"
+      ],
+      "properties": {
+        "pending": {
+          "type": "integer"
+        },
+        "in_progress": {
+          "type": "integer"
+        },
+        "completed": {
+          "type": "integer"
+        },
+        "blocked": {
+          "type": "integer"
+        },
+        "total": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false
     },
     "gitHead": {
       "type": "object",
