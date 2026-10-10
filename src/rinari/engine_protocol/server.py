@@ -246,6 +246,8 @@ class EngineServer:
         self._dispatcher.register("session.mode.set", self._session_mode_set)
         self._dispatcher.register("session.model.set", self._session_model_set)
         self._dispatcher.register("session.permission.get", self._session_permission_get)
+        self._dispatcher.register("session.checklist.get", self._session_checklist_get)
+        self._dispatcher.register("session.checklist.clear", self._session_checklist_clear)
         self._dispatcher.register("session.permission.set", self._session_permission_set)
         self._dispatcher.register("session.turn.start", self._turn_start)
         self._dispatcher.register("command.list", self._command_list)
@@ -1490,6 +1492,23 @@ class EngineServer:
         if not isinstance(ref, str) or not ref:
             raise EngineProtocolError(INVALID_PARAMS, "Param 'ref' must be a non-empty string.")
         return {"session": session_to_dict(self._services.sessions.show(ref))}
+
+    def _session_checklist_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        session_id = self._services.sessions.show(self._need_str(params, "session_id")).id
+        service = getattr(self._services, "checklist", None)
+        checklist = service.visible(session_id) if service is not None else None
+        return {"checklist": checklist.as_dict() if checklist is not None else None}
+
+    def _session_checklist_clear(self, params: dict[str, Any]) -> dict[str, Any]:
+        """The user dismisses the list; the model is not told to reconcile it."""
+        session_id = self._services.sessions.show(self._need_str(params, "session_id")).id
+        if self._turns.has_active_turn(session_id):
+            raise EngineProtocolError(
+                TURN_RUNNING, "Rinari is working on this list; clear it when the turn ends."
+            )
+        service = getattr(self._services, "checklist", None)
+        cleared = service.clear(session_id) if service is not None else None
+        return {"checklist": cleared.as_dict() if cleared is not None else None}
 
     def _session_model_set(self, params: dict[str, Any]) -> dict[str, Any]:
         ref = self._need_str(params, "ref")

@@ -4578,3 +4578,30 @@ the machine.
   Both run off the request loop so turns keep streaming.
 
 Measured with `small` on a desktop CPU: 7.5 s of Spanish speech in ~2.8 s.
+
+## Live checklist (`checklist.update`, `turn_checklist_v1`)
+
+The model keeps a live list of the steps it is carrying out with the
+`checklist.update` tool (the whole list each call, at most 20 items, statuses
+`pending | in_progress | completed | blocked`; `blocked` needs a
+`blocked_reason`; `items: []` clears it). Its description tells it to use the
+list only for work with three or more steps and to mark an item completed only
+after it is done. Subagents do not get the tool: the list is the main
+conversation's.
+
+Every change is turn activity `checklist.updated` (`reason`, `checklist`), one
+card per turn (`checklist:{turn_id}`). The engine keeps it true:
+
+- before the terminal event, a list the turn worked on is settled from the
+  outcome: every item done → `completed`; a normal ending with items left →
+  `open`; a cancelled, failed or stopped turn with items left → `interrupted`
+  (`reason` `turn_completed`, `turn_cancelled`, …);
+- turns a dead engine left behind settle as `interrupted` on restart
+  (`reason` `engine_restart`);
+- the next turn clears a `completed` list (`reason` `rollover`) and hands an
+  `open` or `interrupted` one to the model in its task state, to reconcile;
+- compaction keeps the items in the compact state's task lists.
+
+`session.checklist.get {session_id}` → `{checklist|null}` (null once cleared).
+`session.checklist.clear {session_id}` dismisses it; `TURN_RUNNING` while a
+turn works on it. The CLI prints the list instead.

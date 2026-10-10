@@ -18,6 +18,7 @@ from rinari.application.provider_service import ProviderService
 from rinari.application.session_service import SessionService
 from rinari.artifacts.store import ArtifactStore
 from rinari.changes.service import TurnChangeService
+from rinari.checklist import ChecklistService
 from rinari.checkpoints.service import CheckpointService
 from rinari.context.retrieval import ContextRetrievalService
 from rinari.context.service import ContextService
@@ -61,6 +62,7 @@ class ServiceContainer:
     agents: AgentRegistry
     agent_configs: AgentConfigStore
     schedules: ScheduleService = None
+    checklist: ChecklistService = None
 
 
 def build_services(
@@ -129,6 +131,7 @@ def build_services(
         agents=agents,
         agent_configs=agent_configs,
         schedules=schedules,
+        checklist=ChecklistService(ctx),
     )
 
 

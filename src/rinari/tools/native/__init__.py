@@ -25,10 +25,12 @@ __all__ = ["all_native_tools"]
 
 
 def all_native_tools() -> list[ToolDefinition]:
+    from rinari.tools.native.checklist import checklist_tools
     from rinari.tools.native.questions import question_tools
 
     return [
         *question_tools(),
+        *checklist_tools(),
         *artifact_tools(),
         *filesystem_tools(),
         *image_tools(),

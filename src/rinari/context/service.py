@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import json
 
 from rinari.artifacts.store import ArtifactStore
 from rinari.context import compact_state, engine, tokens
@@ -77,11 +78,41 @@ class ContextService:
                 line += f" {target}"
             approvals.append(line)
         evidence["approvals"] = approvals[-MAX_APPROVALS_RECORDED:]
+        self._checklist_evidence(session_id, evidence)
 
         evidence["artifacts"] = [
             record.uri() for record in self._artifacts.list(session_id=session_id)
         ]
         return evidence
+
+    def _checklist_evidence(self, session_id: str, evidence: dict) -> None:
+        """The live checklist survives compaction in the task lists, marked."""
+        try:
+            row = self._ctx.db.query_one(
+                "SELECT state, items_json FROM session_checklists WHERE session_id = ?",
+                (session_id,),
+            )
+        except Exception:  # an older database without the table
+            return
+        if row is None or row["state"] == "cleared":
+            return
+        try:
+            items = json.loads(row["items_json"] or "[]")
+        except ValueError:
+            return
+        buckets = {
+            "completed": "tasks_completed",
+            "pending": "tasks_active",
+            "in_progress": "tasks_active",
+            "blocked": "tasks_blocked",
+        }
+        for item in items:
+            if not isinstance(item, dict) or item.get("status") not in buckets:
+                continue
+            label = f"checklist: {item.get('content', '')}"
+            if item.get("status") == "blocked" and item.get("blocked_reason"):
+                label += f" (blocked: {item['blocked_reason']})"
+            evidence.setdefault(buckets[item["status"]], []).append(label)
 
     # -- compaction ---------------------------------------------------------
 
