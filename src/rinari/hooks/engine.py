@@ -4,7 +4,8 @@ A declaration names an event and a handler (`python` dotted reference or
 `shell` command). The engine:
 
 - orders hooks deterministically: (source rank, name);
-- enforces trust (project-scope hooks only run for a trusted project);
+- enforces trust (project-scope hooks only run for a trusted project, and
+  hooks of a project's extra folder only while that folder is trusted);
 - enforces capabilities (shell handlers must declare `shell.exec`);
 - bounds each handler (timeout) and never lets a failure propagate:
   every outcome is recorded in the returned list (and, via `on_outcome`,
@@ -53,6 +54,8 @@ class HookDeclaration:
     capabilities: tuple[str, ...] = ()
     risk: str = "low"
     scope: str = "global"
+    # Project hooks of an extra project folder: that folder ("" = the root).
+    folder: str = ""
 
     @property
     def key(self) -> tuple[str, str, str]:
@@ -66,7 +69,9 @@ class HookDeclaration:
         return (rank, self.name)
 
     @classmethod
-    def parse(cls, raw: dict, source: str, scope: str = "global") -> HookDeclaration:
+    def parse(
+        cls, raw: dict, source: str, scope: str = "global", folder: str = ""
+    ) -> HookDeclaration:
         name = str(raw.get("name") or "")
         event = str(raw.get("event") or "")
         handler_type = str(raw.get("handler_type") or "")
@@ -92,10 +97,11 @@ class HookDeclaration:
             capabilities=tuple(sorted(set(caps))),
             risk=str(raw.get("risk") or "low"),
             scope=scope,
+            folder=folder,
         )
 
     def to_row(self) -> dict:
-        return {
+        row = {
             "name": self.name,
             "event": self.event,
             "source": self.source,
@@ -105,6 +111,9 @@ class HookDeclaration:
             "capabilities": list(self.capabilities),
             "risk": self.risk,
         }
+        if self.folder:
+            row["folder"] = self.folder
+        return row
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,9 +179,9 @@ class HookEngine:
 
     def _allowed(self, declaration: HookDeclaration, project: Path | None) -> bool:
         if declaration.source == "project":
-            return (
-                project is not None and self._trust is not None and self._trust.is_trusted(project)
-            )
+            # An extra folder's hooks answer to that folder's own trust.
+            root = Path(declaration.folder) if declaration.folder else project
+            return root is not None and self._trust is not None and self._trust.is_trusted(root)
         return True
 
     def _skip(self, declaration: HookDeclaration, event: str, code: str) -> HookOutcome:

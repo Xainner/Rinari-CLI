@@ -25,13 +25,23 @@ def _project(ctx: typer.Context) -> Path | None:
     return detect_project(Path.cwd(), Path.home()).project_root
 
 
+def _folders(s, project: Path | None) -> tuple[Path, ...]:
+    """The trusted extra folders of the project rooted at `project`."""
+    if project is None:
+        return ()
+    from rinari.cli.agent_runtime import trusted_extra_folders
+
+    project_id = s.projects.folders.exact_owner(project)
+    return trusted_extra_folders(s, project_id) if project_id else ()
+
+
 @app.command("list")
 @with_error_handling("hooks.list")
 def hooks_list(ctx: typer.Context) -> None:
     """List hook declarations (user, project, plugins) with their state."""
     with services(ctx) as s:
         project = _project(ctx)
-        rows = s.hooks.list(project)
+        rows = s.hooks.list(project, folders=_folders(s, project))
         if is_json(ctx):
             emit_json(success_envelope("hooks.list", {"hooks": rows}))
             return
@@ -43,6 +53,7 @@ def hooks_list(ctx: typer.Context) -> None:
             typer.echo(
                 f"{row['event']:<18} {row['name']:<24} {row['source']:<10} "
                 f"{row['handler_type']:<7} {'yes' if row['enabled'] else 'no'}"
+                + (f"  ({row['folder']})" if row.get("folder") else "")
             )
 
 

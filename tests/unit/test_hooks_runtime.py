@@ -389,8 +389,8 @@ def test_session_lifecycle_session_start_and_end(monkeypatch, app_ctx, tmp_path)
     seen: list[str] = []
     real_engine_builder = agent_runtime._build_hook_engine
 
-    def spy(services, root):
-        engine = real_engine_builder(services, root)
+    def spy(services, root, folders=()):
+        engine = real_engine_builder(services, root, folders)
         if engine is not None:
             original = engine.emit
 

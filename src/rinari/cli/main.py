@@ -9,6 +9,7 @@ from rinari.cli.commands import agents as agents_cmd
 from rinari.cli.commands import api as api_cmd
 from rinari.cli.commands import approvals as approvals_cmd
 from rinari.cli.commands import artifacts as artifacts_cmd
+from rinari.cli.commands import bundles as bundles_cmd
 from rinari.cli.commands import cache as cache_cmd
 from rinari.cli.commands import checkpoint as checkpoint_cmd
 from rinari.cli.commands import code as code_cmd
@@ -83,6 +84,7 @@ app.add_typer(skills_cmd.app, name="skills")
 app.add_typer(schedule_cmd.app, name="schedule")
 app.add_typer(agents_cmd.app, name="agents")
 app.add_typer(profiles_cmd.app, name="profiles")
+app.add_typer(bundles_cmd.app, name="bundles")
 app.add_typer(project_cmd.app, name="project")
 app.add_typer(checkpoint_cmd.app, name="checkpoint")
 app.add_typer(permissions_cmd.app, name="permissions")
