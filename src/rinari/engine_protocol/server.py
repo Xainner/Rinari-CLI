@@ -53,6 +53,7 @@ from rinari.engine_protocol.turns import TurnManager
 from rinari.engine_protocol.workspace import InvalidGitError, git_diff, git_files
 from rinari.models.router import ModelRouter
 from rinari.projects.detector import is_home_root
+from rinari.projects.git_head import HEADS
 from rinari.shared.errors import (
     ConflictError,
     InvalidUsageError,
@@ -1732,6 +1733,7 @@ class EngineServer:
             "created_at": project.created_at,
             "updated_at": project.updated_at,
             "last_opened_at": project.last_opened_at or project.updated_at,
+            "git_head": HEADS.get(project.canonical_root).as_dict(),
         }
 
     def _project_list(self, params: dict[str, Any]) -> dict[str, Any]:

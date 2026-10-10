@@ -722,6 +722,7 @@ class SessionService:
             raise InvalidUsageError("Session title must not be empty.")
         if len(clean) > 160:
             raise InvalidUsageError("Session title must be at most 160 characters.")
+        previous = record.title
         record.title = clean
         record.updated_at = self._now()
         with self._ctx.db.transaction():
@@ -729,7 +730,16 @@ class SessionService:
             self._append_event(record.id, EVENT_SESSION_RENAMED, {"title": clean, "source": source})
         if self.on_renamed is not None:
             try:
-                self.on_renamed({"session_id": record.id, "title": clean, "source": source})
+                # previous_title lets a client animate old -> new without
+                # looking up a list it may have already refreshed.
+                self.on_renamed(
+                    {
+                        "session_id": record.id,
+                        "title": clean,
+                        "previous_title": previous,
+                        "source": source,
+                    }
+                )
             except Exception:
                 logger.exception("session rename observer failed")
         return record

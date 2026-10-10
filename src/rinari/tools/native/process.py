@@ -415,9 +415,9 @@ def process_list(input: dict, ctx: ToolContext) -> ToolResult:
 
 
 def _classify_shell_like(input: dict) -> ClassifiedAction:
-    from rinari.tools.definition import command_text
+    from rinari.tools.definition import command_cwd, command_text
 
-    return ClassifiedAction("shell.exec", command_text(input))
+    return ClassifiedAction("shell.exec", command_text(input), cwd=command_cwd(input))
 
 
 def _classify_process_local(input: dict) -> ClassifiedAction:

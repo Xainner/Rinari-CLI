@@ -522,7 +522,9 @@ def pty_terminate(input: dict, ctx: ToolContext) -> ToolResult:
 
 
 def _classify_shell_like(input: dict) -> ClassifiedAction:
-    return ClassifiedAction("shell.exec", str(input.get("command") or ""))
+    from rinari.tools.definition import command_cwd
+
+    return ClassifiedAction("shell.exec", str(input.get("command") or ""), cwd=command_cwd(input))
 
 
 def _classify_pty_local(input: dict) -> ClassifiedAction:

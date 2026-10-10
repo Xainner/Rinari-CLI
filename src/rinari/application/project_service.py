@@ -8,6 +8,7 @@ from typing import Any
 from rinari.application.context import AppContext
 from rinari.projects.detector import is_home_root
 from rinari.projects.git import git_fingerprint
+from rinari.projects.git_head import HEADS
 from rinari.shared.clock import now_iso
 from rinari.shared.errors import (
     ConflictError,
@@ -276,6 +277,7 @@ class ProjectService:
                 ),
                 "active_session_id": bound.get(project.canonical_root),
                 "rinari_profile_id": project.rinari_profile_id,
+                "git_head": HEADS.get(project.canonical_root).as_dict(),
             }
             for project in ranked[:limit]
         ]

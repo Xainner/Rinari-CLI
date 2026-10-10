@@ -105,6 +105,9 @@ CAPABILITIES: dict[str, bool] = {
     # activate), projects and conversations with rinari_profile_id, list
     # filters, project/session move_profile, profile_bundle.update.
     "rinari_profiles_v1": True,
+    # projectSummary.git_head: each project's branch read from .git/HEAD
+    # (no git subprocess), so project lists can show it.
+    "project_git_head_v1": True,
     # Peer messaging between agent sessions (Boards): untrusted data, per-target
     # consent, provenance ceiling in the receiving turn.
     "session_peer_messaging_v1": True,

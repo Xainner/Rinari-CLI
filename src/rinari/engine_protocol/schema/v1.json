@@ -6,6 +6,7 @@
   "x-codegen-definitions": [
     "attachment",
     "sessionSummary",
+    "gitHead",
     "projectSummary",
     "usageSnapshot",
     "governorSnapshot",
@@ -937,6 +938,9 @@
         },
         "rinari_profile_id": {
           "type": "string"
+        },
+        "git_head": {
+          "$ref": "#/$defs/gitHead"
         }
       },
       "additionalProperties": true
@@ -3960,6 +3964,43 @@
         }
       },
       "additionalProperties": true
+    },
+    "gitHead": {
+      "type": "object",
+      "required": [
+        "branch",
+        "detached",
+        "sha_short",
+        "operation"
+      ],
+      "properties": {
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "detached": {
+          "type": "boolean"
+        },
+        "sha_short": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "rebase",
+            null
+          ]
+        }
+      },
+      "additionalProperties": false
     }
   }
 }

@@ -890,7 +890,7 @@ A stream that ends without its terminal event fails with
 `endpoint` (no query or credentials), `http_status`, `request_id`,
 `bytes_received`, `elapsed_s`, `idle_s` and `partial_tool_calls`.
 Every stored title emits `session.renamed` (`session_id`, `title`,
-`source`: `manual`, `generated` or `fallback`). The first message names the
+`previous_title`, `source`: `manual`, `generated` or `fallback`). The first message names the
 session through the model; when no usable title comes back, the trimmed
 message is a provisional `fallback` and later turns retry from that same
 message (three failures at most, each a `SessionTitleFailed` event with only
@@ -943,7 +943,11 @@ and the internet) and never writes, runs or sends. workspace is free inside
 the project or chat folder, on localhost/LAN and reading the internet; it asks
 once to write or run outside, send data to an internet host (a request body or
 a non-GET method, `ssh.inspect` or `ssh.run` to a public host), call an MCP tool, interact
-with a web page or `git push`. full-access asks for none of that. Every profile
+with a web page or `git push`. A command given its own `cwd` (shell,
+process, pty) is judged where it runs: its relative paths resolve from
+there, and outside the project only plain inspection (`ls`, `cat`,
+`git status`/`log`/`diff`…) runs without asking (`shell_cwd_outside`).
+full-access asks for none of that. Every profile
 asks for the hard list (force push, deleting outside the project; never granted
 for good) and for system secrets (`~/.ssh`, GPG/cloud keys, OS and browser
 credential stores; project `.env` files are ordinary work). Once a turn has read
@@ -997,7 +1001,9 @@ with `branched_from` ancestry; task graphs not copied).
 Post-v1 projects: `project.list_recent` (`limit` 1..100 default 20,
 ordered by shared session activity, never a second store;
 `last_opened_at` falls back to record recency; `active_session_id` binds
-the latest non-closed session), `project.open` (`path` → upsert +
+the latest non-closed session; `git_head` `{branch, detached, sha_short,
+operation}` read from `.git/HEAD` without running git, also in
+`project.list`/`project.get`), `project.open` (`path` → upsert +
 recommended session, created or reused-and-touched; `$HOME` rejected;
 plain dirs promote to PROJECT) and `project.status` (git truth +
 `active_session_id` dashboard binding; branch/dirty live here, not in
