@@ -15,6 +15,7 @@ from __future__ import annotations
 import dataclasses
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -280,6 +281,39 @@ def test_write_outside_the_workspace_does_not_invent_folders(project) -> None:
     )
     assert created.ok, created.error
     assert target.read_text(encoding="utf-8") == "x"
+
+
+def _full_access(ctx):
+    from rinari.policy.sandbox import FilesystemSandbox
+
+    return dataclasses.replace(ctx, sandbox=FilesystemSandbox(read_root=None, unrestricted=True))
+
+
+def test_full_access_creates_missing_folders_in_its_own_workspace(project) -> None:
+    # Full access grants no explicit roots; before, it was the only profile
+    # that could not create `src/` in its own project and models looped on it.
+    tmp_path, root, _ = project
+    ctx = _full_access(_ctx(tmp_path, root, profile="full-access"))
+    runtime, _ = _runtime(ctx, tmp_path)
+
+    result = runtime.execute("fs.write", {"path": "web/app/main.ts", "content": "x\n"}, ctx)
+
+    assert result.ok, result.error
+    assert (root / "web" / "app" / "main.ts").read_text(encoding="utf-8") == "x\n"
+    created = [Path(p).resolve() for p in result.data["created_dirs"]]
+    assert created == [(root / "web").resolve(), (root / "web" / "app").resolve()]
+
+
+def test_full_access_still_asks_for_create_parents_outside_its_folders(project) -> None:
+    tmp_path, root, _ = project
+    ctx = _full_access(_ctx(tmp_path, root, profile="full-access"))
+    runtime, _ = _runtime(ctx, tmp_path)
+    target = tmp_path / "elsewhere" / "deep" / "note.txt"
+
+    result = runtime.execute("fs.write", {"path": str(target), "content": "x"}, ctx)
+
+    assert result.error.code is ToolErrorCode.NOT_FOUND
+    assert not (tmp_path / "elsewhere").exists()
 
 
 def test_write_to_a_folder_path_is_an_invalid_argument(project) -> None:
