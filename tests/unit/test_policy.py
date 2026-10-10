@@ -583,3 +583,72 @@ def test_allow_rules_and_mode_never_lift_the_profile_floors(network) -> None:
     read = engine.decide(CAPABILITY_NETWORK, _scope(profile="read-only"), host="api.example.com")
     assert read.action is PolicyAction.ALLOW
     assert send(tainted, host="127.0.0.1").action is PolicyAction.ALLOW
+
+
+# -- shell commands with their own cwd ----------------------------------------
+
+
+def _ran_in(cwd: Path, **kwargs) -> SessionScope:
+    import dataclasses
+
+    return dataclasses.replace(_scope(**kwargs), command_cwd=cwd)
+
+
+def test_shell_relative_delete_is_judged_where_the_command_runs() -> None:
+    # Before: `rm -r build` with cwd=/elsewhere resolved build against the
+    # project root and was allowed as a local command.
+    d = PolicyEngine().decide(
+        CAPABILITY_SHELL, _ran_in(Path("/elsewhere")), command="rm -r ./build"
+    )
+    assert d.action is PolicyAction.ASK
+    assert d.rule_id == "delete_outside_root"
+
+
+def test_shell_command_running_outside_the_workspace_asks() -> None:
+    d = PolicyEngine().decide(CAPABILITY_SHELL, _ran_in(Path("/elsewhere")), command="npm install")
+    assert d.action is PolicyAction.ASK
+    assert d.rule_id == "shell_cwd_outside"
+    full = PolicyEngine().decide(
+        CAPABILITY_SHELL, _ran_in(Path("/elsewhere"), profile="full-access"), command="npm install"
+    )
+    assert full.action is PolicyAction.ALLOW
+
+
+def test_shell_own_cwd_inside_the_project_stays_allowed() -> None:
+    inside = _ran_in(PROJECT / "web")
+    for command in ("npm install", "touch ./a.txt", "ls"):
+        assert PolicyEngine().decide(CAPABILITY_SHELL, inside, command=command).action is (
+            PolicyAction.ALLOW
+        )
+    # Relative paths climb from the command's folder, not the project root.
+    up = PolicyEngine().decide(CAPABILITY_SHELL, inside, command="touch ../../outside.txt")
+    assert up.action is PolicyAction.ASK
+
+
+def test_shell_read_only_command_elsewhere_still_runs() -> None:
+    d = PolicyEngine().decide(CAPABILITY_SHELL, _ran_in(Path("/elsewhere")), command="git status")
+    assert d.action is PolicyAction.ALLOW
+
+
+def test_shell_like_tools_carry_their_cwd() -> None:
+    from rinari.tools.native.process import process_tools
+    from rinari.tools.native.ptytools import _classify_shell_like as pty_classify
+    from rinari.tools.native.shell import shell_tools
+
+    shell = next(tool for tool in shell_tools() if tool.name == "shell.exec")
+    assert shell.classify_action({"command": "ls", "cwd": "../x"}).cwd == "../x"
+    assert shell.classify_action({"command": "ls"}).cwd is None
+    start = next(tool for tool in process_tools() if tool.name == "process.start")
+    assert start.classify_action({"command": "ls", "cwd": "sub"}).cwd == "sub"
+    assert pty_classify({"command": "bash", "cwd": "/tmp"}).cwd == "/tmp"
+
+
+def test_shell_outside_workspace_only_plain_inspection_runs_free() -> None:
+    elsewhere = _ran_in(Path("/elsewhere"))
+    for command in ("ls -la", "git status", "git log --oneline", "Get-ChildItem", "cat README.md"):
+        assert PolicyEngine().decide(CAPABILITY_SHELL, elsewhere, command=command).action is (
+            PolicyAction.ALLOW
+        ), command
+    for command in ("git commit -m x", "make", "ls; npm test", "cat a > b", "git status && rm x"):
+        decision = PolicyEngine().decide(CAPABILITY_SHELL, elsewhere, command=command)
+        assert decision.action is PolicyAction.ASK, command
