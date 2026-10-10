@@ -63,6 +63,7 @@
     "mcpTestResult",
     "soulSettings",
     "checklistItem",
+    "checklistCounts",
     "checklist"
   ],
   "$defs": {
@@ -3962,35 +3963,38 @@
           "type": "string"
         },
         "counts": {
-          "type": "object",
-          "required": [
-            "pending",
-            "in_progress",
-            "completed",
-            "blocked",
-            "total"
-          ],
-          "properties": {
-            "pending": {
-              "type": "integer"
-            },
-            "in_progress": {
-              "type": "integer"
-            },
-            "completed": {
-              "type": "integer"
-            },
-            "blocked": {
-              "type": "integer"
-            },
-            "total": {
-              "type": "integer"
-            }
-          },
-          "additionalProperties": false
+          "$ref": "#/$defs/checklistCounts"
         },
         "updated_at": {
           "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "checklistCounts": {
+      "type": "object",
+      "required": [
+        "pending",
+        "in_progress",
+        "completed",
+        "blocked",
+        "total"
+      ],
+      "properties": {
+        "pending": {
+          "type": "integer"
+        },
+        "in_progress": {
+          "type": "integer"
+        },
+        "completed": {
+          "type": "integer"
+        },
+        "blocked": {
+          "type": "integer"
+        },
+        "total": {
+          "type": "integer"
         }
       },
       "additionalProperties": false
