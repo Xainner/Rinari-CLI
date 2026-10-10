@@ -2139,6 +2139,24 @@ class EngineServer:
             global_path=self._services.ctx.home / "RINARI.md",
             trusted=trusted,
         )
+        scopes = [
+            {"scope": entry.scope, "provenance": provenance_for(entry), "kind": entry.kind}
+            for entry in entries
+        ]
+        # Each trusted extra folder of the project contributes its own chain.
+        from rinari.cli.agent_runtime import trusted_extra_folders
+
+        project_id = self._services.projects.folders.exact_owner(root)
+        for folder in trusted_extra_folders(self._services, project_id) if project_id else ():
+            scopes.extend(
+                {
+                    "scope": f"folder:{folder}",
+                    "provenance": f"folder {folder}: {provenance_for(entry)}",
+                    "kind": entry.kind,
+                    "folder": str(folder),
+                }
+                for entry in resolve_project_instructions(folder, folder, trusted=True)
+            )
         return {
             "project": {"root": str(root)},
             "repository": {
@@ -2155,14 +2173,7 @@ class EngineServer:
             "instructions": {
                 "trusted": trusted,
                 "trust_state": trust_state,
-                "scopes": [
-                    {
-                        "scope": entry.scope,
-                        "provenance": provenance_for(entry),
-                        "kind": entry.kind,
-                    }
-                    for entry in entries
-                ],
+                "scopes": scopes,
             },
         }
 

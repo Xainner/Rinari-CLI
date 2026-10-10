@@ -142,6 +142,29 @@ def project_instructions(
     )
 
 
+def folder_instructions(
+    folders: tuple[Path, ...], cwd: Path | None
+) -> tuple[ProjectInstruction, ...]:
+    """The RINARI.md chain of each extra project folder, labelled and scoped.
+
+    Callers pass only trusted folders (`_extra_roots`): each one answers to
+    its own trust. A folder's files apply to work inside it, so every entry
+    says which folder it governs.
+    """
+    out: list[ProjectInstruction] = []
+    for folder in folders:
+        for entry in resolve_project_instructions(folder, cwd, trusted=True):
+            out.append(
+                ProjectInstruction(
+                    provenance=f"folder {folder}: {provenance_for(entry)}",
+                    content=(
+                        f"These instructions apply to work inside {folder}.\n\n{entry.content}"
+                    ),
+                )
+            )
+    return tuple(out)
+
+
 def _runtime_facts(services: ServiceContainer, record: SessionRecord) -> dict[str, str]:
     """What the model cannot know by itself: today, where it runs, who it is.
 
@@ -234,6 +257,8 @@ def build_assembler_context(
     instructions = project_instructions(
         services, root, Path(record.current_cwd), trusted=project_trusted
     )
+    if root is not None:
+        instructions += folder_instructions(extra_folders, Path(record.current_cwd))
     task_state = _task_state_text(services, root) if record.kind == "PROJECT" else None
     leftover = _checklist_text(services, record.id)
     if leftover:
@@ -526,8 +551,13 @@ def _extra_roots(services: ServiceContainer, record: SessionRecord) -> tuple[Pat
     """A project's other folders that are trusted and present: working folders."""
     if record.kind != "PROJECT" or not record.project_id:
         return ()
+    return trusted_extra_folders(services, record.project_id)
+
+
+def trusted_extra_folders(services: ServiceContainer, project_id: str) -> tuple[Path, ...]:
+    """The project's non-primary folders that exist and are trusted."""
     try:
-        folders = services.projects.folders.list(record.project_id)
+        folders = services.projects.folders.list(project_id)
     except Exception:
         return ()
     roots: list[Path] = []
@@ -654,7 +684,11 @@ def build_agent_session(
     live_sink = _live_output_sink(interactive if live_output is None else live_output)
     output_sink = _activity_output_sink(activity_sink, live_sink)
     network_policy = services.network.policy()
-    hook_engine = _build_hook_engine(services, root) if remote_target is None else None
+    hook_engine = (
+        _build_hook_engine(services, root, _extra_roots(services, record))
+        if remote_target is None
+        else None
+    )
     # model_caller is the eval seam: a scripted/caller-equivalent object that
     # satisfies invoke/invoke_stream/capabilities. Production never passes it.
     caller = model_caller if model_caller is not None else _caller_for(services, record)
@@ -993,11 +1027,14 @@ def _mcp_tools(services: ServiceContainer, root: Path | None) -> list:
     return collected
 
 
-def _build_hook_engine(services: ServiceContainer, root: Path | None):
-    # Build the lifecycle hook engine from hooks.json (user/project) + plugins.
+def _build_hook_engine(
+    services: ServiceContainer, root: Path | None, folders: tuple[Path, ...] = ()
+):
+    # Build the lifecycle hook engine from hooks.json (user/project and the
+    # project's trusted extra folders) + plugins.
     # A failure here must not prevent session start; return None on error.
     try:
-        return services.hooks.build_engine(project=root, trace_sink=lambda d: None)
+        return services.hooks.build_engine(project=root, trace_sink=lambda d: None, folders=folders)
     except Exception:
         return None
 

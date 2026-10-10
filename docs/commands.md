@@ -4693,6 +4693,17 @@ belongs to one project only.
   there and the policy treats it as inside the project (writes, commands run
   there, delete targets). An untrusted one stays outside until trusted.
   The model gets the working folders in its environment (`project_folders`).
+- Each trusted extra folder also brings its own configuration, under its own
+  trust (an untrusted primary does not hide a trusted extra folder, nor the
+  reverse):
+  - its RINARI.md chain (from the folder down to the cwd when the cwd is inside
+    it), labelled `folder <path>: ./RINARI.md` and prefixed with the folder it
+    governs; `project.intelligence` lists those scopes with `folder`;
+  - its `.rinari/hooks.json`: project hooks marked with `folder`, run only
+    while that folder is trusted, and enabled/disabled together with project
+    hooks of the same name (`rinari hooks list` shows the folder).
+  MCP servers and plugins are not per folder: project-scoped MCP servers
+  follow the primary folder's trust.
 - Opening one of a project's folders opens that project; a CLI session started
   inside an extra folder binds to the project (its primary root, cwd kept).
   Checkpoints, LSP and the index stay on the primary folder.

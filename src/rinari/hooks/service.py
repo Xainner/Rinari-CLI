@@ -48,24 +48,39 @@ class HookService:
     def project_hooks_file(self, root: Path) -> Path:
         return Path(root) / ".rinari" / "hooks.json"
 
-    def discover(self, project: Path | None = None) -> list[HookDeclaration]:
+    def discover(
+        self, project: Path | None = None, folders: tuple[Path, ...] = ()
+    ) -> list[HookDeclaration]:
+        """User hooks, the project root's, then each extra project folder's.
+
+        A folder's hooks are project hooks marked with their folder: they run
+        only while that folder is trusted, and share the enabled state of
+        project hooks with the same name.
+        """
         declarations: list[HookDeclaration] = []
         diagnostics: list[dict] = []
         user_file = self.user_hooks_file()
-        for source, path, scope in (
-            ("user", user_file, "global"),
+        sources: list[tuple[str, Path | None, str, str]] = [
+            ("user", user_file, "global", ""),
             (
                 "project",
                 self.project_hooks_file(project) if project is not None else None,
                 "project",
+                "",
             ),
-        ):
+        ]
+        if project is not None:
+            sources.extend(
+                ("project", self.project_hooks_file(folder), "project", str(folder))
+                for folder in folders
+            )
+        for source, path, scope, folder in sources:
             if path is None or not path.is_file():
                 continue
             entries = _load_entries(path, diagnostics)
             for raw in entries:
                 try:
-                    declarations.append(HookDeclaration.parse(raw, source, scope))
+                    declarations.append(HookDeclaration.parse(raw, source, scope, folder))
                 except Exception as exc:
                     diagnostics.append(
                         {
@@ -79,10 +94,13 @@ class HookService:
     # -- state (DB) ------------------------------------------------------------------
 
     def list(
-        self, project: Path | None = None, plugin_hooks: list[tuple[str, str]] | None = None
+        self,
+        project: Path | None = None,
+        plugin_hooks: list[tuple[str, str]] | None = None,
+        folders: tuple[Path, ...] = (),
     ) -> list[dict]:
         rows: list[dict] = []
-        for decl in self.discover(project):
+        for decl in self.discover(project, folders):
             state = self._ctx.hook_repo.find(decl.name, decl.source, decl.scope)
             row = decl.to_row()
             row["enabled"] = True if state is None else bool(state.get("enabled"))
@@ -158,9 +176,10 @@ class HookService:
         project: Path | None = None,
         plugin_hooks: list[tuple[str, object]] | None = None,
         trace_sink: object | None = None,
+        folders: tuple[Path, ...] = (),
     ) -> HookEngine:
         engine = HookEngine(trust=self._trust)
-        for decl in self.discover(project):
+        for decl in self.discover(project, folders):
             if not self._state(decl):
                 continue
             engine.add(decl)
