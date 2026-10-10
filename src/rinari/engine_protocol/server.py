@@ -3060,6 +3060,7 @@ class EngineServer:
 
     def _bundle_create(self, params: dict[str, Any]) -> dict[str, Any]:
         params = params or {}
+        self._check_bundle_agents(params.get("agents"))
         bundle = self._bundles().create(
             params.get("id", ""),
             name=params.get("name", ""),
@@ -3079,6 +3080,7 @@ class EngineServer:
             for key in ("name", "description", "soul_id", "mode", "agents")
             if key in params
         }
+        self._check_bundle_agents(changes.get("agents"))
         bundle = self._bundles().update(bundle_id, **changes)
         self._emit_profiles_changed(bundle.id, "updated")
         return {"profile": bundle.to_summary()}
@@ -3098,33 +3100,30 @@ class EngineServer:
     def _bundle_activate(self, params: dict[str, Any]) -> dict[str, Any]:
         """Switch the workspace: new work goes here, lists show its work.
 
-        Its per-agent models apply (as profile_bundle.apply did); its Soul
-        and mode are stamped on each new conversation, so conversations
-        of other profiles keep theirs.
+        Its Soul and mode are stamped on each new conversation, and its
+        per-agent models are read from each conversation's own profile when
+        a subagent starts (`assignment_for_agent`): nothing global changes,
+        so conversations of other profiles keep theirs.
         """
         profile_id = self._need_str(params or {}, "id")
         previous, bundle = self._services.rinari_profiles.activate(profile_id)
-        self._apply_bundle_agents(bundle)
         self._turns.emit_external(
             event("profile_bundle.activated", {"id": bundle.id, "previous_id": previous})
         )
         return {"active_id": bundle.id, "previous_id": previous, "profile": bundle.to_summary()}
 
-    def _apply_bundle_agents(self, bundle: Any) -> list[str]:
-        if not bundle.agents:
-            return []
+    def _check_bundle_agents(self, agents: Any) -> None:
+        """A profile's agents map names known agents and saved models."""
+        if not isinstance(agents, dict) or not agents:
+            return
         definitions = self._services.agents.list()
-        for agent, assignment in bundle.agents.items():
+        for agent, assignment in agents.items():
             if agent not in definitions:
                 raise NotFoundError(f"Unknown agent: {agent}.")
-            model = (assignment or {}).get("model")
-            fallback = (assignment or {}).get("fallback")
-            if model:
-                self._check_agent_model(model)
-            if fallback:
-                self._check_agent_model(fallback)
-            self._services.agent_configs.set(agent, model=model or None, fallback=fallback or None)
-        return sorted(bundle.agents)
+            for key in ("model", "fallback"):
+                alias = (assignment or {}).get(key) if isinstance(assignment, dict) else None
+                if alias:
+                    self._check_agent_model(alias)
 
     # -- projects with several folders ---------------------------------------------
 

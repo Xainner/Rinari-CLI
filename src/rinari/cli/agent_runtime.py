@@ -21,6 +21,7 @@ from pathlib import Path
 import typer
 
 from rinari import __version__
+from rinari.agents.config import AgentAssignment, coerce_assignment
 from rinari.application.services import ServiceContainer
 from rinari.instructions.resolver import provenance_for, resolve_project_instructions
 from rinari.models.router import ModelRouter
@@ -945,7 +946,7 @@ def _build_orchestrator(
     config = SubagentRuntimeConfig(
         caller=caller,
         caller_for=lambda name: caller_for_agent(services, record, name),
-        effort_for=lambda name: effort_for_agent(services, name),
+        effort_for=lambda name: effort_for_agent(services, record, name),
         base_registry=None,
         parent_runtime=parent_runtime,
         activity_sink=activity_sink,
@@ -1255,8 +1256,9 @@ def caller_for_agent(
     Chain: assigned model → fallback → parent. Entries that do not resolve
     or whose merged capabilities lack tool calls are skipped: a stale
     assignment degrades to the working default instead of breaking turns.
+    The assignment is the conversation's profile's (`assignment_for_agent`).
     """
-    assignment = services.agent_configs.get(agent_name)
+    assignment = assignment_for_agent(services, record, agent_name)
     if not assignment.enabled:
         return None
     router = ModelRouter(services.providers, services.models)
@@ -1275,13 +1277,51 @@ def caller_for_agent(
     return None
 
 
-def effort_for_agent(services: ServiceContainer, agent_name: str) -> str | None:
+def effort_for_agent(
+    services: ServiceContainer, record: SessionRecord, agent_name: str
+) -> str | None:
     """Per-agent reasoning effort override (docs/desktop 03-A).
 
-    None = inherit the session/turn effort. The store only ever holds
-    validated values, so no re-validation is needed here.
+    None = inherit the session/turn effort. Only validated values reach an
+    assignment (`coerce_assignment`), so no re-validation is needed here.
     """
-    return services.agent_configs.get(agent_name).effort
+    return assignment_for_agent(services, record, agent_name).effort
+
+
+def assignment_for_agent(
+    services: ServiceContainer, record: SessionRecord, agent_name: str
+) -> AgentAssignment:
+    """One agent's assignment for this conversation.
+
+    The conversation's Rinari profile wins field by field (model and fallback
+    together, effort, enabled) over the global `agents.toml`, so two
+    conversations of different profiles running at once each use their own
+    models. A profile without an entry for the agent, or one that can no
+    longer be read, leaves the global assignment.
+    """
+    assignment = services.agent_configs.get(agent_name)
+    raw = _profile_agents(services, record).get(agent_name)
+    if not isinstance(raw, dict):
+        return assignment
+    own = coerce_assignment(raw)
+    if own.model or own.fallback:
+        assignment = replace(assignment, model=own.model, fallback=own.fallback)
+    if own.effort:
+        assignment = replace(assignment, effort=own.effort)
+    if "enabled" in raw:
+        assignment = replace(assignment, enabled=own.enabled)
+    return assignment
+
+
+def _profile_agents(services: ServiceContainer, record: SessionRecord) -> dict:
+    profiles = getattr(services, "rinari_profiles", None)
+    profile_id = getattr(record, "rinari_profile_id", None)
+    if profiles is None or not profile_id:
+        return {}
+    try:
+        return profiles.store.get(profile_id).agents
+    except (RinariError, OSError, ValueError):
+        return {}
 
 
 # ---------------------------------------------------------------------------

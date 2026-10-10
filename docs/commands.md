@@ -4598,9 +4598,16 @@ active, shared by the CLI and the desktop (`<home>/active_profile`):
   agents?}`, null clears) and never removed.
 - `profile_bundle.active` → `{active_id, profile}`;
   `profile_bundle.activate {id}` → `{active_id, previous_id, profile}` and
-  `profile_bundle.activated`. Its per-agent models apply; its soul and mode are
-  stamped on each new conversation (conversations of other profiles keep
-  theirs). `profile_bundle.apply` remains for older clients.
+  `profile_bundle.activated`. Its soul and mode are stamped on each new
+  conversation (conversations of other profiles keep theirs).
+  `profile_bundle.apply` remains for older clients.
+- Per-agent models belong to the conversation: when a subagent starts, its
+  model, fallback, effort and `enabled` come from the conversation's profile
+  (`agents` map), field by field, over the global `agents.toml`; a profile with
+  no entry for that agent uses the global one. Activating a profile changes
+  nothing global, so two conversations of different profiles running at once
+  (Boards) each use their own. `profile_bundle.create/update` reject an
+  unknown agent or model alias (`NOT_FOUND`).
 - New work goes to the active profile, or to `rinari_profile_id` in
   `session.create`, `project.add` and `project.open`. A project's conversations
   always have the project's profile (a different one is `INVALID_PARAMS`);

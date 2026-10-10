@@ -261,6 +261,69 @@ def test_caller_for_agent_chain_and_inherit(services, tmp_path) -> None:
     assert agent_runtime.caller_for_agent(services, record, "explore") is None
 
 
+def test_each_conversation_uses_its_own_profile_agent_models(services, server, tmp_path) -> None:
+    """Two conversations of different profiles at once (Boards): each its own models."""
+    one = services.models.resolve("fake-one").id
+    two = services.models.resolve("fake-two").id
+    services.agent_configs.set("explore", model="fake-one")
+    store = services.rinari_profiles.store
+    store.create(
+        "trabajo",
+        name="Trabajo",
+        agents={"explore": {"model": "fake-two", "effort": "high"}, "reviewer": {"enabled": False}},
+    )
+    store.create("casa", name="Casa")
+    work = services.sessions.new(
+        cwd=tmp_path, title="w", forced_chat=True, rinari_profile_id="trabajo"
+    )
+    home = services.sessions.new(
+        cwd=tmp_path, title="h", forced_chat=True, rinari_profile_id="casa"
+    )
+
+    assert agent_runtime.caller_for_agent(services, work, "explore").model_id == two
+    assert agent_runtime.caller_for_agent(services, home, "explore").model_id == one
+    assert agent_runtime.effort_for_agent(services, work, "explore") == "high"
+    assert agent_runtime.effort_for_agent(services, home, "explore") is None
+
+    # A profile entry can turn an agent's override off for its conversations only.
+    services.agent_configs.set("reviewer", model="fake-two")
+    assert agent_runtime.caller_for_agent(services, work, "reviewer") is None
+    assert agent_runtime.caller_for_agent(services, home, "reviewer").model_id == two
+
+    # Activating a profile changes nothing global: the other profile keeps its models.
+    _ok(server.handle_line(_req("p1", "profile_bundle.activate", {"id": "trabajo"})))
+    assert services.agent_configs.get("explore").model == "fake-one"
+    assert agent_runtime.caller_for_agent(services, home, "explore").model_id == one
+
+    # Editing the profile reaches its conversations on the next subagent start.
+    store.update("trabajo", agents={"explore": {"model": "fake-one"}})
+    assert agent_runtime.caller_for_agent(services, work, "explore").model_id == one
+
+
+def test_profile_agents_are_validated(server) -> None:
+    unknown_agent = _err(
+        server.handle_line(
+            _req(
+                "p2",
+                "profile_bundle.create",
+                {"id": "x", "name": "X", "agents": {"nope": {"model": "fake-two"}}},
+            )
+        )
+    )
+    assert unknown_agent["code"] == "NOT_FOUND"
+    _ok(server.handle_line(_req("p3", "profile_bundle.create", {"id": "y", "name": "Y"})))
+    unknown_model = _err(
+        server.handle_line(
+            _req(
+                "p4",
+                "profile_bundle.update",
+                {"id": "y", "agents": {"explore": {"model": "ghost"}}},
+            )
+        )
+    )
+    assert unknown_model["code"] == "NOT_FOUND"
+
+
 def _create_chat(server, tmp_path):
     response = server.handle_line(
         _req("a-c", "session.create", {"cwd": str(tmp_path), "chat": True})
