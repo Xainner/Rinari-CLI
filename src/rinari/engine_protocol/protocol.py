@@ -108,6 +108,9 @@ CAPABILITIES: dict[str, bool] = {
     # checklist.update keeps a live list per conversation: checklist.updated
     # on the turn, settled from the outcome, session.checklist.get/clear.
     "turn_checklist_v1": True,
+    # followup.suggest notes: followup.suggested/resolved on the turn,
+    # followup.list/dismiss/accept (accept starts a new conversation).
+    "followup_suggestions_v1": True,
     # projectSummary.git_head: each project's branch read from .git/HEAD
     # (no git subprocess), so project lists can show it.
     "project_git_head_v1": True,

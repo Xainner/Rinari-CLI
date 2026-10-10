@@ -382,7 +382,7 @@ class _SubagentRunner:
             # The live checklist is the main conversation's: a child's steps
             # are not the user's list.
             if tool is None or tool.name.startswith(
-                ("agent.", "channel.", "capability.", "checklist.")
+                ("agent.", "channel.", "capability.", "checklist.", "followup.")
             ):
                 continue
             # Artifact import is the channel-bound half of attachment

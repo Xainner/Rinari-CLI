@@ -4645,3 +4645,26 @@ card per turn (`checklist:{turn_id}`). The engine keeps it true:
 `session.checklist.get {session_id}` → `{checklist|null}` (null once cleared).
 `session.checklist.clear {session_id}` dismisses it; `TURN_RUNNING` while a
 turn works on it. The CLI prints the list instead.
+
+## Follow-up notes (`followup.suggest`, `followup_suggestions_v1`)
+
+While it works, the model can leave the owner a note with a worthwhile task
+outside the current request (`followup.suggest {title 3..80, prompt 10..2000,
+rationale?}`; the prompt must be self-contained). A note never starts work.
+At most 2 per turn, 3 pending per conversation and 5 per project (the oldest
+pending gives way, `superseded`); a title like one from the last 30 days in the
+same project (or conversation) is refused as a duplicate; pending notes expire
+after 14 days. Subagents and turns started by another agent's message cannot
+leave notes; a note records whether the turn had read outside content.
+
+Events on the turn: `followup.suggested {suggestion}` and `followup.resolved
+{suggestion_id, status, suggestion}`, one card per note (`followup:{id}`).
+
+- `followup.list {session_id?, project_id?, rinari_profile_id?, status?="pending"}`
+  → `{suggestions}`.
+- `followup.dismiss {suggestion_id}` → `{suggestion}`.
+- `followup.accept {suggestion_id}` → `{suggestion, session, turn, already_accepted}`:
+  a new conversation in the same project and profile (same permission profile,
+  BUILD, the note's title) whose first turn the engine starts with the prompt,
+  `origin {kind: user, source: followup, suggestion_id, source_session_id}`.
+  Accepting again returns the conversation already created.

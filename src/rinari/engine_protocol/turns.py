@@ -340,6 +340,10 @@ class TurnManager:
         return getattr(self._services, "checklist", None)
 
     def _checklist_begin(self, turn: _ActiveTurn) -> None:
+        followups = getattr(self._services, "followups", None)
+        if followups is not None:
+            with contextlib.suppress(Exception):
+                followups.begin_turn(turn.session_id, turn.turn_id)
         service = self._checklist_service()
         if service is None:
             return
@@ -354,6 +358,10 @@ class TurnManager:
             )
 
     def _checklist_end(self, turn: _ActiveTurn) -> None:
+        followups = getattr(self._services, "followups", None)
+        if followups is not None:
+            with contextlib.suppress(Exception):
+                followups.end_turn(turn.session_id)
         service = self._checklist_service()
         if service is not None:
             with contextlib.suppress(Exception):
@@ -432,6 +440,28 @@ class TurnManager:
         }
         self._persist_activity(event_name, safe)
         self._emit(event(event_name, safe))
+
+    def emit_followup_resolution(self, suggestion: Any) -> None:
+        """`followup.resolved` on the turn that left the note (live or after)."""
+        payload = {
+            "suggestion_id": suggestion.id,
+            "status": suggestion.status,
+            "suggestion": suggestion.as_dict(),
+        }
+        if not suggestion.turn_id:
+            self._emit(event("followup.resolved", {**payload, "session_id": suggestion.session_id}))
+            return
+        with self._lock:
+            live = self._turns.get(suggestion.turn_id)
+        if live is not None and not live.done.is_set():
+            self._activity_cb(live)("followup.resolved", payload)
+        else:
+            self.emit_persisted_activity(
+                "followup.resolved",
+                session_id=suggestion.session_id,
+                turn_id=suggestion.turn_id,
+                payload=payload,
+            )
 
     def emit_memory_resolution(self, candidate: dict[str, Any]) -> bool:
         """`memory.candidate.resolved` on the turn that showed the proposal.
@@ -1710,6 +1740,12 @@ class TurnManager:
             return f"vision:{payload['vision_id']}:{payload.get('attempt_id', 1)}"
         if event_name == "steer.applied":
             return f"steer:{payload.get('steer_id')}"
+        if event_name.startswith("followup.") and (
+            payload.get("suggestion_id") or (payload.get("suggestion") or {}).get("id")
+        ):
+            # Suggested and resolved update one note in the timeline.
+            key = payload.get("suggestion_id") or payload["suggestion"]["id"]
+            return f"followup:{key}"
         if event_name == "checklist.updated":
             # One card per turn that updates in place.
             return f"checklist:{turn.turn_id}"
