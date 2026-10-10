@@ -432,25 +432,156 @@ def test_without_a_picker_the_documented_aliases_are_the_fallback(tmp_path):
     assert all("reasoning_levels" not in m.capabilities for m in models)
 
 
-def test_capabilities_do_not_promise_tools_before_the_bridge_exists(tmp_path):
+def test_capabilities_offer_tools_through_the_bridge(tmp_path):
     caps = adapter(tmp_path).capabilities()
     assert caps.streaming is True
-    assert caps.tool_calls is False
+    assert caps.tool_calls is True
     # Images are not forwarded yet, so the runtime describes them instead.
     assert caps.vision is False
     assert caps.max_context_tokens is None
 
 
-def test_a_tool_request_fails_loudly_instead_of_silently_dropping_tools(tmp_path):
-    from rinari.models.types import ChatMessage, ModelRequest, ToolSchema
+def _fs_list():
+    from rinari.models.types import ToolSchema
 
+    return ToolSchema(
+        name="fs.list",
+        description="List a folder.",
+        parameters={"type": "object", "properties": {"path": {"type": "string"}}},
+    )
+
+
+def test_a_tool_call_comes_back_to_rinari_and_the_child_is_stopped(tmp_path):
+    """The model's call is Rinari's to run: the child never gets to run it.
+
+    The fake CLI behaves like 2.1.295 does after `stop_reason: tool_use`: it
+    waits on the bridge forever. Returning promptly proves the child was
+    stopped at the end of the message, before any tool ran or a second call
+    to the model started.
+    """
+    from rinari.models.types import ChatMessage, ModelRequest, StopReason
+
+    record = tmp_path / "record.json"
+    request = ModelRequest(
+        model="sonnet", messages=(ChatMessage.user("lista src"),), tools=(_fs_list(),)
+    )
+    started = time.monotonic()
+    response = adapter(
+        tmp_path, FAKE_CLAUDE_MODE="tool", FAKE_CLAUDE_RECORD=str(record)
+    ).invoke_stream(request, None, None, lambda _d: None)
+    assert time.monotonic() - started < 30
+    assert response.stop_reason is StopReason.TOOL_CALLS
+    assert [(c.name, c.arguments) for c in response.tool_calls] == [("fs.list", {"path": "src"})]
+    assert response.tool_calls[0].id == "toolu_fake_1"
+    assert response.content == "Miro."
+    assert response.usage.output_tokens == 12
+    # Tool blocks travel as tool_calls, not as opaque items as well.
+    assert all(item.type != "tool_use" for item in response.items)
+
+    argv = json.loads(record.read_text(encoding="utf-8"))["argv"]
+    assert argv[argv.index("--allowedTools") + 1] == "mcp__rinari"
+    # Claude Code's own tools stay off: only the bridge's are offered.
+    assert argv[argv.index("--tools") + 1] == ""
+    assert "--strict-mcp-config" in argv
+
+
+def test_the_bridge_lists_rinari_tools_under_names_claude_accepts(tmp_path):
+    from rinari.models.types import ToolSchema
+    from rinari.providers.adapters.claude_subscription import _ToolNames
+
+    long_name = "mcp_server." + "x" * 80
+    names = _ToolNames(
+        (
+            _fs_list(),
+            ToolSchema(name=long_name, description="", parameters={}),
+            ToolSchema(name="fs_list", description="", parameters={}),
+        )
+    )
+    wires = [d["name"] for d in names.definitions]
+    assert len(set(wires)) == 3
+    for wire in wires:
+        assert len("mcp__rinari__" + wire) <= 64
+        assert all(ch.isalnum() or ch in "_-" for ch in wire)
+    # Every bridge name maps back to the one Rinari tool it stands for.
+    for real in ("fs.list", "fs_list", long_name):
+        shown = names.shown(real)
+        assert names.tool_call({"id": "t", "name": shown, "input": {}}).name == real
+
+
+def test_arguments_that_are_not_an_object_are_never_run(tmp_path):
+    from rinari.providers.adapters.claude_subscription import _ToolNames
+
+    names = _ToolNames((_fs_list(),))
+    call = names.tool_call({"id": "t", "name": names.shown("fs.list"), "input": "{broken"})
+    assert call.arguments_invalid is True
+    assert call.arguments == {}
+
+
+def test_earlier_tool_calls_and_results_reach_the_transcript(tmp_path):
+    """A turn that only called a tool has no text, and used to vanish.
+
+    Without it, the tool result that follows answered nothing and the model
+    could not tell what it had already done.
+    """
+    from rinari.models.types import ChatMessage, ModelRequest, ToolCall
+
+    record = tmp_path / "record.json"
+    call = ToolCall(id="toolu_1", name="fs.list", arguments={"path": "src"})
     request = ModelRequest(
         model="sonnet",
-        messages=(ChatMessage.user("hola"),),
-        tools=(ToolSchema(name="file_read", description="", parameters={}),),
+        messages=(
+            ChatMessage.user("lista src"),
+            ChatMessage(role="assistant", content="", tool_calls=(call,)),
+            ChatMessage(role="tool", content="a.py", tool_call_id="toolu_1", name="fs.list"),
+        ),
+        tools=(_fs_list(),),
     )
-    with pytest.raises(ProviderError):
-        adapter(tmp_path).invoke_stream(request, None, None, lambda _d: None)
+    adapter(tmp_path, FAKE_CLAUDE_RECORD=str(record)).invoke_stream(
+        request, None, None, lambda _d: None
+    )
+    seen = json.loads(record.read_text(encoding="utf-8"))
+    lines = [json.loads(line) for line in seen["stdin"].splitlines() if line.strip()]
+    texts = [block["text"] for block in lines[0]["message"]["content"]]
+    assert "tool interface" in texts[0]
+    assert texts[2] == (
+        '<turn role="assistant">\n'
+        '<tool_call name="mcp__rinari__fs_list" id="toolu_1">{"path": "src"}</tool_call>\n'
+        "</turn>"
+    )
+    assert texts[3] == '<turn role="tool" name="mcp__rinari__fs_list" id="toolu_1">\na.py\n</turn>'
+
+
+def test_the_bridge_server_lists_tools_and_never_answers_a_call():
+    import io
+
+    from rinari.providers import claude_tool_bridge
+
+    tools = [{"name": "fs_list", "description": "", "inputSchema": {"type": "object"}}]
+    stdin = io.StringIO(
+        "\n".join(
+            json.dumps(m)
+            for m in (
+                {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {}},
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                {"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "fs_list"}},
+                {"jsonrpc": "2.0", "id": 3, "method": "server/discover"},
+            )
+        )
+    )
+    out = io.StringIO()
+    original = sys.stdout
+    sys.stdout = out
+    try:
+        claude_tool_bridge.serve(tools, stdin)
+    finally:
+        sys.stdout = original
+    replies = {r["id"]: r for r in map(json.loads, out.getvalue().splitlines())}
+    assert replies[0]["result"]["capabilities"] == {"tools": {}}
+    assert replies[1]["result"]["tools"] == tools
+    # A tool call is Rinari's: the bridge never runs it and never answers.
+    assert 2 not in replies
+    assert replies[3]["error"]["code"] == -32601
 
 
 def test_invoke_builds_history_from_rinari_not_from_claude(tmp_path):

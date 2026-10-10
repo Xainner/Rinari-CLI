@@ -26,6 +26,7 @@ import platform
 import re
 import shutil
 import subprocess
+import sys
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -204,6 +205,10 @@ class ClaudeRunResult:
     #: Content blocks as the model produced them (text, thinking, ...), in
     #: order, so reasoning survives instead of being thrown away.
     blocks: tuple[dict[str, Any], ...] = ()
+    #: Tools the model asked for (`{"id", "name", "input"}`, Claude Code's
+    #: MCP names). The child was stopped before running any of them: Rinari
+    #: runs them in its own loop (claude_tool_bridge).
+    tool_calls: tuple[dict[str, Any], ...] = ()
 
 
 def _parse_version(raw: str) -> tuple[int, ...]:
@@ -779,6 +784,9 @@ class ClaudeRunRequest:
     system: str | None
     messages: tuple[dict[str, Any], ...]
     effort: str | None = None
+    #: MCP tool definitions (`name`, `description`, `inputSchema`) the bridge
+    #: lists for this call; empty means no tools at all.
+    tools: tuple[dict[str, Any], ...] = ()
 
 
 def _stream_json_user(message: dict[str, Any]) -> str:
@@ -833,6 +841,8 @@ class ClaudeCliStream:
             args += ["--system-prompt-file", str(prompt_file)]
         if request.effort in CLAUDE_EFFORT_LEVELS:
             args += ["--effort", request.effort]
+        if request.tools:
+            args += _bridge_args(cwd, request.tools)
 
         try:
             process = subprocess.Popen(  # argv list, never a shell string
@@ -896,9 +906,12 @@ class ClaudeCliStream:
         # model's reasoning on a transport whose whole point is parity.
         blocks: dict[int, dict[str, Any]] = {}
         usage: dict[str, Any] | None = None
+        stream_usage: dict[str, Any] = {}
         resolved_model: str | None = None
         stop_reason: str | None = None
         result_payload: dict[str, Any] | None = None
+        tool_uses: dict[str, dict[str, Any]] = {}
+        stopped_for_tools = False
         hard_deadline = _deadline(TIMEOUT_HARD_TURN_S)
 
         for event in _pumped_events(process.stdout, run, cancellation, hard_deadline, text_parts):
@@ -914,6 +927,21 @@ class ClaudeCliStream:
                     if not admission.admit(started.get("id")):
                         # Refused at its first event, so nothing of a second
                         # generation reaches the blocks or the user.
+                        run.cancel()
+                        break
+                    if isinstance(started.get("usage"), dict):
+                        stream_usage.update(started["usage"])
+                if inner.get("type") == "message_delta":
+                    if isinstance(inner.get("usage"), dict):
+                        stream_usage.update(inner["usage"])
+                    reason = (inner.get("delta") or {}).get("stop_reason")
+                    if reason == "tool_use" and request.tools:
+                        # The message is complete and every tool_use in it is
+                        # known. Claude Code would now ask the bridge to run
+                        # them and then call the model again: stop it here, so
+                        # Rinari runs them instead and no second call is made.
+                        stop_reason = reason
+                        stopped_for_tools = True
                         run.cancel()
                         break
                 _collect_block(inner, blocks)
@@ -932,6 +960,9 @@ class ClaudeCliStream:
                     break
                 resolved_model = message.get("model") or resolved_model
                 stop_reason = message.get("stop_reason") or stop_reason
+                for block in message.get("content") or ():
+                    if isinstance(block, dict) and block.get("type") == "tool_use":
+                        tool_uses[str(block.get("id"))] = block
                 # Held back, not streamed: the CLI also delivers its own error
                 # notices (an out-of-credits message, for one) as an assistant
                 # message, and only the `result` that follows says whether it
@@ -964,6 +995,28 @@ class ClaudeCliStream:
                 process.wait(timeout=TERMINATE_GRACE_S)
             except subprocess.TimeoutExpired:
                 run.cancel()
+        if stopped_for_tools:
+            calls = _tool_calls(tool_uses, blocks)
+            if not calls:
+                raise _no_retry(
+                    ProviderError(
+                        "Claude Code ended for a tool call it did not describe.",
+                        code=ProviderErrorCode.STREAM_INTERRUPTED,
+                    )
+                )
+            return ClaudeRunResult(
+                text="".join(text_parts),
+                usage=stream_usage or None,
+                model=resolved_model,
+                stop_reason=stop_reason,
+                raw_result=None,
+                blocks=tuple(
+                    blocks[index]
+                    for index in sorted(blocks)
+                    if blocks[index].get("type") != "tool_use"
+                ),
+                tool_calls=calls,
+            )
         if result_payload is None and admission.rejected == 0:
             if not text_parts:
                 if stderr_reader is not None:
@@ -1194,6 +1247,64 @@ def _pumped_events(
             yield parsed
 
 
+def _bridge_args(workdir: Path, tools: tuple[dict[str, Any], ...]) -> list[str]:
+    """Show the model Rinari's tools through the bridge MCP server.
+
+    Both files live in the request's own temp folder (removed with it). Only
+    the bridge is allowed (`--strict-mcp-config` already ignores any other
+    MCP config), and its server name is a fixed word, so nothing here is
+    data the npm shim's cmd.exe could re-parse.
+    """
+    from rinari.providers.claude_tool_bridge import SERVER_NAME
+
+    tools_file = workdir / "rinari-tools.json"
+    tools_file.write_text(json.dumps(list(tools), ensure_ascii=False), encoding="utf-8")
+    config_file = workdir / "rinari-mcp.json"
+    config = {
+        "mcpServers": {
+            SERVER_NAME: {
+                "command": sys.executable,
+                "args": ["-m", "rinari.providers.claude_tool_bridge", str(tools_file)],
+            }
+        }
+    }
+    config_file.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+    return ["--mcp-config", str(config_file), "--allowedTools", f"mcp__{SERVER_NAME}"]
+
+
+def _tool_calls(
+    tool_uses: dict[str, dict[str, Any]], blocks: dict[int, dict[str, Any]]
+) -> tuple[dict[str, Any], ...]:
+    """The tool calls of the stopped message, in the order the model wrote them.
+
+    The `assistant` event carries each call with its parsed input; the stream
+    blocks are the fallback when the child was stopped before that event.
+    """
+    calls: list[dict[str, Any]] = []
+    for index in sorted(blocks):
+        block = blocks[index]
+        if block.get("type") != "tool_use":
+            continue
+        call_id = str(block.get("id") or f"toolu_rinari_{index}")
+        known = tool_uses.get(call_id)
+        if known is not None and isinstance(known.get("input"), dict):
+            arguments: Any = known["input"]
+        else:
+            raw = block.get("partial_json") or ""
+            try:
+                arguments = json.loads(raw) if raw.strip() else {}
+            except json.JSONDecodeError:
+                arguments = raw
+        calls.append({"id": call_id, "name": str(block.get("name") or ""), "input": arguments})
+    seen = {call["id"] for call in calls}
+    for call_id, block in tool_uses.items():
+        if call_id not in seen:
+            calls.append(
+                {"id": call_id, "name": str(block.get("name") or ""), "input": block.get("input")}
+            )
+    return tuple(calls)
+
+
 def _collect_block(event: dict[str, Any], blocks: dict[int, dict[str, Any]]) -> None:
     """Accumulate Anthropic content blocks across start/delta events.
 
@@ -1219,6 +1330,7 @@ def _collect_block(event: dict[str, Any], blocks: dict[int, dict[str, Any]]) -> 
         "text_delta": "text",
         "thinking_delta": "thinking",
         "signature_delta": "signature",
+        "input_json_delta": "partial_json",
     }.get(delta.get("type"))
     if field and isinstance(delta.get(field), str):
         block[field] = block.get(field, "") + delta[field]

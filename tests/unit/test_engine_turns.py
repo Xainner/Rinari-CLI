@@ -1678,7 +1678,7 @@ def test_steering_during_an_answer_keeps_the_turn_going(server, tmp_path, monkey
     events = _collect_until(server, sid)
 
     assert len(fake.requests) == 2
-    assert [m.role for m in fake.requests[1].messages[-2:]] == ["assistant", "user"]
+    assert [m.role for m in _conversation(fake.requests[1].messages)[-2:]] == ["assistant", "user"]
     completed = [e for e in events if e["event"] == "model.content.completed"]
     assert [e["payload"]["output_kind"] for e in completed] == ["progress", "final"]
     assert [e["event"] for e in events].count("turn.completed") == 1
@@ -1694,7 +1694,7 @@ def test_steering_without_a_running_turn_starts_one(server, tmp_path, monkeypatc
     assert steered["result"]["delivery"] == "queued"
     events = _collect_until(server, sid)
     assert events[-1]["event"] == "turn.completed"
-    assert fake.requests[0].messages[-1].content == "hola"
+    assert _conversation(fake.requests[0].messages)[-1].content == "hola"
 
 
 def test_unread_steering_goes_back_when_the_turn_is_stopped(server, tmp_path, monkeypatch) -> None:
@@ -1782,7 +1782,7 @@ def test_compact_and_continue_runs_the_message_in_the_same_turn(
     completed = events[-1]
     assert completed["event"] == "turn.completed"
     assert completed["payload"]["kind"] == "answer"
-    assert model.requests[-1].messages[-1].content == "Continúa"
+    assert _conversation(model.requests[-1].messages)[-1].content == "Continúa"
 
 
 def test_plain_compaction_does_not_continue(server, tmp_path, monkeypatch) -> None:
@@ -1926,3 +1926,8 @@ def test_command_secret_runs_for_real_but_is_hidden_from_storage_ui_and_later_tu
     )
     call = next(m for m in replayed if m.tool_calls)
     assert call.tool_calls[0].arguments == {"command": "echo PASSWORD=[REDACTED]"}
+
+
+def _conversation(messages):
+    """The request without its per-call context note (it now always names the language)."""
+    return [m for m in messages if not m.is_turn_context]

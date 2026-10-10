@@ -1456,7 +1456,20 @@ def _non_latin_share(text: str) -> tuple[int, float]:
 
 
 def _foreign_script(history: Any, answer: str | None) -> bool:
-    """The answer is mostly in a script the user does not write in."""
+    """The answer is in a language the user does not write in.
+
+    A different script (Chinese for a Spanish speaker) shows in the letters
+    alone. Spanish and English share an alphabet, so for those the word-list
+    detector decides, and only when both the owner's message and a
+    substantial answer say clearly which language they are in.
+    """
+    from rinari.prompts.language import detect_language, owner_language
+
+    if answer and len(answer) >= 80:
+        wanted = owner_language(history)
+        written = detect_language(answer)
+        if wanted and written and wanted != written:
+            return True
     user = next(
         (
             m.content
