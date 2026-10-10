@@ -23,15 +23,10 @@ from rinari.tools.definition import (
 )
 
 DESCRIPTION = (
-    "Keep the user's live checklist of the steps you are carrying out. Use it for "
-    "work with 3 or more distinct steps, changes across several files or areas, or "
-    "a list of tasks the user gave you. Do not use it for questions, a single small "
-    "edit or conversation. Send the whole list every time. Mark one item "
-    "in_progress before you start it. Mark an item completed only after it is "
-    "really done (written, run, checked), never ahead. Use blocked with "
-    "blocked_reason when you cannot go on. When the plan changes, update the list "
-    "(add, remove or rewrite items) so it always matches the real work. Before you "
-    "finish, the list must be true. items: [] clears it when it no longer applies."
+    "Live list of your steps for multi-step work (3+ steps, several files, or a task "
+    "list from the user); never for simple questions or chats. Send the whole list "
+    "each call, one item in_progress at a time, completed only when really done, "
+    "blocked with blocked_reason. Keep it true when the plan changes; [] clears it."
 )
 
 INPUT_SCHEMA: dict[str, Any] = {
@@ -47,25 +42,15 @@ INPUT_SCHEMA: dict[str, Any] = {
                 "additionalProperties": False,
                 "required": ["id", "content", "status"],
                 "properties": {
-                    "id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,32}$"},
-                    "content": {"type": "string", "minLength": 1, "maxLength": 200},
+                    "id": {"type": "string", "maxLength": 32},
+                    "content": {"type": "string", "maxLength": 200},
                     "status": {"enum": list(ITEM_STATUSES)},
-                    "active_form": {
-                        "type": "string",
-                        "maxLength": 120,
-                        "description": (
-                            "How it reads while in progress, e.g. 'Writing the tests'."
-                        ),
-                    },
+                    "active_form": {"type": "string", "maxLength": 120},
                     "blocked_reason": {"type": "string", "maxLength": 200},
                 },
             },
         },
-        "explanation": {
-            "type": "string",
-            "maxLength": 300,
-            "description": "Why the list changed, when it did (optional).",
-        },
+        "explanation": {"type": "string", "maxLength": 300},
     },
 }
 
