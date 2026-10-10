@@ -22,14 +22,10 @@ from rinari.tools.definition import (
 )
 
 DESCRIPTION = (
-    "Leave the user a short note suggesting a worthwhile follow-up task you noticed "
-    "while working: a nearby bug, missing tests, stale docs, a risky pattern worth "
-    "fixing. Only for work outside the current request (the steps of the current task "
-    "go in checklist.update), never to ask permission and never for something you are "
-    "about to do anyway. At most one or two per turn, only when really useful. The note "
-    "does not start anything: if the user accepts it, the prompt opens a new "
-    "conversation, so write it self-contained: what to do, which files or areas, and "
-    "how to know it is done."
+    "Leave the user a note with one worthwhile follow-up task outside the current "
+    "request (a nearby bug, missing tests, stale docs). Not for the current steps nor "
+    "to ask permission; at most 1-2 per turn. If accepted, the prompt starts a new "
+    "conversation: make it self-contained (what, where, how to check it is done)."
 )
 
 INPUT_SCHEMA: dict[str, Any] = {
@@ -37,23 +33,9 @@ INPUT_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["title", "prompt"],
     "properties": {
-        "title": {
-            "type": "string",
-            "minLength": 3,
-            "maxLength": 80,
-            "description": "A few words, e.g. 'Add tests for the parser'.",
-        },
-        "prompt": {
-            "type": "string",
-            "minLength": 10,
-            "maxLength": 2000,
-            "description": "The self-contained instruction that starts the new conversation.",
-        },
-        "rationale": {
-            "type": "string",
-            "maxLength": 200,
-            "description": "Why it is worth doing (one sentence, optional).",
-        },
+        "title": {"type": "string", "minLength": 3, "maxLength": 80},
+        "prompt": {"type": "string", "minLength": 10, "maxLength": 2000},
+        "rationale": {"type": "string", "maxLength": 200},
     },
 }
 
