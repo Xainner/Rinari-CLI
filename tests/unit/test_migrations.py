@@ -28,6 +28,7 @@ TABLES_AFTER_MIGRATIONS = {
     "projects",
     "sessions",
     "session_events",
+    "session_checklists",
     "session_messages",
     "worktree_baselines",
     "trust_entries",
@@ -126,6 +127,7 @@ def test_migrate_fresh_database_applies_all(db):
         43,
         44,
         45,
+        46,
         47,
     ]
     assert _table_names(db) == TABLES_AFTER_MIGRATIONS
@@ -287,7 +289,7 @@ def test_a_home_migrated_by_the_voice_branch_gets_the_missing_migrations(db, tmp
         },
     )
     MigrationRunner(db, FakeClock(), directory=voice).migrate()
-    assert MigrationRunner(db, FakeClock()).migrate() == [38, 39, 40, 41, 42, 43, 44, 45, 47]
+    assert MigrationRunner(db, FakeClock()).migrate() == [38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
     columns = {row["name"] for row in db.query("PRAGMA table_info(sessions)")}
     assert "pinned_at" in columns
     assert {"skill_records", "scheduled_tasks", "scheduled_runs"} <= _table_names(db)
@@ -305,7 +307,7 @@ def test_a_home_that_applied_the_old_numbers_is_not_migrated_twice(db, tmp_path)
     MigrationRunner(db, FakeClock(), directory=old).migrate()
     runner = MigrationRunner(db, FakeClock())
     # No duplicate pinned_at column and nothing re-run: only what came after.
-    assert runner.migrate() == [41, 42, 43, 44, 45, 47]
+    assert runner.migrate() == [41, 42, 43, 44, 45, 46, 47]
     recorded = {row["version"]: row["name"] for row in db.query("SELECT * FROM schema_migrations")}
     assert recorded[38] == "0038_session_pins" and recorded[40] == "0040_scheduled_tasks"
     # The old numbers are free again for the migrations that own them.
@@ -345,7 +347,7 @@ def test_stored_runtime_notes_are_marked_as_harness_not_as_the_owner(db, tmp_pat
             (message_id, "ses_h", seq, "user", content, "t0"),
         )
 
-    assert MigrationRunner(db, FakeClock()).migrate() == [41, 42, 43, 44, 45, 47]
+    assert MigrationRunner(db, FakeClock()).migrate() == [41, 42, 43, 44, 45, 46, 47]
     origins = {m.id: m.origin for m in SessionMessageRepository(db).list("ses_h")}
     assert origins == {
         "m1": None,

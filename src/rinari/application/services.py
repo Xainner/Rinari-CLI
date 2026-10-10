@@ -20,6 +20,7 @@ from rinari.application.rinari_profiles import RinariProfileService
 from rinari.application.session_service import SessionService
 from rinari.artifacts.store import ArtifactStore
 from rinari.changes.service import TurnChangeService
+from rinari.checklist import ChecklistService
 from rinari.checkpoints.service import CheckpointService
 from rinari.context.retrieval import ContextRetrievalService
 from rinari.context.service import ContextService
@@ -64,6 +65,7 @@ class ServiceContainer:
     agent_configs: AgentConfigStore
     schedules: ScheduleService = None
     rinari_profiles: RinariProfileService = None
+    checklist: ChecklistService = None
 
 
 def build_services(
@@ -139,6 +141,7 @@ def build_services(
         agent_configs=agent_configs,
         schedules=schedules,
         rinari_profiles=rinari_profiles,
+        checklist=ChecklistService(ctx),
     )
 
 

@@ -379,7 +379,11 @@ class _SubagentRunner:
             else all_native_tools()
         )
         for tool in tools:
-            if tool is None or tool.name.startswith(("agent.", "channel.", "capability.")):
+            # The live checklist is the main conversation's: a child's steps
+            # are not the user's list.
+            if tool is None or tool.name.startswith(
+                ("agent.", "channel.", "capability.", "checklist.")
+            ):
                 continue
             # Artifact import is the channel-bound half of attachment
             # delivery. Children must not inherit it with a stale host binding.
