@@ -1890,6 +1890,12 @@ class EngineServer:
                 "trusted": root.is_dir() and self._services.trust.status(root).state == "trusted",
             }
         )
+        # Per-folder trust only here: it runs git, too costly for lists.
+        for folder in view["folders"]:
+            path = Path(folder["path"])
+            folder["trust_state"] = (
+                self._services.trust.status(path).state if path.is_dir() else "not-found"
+            )
         return {"project": view}
 
     def _project_add(self, params: dict[str, Any]) -> dict[str, Any]:
