@@ -118,6 +118,7 @@ rinari
 │
 ├── config
 ├── profiles
+├── bundles
 ├── project
 ├── trust
 │
@@ -2086,6 +2087,41 @@ rinari profiles clone workspace my-workspace
 ```
 
 Profiles may bundle model/provider preferences without modifying underlying provider/model records.
+
+---
+
+## `bundles` (Rinari profiles as workspaces)
+
+Not the capability profiles above: a Rinari profile (soul, mode, per-agent
+models) is where projects and conversations live, the same profiles the
+desktop switches between (see "Rinari profiles as workspaces"). The active one
+is shared with the desktop (`<home>/active_profile`); the app picks up a change
+made here when its window regains focus.
+
+```text
+bundles list
+bundles activate <id>
+bundles create <id> --name NAME [--description D] [--soul ID] [--mode MODE]
+               [--agent NAME=MODEL[,FALLBACK]]... [--activate]
+bundles move-project <project-id | path> <id>
+bundles move-session <session> <id> [--with-project]
+```
+
+- `list` shows each profile with its projects (not archived) and open
+  conversations; `*` marks the active one (`--json`: `{profiles, active_id}`).
+- `activate` makes new projects and conversations go to that profile.
+- `create` validates `--agent`: a known agent and saved model aliases.
+- `move-project` takes the project id or any path inside one of its folders,
+  and moves the project with all its conversations.
+- `move-session` moves a conversation that is not in a project. One inside a
+  project has the project's profile: `--with-project` moves the whole project;
+  taking it out of the project first is done in the app.
+
+```bash
+rinari bundles create trabajo --name "Trabajo" --agent explore=fast --activate
+rinari bundles move-project ~/code/tienda trabajo
+rinari bundles list
+```
 
 ---
 
