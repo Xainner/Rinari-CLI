@@ -156,7 +156,9 @@ def test_queue_runs_after_live_turn(server, tmp_path, monkeypatch) -> None:
 
 
 def test_profile_bundle_crud_and_apply(server, tmp_path) -> None:
-    assert _ok(server.handle_line(_req("b1", "profile_bundle.list", {})))["profiles"] == []
+    # The built-in default profile is always listed.
+    initial = _ok(server.handle_line(_req("b1", "profile_bundle.list", {})))["profiles"]
+    assert [p["id"] for p in initial] == ["default"]
     created = _ok(
         server.handle_line(
             _req(
@@ -190,7 +192,7 @@ def test_profile_bundle_crud_and_apply(server, tmp_path) -> None:
     assert applied["mode"] == "plan"
     assert applied["session_id"] == session_id
     listed = _ok(server.handle_line(_req("b6", "profile_bundle.list", {})))["profiles"]
-    assert [p["id"] for p in listed] == ["foco"]
+    assert [p["id"] for p in listed] == ["default", "foco"]
     removed = _ok(server.handle_line(_req("b7", "profile_bundle.remove", {"id": "foco"})))
     assert removed["removed"] == {"id": "foco"}
     assert (

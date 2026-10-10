@@ -24,8 +24,8 @@ class SessionRepository:
                 created_cwd, current_cwd, provider_id, model_id,
                 profile_id, mode, state, compact_state_json,
                 created_at, updated_at, last_active_at, git_branch, forked_from,
-                active_skills_json, permission_profile, soul_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                active_skills_json, permission_profile, soul_id, rinari_profile_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 rec.id,
@@ -53,6 +53,7 @@ class SessionRepository:
                 ),
                 rec.permission_profile,
                 rec.soul_id,
+                rec.rinari_profile_id,
             ),
         )
 
@@ -109,9 +110,13 @@ class SessionRepository:
         project_id: str | None = None,
         state: str | None = None,
         limit: int | None = None,
+        rinari_profile_id: str | None = None,
     ) -> list[SessionRecord]:
         sql = "SELECT * FROM sessions WHERE 1=1"
         params: list[object] = []
+        if rinari_profile_id is not None:
+            sql += " AND rinari_profile_id = ?"
+            params.append(rinari_profile_id)
         if kind is not None:
             sql += " AND kind = ?"
             params.append(kind)
@@ -126,6 +131,14 @@ class SessionRepository:
             sql += " LIMIT ?"
             params.append(limit)
         return [_session_to_record(r) for r in self._db.query(sql, params)]
+
+    def set_rinari_profile(self, session_ids: list[str], rinari_profile_id: str) -> None:
+        """Only writer of a conversation's profile (see SessionRecord)."""
+        for session_id in session_ids:
+            self._db.execute(
+                "UPDATE sessions SET rinari_profile_id = ? WHERE id = ?",
+                (rinari_profile_id, session_id),
+            )
 
     def for_project(self, project_id: str, root: str | None = None) -> list[SessionRecord]:
         """Todas las sesiones de un proyecto, sin tope.
@@ -173,6 +186,7 @@ def _session_to_record(row: dict) -> SessionRecord:
         permission_profile=row["permission_profile"] or "workspace",
         soul_id=row["soul_id"],
         pinned_at=row["pinned_at"],
+        rinari_profile_id=row["rinari_profile_id"] or "default",
     )
 
 

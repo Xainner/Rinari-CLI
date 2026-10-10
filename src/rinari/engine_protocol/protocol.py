@@ -101,6 +101,10 @@ CAPABILITIES: dict[str, bool] = {
     # memory.export / memory.import: portable bundle of user and project
     # records plus forgotten-text suppressions (additive, digest-checked).
     "memory_portability_v1": True,
+    # Rinari profiles are workspaces: an active profile (profile_bundle.active /
+    # activate), projects and conversations with rinari_profile_id, list
+    # filters, project/session move_profile, profile_bundle.update.
+    "rinari_profiles_v1": True,
     # checklist.update keeps a live list per conversation: checklist.updated
     # on the turn, settled from the outcome, session.checklist.get/clear.
     "turn_checklist_v1": True,

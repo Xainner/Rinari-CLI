@@ -405,6 +405,11 @@ class EngineServer:
         self._dispatcher.register("profile_bundle.get", self._bundle_get)
         self._dispatcher.register("profile_bundle.create", self._bundle_create)
         self._dispatcher.register("profile_bundle.remove", self._bundle_remove)
+        self._dispatcher.register("profile_bundle.update", self._bundle_update)
+        self._dispatcher.register("profile_bundle.active", self._bundle_active)
+        self._dispatcher.register("profile_bundle.activate", self._bundle_activate)
+        self._dispatcher.register("project.move_profile", self._project_move_profile)
+        self._dispatcher.register("session.move_profile", self._session_move_profile)
         self._dispatcher.register("profile_bundle.apply", self._bundle_apply)
         self._dispatcher.register("provider.list", self._provider_list)
         self._dispatcher.register("provider.catalog.get", self._provider_catalog)
@@ -604,6 +609,7 @@ class EngineServer:
             project_id=project_id,
             state=state,
             limit=limit,
+            rinari_profile_id=self._profile_filter(params),
         )
         if not params.get("include_closed", False) and state is None:
             records = [
@@ -792,9 +798,13 @@ class EngineServer:
             if project is not None
             else self._resolve_cwd(params.get("cwd"))
         )
-        mode = params.get("mode", "build")
+        # No mode given: the profile's, else BUILD (a desktop session is
+        # born in a real mode).
+        mode = params.get("mode")
         permission_profile = params.get("permission_profile", "workspace")
-        if not isinstance(mode, str) or not isinstance(permission_profile, str):
+        if (mode is not None and not isinstance(mode, str)) or not isinstance(
+            permission_profile, str
+        ):
             raise EngineProtocolError(
                 INVALID_PARAMS,
                 "Mode and permission_profile must be strings.",
@@ -808,6 +818,8 @@ class EngineServer:
             forced_chat=chat,
             mode=mode,
             permission_profile=permission_profile,
+            rinari_profile_id=None if project is not None else self._profile_param(params),
+            default_mode="build",
         )
         if project is not None and record.kind != "PROJECT":
             record = self._services.sessions.promote(record.id, Path(project.canonical_root))
@@ -1718,7 +1730,11 @@ class EngineServer:
         limit = params.get("limit", 20)
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
             raise EngineProtocolError(INVALID_PARAMS, "Param 'limit' must be an int in 1..100.")
-        return {"projects": self._services.projects.list_recent(limit=limit)}
+        return {
+            "projects": self._services.projects.list_recent(
+                limit=limit, rinari_profile_id=self._profile_filter(params)
+            )
+        }
 
     @staticmethod
     def _project_view(project: Any) -> dict[str, Any]:
@@ -1732,6 +1748,7 @@ class EngineServer:
             "git_fingerprint": project.git_fingerprint,
             "pinned": project.pinned,
             "archived": project.archived,
+            "rinari_profile_id": project.rinari_profile_id,
             "created_at": project.created_at,
             "updated_at": project.updated_at,
             "last_opened_at": project.last_opened_at or project.updated_at,
@@ -1742,7 +1759,9 @@ class EngineServer:
         include_archived = params.get("include_archived", False)
         if not isinstance(include_archived, bool):
             raise EngineProtocolError(INVALID_PARAMS, "Param 'include_archived' must be boolean.")
-        projects = self._services.projects.list(include_archived=include_archived)
+        projects = self._services.projects.list(
+            include_archived=include_archived, rinari_profile_id=self._profile_filter(params)
+        )
         return {"projects": [self._project_view(project) for project in projects]}
 
     def _project_get(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1768,6 +1787,7 @@ class EngineServer:
             root,
             name=name,
             description=description,
+            rinari_profile_id=self._profile_param(params),
         )
         return {"project": self._project_view(project), "created": created}
 
@@ -1889,7 +1909,9 @@ class EngineServer:
                 "$HOME is never an implicit project workspace",
                 hint="Open a project subdirectory instead.",
             )
-        project = self._services.projects.upsert(root)
+        project = self._services.projects.upsert(
+            root, rinari_profile_id=self._profile_param(params)
+        )
         existing = self._services.sessions.latest_for_root(root)
         created = False
         if existing is None:
@@ -2870,12 +2892,36 @@ class EngineServer:
     # -- profile bundles (Phase 11) -----------------------------------------------
 
     def _bundles(self):  # ProfileBundleStore bound to the engine home.
-        from rinari.engine_protocol.profile_bundles import ProfileBundleStore
+        return self._services.rinari_profiles.store
 
-        return ProfileBundleStore(self._services.ctx.home)
+    def _profile_param(self, params: dict[str, Any]) -> str | None:
+        """`rinari_profile_id` for something new; omitted means the active one."""
+        value = params.get("rinari_profile_id")
+        if value is None:
+            return None
+        if not isinstance(value, str) or not self._bundles().exists(value):
+            raise EngineProtocolError(INVALID_PARAMS, "Unknown 'rinari_profile_id'.")
+        return value
+
+    def _profile_filter(self, params: dict[str, Any]) -> str | None:
+        """List filter: a profile id, or "active"; omitted lists every profile."""
+        value = params.get("rinari_profile_id")
+        if value is None:
+            return None
+        if value == "active":
+            return self._services.rinari_profiles.active_id()
+        if not isinstance(value, str) or not value:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'rinari_profile_id' must be a string.")
+        return value
+
+    def _emit_profiles_changed(self, profile_id: str, change: str, **extra: Any) -> None:
+        self._turns.emit_external(
+            event("profile_bundle.changed", {"id": profile_id, "change": change, **extra})
+        )
 
     def _bundle_list(self, params: dict[str, Any]) -> dict[str, Any]:
-        return {"profiles": [b.to_summary() for b in self._bundles().list()]}
+        profiles = self._services.rinari_profiles
+        return {"profiles": profiles.summaries(), "active_id": profiles.active_id()}
 
     def _bundle_get(self, params: dict[str, Any]) -> dict[str, Any]:
         return {"profile": self._bundles().get((params or {}).get("id", "")).to_summary()}
@@ -2890,12 +2936,131 @@ class EngineServer:
             mode=params.get("mode"),
             agents=params.get("agents") or {},
         )
+        self._emit_profiles_changed(bundle.id, "created")
+        return {"profile": bundle.to_summary()}
+
+    def _bundle_update(self, params: dict[str, Any]) -> dict[str, Any]:
+        params = params or {}
+        bundle_id = self._need_str(params, "id")
+        changes = {
+            key: params[key]
+            for key in ("name", "description", "soul_id", "mode", "agents")
+            if key in params
+        }
+        bundle = self._bundles().update(bundle_id, **changes)
+        self._emit_profiles_changed(bundle.id, "updated")
         return {"profile": bundle.to_summary()}
 
     def _bundle_remove(self, params: dict[str, Any]) -> dict[str, Any]:
-        bundle_id = (params or {}).get("id", "")
-        self._bundles().remove(bundle_id)
-        return {"removed": {"id": bundle_id}}
+        params = params or {}
+        bundle_id = self._need_str(params, "id")
+        reassign_to = params.get("reassign_to") or "default"
+        result = self._services.rinari_profiles.remove(bundle_id, reassign_to)
+        self._emit_profiles_changed(bundle_id, "removed", reassigned_to=reassign_to)
+        return result
+
+    def _bundle_active(self, params: dict[str, Any]) -> dict[str, Any]:
+        profiles = self._services.rinari_profiles
+        return {"active_id": profiles.active_id(), "profile": profiles.active().to_summary()}
+
+    def _bundle_activate(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Switch the workspace: new work goes here, lists show its work.
+
+        Its per-agent models apply (as profile_bundle.apply did); its Soul
+        and mode are stamped on each new conversation, so conversations
+        of other profiles keep theirs.
+        """
+        profile_id = self._need_str(params or {}, "id")
+        previous, bundle = self._services.rinari_profiles.activate(profile_id)
+        self._apply_bundle_agents(bundle)
+        self._turns.emit_external(
+            event("profile_bundle.activated", {"id": bundle.id, "previous_id": previous})
+        )
+        return {"active_id": bundle.id, "previous_id": previous, "profile": bundle.to_summary()}
+
+    def _apply_bundle_agents(self, bundle: Any) -> list[str]:
+        if not bundle.agents:
+            return []
+        definitions = self._services.agents.list()
+        for agent, assignment in bundle.agents.items():
+            if agent not in definitions:
+                raise NotFoundError(f"Unknown agent: {agent}.")
+            model = (assignment or {}).get("model")
+            fallback = (assignment or {}).get("fallback")
+            if model:
+                self._check_agent_model(model)
+            if fallback:
+                self._check_agent_model(fallback)
+            self._services.agent_configs.set(agent, model=model or None, fallback=fallback or None)
+        return sorted(bundle.agents)
+
+    def _project_move_profile(self, params: dict[str, Any]) -> dict[str, Any]:
+        project_id = self._need_str(params, "project_id")
+        target = self._need_str(params, "rinari_profile_id")
+        moved = self._services.rinari_profiles.move_project(project_id, target)
+        self._turns.emit_external(
+            event(
+                "project.moved",
+                {
+                    "project_id": project_id,
+                    "rinari_profile_id": moved.rinari_profile_id,
+                    "previous_rinari_profile_id": moved.previous_rinari_profile_id,
+                    "session_ids": list(moved.session_ids),
+                },
+            )
+        )
+        return {
+            "project": self._project_view(self._services.projects.get(project_id)),
+            "session_ids": list(moved.session_ids),
+        }
+
+    def _session_move_profile(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Move one conversation; one inside a project needs `project_policy`.
+
+        `leave_project` takes it out of the project first (same checks as
+        session.move), `move_project` moves the whole project with it.
+        Without a policy the answer names the consequence instead.
+        """
+        session_id = self._services.sessions.show(self._need_str(params, "session_id")).id
+        target = self._need_str(params, "rinari_profile_id")
+        policy = params.get("project_policy")
+        record = self._services.sessions.show(session_id)
+        project = None
+        if record.project_id:
+            project = self._services.projects.get(record.project_id)
+            if policy not in ("leave_project", "move_project"):
+                sessions = self._services.ctx.session_repo.for_project(
+                    project.id, project.canonical_root
+                )
+                raise EngineProtocolError(
+                    INVALID_PARAMS,
+                    "This conversation belongs to a project: choose project_policy "
+                    '("leave_project" or "move_project").',
+                    details={
+                        "code": "PROJECT_POLICY_REQUIRED",
+                        "project_id": project.id,
+                        "project_name": project.name,
+                        "project_session_count": len(sessions),
+                    },
+                )
+            if policy == "move_project":
+                return self._project_move_profile(
+                    {"project_id": project.id, "rinari_profile_id": target}
+                )
+            self._desktop.move({"session_id": session_id, "project_id": None})
+        moved = self._services.rinari_profiles.move_session(session_id, target)
+        self._turns.emit_external(
+            event(
+                "session.moved",
+                {
+                    "session_id": session_id,
+                    "project_id": None,
+                    "rinari_profile_id": moved.rinari_profile_id,
+                    "previous_rinari_profile_id": moved.previous_rinari_profile_id,
+                },
+            )
+        )
+        return {"session": session_to_dict(self._services.sessions.show(session_id))}
 
     def _bundle_apply(self, params: dict[str, Any]) -> dict[str, Any]:
         from rinari.soul.store import SoulStore

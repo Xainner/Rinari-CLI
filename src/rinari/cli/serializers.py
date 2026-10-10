@@ -71,6 +71,7 @@ def session_dict(record: SessionRecord) -> dict[str, Any]:
         "forked_from": record.forked_from,
         "soul_id": record.soul_id,
         "pinned_at": record.pinned_at,
+        "rinari_profile_id": record.rinari_profile_id,
         "active_skills": (
             [list(pair) for pair in record.active_skills] if record.active_skills else None
         ),

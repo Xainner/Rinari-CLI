@@ -151,6 +151,7 @@ class SessionService:
 
         now = self._now()
         warnings: list[str] = []
+        active_profile = self._profile_for(None, None)
         if project_root is not None:
             root_str = str(project_root.resolve())
             match = next(
@@ -165,7 +166,9 @@ class SessionService:
             match = next(
                 (
                     s
-                    for s in self._ctx.session_repo.list(kind=SESSION_KIND_CHAT, limit=100)
+                    for s in self._ctx.session_repo.list(
+                        kind=SESSION_KIND_CHAT, limit=100, rinari_profile_id=active_profile
+                    )
                     if s.state == SESSION_STATE_ACTIVE
                 ),
                 None,
@@ -189,6 +192,7 @@ class SessionService:
                 project = self._projects.upsert(project_root)
                 project_id = project.id
                 project_root_snapshot = str(project_root.resolve())
+            profile_id_for_new = self._profile_for(project_id, None)
             record = SessionRecord(
                 id=self._ctx.ids.new("ses"),
                 kind=kind,
@@ -206,7 +210,9 @@ class SessionService:
                 created_at=now,
                 updated_at=now,
                 last_active_at=now,
+                rinari_profile_id=profile_id_for_new,
             )
+            self._stamp_profile(record, explicit_mode=False)
             with self._ctx.db.transaction():
                 self._ctx.session_repo.insert(record)
                 self._append_event(
@@ -260,8 +266,10 @@ class SessionService:
         title: str | None = None,
         forced_chat: bool = False,
         *,
-        mode: str = "ask",
+        mode: str | None = None,
         permission_profile: str = "workspace",
+        rinari_profile_id: str | None = None,
+        default_mode: str = "ask",
     ) -> SessionRecord:
         cwd = Path(cwd).expanduser().resolve()
         detection = self.detect(cwd)
@@ -281,10 +289,12 @@ class SessionService:
         project_id = None
         project_root_snapshot = None
         if project_root is not None:
-            project = self._projects.upsert(project_root)
+            project = self._projects.upsert(project_root, rinari_profile_id=rinari_profile_id)
             project_id = project.id
             project_root_snapshot = str(project_root.resolve())
-        normalized_mode = (mode or "").strip().lower()
+        profile_for_new = self._profile_for(project_id, rinari_profile_id)
+        explicit_mode = mode is not None
+        normalized_mode = (mode or default_mode).strip().lower()
         if normalized_mode not in (*SESSION_MODES, "ask"):
             raise InvalidUsageError(f"Unknown session mode: {mode!r}.")
         normalized_profile = normalize_profile(permission_profile).value
@@ -306,7 +316,9 @@ class SessionService:
             updated_at=now,
             last_active_at=now,
             permission_profile=normalized_profile,
+            rinari_profile_id=profile_for_new,
         )
+        self._stamp_profile(record, explicit_mode=explicit_mode)
         with self._ctx.db.transaction():
             self._ctx.session_repo.insert(record)
             self._append_event(
@@ -367,6 +379,8 @@ class SessionService:
             forked_from=source.id,
             active_skills=source.active_skills,
             permission_profile=source.permission_profile,
+            soul_id=source.soul_id,
+            rinari_profile_id=source.rinari_profile_id,
         )
         messages = [
             SessionMessageRecord(
@@ -394,6 +408,36 @@ class SessionService:
         return StartedSession(session=record, created=True)
 
     # -- promotion ----------------------------------------------------------
+
+    # -- Rinari profiles ------------------------------------------------------
+
+    def _profile_for(self, project_id: str | None, requested: str | None) -> str:
+        """A project's conversation has its profile; else requested or active."""
+        profiles = getattr(self, "profiles", None)
+        if profiles is None:
+            return requested or "default"
+        owner = profiles.for_project(project_id)
+        if owner is not None:
+            if requested and requested != owner:
+                raise InvalidUsageError(
+                    "A project's conversations belong to the project's profile."
+                )
+            return owner
+        return profiles.resolve(requested)
+
+    def _stamp_profile(self, record: SessionRecord, *, explicit_mode: bool) -> None:
+        """A new conversation takes its profile's Soul and mode (if any)."""
+        profiles = getattr(self, "profiles", None)
+        if profiles is None:
+            return
+        try:
+            bundle = profiles.store.get(record.rinari_profile_id)
+        except Exception:  # a removed profile file: keep the defaults
+            return
+        if bundle.soul_id:
+            record.soul_id = bundle.soul_id
+        if bundle.mode and not explicit_mode and bundle.mode in (*SESSION_MODES, "ask"):
+            record.mode = bundle.mode
 
     def move(self, session_ref: str, project_id: str | None) -> SessionRecord:
         """Rebind future execution; historical files/checkpoints stay at origin."""
@@ -447,6 +491,10 @@ class SessionService:
         record.updated_at = self._now()
         with self._ctx.db.transaction():
             self._ctx.session_repo.update(record)
+            if project is not None and project.rinari_profile_id != record.rinari_profile_id:
+                # A project's conversations always share its profile.
+                self._ctx.session_repo.set_rinari_profile([record.id], project.rinari_profile_id)
+                record.rinari_profile_id = project.rinari_profile_id
             self._ctx.worktree_repo.insert_many(
                 record.id, [WorktreeBaselineRecord(**row) for row in restored_baseline]
             )
@@ -477,7 +525,10 @@ class SessionService:
         with self._ctx.db.transaction():
             if record.kind != SESSION_KIND_CHAT:
                 raise ConflictError(f"Session {record.id} is already a {record.kind} session")
-            project = self._projects.upsert(root)
+            project = self._projects.upsert(root, rinari_profile_id=record.rinari_profile_id)
+            if project.rinari_profile_id != record.rinari_profile_id:
+                self._ctx.session_repo.set_rinari_profile([record.id], project.rinari_profile_id)
+                record.rinari_profile_id = project.rinari_profile_id
             record.kind = SESSION_KIND_PROJECT
             record.project_id = project.id
             record.project_root_snapshot = str(root)
@@ -516,12 +567,14 @@ class SessionService:
         project_id: str | None = None,
         state: str | None = None,
         limit: int = 50,
+        rinari_profile_id: str | None = None,
     ) -> list[SessionRecord]:
         records = self._ctx.session_repo.list(
             kind=kind,
             project_id=project_id,
             state=state,
             limit=limit,
+            rinari_profile_id=rinari_profile_id,
         )
         # Older Windows transports decoded UTF-8 titles with the ANSI locale.
         # Repair only the known generated title; never guess at user-authored text.

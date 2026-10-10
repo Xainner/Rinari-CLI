@@ -4585,6 +4585,40 @@ the machine.
 
 Measured with `small` on a desktop CPU: 7.5 s of Spanish speech in ~2.8 s.
 
+## Rinari profiles as workspaces (`rinari_profiles_v1`)
+
+A Rinari profile (soul, mode, per-agent models) is also where projects and
+conversations live. Projects and sessions carry `rinari_profile_id`
+(migration 0047; everything older is in the built-in `default`). One profile is
+active, shared by the CLI and the desktop (`<home>/active_profile`):
+
+- `profile_bundle.list` → `{profiles, active_id}`; each profile adds `builtin`,
+  `active` and `counts {projects, sessions}`. `default` always exists, can be
+  edited (`profile_bundle.update {id, name?, description?, soul_id?, mode?,
+  agents?}`, null clears) and never removed.
+- `profile_bundle.active` → `{active_id, profile}`;
+  `profile_bundle.activate {id}` → `{active_id, previous_id, profile}` and
+  `profile_bundle.activated`. Its per-agent models apply; its soul and mode are
+  stamped on each new conversation (conversations of other profiles keep
+  theirs). `profile_bundle.apply` remains for older clients.
+- New work goes to the active profile, or to `rinari_profile_id` in
+  `session.create`, `project.add` and `project.open`. A project's conversations
+  always have the project's profile (a different one is `INVALID_PARAMS`);
+  moving a conversation into a project adopts the project's profile, and
+  promoting a chat creates the project in the chat's profile.
+- `session.list`, `project.list` and `project.list_recent` take
+  `rinari_profile_id` (an id or `"active"`; omitted lists every profile).
+- `project.move_profile {project_id, rinari_profile_id}` moves the project and
+  all its conversations (`project.moved`). `session.move_profile {session_id,
+  rinari_profile_id, project_policy?}` moves a loose conversation; one inside a
+  project needs `project_policy`: `leave_project` (taken out first, same checks
+  as `session.move`) or `move_project` (the whole project). Without it the
+  error is `INVALID_PARAMS` with `details {code: PROJECT_POLICY_REQUIRED,
+  project_id, project_name, project_session_count}`.
+- `profile_bundle.remove {id, reassign_to?="default"}` reassigns its projects
+  and conversations first (`profile_bundle.changed`); removing the active
+  profile activates the target. Work whose profile file disappeared returns to
+  `default` when the engine starts.
 ## Live checklist (`checklist.update`, `turn_checklist_v1`)
 
 The model keeps a live list of the steps it is carrying out with the
