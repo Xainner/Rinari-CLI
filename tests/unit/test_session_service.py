@@ -401,9 +401,20 @@ def test_every_rename_is_published_with_its_source(app_ctx, services, home):
         record.id, "Hola", title_factory=lambda _: "Saludo inicial"
     )
     services.sessions.rename(record.id, "A mano")
+    first_title = published[0]["previous_title"]
     assert published == [
-        {"session_id": record.id, "title": "Saludo inicial", "source": "generated"},
-        {"session_id": record.id, "title": "A mano", "source": "manual"},
+        {
+            "session_id": record.id,
+            "title": "Saludo inicial",
+            "previous_title": first_title,
+            "source": "generated",
+        },
+        {
+            "session_id": record.id,
+            "title": "A mano",
+            "previous_title": "Saludo inicial",
+            "source": "manual",
+        },
     ]
 
 

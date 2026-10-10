@@ -6,6 +6,7 @@
   "x-codegen-definitions": [
     "attachment",
     "sessionSummary",
+    "gitHead",
     "projectSummary",
     "usageSnapshot",
     "governorSnapshot",
@@ -927,6 +928,9 @@
             "string",
             "null"
           ]
+        },
+        "git_head": {
+          "$ref": "#/$defs/gitHead"
         }
       },
       "additionalProperties": true
@@ -3995,6 +3999,43 @@
         },
         "total": {
           "type": "integer"
+        }
+      },
+      "additionalProperties": false
+    },
+    "gitHead": {
+      "type": "object",
+      "required": [
+        "branch",
+        "detached",
+        "sha_short",
+        "operation"
+      ],
+      "properties": {
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "detached": {
+          "type": "boolean"
+        },
+        "sha_short": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "rebase",
+            null
+          ]
         }
       },
       "additionalProperties": false
