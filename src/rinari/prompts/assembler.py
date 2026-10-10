@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from rinari.models.types import TURN_CONTEXT_SOURCE, ChatMessage
+from rinari.prompts.language import language_note, owner_language
 from rinari.prompts.segments import (
     CachePolicy,
     PromptSegment,
@@ -303,6 +304,20 @@ class PromptAssembler:
                     id="environment-current",
                     kind=SegmentKind.ENVIRONMENT,
                     content=_render_environment(current),
+                    trust=SegmentTrust.TRUSTED,
+                    cache_policy=CachePolicy.TURN,
+                )
+            )
+        note = language_note(owner_language(context.history))
+        if note:
+            # Per call: the owner may switch language mid-conversation, and the
+            # latest turn the model sees is often a runtime note or a tool
+            # result, not the owner (rinari.prompts.language).
+            segments.append(
+                PromptSegment(
+                    id="user-language",
+                    kind=SegmentKind.ENVIRONMENT,
+                    content=note,
                     trust=SegmentTrust.TRUSTED,
                     cache_policy=CachePolicy.TURN,
                 )

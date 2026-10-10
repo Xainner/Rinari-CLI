@@ -818,9 +818,12 @@ def test_first_tool_batch_waits_for_an_opening_sentence(env) -> None:
     assert requested == ["l2"]
     order = [name for name, _ in activity if name in {"model.content.completed", "tool.requested"}]
     assert order[:2] == ["model.content.completed", "tool.requested"]
-    reminder = model.requests[1].messages[-1]
+    sent = model.requests[1].messages
+    reminder = next(m for m in sent if (m.origin or {}).get("source") == "opening")
     assert reminder.origin == {"kind": "harness", "source": "opening"}
     assert "none of those calls ran" in reminder.content
+    # The opening it asks for must follow the owner, not the Soul's examples.
+    assert "The user is writing in Spanish" in (sent[-1].content or "")
     assert events.count("OpeningRequested") == 1
 
 
