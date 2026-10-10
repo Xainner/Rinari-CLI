@@ -655,6 +655,7 @@ def build_agent_session(
         validation=services.verification,
         memory=services.memory,
         checklist=getattr(services, "checklist", None),
+        followups=getattr(services, "followups", None),
         activity_sink=activity_sink,
         context_retrieval=services.retrieval,
         project_trusted=_project_trusted(services, root),

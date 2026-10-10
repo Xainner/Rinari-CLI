@@ -67,7 +67,8 @@
     "rinariProfile",
     "checklistItem",
     "checklistCounts",
-    "checklist"
+    "checklist",
+    "followupSuggestion"
   ],
   "$defs": {
     "webPreview": {
@@ -511,7 +512,10 @@
         "schedule.run_now",
         "schedule.grant",
         "project.move_profile",
-        "session.move_profile"
+        "session.move_profile",
+        "followup.list",
+        "followup.dismiss",
+        "followup.accept"
       ]
     },
     "event": {
@@ -602,7 +606,9 @@
         "profile_bundle.activated",
         "profile_bundle.changed",
         "project.moved",
-        "checklist.updated"
+        "checklist.updated",
+        "followup.suggested",
+        "followup.resolved"
       ]
     },
     "attachment": {
@@ -2092,6 +2098,12 @@
           ]
         },
         "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "suggestion_id": {
           "type": [
             "string",
             "null"
@@ -4117,6 +4129,88 @@
         },
         "updated_at": {
           "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "followupSuggestion": {
+      "type": "object",
+      "required": [
+        "id",
+        "session_id",
+        "turn_id",
+        "project_id",
+        "title",
+        "prompt",
+        "rationale",
+        "status",
+        "external_content",
+        "sources",
+        "accepted_session_id",
+        "created_at",
+        "resolved_at"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "turn_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "rationale": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "accepted",
+            "dismissed",
+            "superseded",
+            "expired"
+          ]
+        },
+        "external_content": {
+          "type": "boolean"
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "accepted_session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "resolved_at": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false

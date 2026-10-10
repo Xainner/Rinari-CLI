@@ -75,7 +75,11 @@ PEER_ORIGIN_DENIED_CAPABILITIES = frozenset(
         "git.local",
     }
 )
-PEER_ORIGIN_DENIED_TOOLS = frozenset({"agent.spawn", "agent.message", "agent.synthesize"})
+# A message from another agent session cannot plant a note that the owner
+# would later start with one click.
+PEER_ORIGIN_DENIED_TOOLS = frozenset(
+    {"agent.spawn", "agent.message", "agent.synthesize", "followup.suggest"}
+)
 
 
 def grant_scope_key(ctx: ToolContext) -> str:

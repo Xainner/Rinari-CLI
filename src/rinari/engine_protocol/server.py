@@ -195,6 +195,7 @@ class EngineServer:
         from rinari.engine_protocol.desktop import DesktopWorkspace
 
         self._desktop = DesktopWorkspace(self)
+        self._followup_accept_lock = threading.Lock()
         from rinari.engine_protocol.preview import WebPreviews
 
         self._previews = WebPreviews(self._desktop)
@@ -248,6 +249,9 @@ class EngineServer:
         self._dispatcher.register("session.model.set", self._session_model_set)
         self._dispatcher.register("session.permission.get", self._session_permission_get)
         self._dispatcher.register("session.checklist.get", self._session_checklist_get)
+        self._dispatcher.register("followup.list", self._followup_list)
+        self._dispatcher.register("followup.dismiss", self._followup_dismiss)
+        self._dispatcher.register("followup.accept", self._followup_accept)
         self._dispatcher.register("session.checklist.clear", self._session_checklist_clear)
         self._dispatcher.register("session.permission.set", self._session_permission_set)
         self._dispatcher.register("session.turn.start", self._turn_start)
@@ -1505,6 +1509,104 @@ class EngineServer:
         if not isinstance(ref, str) or not ref:
             raise EngineProtocolError(INVALID_PARAMS, "Param 'ref' must be a non-empty string.")
         return {"session": session_to_dict(self._services.sessions.show(ref))}
+
+    # -- follow-up suggestions ---------------------------------------------------
+
+    def _followups(self) -> Any:
+        service = getattr(self._services, "followups", None)
+        if service is None:
+            raise EngineProtocolError(INVALID_PARAMS, "Suggestions are not available.")
+        return service
+
+    def _followup(self, suggestion_id: str) -> Any:
+        from rinari.followups import FollowupError
+
+        try:
+            return self._followups().get(suggestion_id)
+        except FollowupError as exc:
+            raise NotFoundError(str(exc)) from exc
+
+    def _followup_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        status = params.get("status", "pending")
+        if status is not None and status not in (
+            "pending",
+            "accepted",
+            "dismissed",
+            "superseded",
+            "expired",
+        ):
+            raise EngineProtocolError(INVALID_PARAMS, "Unknown 'status'.")
+        suggestions = self._followups().list(
+            session_id=self._opt_str(params, "session_id"),
+            project_id=self._opt_str(params, "project_id"),
+            rinari_profile_id=self._profile_filter(params),
+            status=status,
+        )
+        return {"suggestions": [item.as_dict() for item in suggestions]}
+
+    def _followup_dismiss(self, params: dict[str, Any]) -> dict[str, Any]:
+        suggestion = self._followup(self._need_str(params, "suggestion_id"))
+        dismissed = self._followups().dismiss(suggestion.id)
+        if dismissed.status != suggestion.status:
+            self._turns.emit_followup_resolution(dismissed)
+        return {"suggestion": dismissed.as_dict()}
+
+    def _followup_accept(self, params: dict[str, Any]) -> dict[str, Any]:
+        """The owner accepts a note: a new conversation starts the task.
+
+        Same project and profile as the conversation that left it, the same
+        permission profile, BUILD, and the note's title. The engine starts the
+        turn itself (as a scheduled run does), marked as the owner's. Accepting
+        twice returns the conversation already created.
+        """
+        suggestion_id = self._need_str(params, "suggestion_id")
+        with self._followup_accept_lock:
+            suggestion = self._followup(suggestion_id)
+            if suggestion.status == "accepted" and suggestion.accepted_session_id:
+                return {
+                    "suggestion": suggestion.as_dict(),
+                    "session": session_to_dict(
+                        self._services.sessions.show(suggestion.accepted_session_id)
+                    ),
+                    "turn": None,
+                    "already_accepted": True,
+                }
+            if suggestion.status != "pending":
+                raise ConflictError(f"This suggestion is {suggestion.status}.")
+            source = self._services.sessions.show(suggestion.session_id)
+            project = self._services.projects.get(source.project_id) if source.project_id else None
+            if project is not None and project.archived:
+                raise ConflictError("Restore the project before starting this task.")
+            cwd = Path(project.canonical_root) if project is not None else Path(source.current_cwd)
+            record = self._services.sessions.new(
+                cwd=cwd,
+                title=suggestion.title,
+                forced_chat=project is None,
+                mode="build",
+                permission_profile=source.permission_profile,
+                rinari_profile_id=None if project is not None else source.rinari_profile_id,
+            )
+            if project is not None and record.kind != "PROJECT":
+                record = self._services.sessions.promote(record.id, cwd)
+            accepted = self._followups().mark_accepted(suggestion.id, record.id)
+        turn = self._turns.start_turn(
+            record.id,
+            suggestion.prompt,
+            display_message=suggestion.prompt,
+            origin={
+                "kind": "user",
+                "source": "followup",
+                "suggestion_id": suggestion.id,
+                "source_session_id": source.id,
+            },
+        )
+        self._turns.emit_followup_resolution(accepted)
+        return {
+            "suggestion": accepted.as_dict(),
+            "session": session_to_dict(self._services.sessions.show(record.id)),
+            "turn": {"turn_id": turn.get("turn_id")},
+            "already_accepted": False,
+        }
 
     def _session_checklist_get(self, params: dict[str, Any]) -> dict[str, Any]:
         session_id = self._services.sessions.show(self._need_str(params, "session_id")).id

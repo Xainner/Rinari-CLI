@@ -361,6 +361,8 @@ class ToolContext:
     # ChecklistService (rinari.checklist): checklist.update keeps the
     # conversation's live list. None outside a desktop or CLI session.
     checklist: Any = None
+    # FollowupService (rinari.followups): followup.suggest leaves notes.
+    followups: Any = None
     # Application-level ContextRetrievalService (rinari.context.retrieval);
     # None only when the session is not wired to the full service container.
     context_retrieval: Any = None
