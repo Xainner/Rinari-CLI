@@ -364,6 +364,11 @@ class ToolRuntime:
                 )
         for action in actions:
             scope = scope_from_context(ctx)
+            if getattr(action, "cwd", None):
+                with contextlib.suppress(Exception):  # the tool reports a bad cwd itself
+                    scope = dataclasses.replace(
+                        scope, command_cwd=ctx.sandbox.resolve(action.cwd, base=ctx.cwd)
+                    )
             if tool_name.startswith("channel.") and ctx.channel_host is None:
                 return self._error(ctx, ToolErrorCode.PERMISSION_DENIED, "No channel binding")
             if tool_name in ("session.peers", "session.send") and ctx.peer_host is None:

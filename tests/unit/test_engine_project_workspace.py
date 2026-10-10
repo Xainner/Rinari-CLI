@@ -133,6 +133,17 @@ def test_list_recent_carries_binding_and_limit_validation(server, tmp_path) -> N
     assert entry["id"] == opened["project"]["id"]
     assert entry["active_session_id"] == opened["session"]["id"]
     assert isinstance(entry["last_opened_at"], str) and entry["last_opened_at"]
+    # Not a repository: the branch is empty, never an error.
+    assert entry["git_head"] == {
+        "branch": None,
+        "detached": False,
+        "sha_short": None,
+        "operation": None,
+    }
+    (a / ".git").mkdir()
+    (a / ".git" / "HEAD").write_text("ref: refs/heads/trunk\n", encoding="utf-8")
+    listed = _ok(server.handle_line(_req("r4", "project.list", {})))["projects"]
+    assert listed[0]["git_head"]["branch"] == "trunk"
     assert (
         _err(server.handle_line(_req("r3", "project.list_recent", {"limit": 0})))["code"]
         == "INVALID_PARAMS"

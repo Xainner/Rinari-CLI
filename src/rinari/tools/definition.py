@@ -266,10 +266,19 @@ class ClassifiedAction:
     data on the wire (a request body, a non-GET method).
     """
 
-    def __init__(self, capability: str, target: str | None = None, mode: str | None = None) -> None:
+    def __init__(
+        self,
+        capability: str,
+        target: str | None = None,
+        mode: str | None = None,
+        cwd: str | None = None,
+    ) -> None:
         self.capability = capability
         self.target = target
         self.mode = mode
+        # Shell-like actions: the folder the command runs in, when the call
+        # names one (`cwd` argument). Policy judges paths from there.
+        self.cwd = cwd
 
     @property
     def fs_path(self) -> str | None:
@@ -419,6 +428,12 @@ class ToolContext:
     image_slots: int | None = None  # Deprecated compatibility field; no session quota.
 
 
+def command_cwd(input: dict[str, Any]) -> str | None:
+    """The `cwd` argument of a shell-like call, if it names one."""
+    value = input.get("cwd")
+    return value if isinstance(value, str) and value.strip() else None
+
+
 def command_text(arguments: dict) -> str:
     import subprocess
 
@@ -489,7 +504,7 @@ class ToolDefinition:
         if self.name in ("fs.write", "fs.patch"):
             return ClassifiedAction("fs.write", str(input.get("path") or ""))
         if self.name == "shell.exec":
-            return ClassifiedAction("shell.exec", command_text(input))
+            return ClassifiedAction("shell.exec", command_text(input), cwd=command_cwd(input))
         if self.name.startswith("git."):
             return ClassifiedAction("git.local", self.project_target(input))
         if "network.outbound" in self.capabilities or self.namespace in ("web", "http", "browser"):

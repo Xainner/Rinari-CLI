@@ -102,6 +102,9 @@ class SessionScope:
     # This turn already read external (untrusted) content: sending data out
     # asks even in full-access (module docstring).
     external_content: bool = False
+    # Folder a shell-like command runs in when the call names its own `cwd`;
+    # None means it runs in the session's cwd.
+    command_cwd: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,6 +274,18 @@ _DESTRUCTIVE_SHELL = re.compile(
 _CMD_SWITCH_VERBS = frozenset(
     {"copy", "move", "del", "erase", "md", "rd", "rmdir", "mkdir", "xcopy", "robocopy"}
 )
+# Inspection commands that change nothing: the only ones that run without
+# asking in a folder outside the workspace. A single command, no chaining or
+# redirection (checked separately), and git only with its read verbs.
+_INSPECTION_SHELL = re.compile(
+    r"^\s*(?:ls|dir|pwd|cat|type|head|tail|wc|stat|file|tree|where|which|"
+    r"rg|grep|findstr|get-childitem|get-content|get-item|get-location|"
+    r"resolve-path|test-path|"
+    r"git\s+(?:status|log|diff|show|branch|rev-parse|remote|ls-files|blame)"
+    r")\b(?:\s|$)",
+    re.IGNORECASE,
+)
+_CHAINING = re.compile(r"[;&|`]|\$\(|>")
 _REDIRECT_TARGET = re.compile(r"(?<!>)>>?\s*(?:\"([^\"]+)\"|'([^']+)'|([^\s;&|]+))")
 _PATH_TOKEN = re.compile(r"(?:\"([^\"]+)\"|'([^']+)'|([^\s;&|]+))")
 
@@ -279,6 +294,11 @@ def _local_part(command: str) -> str:
     """What runs here: a quoted `ssh host "..."` payload runs remotely."""
     match = re.match(r"^\s*ssh\b[^\"']*", command)
     return match.group(0) if match else command
+
+
+def _is_inspection(command: str) -> bool:
+    command = _local_part(command)
+    return bool(_INSPECTION_SHELL.match(command)) and not _CHAINING.search(command)
 
 
 def classify_shell_risk(command: str, scope: SessionScope) -> ShellRisk:
@@ -325,7 +345,12 @@ def classify_shell_risk(command: str, scope: SessionScope) -> ShellRisk:
         if not looks_path:
             continue
         try:
-            base = scope.root if scope.root is not None and scope.kind == "PROJECT" else scope.cwd
+            if scope.command_cwd is not None:
+                base = scope.command_cwd  # relative paths are relative to where it runs
+            elif scope.root is not None and scope.kind == "PROJECT":
+                base = scope.root
+            else:
+                base = scope.cwd
             candidate = Path(value)
             resolved = (base / candidate if not candidate.is_absolute() else candidate).resolve()
         except (OSError, RuntimeError, ValueError):
@@ -926,6 +951,18 @@ class PolicyEngine:
                 risk_class=risk_class,
                 rule_id="shell_external_mutation",
             )
+        outside = self._command_cwd_outside(scope)
+        if outside is not None and not _is_inspection(command or ""):
+            # Runs in another folder: `npm install`, `git commit`, a build...
+            # change things there without any path token to check.
+            return self._ask(
+                CAPABILITY_SHELL,
+                f"command runs outside the workspace (in {outside})",
+                target=command,
+                risk=risk,
+                risk_class=risk_class,
+                rule_id="shell_cwd_outside",
+            )
         return self._allow(CAPABILITY_SHELL, "local command in the workspace", risk, risk_class)
 
     # -- helpers --------------------------------------------------------------
@@ -934,6 +971,22 @@ class PolicyEngine:
         base = scope.root if scope.root is not None and scope.kind == "PROJECT" else scope.cwd
         candidate = Path(path)
         return (base / candidate if not candidate.is_absolute() else candidate).resolve()
+
+    def _command_cwd_outside(self, scope: SessionScope) -> str | None:
+        """The command's own cwd when it lies outside the workspace, else None.
+
+        Only an explicit `cwd` counts: without one the command runs in the
+        session's folder. A chat opened at $HOME has no implicit workspace,
+        so there is nothing to be outside of (path targets still apply).
+        """
+        if scope.command_cwd is None or scope.root is None:
+            return None
+        if self._is_home_itself(scope.root, scope):
+            return None
+        cwd = scope.command_cwd.resolve()
+        if self._inside_root(cwd, scope.root):
+            return None
+        return str(cwd)
 
     def _inside_root(self, resolved: Path, root: Path | None) -> bool:
         if root is None:

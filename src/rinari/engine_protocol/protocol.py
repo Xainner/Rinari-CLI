@@ -101,6 +101,9 @@ CAPABILITIES: dict[str, bool] = {
     # memory.export / memory.import: portable bundle of user and project
     # records plus forgotten-text suppressions (additive, digest-checked).
     "memory_portability_v1": True,
+    # projectSummary.git_head: each project's branch read from .git/HEAD
+    # (no git subprocess), so project lists can show it.
+    "project_git_head_v1": True,
     # Peer messaging between agent sessions (Boards): untrusted data, per-target
     # consent, provenance ceiling in the receiving turn.
     "session_peer_messaging_v1": True,

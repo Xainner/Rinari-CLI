@@ -232,5 +232,10 @@ def test_rename_publishes_session_renamed(server, tmp_path) -> None:
     assert events[0]["payload"] == {
         "session_id": session_id,
         "title": "Mi nombre",
+        "previous_title": events[0]["payload"]["previous_title"],
         "source": "manual",
     }
+    assert events[0]["payload"]["previous_title"] != "Mi nombre"
+    server.handle_line(_req("r2", "session.rename", {"ref": session_id, "title": "Otro"}))
+    again = server.drain_events()[0]["payload"]
+    assert (again["previous_title"], again["title"]) == ("Mi nombre", "Otro")
