@@ -226,6 +226,11 @@ def build_assembler_context(
         from rinari.repo.state import analyze_repository  # local: keep module import light
 
         environment["repository"] = analyze_repository(root).to_prompt_dict()
+    extra_folders = _extra_roots(services, record)
+    if extra_folders and root is not None:
+        # The project's other working folders: the model works in them as in
+        # the root (only trusted ones are listed, and only those are writable).
+        environment["project_folders"] = [str(root), *(str(path) for path in extra_folders)]
     instructions = project_instructions(
         services, root, Path(record.current_cwd), trusted=project_trusted
     )
@@ -494,13 +499,18 @@ def _secrets_for_redaction(services: ServiceContainer) -> list[str]:
 
 
 def _sandbox_for(
-    record: SessionRecord, user_home: Path, profile: PermissionProfile = PermissionProfile.WORKSPACE
+    record: SessionRecord,
+    user_home: Path,
+    profile: PermissionProfile = PermissionProfile.WORKSPACE,
+    extra_roots: tuple[Path, ...] = (),
 ) -> FilesystemSandbox:
     if profile is PermissionProfile.FULL_ACCESS:
         return FilesystemSandbox(read_root=None, unrestricted=True)
     root = Path(record.project_root_snapshot) if record.project_root_snapshot else None
     if record.kind == "PROJECT" and root is not None:
-        return FilesystemSandbox(read_root=root, write_roots=(root,), unrestricted_reads=True)
+        return FilesystemSandbox(
+            read_root=root, write_roots=(root, *extra_roots), unrestricted_reads=True
+        )
     # CHAT (harness.md 76): reads inside the home tree; the only writable
     # scope is the candidate project-creation workspace = the directory the
     # user explicitly opened, unless that directory is $HOME itself (locked).
@@ -510,6 +520,30 @@ def _sandbox_for(
     # locations); only $HOME itself is locked (AGENTS.md 13).
     write_roots: tuple[Path, ...] = () if cwd == home else (cwd,)
     return FilesystemSandbox(read_root=user_home, write_roots=write_roots, unrestricted_reads=True)
+
+
+def _extra_roots(services: ServiceContainer, record: SessionRecord) -> tuple[Path, ...]:
+    """A project's other folders that are trusted and present: working folders."""
+    if record.kind != "PROJECT" or not record.project_id:
+        return ()
+    try:
+        folders = services.projects.folders.list(record.project_id)
+    except Exception:
+        return ()
+    roots: list[Path] = []
+    for folder in folders:
+        if folder["primary"]:
+            continue
+        path = Path(folder["path"])
+        if not path.is_dir():
+            continue
+        try:
+            trusted = services.trust.status(path).state == "trusted"
+        except Exception:
+            trusted = False
+        if trusted:
+            roots.append(path)
+    return tuple(roots)
 
 
 def _persist_event(
@@ -601,7 +635,8 @@ def build_agent_session(
     root = Path(record.project_root_snapshot) if record.project_root_snapshot else None
     cwd = Path(record.current_cwd)
     home = user_home if user_home is not None else Path.home()
-    sandbox = _sandbox_for(record, home, profile)
+    extra_roots = _extra_roots(services, record)
+    sandbox = _sandbox_for(record, home, profile, extra_roots)
     if (
         record.kind == "CHAT"
         and cwd.resolve().is_relative_to((services.ctx.home / "workspaces").resolve())
@@ -656,6 +691,7 @@ def build_agent_session(
         memory=services.memory,
         checklist=getattr(services, "checklist", None),
         followups=getattr(services, "followups", None),
+        extra_project_roots=extra_roots,
         activity_sink=activity_sink,
         context_retrieval=services.retrieval,
         project_trusted=_project_trusted(services, root),
@@ -1617,7 +1653,10 @@ def _apply_promotion(session: AgentSession, record: SessionRecord, marker: str) 
         kind=record.kind,
         cwd=root,
         project_root=root,
-        sandbox=_sandbox_for(record, home, session.context.tool_ctx.profile),
+        sandbox=_sandbox_for(
+            record, home, session.context.tool_ctx.profile, _extra_roots(services, record)
+        ),
+        extra_project_roots=_extra_roots(services, record),
         worktree=_ensure_worktree_baseline(services, record),
         lsp=_build_lsp_manager(root),
         validation=services.verification,

@@ -105,6 +105,9 @@ class SessionScope:
     # Folder a shell-like command runs in when the call names its own `cwd`;
     # None means it runs in the session's cwd.
     command_cwd: Path | None = None
+    # A project's other trusted working folders: inside them is inside the
+    # project, exactly as the primary root. Untrusted ones are not listed.
+    extra_roots: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -361,7 +364,14 @@ def classify_shell_risk(command: str, scope: SessionScope) -> ShellRisk:
         home = scope.user_home.resolve() if scope.user_home is not None else None
         if root is not None and root == home:
             root = None  # a chat opened at $HOME has no implicit workspace
-        if root is None or not (resolved == root or root in resolved.parents):
+        inside_extra = any(
+            resolved == extra.resolve() or extra.resolve() in resolved.parents
+            for extra in scope.extra_roots
+            if home is None or extra.resolve() != home
+        )
+        if not inside_extra and (
+            root is None or not (resolved == root or root in resolved.parents)
+        ):
             rendered = str(resolved)
             if rendered not in external:
                 external.append(rendered)
@@ -841,6 +851,14 @@ class PolicyEngine:
                     rule_id="preexisting_user_work",
                     choices=CHOICES_SESSION,
                 )
+        if self._inside_extra_root(resolved, scope):
+            return self._allow(
+                CAPABILITY_FS_WRITE,
+                "inside a project folder",
+                risk,
+                risk_class,
+                str(resolved),
+            )
         if self._inside_root(resolved, root) and not home_root:
             return self._allow(
                 CAPABILITY_FS_WRITE,
@@ -984,9 +1002,15 @@ class PolicyEngine:
         if self._is_home_itself(scope.root, scope):
             return None
         cwd = scope.command_cwd.resolve()
-        if self._inside_root(cwd, scope.root):
+        if self._inside_root(cwd, scope.root) or self._inside_extra_root(cwd, scope):
             return None
         return str(cwd)
+
+    def _inside_extra_root(self, resolved: Path, scope: SessionScope) -> bool:
+        return any(
+            self._inside_root(resolved, extra) and not self._is_home_itself(extra, scope)
+            for extra in scope.extra_roots
+        )
 
     def _inside_root(self, resolved: Path, root: Path | None) -> bool:
         if root is None:

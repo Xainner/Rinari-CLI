@@ -413,6 +413,10 @@ class EngineServer:
         self._dispatcher.register("profile_bundle.active", self._bundle_active)
         self._dispatcher.register("profile_bundle.activate", self._bundle_activate)
         self._dispatcher.register("project.move_profile", self._project_move_profile)
+        self._dispatcher.register("project.folders.validate", self._project_folders_validate)
+        self._dispatcher.register("project.create", self._project_create)
+        self._dispatcher.register("project.folder.add", self._project_folder_add)
+        self._dispatcher.register("project.folder.remove", self._project_folder_remove)
         self._dispatcher.register("session.move_profile", self._session_move_profile)
         self._dispatcher.register("profile_bundle.apply", self._bundle_apply)
         self._dispatcher.register("provider.list", self._provider_list)
@@ -1838,8 +1842,7 @@ class EngineServer:
             )
         }
 
-    @staticmethod
-    def _project_view(project: Any) -> dict[str, Any]:
+    def _project_view(self, project: Any) -> dict[str, Any]:
         root = Path(project.canonical_root)
         return {
             "id": project.id,
@@ -1855,6 +1858,16 @@ class EngineServer:
             "updated_at": project.updated_at,
             "last_opened_at": project.last_opened_at or project.updated_at,
             "git_head": HEADS.get(project.canonical_root).as_dict(),
+            "folders": [
+                {
+                    "path": folder["path"],
+                    "primary": folder["primary"],
+                    "position": folder["position"],
+                    "exists": Path(folder["path"]).is_dir(),
+                    "git_head": HEADS.get(folder["path"]).as_dict(),
+                }
+                for folder in self._services.projects.folders.list(project.id)
+            ],
         }
 
     def _project_list(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -3095,6 +3108,114 @@ class EngineServer:
                 self._check_agent_model(fallback)
             self._services.agent_configs.set(agent, model=model or None, fallback=fallback or None)
         return sorted(bundle.agents)
+
+    # -- projects with several folders ---------------------------------------------
+
+    def _folder_report(self, checks: list[Any]) -> list[dict[str, Any]]:
+        report = []
+        for check in checks:
+            row = check.as_dict()
+            if check.canonical_path:
+                row["trust_state"] = self._services.trust.status(Path(check.canonical_path)).state
+                row["git_head"] = HEADS.get(check.canonical_path).as_dict()
+            else:
+                row["trust_state"] = None
+                row["git_head"] = None
+            report.append(row)
+        return report
+
+    def _folder_error(self, error: Any) -> EngineProtocolError:
+        return EngineProtocolError(
+            INVALID_PARAMS,
+            str(error),
+            details={"folders": self._folder_report(error.checks)},
+        )
+
+    def _project_folders_validate(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Check folders for a project without changing anything (the review step)."""
+        paths = params.get("paths")
+        if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'paths' must be a list of strings.")
+        if len(paths) > 32:
+            raise EngineProtocolError(INVALID_PARAMS, "Too many folders.")
+        checks = self._services.projects.validate_folders(
+            paths, self._opt_str(params, "project_id")
+        )
+        return {"folders": self._folder_report(checks)}
+
+    def _project_create(self, params: dict[str, Any]) -> dict[str, Any]:
+        """A project with its name, description, folders and their trust.
+
+        `folders: [{path, trust}]`, the first one primary. Trust is granted per
+        folder that asks for it, after the project exists. With `open` (the
+        default) the project's recommended conversation comes back too.
+        """
+        from rinari.application.project_service import ProjectFolderError
+
+        folders = params.get("folders")
+        if not isinstance(folders, list) or not folders:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'folders' must be a non-empty list.")
+        paths: list[str] = []
+        trust: list[bool] = []
+        for entry in folders:
+            if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+                raise EngineProtocolError(INVALID_PARAMS, "Each folder needs a 'path'.")
+            paths.append(entry["path"])
+            trust.append(bool(entry.get("trust", False)))
+        open_after = params.get("open", True)
+        if not isinstance(open_after, bool):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'open' must be a boolean.")
+        try:
+            project = self._services.projects.create(
+                name=self._need_str(params, "name"),
+                description=self._opt_str(params, "description") or "",
+                folders=paths,
+                rinari_profile_id=self._profile_param(params),
+            )
+        except ProjectFolderError as exc:
+            raise self._folder_error(exc) from exc
+        granted = []
+        for folder, wanted in zip(
+            self._services.projects.folders.list(project.id), trust, strict=False
+        ):
+            path = Path(folder["path"])
+            if wanted:
+                self._services.trust.add(path)
+            granted.append(
+                {"path": folder["path"], "state": self._services.trust.status(path).state}
+            )
+        session = None
+        if open_after:
+            root = Path(project.canonical_root)
+            record = self._services.sessions.new(cwd=root, mode="build")
+            if record.kind != "PROJECT":
+                record = self._services.sessions.promote(record.id, root)
+            session = session_to_dict(record)
+        return {"project": self._project_view(project), "session": session, "trust": granted}
+
+    def _project_folder_add(self, params: dict[str, Any]) -> dict[str, Any]:
+        from rinari.application.project_service import ProjectFolderError
+
+        project_id = self._need_str(params, "project_id")
+        path = self._need_str(params, "path")
+        try:
+            project = self._services.projects.add_folder(project_id, path)
+        except ProjectFolderError as exc:
+            raise self._folder_error(exc) from exc
+        if params.get("trust") is True:
+            self._services.trust.add(Path(path).expanduser().resolve())
+        return {"project": self._project_view(project)}
+
+    def _project_folder_remove(self, params: dict[str, Any]) -> dict[str, Any]:
+        project_id = self._need_str(params, "project_id")
+        project = self._services.projects.get(project_id)
+        for session in self._services.ctx.session_repo.for_project(project.id):
+            if self._turns.has_active_turn(session.id):
+                raise EngineProtocolError(
+                    TURN_RUNNING, "Wait for the project's turns to finish before removing a folder."
+                )
+        updated = self._services.projects.remove_folder(project_id, self._need_str(params, "path"))
+        return {"project": self._project_view(updated)}
 
     def _project_move_profile(self, params: dict[str, Any]) -> dict[str, Any]:
         project_id = self._need_str(params, "project_id")

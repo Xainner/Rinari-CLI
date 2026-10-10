@@ -111,6 +111,10 @@ CAPABILITIES: dict[str, bool] = {
     # followup.suggest notes: followup.suggested/resolved on the turn,
     # followup.list/dismiss/accept (accept starts a new conversation).
     "followup_suggestions_v1": True,
+    # Projects with several working folders: project.create,
+    # project.folders.validate, project.folder.add/remove, projectSummary.folders;
+    # trusted extra folders count as inside the project for the policy.
+    "project_folders_v1": True,
     # projectSummary.git_head: each project's branch read from .git/HEAD
     # (no git subprocess), so project lists can show it.
     "project_git_head_v1": True,

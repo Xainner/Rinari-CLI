@@ -4668,3 +4668,31 @@ Events on the turn: `followup.suggested {suggestion}` and `followup.resolved
   BUILD, the note's title) whose first turn the engine starts with the prompt,
   `origin {kind: user, source: followup, suggestion_id, source_session_id}`.
   Accepting again returns the conversation already created.
+
+## Projects with several folders (`project_folders_v1`)
+
+A project has a primary folder (`canonical_root`, which still keys memory,
+tasks, checkpoints and grants) and may own others (`project_folders`,
+migration 0049; every existing project has its root as the primary). A folder
+belongs to one project only.
+
+- `project.folders.validate {paths, project_id?}` → `{folders: [{input,
+  canonical_path, ok, error?: {code, message, project_id?, project_name?},
+  trust_state, git_head}]}` with codes `NOT_FOUND`, `NOT_DIRECTORY`, `HOME`,
+  `ENGINE_HOME`, `DUPLICATE`, `NESTED`, `IN_PROJECT`, `TOO_MANY` (16). Changes
+  nothing: it backs the review step of the creation window.
+- `project.create {name, description?, folders: [{path, trust}], rinari_profile_id?,
+  open?=true}` → `{project, session|null, trust: [{path, state}]}`. All or
+  nothing (`INVALID_PARAMS` with `details.folders`); the first folder is
+  primary; `trust` grants each folder's trust after creation.
+- `project.folder.add {project_id, path, trust?}`, `project.folder.remove
+  {project_id, path}` (the primary is `CONFLICT`; a running turn in the project
+  is `TURN_RUNNING`). `projectSummary.folders: [{path, primary, position,
+  exists, git_head}]`.
+- An extra folder is a working folder only when trusted: the sandbox can write
+  there and the policy treats it as inside the project (writes, commands run
+  there, delete targets). An untrusted one stays outside until trusted.
+  The model gets the working folders in its environment (`project_folders`).
+- Opening one of a project's folders opens that project; a CLI session started
+  inside an extra folder binds to the project (its primary root, cwd kept).
+  Checkpoints, LSP and the index stay on the primary folder.
