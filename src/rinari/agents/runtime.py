@@ -417,16 +417,31 @@ class _SubagentRunner:
             requested = PermissionProfile(definition.profile)
             if rank[requested] < rank[profile]:
                 profile = requested
-        from rinari.policy.sandbox import FilesystemSandbox
+        from rinari.policy.sandbox import FilesystemSandbox, working_roots
         from rinari.tools.exposure import ToolExposure
 
         parent_sandbox = parent_ctx.sandbox
+        unrestricted = profile == PermissionProfile.FULL_ACCESS and parent_sandbox.unrestricted
+        if profile == PermissionProfile.READ_ONLY:
+            write_roots: tuple[Path, ...] = ()
+        elif worktree_path:
+            write_roots = (cwd,)
+        elif parent_sandbox.unrestricted and not unrestricted:
+            # A narrower child of a full-access parent: the parent names no
+            # roots, so the child gets the session's own folders instead of
+            # none (before, it could not write even inside the project).
+            write_roots = working_roots(
+                getattr(parent_ctx, "project_root", None),
+                getattr(parent_ctx, "cwd", None),
+                tuple(getattr(parent_ctx, "extra_project_roots", ()) or ()),
+                getattr(parent_ctx, "user_home", None),
+            )
+        else:
+            write_roots = parent_sandbox.write_roots
         sandbox = FilesystemSandbox(
             read_root=cwd if worktree_path else parent_sandbox.read_root,
-            write_roots=()
-            if profile == PermissionProfile.READ_ONLY
-            else ((cwd,) if worktree_path else parent_sandbox.write_roots),
-            unrestricted=profile == PermissionProfile.FULL_ACCESS and parent_sandbox.unrestricted,
+            write_roots=write_roots,
+            unrestricted=unrestricted,
             # Reads are free in every profile; the policy still asks for secrets.
             unrestricted_reads=True,
             approved_read_roots=parent_sandbox.approved_read_roots,

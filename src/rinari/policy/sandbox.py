@@ -91,6 +91,32 @@ class FilesystemSandbox:
         )
 
 
+def working_roots(
+    project_root: Path | None,
+    cwd: Path | None,
+    extra_roots: tuple[Path, ...] = (),
+    user_home: Path | None = None,
+) -> tuple[Path, ...]:
+    """The folders a session works in when its sandbox names none.
+
+    Full access grants no explicit roots (it may write anywhere), so code
+    that needs "this session's own folders" (creating missing parents, a
+    narrower sandbox for a subagent) asks here: the project root, or the
+    chat's working directory, plus the project's trusted extra folders.
+    $HOME itself is never one of them.
+    """
+    home = user_home.resolve() if user_home else None
+    base = project_root if project_root is not None else cwd
+    roots: list[Path] = []
+    for root in (base, *extra_roots):
+        if root is None:
+            continue
+        resolved = root.resolve()
+        if resolved != home and resolved not in roots:
+            roots.append(resolved)
+    return tuple(roots)
+
+
 class ProcessLimits:
     """Technical process limits applied by the shell tool."""
 

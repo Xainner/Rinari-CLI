@@ -1070,6 +1070,42 @@ def test_child_inherits_permission_ceiling(tmp_path, parent_profile, restriction
     ctx.browser.close()
 
 
+def test_narrower_child_of_full_access_can_write_in_the_project(tmp_path):
+    # A full-access parent names no write roots; a workspace child used to
+    # inherit that empty tuple and could not write even inside the project.
+    from dataclasses import replace
+
+    from rinari.agents.runtime import SubagentRuntimeConfig, make_subagent_runner
+    from rinari.policy.engine import PermissionProfile, PolicyEngine
+    from rinari.policy.sandbox import FilesystemSandbox, SandboxViolationError
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    parent = replace(
+        _ParentCtx(project, FakeClock()),
+        user_home=tmp_path,
+        profile=PermissionProfile.FULL_ACCESS,
+        sandbox=FilesystemSandbox(read_root=None, unrestricted=True),
+    )
+    config = SubagentRuntimeConfig(None, None, CancellationToken(), PolicyEngine(), None, parent)
+    runner = make_subagent_runner(config)
+    spec = SubagentRunSpec(
+        agent_id="a",
+        definition=AgentDefinition("custom", "", "", profile="workspace"),
+        objective="edit",
+        project_root=project,
+        session_id="parent",
+    )
+    ctx = runner._build_tool_ctx(spec)
+    assert ctx.profile is PermissionProfile.WORKSPACE
+    assert ctx.sandbox.unrestricted is False
+    assert ctx.sandbox.write_roots == (project.resolve(),)
+    ctx.sandbox.assert_writable((project / "src" / "a.py").resolve())
+    with pytest.raises(SandboxViolationError):
+        ctx.sandbox.assert_writable((tmp_path / "outside.txt").resolve())
+    ctx.browser.close()
+
+
 def test_child_uses_parent_ssh_catalog_and_session_grants(tmp_path):
     from dataclasses import replace
     from types import SimpleNamespace

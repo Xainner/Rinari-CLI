@@ -165,6 +165,9 @@ class AgentContext:
     # Subagents that finished since the last look, worded for the model: the
     # coordinator otherwise kept messaging agents that had already ended.
     collect_agent_notices: Callable[[], list[str]] | None = None
+    # Live checklist that fell behind the work (rinari.checklist.reminder):
+    # called after each tool round with the tools it ran.
+    checklist_reminder: Callable[[list[str]], str | None] | None = None
     # Messages the owner sent while this turn runs (steering). Each call
     # hands over what arrived since the last one; the loop puts them in the
     # history after the current step and the model reads them next.
@@ -892,6 +895,11 @@ class AgentLoop:
                         )
                     )
                 ctx.history.extend(round_nudges)
+                if ctx.checklist_reminder is not None:
+                    with contextlib.suppress(Exception):
+                        note = ctx.checklist_reminder([call.name for call, _ in round_results])
+                        if note:
+                            ctx.history.append(ChatMessage.harness(note, "checklist"))
                 if ctx.collect_agent_notices is not None:
                     with contextlib.suppress(Exception):
                         ctx.history.extend(

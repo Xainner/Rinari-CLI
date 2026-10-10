@@ -279,8 +279,18 @@ def _inside_write_roots(ctx: ToolContext, folder: Path) -> bool:
     result lists them, so a mistyped path is visible). A root granted by a
     one-off approval is the target's own folder, never strictly inside, so
     approved writes outside the workspace still require create_parents.
+
+    Full access grants no explicit roots (it may write anywhere), so the
+    session's own working folders count as its roots: otherwise the most
+    permissive profile would be the only one that cannot create `src/` in
+    its own project.
     """
-    return any(root in folder.parents for root in ctx.sandbox.write_roots)
+    roots: tuple[Path, ...] = tuple(ctx.sandbox.write_roots)
+    if ctx.sandbox.unrestricted:
+        from rinari.policy.sandbox import working_roots
+
+        roots += working_roots(ctx.project_root, ctx.cwd, ctx.extra_project_roots, ctx.user_home)
+    return any(root in folder.parents for root in roots)
 
 
 def fs_write(input: dict, ctx: ToolContext) -> ToolResult:

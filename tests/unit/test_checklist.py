@@ -366,3 +366,43 @@ def test_compaction_keeps_the_checklist_in_the_task_lists(services, service, ses
     assert evidence["tasks_blocked"] == ["checklist: Docs (blocked: sin acceso)"]
     service.clear(session_id)
     assert "tasks_active" not in services.context.build_evidence(session_id, None)
+
+
+# -- reminder --------------------------------------------------------------------
+
+
+def test_reminder_after_quiet_rounds_on_an_active_list(service, session_id):
+    from rinari.checklist.reminder import ChecklistReminder
+
+    service.replace(session_id, _items("completed", "in_progress", "pending"))
+    reminder = ChecklistReminder(service, session_id, every=3)
+    assert reminder.after_round(["shell.exec"]) is None
+    assert reminder.after_round(["fs.write", "fs.write"]) is None
+    note = reminder.after_round(["fs.read"])
+    assert note is not None
+    assert "1/3 done" in note and "«Paso 2» in progress" in note
+    assert "checklist.update" in note
+    # The count restarts after a reminder: no stream of notes.
+    assert reminder.after_round(["fs.read"]) is None
+
+
+def test_reminder_restarts_when_the_model_updates_the_list(service, session_id):
+    from rinari.checklist.reminder import ChecklistReminder
+
+    service.replace(session_id, _items("in_progress", "pending"))
+    reminder = ChecklistReminder(service, session_id, every=2)
+    assert reminder.after_round(["shell.exec"]) is None
+    assert reminder.after_round(["checklist.update", "shell.exec"]) is None
+    assert reminder.after_round(["shell.exec"]) is None
+    assert reminder.after_round(["shell.exec"]) is not None
+
+
+def test_no_reminder_for_a_finished_cleared_or_missing_list(service, session_id):
+    from rinari.checklist.reminder import ChecklistReminder
+
+    reminder = ChecklistReminder(service, session_id, every=1)
+    assert reminder.after_round(["shell.exec"]) is None  # no list at all
+    service.replace(session_id, _items("completed", "completed"))
+    assert reminder.after_round(["shell.exec"]) is None
+    service.replace(session_id, [])
+    assert reminder.after_round(["shell.exec"]) is None
