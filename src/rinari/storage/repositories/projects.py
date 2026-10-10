@@ -13,8 +13,8 @@ class ProjectRepository:
             """
             INSERT INTO projects (
                 id, canonical_root, git_fingerprint, metadata_json, created_at, updated_at,
-                name, description, pinned, archived, last_opened_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                name, description, pinned, archived, last_opened_at, rinari_profile_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 rec.id,
@@ -28,6 +28,7 @@ class ProjectRepository:
                 int(rec.pinned),
                 int(rec.archived),
                 rec.last_opened_at,
+                rec.rinari_profile_id,
             ),
         )
 
@@ -41,12 +42,17 @@ class ProjectRepository:
         )
         return _row_to_record(row) if row else None
 
-    def list(self, *, include_archived: bool = True) -> list[ProjectRecord]:
-        sql = "SELECT * FROM projects"
-        params: tuple[object, ...] = ()
+    def list(
+        self, *, include_archived: bool = True, rinari_profile_id: str | None = None
+    ) -> list[ProjectRecord]:
+        sql = "SELECT * FROM projects WHERE 1=1"
+        params: list[object] = []
         if not include_archived:
-            sql += " WHERE archived = ?"
-            params = (0,)
+            sql += " AND archived = ?"
+            params.append(0)
+        if rinari_profile_id is not None:
+            sql += " AND rinari_profile_id = ?"
+            params.append(rinari_profile_id)
         sql += " ORDER BY pinned DESC, last_opened_at DESC, name COLLATE NOCASE"
         rows = self._db.query(sql, params)
         return [_row_to_record(r) for r in rows]
@@ -71,6 +77,13 @@ class ProjectRepository:
             ),
         )
 
+    def set_rinari_profile(self, project_id: str, rinari_profile_id: str) -> None:
+        """Only writer of the project's profile (see ProjectRecord)."""
+        self._db.execute(
+            "UPDATE projects SET rinari_profile_id = ? WHERE id = ?",
+            (rinari_profile_id, project_id),
+        )
+
 
 def _row_to_record(row: dict) -> ProjectRecord:
     return ProjectRecord(
@@ -85,4 +98,5 @@ def _row_to_record(row: dict) -> ProjectRecord:
         pinned=bool(row["pinned"]),
         archived=bool(row["archived"]),
         last_opened_at=row["last_opened_at"],
+        rinari_profile_id=row["rinari_profile_id"] or "default",
     )

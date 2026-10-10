@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from rinari.application.model_service import ModelService
 from rinari.application.network_service import NetworkService
 from rinari.application.project_service import ProjectService
 from rinari.application.provider_service import ProviderService
+from rinari.application.rinari_profiles import RinariProfileService
 from rinari.application.session_service import SessionService
 from rinari.artifacts.store import ArtifactStore
 from rinari.changes.service import TurnChangeService
@@ -61,6 +63,7 @@ class ServiceContainer:
     agents: AgentRegistry
     agent_configs: AgentConfigStore
     schedules: ScheduleService = None
+    rinari_profiles: RinariProfileService = None
 
 
 def build_services(
@@ -103,6 +106,12 @@ def build_services(
         # A task may name a project skill: its folder is only known at run time.
         skill_exists=lambda name: True,
     )
+    rinari_profiles = RinariProfileService(ctx)
+    projects.profiles = rinari_profiles
+    sessions.profiles = rinari_profiles
+    # A broken profile file never keeps the engine from starting.
+    with contextlib.suppress(Exception):
+        rinari_profiles.reconcile_orphans()
     return ServiceContainer(
         ctx=ctx,
         credentials=credentials,
@@ -129,6 +138,7 @@ def build_services(
         agents=agents,
         agent_configs=agent_configs,
         schedules=schedules,
+        rinari_profiles=rinari_profiles,
     )
 
 

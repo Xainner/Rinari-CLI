@@ -61,7 +61,9 @@
     "mcpSecretState",
     "mcpServer",
     "mcpTestResult",
-    "soulSettings"
+    "soulSettings",
+    "rinariProfileCounts",
+    "rinariProfile"
   ],
   "$defs": {
     "webPreview": {
@@ -403,6 +405,9 @@
         "profile_bundle.get",
         "profile_bundle.create",
         "profile_bundle.remove",
+        "profile_bundle.activate",
+        "profile_bundle.active",
+        "profile_bundle.update",
         "profile_bundle.apply",
         "session.queue.add",
         "session.queue.list",
@@ -498,7 +503,9 @@
         "schedule.delete",
         "schedule.runs",
         "schedule.run_now",
-        "schedule.grant"
+        "schedule.grant",
+        "project.move_profile",
+        "session.move_profile"
       ]
     },
     "event": {
@@ -585,7 +592,10 @@
         "steer.returned",
         "memory.candidate.created",
         "memory.candidate.resolved",
-        "memory.remembered"
+        "memory.remembered",
+        "profile_bundle.activated",
+        "profile_bundle.changed",
+        "project.moved"
       ]
     },
     "attachment": {
@@ -860,6 +870,9 @@
             "string",
             "null"
           ]
+        },
+        "rinari_profile_id": {
+          "type": "string"
         }
       },
       "additionalProperties": true
@@ -921,6 +934,9 @@
             "string",
             "null"
           ]
+        },
+        "rinari_profile_id": {
+          "type": "string"
         }
       },
       "additionalProperties": true
@@ -3879,6 +3895,71 @@
         "options",
         "default"
       ]
+    },
+    "rinariProfileCounts": {
+      "type": "object",
+      "required": [
+        "projects",
+        "sessions"
+      ],
+      "properties": {
+        "projects": {
+          "type": "integer"
+        },
+        "sessions": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false
+    },
+    "rinariProfile": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "description",
+        "soul_id",
+        "mode",
+        "agents",
+        "builtin"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "soul_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "agents": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "builtin": {
+          "type": "boolean"
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "counts": {
+          "$ref": "#/$defs/rinariProfileCounts"
+        }
+      },
+      "additionalProperties": true
     }
   }
 }

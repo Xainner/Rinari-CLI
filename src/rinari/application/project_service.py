@@ -37,8 +37,16 @@ Stable instructions for Rinari in this repository.
 class ProjectService:
     def __init__(self, ctx: AppContext) -> None:
         self._ctx = ctx
+        # RinariProfileService, bound by build_services: new projects go to
+        # the active profile (or the one asked for).
+        self.profiles = None
 
-    def upsert(self, root: Path) -> ProjectRecord:
+    def _profile_for_new(self, requested: str | None) -> str:
+        if self.profiles is None:
+            return requested or "default"
+        return self.profiles.resolve(requested)
+
+    def upsert(self, root: Path, *, rinari_profile_id: str | None = None) -> ProjectRecord:
         canonical = str(Path(root).expanduser().resolve())
         now = now_iso(self._ctx.clock)
         existing = self._ctx.project_repo.get_by_root(canonical)
@@ -59,6 +67,7 @@ class ProjectService:
             updated_at=now,
             name=Path(canonical).name or canonical,
             last_opened_at=now,
+            rinari_profile_id=self._profile_for_new(rinari_profile_id),
         )
         self._ctx.project_repo.insert(record)
         return record
@@ -69,10 +78,14 @@ class ProjectService:
             raise NotFoundError(f"Project not found: {project_id}")
         return self._normalize(record)
 
-    def list(self, *, include_archived: bool = False) -> list[ProjectRecord]:
+    def list(
+        self, *, include_archived: bool = False, rinari_profile_id: str | None = None
+    ) -> list[ProjectRecord]:
         return [
             self._normalize(record)
-            for record in self._ctx.project_repo.list(include_archived=include_archived)
+            for record in self._ctx.project_repo.list(
+                include_archived=include_archived, rinari_profile_id=rinari_profile_id
+            )
         ]
 
     def add(
@@ -81,12 +94,13 @@ class ProjectService:
         *,
         name: str | None = None,
         description: str = "",
+        rinari_profile_id: str | None = None,
     ) -> tuple[ProjectRecord, bool]:
         canonical = Path(root).expanduser().resolve()
         if not canonical.is_dir():
             raise NotFoundError(f"Project folder not found: {canonical}")
         existing = self._ctx.project_repo.get_by_root(str(canonical))
-        record = self.upsert(canonical)
+        record = self.upsert(canonical, rinari_profile_id=rinari_profile_id)
         changed = False
         if name is not None:
             clean_name = name.strip()
@@ -219,7 +233,9 @@ class ProjectService:
         record = self.upsert(root)
         return record, created
 
-    def list_recent(self, limit: int = 20) -> list[dict[str, Any]]:
+    def list_recent(
+        self, limit: int = 20, *, rinari_profile_id: str | None = None
+    ) -> list[dict[str, Any]]:
         """Projects ordered by real open activity (shared session table).
 
         No second store: recency derives from session last_active_at, so
@@ -241,7 +257,7 @@ class ProjectService:
             if session.state == SESSION_STATE_ACTIVE and root not in bound:
                 bound[root] = session.id
         ranked = sorted(
-            self.list(include_archived=False),
+            self.list(include_archived=False, rinari_profile_id=rinari_profile_id),
             key=lambda p: activity.get(p.canonical_root, p.updated_at),
             reverse=True,
         )
@@ -259,6 +275,7 @@ class ProjectService:
                     project.last_opened_at or project.updated_at,
                 ),
                 "active_session_id": bound.get(project.canonical_root),
+                "rinari_profile_id": project.rinari_profile_id,
             }
             for project in ranked[:limit]
         ]

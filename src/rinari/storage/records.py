@@ -61,6 +61,10 @@ class ProjectRecord:
     pinned: bool = False
     archived: bool = False
     last_opened_at: str | None = None
+    # The Rinari profile (workspace) the project belongs to. Its
+    # conversations always share it. Written only by
+    # ProjectRepository.set_rinari_profile, never by update().
+    rinari_profile_id: str = "default"
 
 
 @dataclass(slots=True)
@@ -95,6 +99,10 @@ class SessionRecord:
     # When the owner pinned the conversation; None = not pinned. Read-only
     # here: SessionRepository.update never writes it (see set_pinned_at).
     pinned_at: str | None = None
+    # The Rinari profile (workspace) of the conversation; a project's
+    # conversations have the project's. Like pinned_at, update() never
+    # writes it: SessionRepository.set_rinari_profile does.
+    rinari_profile_id: str = "default"
 
 
 @dataclass(slots=True)
