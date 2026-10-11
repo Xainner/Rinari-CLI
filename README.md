@@ -1,142 +1,137 @@
 <div align="center">
 
-<img src="docs/img/rinari-cli-hero.png" alt="Rinari working at her terminal — From intent to execution." width="100%" />
+<a href="https://rinari.ai"><img src="docs/img/rinari-cli-hero-030.jpg" alt="Rinari CLI — Your terminal. Her engine. A real session ends with completion: DONE." width="100%" /></a>
 
 # Rinari CLI
 
-**Your terminal. An agent that can work with it.**
-
-Explore a codebase, plan a change, run tools and review the evidence.
-Persistent context and controlled execution, in the workflow you already use.
+**Your terminal. Her engine.**<br>
+Ask, plan, fix and prove it from the command line, then hand the same session to the desktop.
 
 [![CI](https://github.com/Xainner/Rinari-CLI/actions/workflows/ci.yml/badge.svg)](https://github.com/Xainner/Rinari-CLI/actions/workflows/ci.yml)
-![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
-[![License: MIT](https://img.shields.io/badge/License-MIT-8b5cf6)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-9358ff)](LICENSE)
+![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-241047?logo=python&logoColor=white)
+[![Rinari Agent](https://img.shields.io/github/v/release/Xainner/Rinari-Agent?color=9358ff&label=Rinari%20Agent)](https://github.com/Xainner/Rinari-Agent/releases/latest)
 
-[Get started](#get-started) · [Why Rinari](#more-than-an-answer-in-your-terminal) · [Commands](#find-your-next-command) · [Documentation](#documentation) · [Desktop workspace](https://github.com/Xainner/Rinari-Agent)
+[Install](#install) · [First steps](#first-steps) · [Commands](#commands) · [Desktop handoff](#start-in-the-terminal-continue-on-the-desktop) · [Docs](#documentation) · [rinari.ai](https://rinari.ai)
 
 </div>
 
-## More than an answer in your terminal
+<br>
 
-A useful coding agent needs more than a model and a shell. It needs to know which project it is working in, which actions are allowed, what has already happened and what evidence supports the result.
+This repository holds **Rinari Engine** and its **terminal client**. The engine owns execution, sessions, model routing, approvals, credentials and state. The terminal and [Rinari Agent](https://github.com/Xainner/Rinari-Agent), the desktop app, are two clients of that same engine, not two separate agents.
 
-**Rinari CLI connects conversation to execution.** Ask a question about your repository, investigate a change before implementing it, or give Rinari a bounded task to carry out with files, commands, Git and verification. Keep working in your terminal while the engine manages the session, tool calls and operational state.
+<sub>The banner frames a real session: the terminal content is the replay of a recorded take with Rinari 0.3.1.</sub>
 
-This repository contains **Rinari Engine** and its **terminal client**. Prefer a visual workspace? [Rinari Agent](https://github.com/Xainner/Rinari-Agent) is the desktop client for the same engine—not a separate agent implementation.
+## What it does
 
-> **Current source, active development.** The core harness is implemented and release preparation is ongoing. This page describes available capabilities, not a guarantee of flawless autonomous results or identical support across every provider and platform. See [delivery status and release gates](TODO.md).
+**Tell her what's broken.** She reads the repository before touching anything, reproduces the bug with a failing test, applies the fix, runs the suite again and reports what passed. In the session above:
 
-## Work at the level of your intent
+```text
+◆ checklist.update
+│   [x] Trace coupon calculation and reproduce the negative total with a failing regression test.
+│   [x] Apply the minimal root-cause fix.
+│   [x] Run regression and full suite, review diff, and record validation evidence.
+RINARI  Fixed. WELCOME10 now produces **$11.66**, not **-$116.64**.
+completion: DONE (all required kinds passed: test)
+```
 
-### Understand before you edit
+`completion: DONE` appears only when the required verification kinds actually passed. It reports what was checked; it doesn't make generated code correct by itself.
 
-Use read-oriented commands to explore unfamiliar code, trace a behavior or turn a feature request into an implementation plan. `ask`, `plan` and `review` select a read-only permission profile; implementation commands use a workspace profile.
+| Capability | What it brings |
+| :--- | :--- |
+| **Modes with permissions** | `ask`, `plan` and `review` run read-only; `agent` and `run` use a workspace profile. Risky actions wait for your approval. |
+| **Repository tools** | Files, shell, Git, repository search, tree-sitter and LSP, managed background processes and PTY sessions. |
+| **Beyond the repo** | Browser automation, HTTP, MCP (stdio and remote), OpenAPI operations, plugins and hooks. |
+| **Context that lasts** | CHAT and PROJECT sessions, durable memory, context pins, a repository index and compaction for long work. |
+| **Delegated work** | Specialist agents and parallel subagents with their own model, objective and budget. |
+| **Evidence** | Checklists, verification records, checkpoints and `undo`, artifacts and an event trace for every session. |
+
+## Install
+
+**With Rinari Agent (Windows).** The [desktop installer](https://github.com/Xainner/Rinari-Agent/releases/latest) ships the engine and the CLI. Tick **Add Rinari CLI to PATH** during setup (it is off by default) and `rinari` works from any terminal.
+
+**With uv** (Python 3.11+, [uv](https://docs.astral.sh/uv/) and Git):
+
+```bash
+uv tool install "rinari @ git+https://github.com/Xainner/Rinari-CLI"
+```
+
+To match a desktop release exactly, pin the engine revision it ships with (see `engine-manifest.json` in [Rinari Agent](https://github.com/Xainner/Rinari-Agent)), for example `…/Rinari-CLI@2a94168` for Rinari Agent 0.3.1.
+
+**Keep it current.** `rinari update` updates the desktop app and the CLI to the latest published release:
+
+```bash
+rinari update            # app + CLI, asks before applying
+rinari update --check    # only report (exit 1 when something is pending)
+rinari update --cli-only
+```
+
+## First steps
+
+```bash
+rinari setup     # connect a provider and pick a model (re-running never erases records)
+rinari doctor    # local diagnostics; never touches credentials or state
+cd my-project
+rinari           # detects the project and opens a session
+```
+
+Then give her a focused task:
 
 ```bash
 rinari ask "Where is configuration validated?"
 rinari plan "Add JSON export to the report command"
-rinari review "Check the current diff for regressions"
+rinari agent "Checkout shows -116.64 with WELCOME10. Find the bug, fix it and prove it with the tests."
+rinari review "Check today's changes for regressions"
 ```
 
-These are separate task invocations, not an automatic plan-to-build pipeline. Review the result and decide the next step.
+These are separate invocations, not an automatic plan-to-build pipeline: read the result and decide the next step.
 
-### Give the agent a task, not a sequence of copy-pastes
+## Start in the terminal, continue on the desktop
 
-Rinari can search and read the repository, edit files, execute commands and use verification tools within the allowed scope. Structured tool results, execution events and recorded failures give you more to inspect than a final summary.
+Every session lives in the engine, so the desktop can pick it up exactly where the terminal left it:
 
 ```bash
-rinari agent "Add tests for session persistence and run the relevant test suite"
+rinari desktop .                    # open this project in Rinari Agent
+rinari desktop . --session <id>     # continue this session there
 ```
 
-Model output still needs review. Verification records and completion checks help expose what was tested; they do not make generated code automatically correct.
+<img src="docs/img/handoff-030.webp" alt="The session started in the CLI, open in Rinari Agent: the request typed in the terminal is the first message" width="100%" />
 
-### Keep the context that makes work possible
+Set `RINARI_AGENT_BIN` (or pass `--binary`) if the desktop executable isn't found. `rinari code` remains a compatibility alias; `rinari agent` runs a task in the terminal and doesn't open the desktop.
 
-Start a project session, have a general conversation, or resume earlier work. Rinari separates **CHAT** from **PROJECT** sessions and persists conversation history and operational state. Context pins, retrieval, compaction and artifact references help manage longer tasks without treating every turn as a fresh start.
+## Commands
 
-```bash
-rinari          # Detect project context automatically
-rinari chat     # Start a general conversation explicitly
-rinari resume   # Resume a compatible session
-```
+`rinari --help` and `rinari <command> --help` describe your installed version. The [command reference](docs/commands.md) covers the full contract.
 
-### Choose the model. Extend the workflow.
-
-Keep multiple providers and models configured, switch between them and assign models to agent roles. Add reusable procedures through skills, connect MCP servers, expose OpenAPI operations or use plugins and hooks.
-
-Extensions participate in the tool runtime rather than acting as a separate execution path. Their usefulness still depends on their configuration, trust, permissions and the selected model's capabilities.
-
-## The engine behind your workflow
-
-| Capability | What it brings to your work |
+| You want to… | Commands |
 | :--- | :--- |
-| **Repository tools** | Filesystem operations, shell, Git, repository search, tree-sitter and LSP integration for navigating and changing code. |
-| **Browser and external tools** | Browser automation, HTTP, MCP and OpenAPI integrations for tasks beyond local files. |
-| **Session processes** | Managed background processes and PTY tools for work that spans more than one command. |
-| **Persistent context** | CHAT/PROJECT sessions, memory retrieval, context pins, repository indexing and compaction. |
-| **Delegated work** | Specialist agents with model routing, bounded objectives, budgets and workspace isolation support. |
-| **Reviewable results** | Task dependencies, verification records, checkpoints and artifacts for inspecting work and recovery options. |
-| **Execution controls** | Permission profiles, approvals, trust settings, cancellation support and runtime budgets. |
-| **Diagnostics** | Status, doctor, events, traces, logs and available usage metrics. |
-
-Provider behavior varies. A model may not support tool calling, vision or reasoning controls; metrics are only meaningful when the provider supplies the necessary data. Remote model usage may incur provider charges, and local models require a compatible running server and suitable hardware.
-
-## Get started
-
-You need **Python 3.11+**, **uv** and **Git**, plus a model provider connection.
-
-```bash
-git clone https://github.com/Xainner/Rinari-CLI.git
-cd Rinari-CLI
-uv sync
-uv run rinari setup
-uv run rinari doctor
-```
-
-Use setup to configure your provider and model, then run doctor to inspect your installation. From the source checkout, prefix commands with `uv run`.
-
-To make Rinari available outside the checkout:
-
-```bash
-uv tool install .
-```
-
-Open a terminal in the project you want to work on and run `rinari`. Start with a focused task and inspect the proposed actions and results.
-
-**Already using Rinari Agent?** With the desktop executable installed, open the current folder in its visual workspace:
-
-```bash
-rinari desktop .
-```
-
-Set `RINARI_AGENT_BIN` to the executable if it is not on `PATH`. `rinari code` remains a compatibility alias. The `rinari agent` command runs a task in the CLI; it does not launch the desktop application.
+| Work on a task | `ask` · `plan` · `agent` · `run` · `review` · `chat` |
+| Continue or stop work | `resume` · `session` · `stop` · `undo` · `checkpoint` |
+| Verify and inspect the work | `verify` · `tasks` · `flow` · `trace` |
+| Profiles, projects and memory | `bundles` (profiles as workspaces) · `project` · `init` · `memory` · `context` · `index` |
+| Models and providers | `setup` · `providers` · `provider` · `models` · `model` · `agents` · `vision` |
+| Extend her | `skills` · `mcp` · `plugins` · `api` · `hooks` · `tools` · `schedule` |
+| Policy and safety | `trust` · `permissions` · `approvals` · `sandbox` · `network` · `secrets` · `profiles` |
+| Diagnose | `status` · `doctor` · `logs` · `metrics` · `artifacts` · `version` |
+| Move data | `export` · `import` · `update` |
+| Connect a client | `desktop` · `engine` |
 
 ## Control is part of the workflow
 
-Rinari's personality is not its permission system. Tool execution passes through runtime validation and policy checks, with approvals and sandbox enforcement where applicable. Project trust determines how project-local extensions are admitted.
+Her personality is never her permission system. Every tool call passes through validation and policy, with approvals and sandboxing where they apply, and project trust decides which project-local extensions load.
 
-- **Choose the scope deliberately.** Read-oriented work and implementation have different permission profiles. See the [tool contract](docs/tools.md) and [read-scope semantics](docs/plan-read-scope.md).
-- **Treat external content as input.** Files, websites and tool results are material to inspect, not automatic authority to change permissions.
-- **Know where data goes.** Running a local CLI does not make cloud providers or external integrations offline. Configure credentials through supported backends and keep secrets out of prompts, shared logs and repositories.
-- **Review before relying on results.** Check diffs, tests and artifacts. Checkpoints are recovery tools, not a replacement for backups or careful review.
+- **Choose the scope.** Read-only and workspace work have different permission profiles ([tool contract](docs/tools.md), [read-scope semantics](docs/plan-read-scope.md)).
+- **External content is input, not authority.** Files, web pages and tool results never grant new permissions.
+- **Know where data goes.** A local CLI doesn't make cloud providers or integrations offline. Keep secrets out of prompts, logs and repositories (`rinari secrets` stores references; values are never shown).
+- **Review before relying on results.** Check diffs, tests and artifacts. Checkpoints help you recover; they don't replace review.
 
-## Find your next command
+## The engine protocol
 
-| You want to… | Start here |
-| :--- | :--- |
-| Ask, plan or implement | `chat`, `ask`, `plan`, `agent`, `run` |
-| Review and verify | `review`, `verify` |
-| Continue or recover work | `session`, `resume`, `project`, `checkpoint`, `undo` |
-| Configure models and roles | `setup`, `providers`, `models`, `agents`, `profiles` |
-| Add capabilities | `tools`, `skills`, `mcp`, `plugins`, `api`, `hooks` |
-| Inspect runtime state | `status`, `doctor`, `context`, `artifacts`, `metrics`, `trace` |
-| Manage execution policy | `trust`, `permissions`, `approvals`, `sandbox`, `network` |
-| Connect another client | `engine`, `desktop` |
+```bash
+rinari engine --stdio
+```
 
-Use `rinari --help` and `rinari <command> --help` for your installed version. The [command reference](docs/commands.md) explains the wider contract; some design examples may be ahead of the implementation.
-
-## One runtime, terminal and desktop
+A versioned NDJSON protocol over stdio, with requests, responses and session-scoped events, for compatible clients such as Rinari Agent. It is a machine transport, not an interactive chat.
 
 ```mermaid
 flowchart LR
@@ -145,58 +140,46 @@ flowchart LR
     Protocol --> Engine
     Engine --> Models["Providers & models"]
     Engine --> Tools["Tools · Policy · Approvals"]
-    Engine --> State["Sessions · Context · Artifacts"]
+    Engine --> State["Sessions · Context · Memory"]
 ```
-
-The Python engine owns execution and durable state. The desktop connects through a negotiated NDJSON protocol with requests, responses and session-scoped events. Runtime snapshots support state reconstruction; large outputs stay in the artifact store.
-
-```bash
-rinari engine --stdio
-```
-
-This is a machine transport for compatible clients, not the interactive chat command.
 
 ## Where the project stands
 
-Rinari is still moving toward a stable release. The [roadmap](TODO.md) tracks completed implementation and open gates, including broader platform validation, release distribution and additional adversarial test coverage. Some browser, plugin and metrics capabilities remain incomplete; a subsystem being present does not mean every planned integration is finished.
-
-Use the current source or a published build whose notes match your needs. Do not infer production readiness, universal platform support or a security guarantee from a feature list.
+Rinari is moving toward a stable release. The [roadmap](TODO.md) tracks what is done and the open gates, including broader platform validation and more adversarial tests. Provider behavior varies: a model may not support tool calling, vision or reasoning levels, and remote models may charge for usage.
 
 ## Development
 
 ```bash
+git clone https://github.com/Xainner/Rinari-CLI.git
+cd Rinari-CLI
 uv sync
+uv run rinari doctor
 uv run pytest tests/unit -q
 uv run ruff check .
 uv run ruff format --check .
-uv build
 ```
 
-Run `uv run pytest` for the full test suite. Follow [AGENTS.md](AGENTS.md) and the current phase in [TODO.md](TODO.md). Documentation and artwork changes do not alter the agent runtime.
+From a source checkout, prefix commands with `uv run`. Run `uv run pytest` for the full suite and follow [AGENTS.md](AGENTS.md) and [TODO.md](TODO.md).
 
 ## Documentation
 
-| Guide | What you will find |
+| Guide | What you'll find |
 | :--- | :--- |
-| [Commands](docs/commands.md) | CLI workflows, options and persistence semantics |
-| [Tools](docs/tools.md) / [Skills](docs/skills.md) | Execution capabilities and reusable procedures |
-| [Harness](docs/harness.md) / [Architecture](docs/stack.md) | Runtime ownership and subsystem contracts |
-| [Desktop protocol](docs/desktop/README.md) | Shared engine/client integration |
+| [Commands](docs/commands.md) | Workflows, options and persistence semantics |
+| [Tools](docs/tools.md) · [Skills](docs/skills.md) | Execution capabilities and reusable procedures |
+| [Harness](docs/harness.md) · [Architecture](docs/stack.md) | Runtime ownership and subsystem contracts |
+| [Desktop protocol](docs/desktop/README.md) | The engine/client contract |
 | [Troubleshooting](docs/troubleshooting.md) | Diagnostics, configuration and recovery |
-| [Roadmap](TODO.md) | Implementation status and remaining work |
+| [rinari.ai/docs](https://rinari.ai/docs/) | Install, connect a model and work with Rinari |
 
-Found a bug? [Open an issue](https://github.com/Xainner/Rinari-CLI/issues) with your version, reproduction steps and redacted diagnostics. Do not include credentials or private project content.
+Found a bug? [Open an issue](https://github.com/Xainner/Rinari-CLI/issues) with your version (`rinari version`), the steps to reproduce it and redacted diagnostics. Never include credentials or private project content.
 
 ---
 
 <div align="center">
 
-<img src="docs/img/rinari-cli-closing.png" alt="Overhead view of Rinari working between a laptop and notebook — Stay in flow." width="100%" />
-
 **Less context switching. More deliberate work.**
 
-[Get started](#get-started) · [Explore Rinari Agent](https://github.com/Xainner/Rinari-Agent) · [MIT License](LICENSE)
-
-<sub>Rinari illustrations are brand artwork, not terminal screenshots.</sub>
+[Install](#install) · [Rinari Agent](https://github.com/Xainner/Rinari-Agent) · [rinari.ai](https://rinari.ai) · [MIT License](LICENSE)
 
 </div>
