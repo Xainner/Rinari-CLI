@@ -206,6 +206,21 @@ permanece completo. Las restricciones se validan por bytes y por límites declar
 del proveedor/modelo, sin omisiones silenciosas. El modo auxiliar procesa un mensaje
 por operación y conserva un derivado recuperable; reproducir historia no lo reanaliza.
 
+## Alcance de lectura en PLAN y REVIEW
+
+Capacidad `plan_read_scope_v1` (2026-09-09). PLAN y REVIEW usan siempre un perfil de
+ejecución inmutable: se niegan las escrituras en el sistema de archivos y la ejecución
+de shell y procesos. Las lecturas normales las sigue gobernando el permiso elegido en
+la sesión: con acceso total se permiten lecturas externas, con `workspace` se pide
+aprobación fuera de la raíz de la sesión, y con `read-only` solo se lee dentro de la
+raíz. Las lecturas de credenciales sensibles conservan su aprobación explícita y el
+almacenamiento privado del Engine sigue siendo inaccesible. Aprobar una lectura externa
+amplía el sandbox solo para esa llamada.
+
+El resumen de sesión expone `read_permission_profile` (el elegido) aparte de
+`effective_permission_profile` (`read-only` en PLAN y REVIEW). Un cliente de escritorio
+no debe presentar el perfil de ejecución como si fuera el alcance de lectura elegido.
+
 > Catálogo maestro de tools para un agente CLI generalista.  
 > Las tools son capacidades atómicas o casi-atómicas que el runtime puede exponer al modelo.
 

@@ -1,3 +1,5 @@
+> **Archivado el 2026-10-12.** Análisis puntual de septiembre, ya resuelto; no es una regla ni una tarea pendiente. Índice: [README.md](README.md). Cómo se escriben skills hoy: [skills.md](../skills.md) y la sección «Autoría de skills» de [tools.md](../tools.md).
+
 # Skill authoring: regression evidence
 
 The reported `/learn` session repeatedly received `MISSING_PROCEDURE` for a

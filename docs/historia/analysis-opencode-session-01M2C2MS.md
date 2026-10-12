@@ -1,3 +1,5 @@
+> **Archivado el 2026-10-12.** Análisis puntual de septiembre, ya resuelto; no es una regla ni una tarea pendiente. Índice: [README.md](README.md). Lo vigente sobre reintentos y streams está en [stream-recovery.md](../stream-recovery.md).
+
 # Análisis de sesión: OpenCode Go / Muse Spark 1.3
 
 Sesión: ses_01M2C2MS86NRDRCKYRA1B06FHJ.

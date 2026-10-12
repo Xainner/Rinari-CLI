@@ -120,7 +120,7 @@ Set `RINARI_AGENT_BIN` (or pass `--binary`) if the desktop executable isn't foun
 
 Her personality is never her permission system. Every tool call passes through validation and policy, with approvals and sandboxing where they apply, and project trust decides which project-local extensions load.
 
-- **Choose the scope.** Read-only and workspace work have different permission profiles ([tool contract](docs/tools.md), [read-scope semantics](docs/plan-read-scope.md)).
+- **Choose the scope.** Read-only and workspace work have different permission profiles ([tool contract](docs/tools.md), [read-scope semantics](docs/tools.md#alcance-de-lectura-en-plan-y-review)).
 - **External content is input, not authority.** Files, web pages and tool results never grant new permissions.
 - **Know where data goes.** A local CLI doesn't make cloud providers or integrations offline. Keep secrets out of prompts, logs and repositories (`rinari secrets` stores references; values are never shown).
 - **Review before relying on results.** Check diffs, tests and artifacts. Checkpoints help you recover; they don't replace review.
@@ -145,7 +145,7 @@ flowchart LR
 
 ## Where the project stands
 
-Rinari is moving toward a stable release. The [roadmap](TODO.md) tracks what is done and the open gates, including broader platform validation and more adversarial tests. Provider behavior varies: a model may not support tool calling, vision or reasoning levels, and remote models may charge for usage.
+Rinari is moving toward a stable release. [TODO.md](TODO.md) lists the open work that is still real, including broader platform validation and more adversarial tests. Provider behavior varies: a model may not support tool calling, vision or reasoning levels, and remote models may charge for usage.
 
 ## Development
 
@@ -159,7 +159,7 @@ uv run ruff check .
 uv run ruff format --check .
 ```
 
-From a source checkout, prefix commands with `uv run`. Run `uv run pytest` for the full suite and follow [AGENTS.md](AGENTS.md) and [TODO.md](TODO.md).
+From a source checkout, prefix commands with `uv run`. Run `uv run pytest` for the full suite and follow [AGENTS.md](AGENTS.md).
 
 ## Documentation
 
