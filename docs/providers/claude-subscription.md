@@ -285,7 +285,7 @@ usage, never converted into a bill.
   them. Picking one of the three leaves the model on its own default effort.
 - **Thinking** blocks are kept on the response as items with their
   signature, the same way the HTTP adapter keeps them. Nothing renders them:
-  Rinari does not display a model's private reasoning (AGENTS.md), so what the
+  Rinari does not display a model's private reasoning (Rinari Agent `AGENTS.md`, «La interfaz no exagera»), so what the
   user controls and sees is the effort level, not the thinking. Whether a turn
   produces any is the model's and the CLI's decision.
 - **No vision**, no structured output, no continuation reuse.

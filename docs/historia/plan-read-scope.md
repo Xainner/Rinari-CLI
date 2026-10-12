@@ -1,3 +1,5 @@
+> **Archivado el 2026-10-12.** Análisis puntual de septiembre, ya resuelto; no es una regla ni una tarea pendiente. Índice: [README.md](README.md). Su contenido sigue vigente y está en [tools.md](../tools.md#alcance-de-lectura-en-plan-y-review).
+
 # PLAN/REVIEW read scope
 
 PLAN and REVIEW always use an immutable execution profile: filesystem writes and

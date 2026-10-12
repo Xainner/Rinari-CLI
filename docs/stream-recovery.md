@@ -1,7 +1,7 @@
 # Recuperación de streams y contexto durable
 
 Implementación local, 2026-09-13. Responde a los cuatro puntos del análisis
-[OpenCode/Muse](analysis-opencode-session-01M2C2MS.md). No cambia el endpoint del
+[OpenCode/Muse](historia/analysis-opencode-session-01M2C2MS.md) (archivado). No cambia el endpoint del
 proveedor ni reanuda la tarea original.
 
 ## Comportamiento

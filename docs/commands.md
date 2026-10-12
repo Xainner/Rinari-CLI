@@ -2286,14 +2286,41 @@ tasks retry
 tasks blockers
 ```
 
-Example:
+Every subcommand takes `--project <dir>` (default: the current directory) and
+the global `--json`.
+
+| Command | What it does |
+|---|---|
+| `tasks list` | List the project's tasks. |
+| `tasks show <task_id>` | Show one task with its done-when report. |
+| `tasks tree` | Show the task graph as an indented tree, by dependency. |
+| `tasks add <title>` | Add a task. Options: `--description`/`-d`, `--acceptance` (a checklist of `- [ ] ...` lines), `--implementation`, `--validation`, `--scope`, `--unresolved`, `--depends-on` (comma-separated task IDs). |
+| `tasks update <task_id>` | Change fields: the same options as `add` plus `--title`/`-t`, `--status`, `--blocker` and `--evidence` (appends a semicolon-separated reference). |
+| `tasks cancel <task_id>` | Cancel a task. |
+| `tasks retry <task_id>` | Put a blocked or cancelled task back to `pending` and clear its blocker. |
+| `tasks blockers` | Show tasks that are blocked or waiting on dependencies. |
+
+Statuses: `pending`, `in_progress`, `done`, `blocked` and `cancelled`.
+`--status` rejects anything else and enforces two gates (`tasks/service.py`):
+
+- `in_progress` requires every dependency to be `done`;
+- `done` requires the done-when contract (`tasks/core.py`): acceptance and
+  validation criteria exist and are all checked (`[x]`), implementation and
+  scope criteria (if any) are all checked, and nothing is left in
+  `unresolved`.
+
+Dependencies must be existing task IDs, and an edge that would close a cycle
+is rejected. `tasks show` prints the done-when report with what is still
+missing.
+
+Example (`tasks list`):
 
 ```text
-[done]     identify root cause
-[done]     patch auth callback
-[running]  add regression test
-[pending]  run integration tests
-[pending]  inspect final diff
+[done]         identify root cause
+[done]         patch auth callback
+[in_progress]  add regression test
+[pending]      run integration tests
+[pending]      inspect final diff
 ```
 
 ---
@@ -2520,12 +2547,28 @@ network history
 
 Network policy remains authoritative regardless of model request.
 
-Semantics (phase 4): decision per target host — an explicit DENY rule always
-wins; `network.mode=off` denies everything; an ALLOW rule short-circuits
-`ask`; `network.mode=allow` allows the rest; the default `ask` routes targets
+| Command | What it does |
+|---|---|
+| `network status` | The active `network.mode`, how many rules there are (allow and deny) and the size of the audit trail. |
+| `network test <target>` | Evaluate a host or URL against the current policy without touching it: prints `ALLOW`, `ASK` or `DENY` and the reason. |
+| `network rules` | List the persisted rules. |
+| `network allow <host> [--reason <text>]` | Persist an allow rule for a host and its subdomains. |
+| `network deny <host> [--reason <text>]` | Persist a deny rule; it wins even with `network.mode=allow`. |
+| `network remove <host> [--decision allow\|deny]` | Remove the host's persisted rules (both kinds by default). |
+| `network history [--limit N] [--session <id>]` | Recent policy decisions, newest first (`--limit` 1–200, default 20). |
+
+All of them accept the global `--json`. Rule changes apply to running
+sessions without a restart.
+
+Semantics (`policy/network.py`): decision per target host, in this order —
+an explicit DENY rule always wins; `network.mode=off` denies everything; an
+ALLOW rule allows; `network.mode=allow` allows the rest; with the default
+`network.mode=auto` the session's permission profile decides (reads are free,
+sending follows the profile); `network.mode=ask` routes every other target
 through the approval gate. Rules match exact hosts and subdomains
-(`github.com` covers `api.github.com`). Every runtime gate decision on a
-`network.outbound` tool call is audited into `network history`.
+(`github.com` covers `api.github.com`). A target that does not resolve to a
+host is denied. Every runtime gate decision on a `network.outbound` tool call
+is audited into `network history`.
 
 ---
 
