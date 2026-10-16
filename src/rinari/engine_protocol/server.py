@@ -288,6 +288,8 @@ class EngineServer:
         self._dispatcher.register("operation.cancel", self._operation_cancel)
         self._dispatcher.register("session.turn.cancel", self._turn_cancel)
         self._dispatcher.register("session.turn.steer", self._turn_steer)
+        self._dispatcher.register("session.turn.steer.update", self._turn_steer_update)
+        self._dispatcher.register("session.turn.steer.cancel", self._turn_steer_cancel)
         self._dispatcher.register("turn.changes.get", self._turn_changes_get)
         self._dispatcher.register("turn.changes.review", self._turn_changes_review)
         self._dispatcher.register("turn.changes.undo.preview", self._turn_changes_undo_preview)
@@ -3931,7 +3933,36 @@ class EngineServer:
         message = params.get("message")
         if not isinstance(message, str):
             raise EngineProtocolError(INVALID_PARAMS, "Param 'message' must be a string.")
-        return self._turns.steer(session_id, message)
+        attachments = params.get("attachments") or []
+        if not isinstance(attachments, list):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'attachments' must be a list.")
+        # Files in a message sent during the turn travel with it (#54).
+        context, image_refs, metadata = _prepare_turn_attachments(
+            self._services,
+            session_id,
+            attachments,
+            allow_unconfirmed_vision=params.get("allow_unconfirmed_vision") is True,
+        )
+        return self._turns.steer(
+            session_id,
+            message,
+            attachment_context=context,
+            image_refs=image_refs,
+            attachment_metadata=metadata,
+        )
+
+    def _turn_steer_update(self, params: dict[str, Any]) -> dict[str, Any]:
+        message = params.get("message")
+        if not isinstance(message, str):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'message' must be a string.")
+        return self._turns.steer_update(
+            self._need_str(params, "session_id"), self._need_str(params, "steer_id"), message
+        )
+
+    def _turn_steer_cancel(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._turns.steer_cancel(
+            self._need_str(params, "session_id"), self._need_str(params, "steer_id")
+        )
 
     def _turn_changes_get(self, params: dict[str, Any]) -> dict[str, Any]:
         return self._services.changes.get(self._need_str(params, "turn_id"))

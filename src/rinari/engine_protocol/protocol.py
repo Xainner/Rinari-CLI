@@ -131,6 +131,10 @@ CAPABILITIES: dict[str, bool] = {
     # session.summary (sources, results, connectors, background) and
     # session.summary.changed, coalesced per session (plan 0.4.0 #82).
     "session_summary_v1": True,
+    # A message sent during the turn carries attachments, and while unread it
+    # can be edited or withdrawn: session.turn.steer.update / .cancel,
+    # steer.updated / steer.cancelled, STEER_ALREADY_READ (plan 0.4.0 #54).
+    "steer_edit_v1": True,
     # followup.suggest notes: followup.suggested/resolved on the turn,
     # followup.list/dismiss/accept (accept starts a new conversation).
     "followup_suggestions_v1": True,

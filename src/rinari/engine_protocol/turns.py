@@ -1220,9 +1220,22 @@ class TurnManager:
     # turn that was stopped or failed goes back to the owner (`steer.returned`)
     # instead of starting work they just stopped.
 
-    def steer(self, session_id: str, message: str) -> dict[str, Any]:
+    def steer(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        attachment_context: str = "",
+        image_refs: list | None = None,
+        attachment_metadata: list | None = None,
+    ) -> dict[str, Any]:
+        """`attachment_context`, `image_refs` and `attachment_metadata` come from
+        the same preparation as a normal message (plan 0.4.0 #54): the files
+        reach the model with the text when it reads it."""
         record = self._services.sessions.show(session_id)
         text = (message or "").strip()
+        if not text and attachment_metadata:
+            text = "(attached files)"
         if not text:
             raise EngineProtocolError(errors.INVALID_PARAMS, "Message is empty.")
         if len(text) > MAX_QUEUE_MESSAGE_CHARS:
@@ -1251,11 +1264,16 @@ class TurnManager:
                     )
                 turn.steer_count += 1
                 steer_id = f"{turn.turn_id}:steer_{turn.steer_count}"
+                body = (
+                    f"{attachment_context}\n\nUser request:\n{text}" if attachment_context else text
+                )
                 turn.steering.append(
                     ChatMessage(
                         role="user",
-                        content=STEER_PREFIX + text,
+                        content=STEER_PREFIX + body,
                         display_content=text,
+                        images=self._steer_images(turn, record.id, image_refs),
+                        attachments=tuple(attachment_metadata or ()),
                         origin={"kind": "user", "steer_id": steer_id},
                     )
                 )
@@ -1270,6 +1288,78 @@ class TurnManager:
         queued = self.queue_add(record.id, text)
         self._start_next_queued(record.id)
         return {"session_id": record.id, "delivery": "queued", "position": queued["position"]}
+
+    def _steer_images(self, turn: _ActiveTurn, session_id: str, image_refs: list | None) -> tuple:
+        """Pixels only for a model that sees; otherwise the manifest names the
+        files and the model opens them with its tools (plan 0.4.0 #11)."""
+        if not image_refs:
+            return ()
+        from rinari.models.images import references
+        from rinari.runtime.vision import visual_status
+
+        session = turn.session
+        gateway = getattr(session, "gateway", None) if session is not None else None
+        if gateway is not None:
+            with contextlib.suppress(Exception):
+                if not visual_status(gateway).available:
+                    return ()
+        return tuple(references(self._services.artifacts, session_id, image_refs))
+
+    def _queued_steer(self, session_id: str, steer_id: str) -> tuple[_ActiveTurn, int]:
+        """The running turn and the index of an unread message; caller holds the lock."""
+        for active in self._turns.values():
+            if active.session_id != session_id or active.done.is_set():
+                continue
+            for index, item in enumerate(active.steering):
+                if (item.origin or {}).get("steer_id") == steer_id:
+                    return active, index
+        raise EngineProtocolError(
+            "STEER_ALREADY_READ",
+            "Rinari already read this message.",
+            details={"steer_id": steer_id},
+        )
+
+    def steer_update(self, session_id: str, steer_id: str, message: str) -> dict[str, Any]:
+        """Edit a message sent during the turn while Rinari has not read it (#54)."""
+        record = self._services.sessions.show(session_id)
+        text = (message or "").strip()
+        if not text:
+            raise EngineProtocolError(errors.INVALID_PARAMS, "Message is empty.")
+        if len(text) > MAX_QUEUE_MESSAGE_CHARS:
+            raise EngineProtocolError(
+                errors.INVALID_PARAMS, f"Message exceeds {MAX_QUEUE_MESSAGE_CHARS} chars."
+            )
+        with self._lock:
+            turn, index = self._queued_steer(record.id, steer_id)
+            current = turn.steering[index]
+            content = current.content or ""
+            # Keep the attachment preamble; replace the owner's words only.
+            marker = "\n\nUser request:\n"
+            if marker in content:
+                content = content.rsplit(marker, 1)[0] + marker + text
+            else:
+                content = STEER_PREFIX + text
+            turn.steering[index] = replace(current, content=content, display_content=text)
+            turn_id = turn.turn_id
+        payload = {
+            "session_id": record.id,
+            "turn_id": turn_id,
+            "steer_id": steer_id,
+            "message": text,
+        }
+        self._emit(event("steer.updated", payload))
+        return {**payload, "status": "updated"}
+
+    def steer_cancel(self, session_id: str, steer_id: str) -> dict[str, Any]:
+        """Withdraw a message sent during the turn before Rinari reads it (#54)."""
+        record = self._services.sessions.show(session_id)
+        with self._lock:
+            turn, index = self._queued_steer(record.id, steer_id)
+            turn.steering.pop(index)
+            turn_id = turn.turn_id
+        payload = {"session_id": record.id, "turn_id": turn_id, "steer_id": steer_id}
+        self._emit(event("steer.cancelled", payload))
+        return {**payload, "status": "cancelled"}
 
     def _drain_steering(self, turn: _ActiveTurn) -> list[ChatMessage]:
         with self._lock:

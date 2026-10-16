@@ -547,7 +547,9 @@
         "project.folder.remove",
         "repo.status",
         "repo.pr.create",
-        "session.summary"
+        "session.summary",
+        "session.turn.steer.update",
+        "session.turn.steer.cancel"
       ]
     },
     "event": {
@@ -652,7 +654,9 @@
         "repo.pr.failed",
         "session.summary.changed",
         "file.presented",
-        "speech.setup_needed"
+        "speech.setup_needed",
+        "steer.updated",
+        "steer.cancelled"
       ]
     },
     "attachment": {
