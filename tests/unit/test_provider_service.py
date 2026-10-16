@@ -2,7 +2,12 @@ import httpx
 import pytest
 
 from rinari.application.model_service import ModelService
-from rinari.application.provider_service import AddProviderInput, ProviderService
+from rinari.application.provider_service import (
+    KEY_ACTIVE_MODEL,
+    KEY_ACTIVE_PROVIDER,
+    AddProviderInput,
+    ProviderService,
+)
 from rinari.shared.errors import (
     ConflictError,
     InvalidUsageError,
@@ -151,8 +156,18 @@ def test_remove_inactive_provider_only(app_ctx, providers, models) -> None:
     assert providers.current().provider.alias == "openai-personal"
 
 
-def test_remove_active_provider_requires_switch(app_ctx, providers) -> None:
+def test_the_only_provider_can_be_removed_and_leaves_none_active(app_ctx, providers) -> None:
+    # Plan 0.4.0 #19: with no other provider there is nothing to switch to.
     _openai(providers)
+    providers.remove("openai-personal")
+    assert providers.list() == []
+    assert app_ctx.config_repo.get(KEY_ACTIVE_PROVIDER) is None
+    assert app_ctx.config_repo.get(KEY_ACTIVE_MODEL) is None
+
+
+def test_remove_active_provider_requires_switch_when_others_remain(app_ctx, providers) -> None:
+    _openai(providers)
+    _openai(providers, alias="openai-work")
     with pytest.raises(InvalidUsageError):
         providers.remove("openai-personal")
 

@@ -456,7 +456,11 @@ class ProviderService:
         record = self.get(ref)
         active_id = self._ctx.config_repo.get(KEY_ACTIVE_PROVIDER)
         was_active = active_id == record.id
-        if was_active and switch_to is None:
+        others = [p for p in self._ctx.provider_repo.list() if p.id != record.id]
+        # The only provider can go (plan 0.4.0 #19): Rinari is left without
+        # one and the app opens the setup assistant. With others, which one
+        # takes over is still the owner's choice.
+        if was_active and switch_to is None and others:
             raise InvalidUsageError(
                 f"Provider {record.alias!r} is active. Select another provider first.",
                 hint=f"rinari providers remove {record.alias} --switch-to <alias>",
