@@ -116,6 +116,9 @@ CAPABILITIES: dict[str, bool] = {
     # session.resume.get/arm/cancel/now, resume.settings.get/set,
     # session.resume.updated, errors carry details.resets_at.
     "session_resume_v1": True,
+    # Fallback and auxiliary models (plan 0.4.0 #80): models.roles.get/set,
+    # model.fallback on the turn when it switches.
+    "model_roles_v1": True,
     # followup.suggest notes: followup.suggested/resolved on the turn,
     # followup.list/dismiss/accept (accept starts a new conversation).
     "followup_suggestions_v1": True,

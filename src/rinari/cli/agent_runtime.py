@@ -740,6 +740,8 @@ def build_agent_session(
     # Stable indirection: the loop (and subagent runs) hold the gateway so
     # in-session provider/model switches take effect on the next turn.
     gateway = caller if isinstance(caller, SessionModelGateway) else SessionModelGateway(caller)
+    if model_caller is None and gateway.fallback_factory is None:
+        gateway.fallback_factory = lambda: _fallback_caller(services, record)
     policy = PolicyEngine(network=network_policy)
     tool_ctx = ToolContext(
         observation_budget_bytes=services.ctx.config.config.runtime.tools.observation_bytes,
@@ -1292,6 +1294,35 @@ def _caller_for(services: ServiceContainer, record: SessionRecord) -> ModelCalle
             model_id=record.model_id,
         ),
     )
+
+
+def _fallback_caller(services: ServiceContainer, record: SessionRecord):
+    """The fallback model's caller for this conversation (plan 0.4.0 #80), or None."""
+    from rinari.models.roles import get_roles
+
+    model_id = get_roles(services.ctx).get("fallback")
+    if not model_id or model_id == record.model_id:
+        return None
+    try:
+        model = services.models.resolve(model_id)
+        provider = services.providers.get(model.provider_id)
+        router = ModelRouter(services.providers, services.models)
+        if not router.capabilities(provider, model.id).tool_calls:
+            return None
+    except RinariError:
+        return None
+    return _caller_for(services, replace(record, provider_id=provider.id, model_id=model.id))
+
+
+def _auxiliary_caller(services: ServiceContainer, fallback):
+    """The auxiliary model for internal calls (titles), or `fallback` without one."""
+    from rinari.models.roles import role_caller
+
+    try:
+        router = ModelRouter(services.providers, services.models)
+        return role_caller(services.ctx, router, "auxiliary") or fallback
+    except Exception:
+        return fallback
 
 
 def caller_for_agent(
@@ -2276,9 +2307,11 @@ def _run_turn_unlocked(
         if budget.exhausted():
             return ""
         budget.note_model_call()
-        response = session.caller.invoke(
+        # A cheaper auxiliary model when the owner set one (plan 0.4.0 #80).
+        title_caller = _auxiliary_caller(session.services, session.caller)
+        response = title_caller.invoke(
             ModelRequest(
-                model=session.caller.model_id or "",
+                model=title_caller.model_id or "",
                 # Providers that route by session (OpenCode Go asks for
                 # x-opencode-session) refused every title without it (#48).
                 session_id=session.record.id,

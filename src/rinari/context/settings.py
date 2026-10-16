@@ -135,6 +135,13 @@ def summarizer(ctx, caller):
     main = destination(caller)
     ref = load(ctx)["model_id"]
     if not ref:
+        # The auxiliary model only when the owner turned that on (plan 0.4.0 #80).
+        from rinari.models.roles import get_roles, role_caller
+
+        if get_roles(ctx)["auxiliary_compaction"]:
+            auxiliary = role_caller(ctx, main.router, "auxiliary")
+            if auxiliary is not None:
+                return auxiliary
         return main
     from rinari.runtime.model_caller import ModelCaller
 

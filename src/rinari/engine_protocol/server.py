@@ -268,6 +268,8 @@ class EngineServer:
         self._dispatcher.register("session.resume.cancel", self._session_resume_cancel)
         self._dispatcher.register("session.resume.now", self._session_resume_now)
         self._dispatcher.register("resume.settings.get", self._resume_settings_get)
+        self._dispatcher.register("models.roles.get", self._models_roles_get)
+        self._dispatcher.register("models.roles.set", self._models_roles_set)
         self._dispatcher.register("resume.settings.set", self._resume_settings_set)
         self._dispatcher.register("session.permission.set", self._session_permission_set)
         self._dispatcher.register("session.turn.start", self._turn_start)
@@ -1646,6 +1648,33 @@ class EngineServer:
         service = getattr(self._services, "checklist", None)
         cleared = service.clear(session_id) if service is not None else None
         return {"checklist": cleared.as_dict() if cleared is not None else None}
+
+    # -- model roles (plan 0.4.0 #80) ---------------------------------------------
+
+    def _models_roles_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        from rinari.models.roles import get_roles
+
+        return {"roles": get_roles(self._services.ctx)}
+
+    def _models_roles_set(self, params: dict[str, Any]) -> dict[str, Any]:
+        """fallback / auxiliary: a model alias or id, null clears; auxiliary_compaction: bool."""
+        from rinari.models.roles import set_roles
+
+        changes: dict[str, Any] = {}
+        for role in ("fallback", "auxiliary"):
+            if role in params:
+                value = params[role]
+                if value is not None and not isinstance(value, str):
+                    raise EngineProtocolError(INVALID_PARAMS, f"Param '{role}' must be a string.")
+                changes[role] = value
+        if "auxiliary_compaction" in params:
+            if not isinstance(params["auxiliary_compaction"], bool):
+                raise EngineProtocolError(
+                    INVALID_PARAMS, "Param 'auxiliary_compaction' must be a boolean."
+                )
+            changes["auxiliary_compaction"] = params["auxiliary_compaction"]
+        roles = set_roles(self._services.ctx, self._services.models, **changes)
+        return {"roles": roles}
 
     # -- resumes (plan 0.4.0 #24) -------------------------------------------------
 

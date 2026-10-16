@@ -243,6 +243,13 @@ class AgentLoop:
     ) -> TurnResult:
         cancel = cancel if cancel is not None else CancellationToken()
         self._tools.registry.context = ctx.tool_ctx
+        # Each turn starts with the conversation's own model (plan 0.4.0 #80).
+        restore = getattr(self._provider, "restore_primary", None)
+        if callable(restore) and getattr(self._provider, "on_fallback", False):
+            restore()
+            primary = getattr(self._provider, "primary_model_id", None)
+            if primary:
+                ctx.model_ref = primary
         loop = loop if loop is not None else LoopDetector()
         governor = governor if governor is not None else TurnGovernor()
         started_payload: dict = {"preview": user_message[:200]}
@@ -600,6 +607,10 @@ class AgentLoop:
                         # Nothing is kept from the empty answer: the model
                         # gets the note and one more call.
                         empty_retried = True
+                        ctx.history.append(ChatMessage.harness(_EMPTY_REMINDER, "empty"))
+                        continue
+                    if self._switch_to_fallback(ctx, "empty_response", "two empty answers"):
+                        empty_retried = False
                         ctx.history.append(ChatMessage.harness(_EMPTY_REMINDER, "empty"))
                         continue
                     return self._stop(
@@ -1279,12 +1290,28 @@ class AgentLoop:
             try:
                 return self._invoke(ctx, request, self._guarded_delta(ctx, visible_delta), cancel)
             except Exception as exc:
+                fallback_reason = _fallback_reason(exc)
+                if fallback_reason == "QUOTA_EXHAUSTED" and self._switch_to_fallback(
+                    ctx, fallback_reason, str(exc), model_call_id
+                ):
+                    # Out of quota: no point waiting, the fallback goes now (#80).
+                    retries = 0
+                    restart_output()
+                    request = replace(request, model=ctx.model_ref)
+                    continue
                 reason = _transient_failure(exc)
                 if reason is not None and not _streams(self._provider) and _router_retried(exc):
                     # A non-streaming call was already retried by the router.
                     reason = None
                 delays = MODEL_RETRY_DELAYS_S[:1] if reason == "TIMEOUT" else MODEL_RETRY_DELAYS_S
                 if reason is None or retries >= len(delays) or not _reserve_retry(budget):
+                    if fallback_reason is not None and self._switch_to_fallback(
+                        ctx, fallback_reason, str(exc), model_call_id
+                    ):
+                        retries = 0
+                        restart_output()
+                        request = replace(request, model=ctx.model_ref)
+                        continue
                     raise
                 retry_after = getattr(exc, "retry_after", None)
                 delay = (
@@ -1306,6 +1333,30 @@ class AgentLoop:
                     },
                 )
                 _cancellable_wait(delay, cancel)
+
+    def _switch_to_fallback(
+        self, ctx: AgentContext, reason: str, message: str, model_call_id: str | None = None
+    ) -> bool:
+        """Go on with the fallback model for the rest of this turn (plan 0.4.0 #80)."""
+        use = getattr(self._provider, "use_fallback", None)
+        if not callable(use):
+            return False
+        previous = ctx.model_ref
+        caller = use()
+        if caller is None:
+            return False
+        ctx.model_ref = getattr(caller, "model_id", None) or ctx.model_ref
+        payload = {
+            "from_model": previous,
+            "to_model": ctx.model_ref,
+            "reason": reason,
+            "message": message[:300],
+        }
+        if model_call_id:
+            payload["model_call_id"] = model_call_id
+        self._emit_activity("model.fallback", payload)
+        self._emit(ctx.session_id, "ModelFallback", payload)
+        return True
 
     def _guarded_delta(self, ctx: AgentContext, on_delta: DeltaFn | None) -> DeltaFn | None:
         """Abort a live stream promptly on cancel (Â§8/Etapa D).
@@ -1604,6 +1655,28 @@ def _transient_failure(exc: BaseException) -> str | None:
     if isinstance(exc, NetworkError):
         kind = (getattr(exc, "details", None) or {}).get("kind")
         return kind if kind in ("TIMEOUT", "STREAM_INTERRUPTED") else "NETWORK"
+    return None
+
+
+def _fallback_reason(exc: BaseException) -> str | None:
+    """A technical failure the fallback model may cover; never a content refusal."""
+    from rinari.providers.errors import ProviderError, ProviderErrorCode
+    from rinari.shared.errors import NetworkError
+
+    if isinstance(exc, ProviderError):
+        covered = (
+            ProviderErrorCode.SERVER_ERROR,
+            ProviderErrorCode.TIMEOUT,
+            ProviderErrorCode.STREAM_INTERRUPTED,
+            ProviderErrorCode.RATE_LIMIT,
+            ProviderErrorCode.QUOTA_EXHAUSTED,
+            ProviderErrorCode.MODEL_UNAVAILABLE,
+            ProviderErrorCode.MODEL_NOT_FOUND,
+            ProviderErrorCode.AUTH,
+        )
+        return str(exc.error_code) if exc.error_code in covered else None
+    if isinstance(exc, NetworkError):
+        return "NETWORK"
     return None
 
 
