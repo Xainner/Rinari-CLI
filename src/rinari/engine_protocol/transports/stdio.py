@@ -28,9 +28,14 @@ EVENT_POLL_S = 0.05
 # shows them; stdout stays protocol-only). Helps catch stalls like a
 # network-blocked call holding up later requests on the single loop.
 SLOW_REQUEST_S = 10.0
-# After stdin closes, keep draining until in-flight turns settle (bounded:
-# an approval-blocked turn still ends at its own timeout, then we leave).
-EOF_DRAIN_WAIT_S = 60.0
+# Stdin closing means the client left: the desktop quit, or is restarting the
+# Engine. Running turns are cancelled (their history is kept) and the loop
+# drains what they emit while they settle, bounded so the home lock is free
+# for the next Engine within seconds. Waiting for them instead (it used to be
+# up to 60 s) left a dev Engine under `uv run` alive with the lock after the
+# app closed mid-turn, and the next start failed with «Another Rinari engine
+# is already using …».
+EOF_DRAIN_WAIT_S = 5.0
 
 _EOF = object()
 
@@ -138,6 +143,7 @@ def run_stdio(
             if item is _EOF:
                 eof = True
                 eof_since = time.monotonic()
+                server.cancel_all_turns()
             elif item is not None:
                 started = time.monotonic()
                 try:
@@ -163,12 +169,12 @@ def run_stdio(
             if not _emit(out, pending, err):
                 return 0
         if eof:
-            # Stdin closed: wait for in-flight turns to settle so the desktop
-            # never loses a turn that was accepted but not yet flushed.
-            # Quiescence needs drain-empty *then* inactive: workers always
-            # emit the terminal event before marking done, so this ordering
-            # cannot skip an event emitted before we looked. Daemon workers
-            # die with the process if the deadline hits.
+            # Stdin closed: the cancelled turns settle and their last events
+            # are still written while anyone reads. Quiescence needs
+            # drain-empty *then* inactive: workers always emit the terminal
+            # event before marking done, so this ordering cannot skip an event
+            # emitted before we looked. Daemon workers die with the process if
+            # the deadline hits.
             if not drained_any and not server.has_active_turns():
                 late = server.drain_events()
                 if not late and not server.has_active_turns():

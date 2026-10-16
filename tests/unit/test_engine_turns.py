@@ -855,8 +855,12 @@ def test_stdio_flushes_async_events(server, tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         agent_runtime, "_caller_for", lambda services, rec: FakeModel(scripted=[_answer()])
     )
-    stdin = io.StringIO(
-        _req("e1", "session.turn.start", {"session_id": session_id, "message": "hi"}) + "\n"
+    # The client stays connected until the turn is over: closing stdin means
+    # it left, and that cancels the turn (see the test below).
+    finished = threading.Event()
+    stdin = _HeldStdin(
+        _req("e1", "session.turn.start", {"session_id": session_id, "message": "hi"}) + "\n",
+        finished,
     )
     stdout, stderr = io.StringIO(), io.StringIO()
 
@@ -865,9 +869,10 @@ def test_stdio_flushes_async_events(server, tmp_path, monkeypatch) -> None:
         while time.time() < deadline:
             for evt in server.drain_events():
                 stdout.write(json.dumps(evt) + "\n")
-            if not server.has_active_turns() and server.turns.drain_events() == []:
+            if '"turn.completed"' in stdout.getvalue() and not server.has_active_turns():
                 break
             time.sleep(0.02)
+        finished.set()
 
     code_holder: dict = {}
 
@@ -887,6 +892,63 @@ def test_stdio_flushes_async_events(server, tmp_path, monkeypatch) -> None:
     assert "turn.completed" in by_event
     assert "e1" in by_event
     assert stderr.getvalue() == ""
+
+
+class _HeldStdin:
+    """Stdin of a client that sends `lines` and closes only once `until` is set."""
+
+    def __init__(self, lines: str, until: threading.Event) -> None:
+        self._lines = lines.splitlines(keepends=True)
+        self._until = until
+
+    def __iter__(self):
+        yield from self._lines
+        self._until.wait(30)
+
+
+def test_stdin_closing_mid_turn_cancels_it_and_frees_the_engine(
+    server, tmp_path, monkeypatch
+) -> None:
+    """The desktop quitting mid-turn: the Engine must leave within seconds.
+
+    It used to wait up to 60 s for the turn, so a dev Engine under `uv run`
+    kept the home lock after the app closed and the next start failed.
+    """
+    import io
+
+    session_id = _create_chat(server, tmp_path, tag="eof")
+    gate, abort = threading.Event(), threading.Event()
+    fake = FakeBlockingModel(scripted=[_answer()], gate=gate, abort=abort)
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda services, rec: fake)
+    leave = threading.Event()
+    stdin = _HeldStdin(
+        _req("s1", "session.turn.start", {"session_id": session_id, "message": "slow"}) + "\n",
+        leave,
+    )
+    stdout, stderr = io.StringIO(), io.StringIO()
+    code_holder: dict = {}
+
+    def _run() -> None:
+        code_holder["code"] = run_stdio(server, stdin=stdin, stdout=stdout, stderr=stderr)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    deadline = time.time() + 10
+    while not fake.requests and time.time() < deadline:
+        time.sleep(0.02)
+    assert fake.requests, "the turn never reached the model"
+
+    left_at = time.monotonic()
+    leave.set()
+    thread.join(timeout=10)
+    abort.set()
+
+    assert not thread.is_alive()
+    assert code_holder.get("code") == 0
+    assert time.monotonic() - left_at < 3
+    assert not server.has_active_turns()
+    events = [json.loads(line).get("event") for line in stdout.getvalue().splitlines()]
+    assert "turn.cancelled" in events
 
 
 def test_durable_operation_replay_and_restart(server, services, tmp_path, monkeypatch):
