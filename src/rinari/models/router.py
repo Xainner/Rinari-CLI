@@ -111,6 +111,21 @@ def _wire_alias(name: str, *, reserve: int = 0) -> str:
     return sanitize_tool_name(name)[: max(0, 64 - reserve)]
 
 
+def _vision_constraints(provider: ProviderRecord, model) -> dict[str, Any]:
+    """Image limits for one call: what the endpoint announced, then the saved settings."""
+    discovered = (model.settings or {}).get("discovered_capabilities") or {}
+    announced = (
+        {"max_images": discovered["max_images"]}
+        if type(discovered.get("max_images")) is int and discovered["max_images"] > 0
+        else {}
+    )
+    return {
+        **announced,
+        **(provider.settings or {}).get("vision_limits", {}),
+        **(model.settings or {}).get("vision_limits", {}),
+    }
+
+
 def _merge_capabilities(
     base: ProviderCapabilities, override: dict[str, Any] | None
 ) -> ProviderCapabilities:
@@ -686,11 +701,7 @@ class ModelRouter:
         request = self._validate_reasoning(provider, model, request)
         from rinari.models.visual_context import prepare_visual_payload
 
-        constraints = {
-            **(provider.settings or {}).get("vision_limits", {}),
-            **(model.settings or {}).get("vision_limits", {}),
-        }
-        request = prepare_visual_payload(request, constraints)
+        request = prepare_visual_payload(request, _vision_constraints(provider, model))
         real_by_alias = _alias_map_for_request(provider.endpoint, request)
         transport = _resolve_transport(provider, model)
         from rinari.models.usage_tracking import observe_call
@@ -754,11 +765,7 @@ class ModelRouter:
         request = self._validate_reasoning(provider, model, request)
         from rinari.models.visual_context import prepare_visual_payload
 
-        constraints = {
-            **(provider.settings or {}).get("vision_limits", {}),
-            **(model.settings or {}).get("vision_limits", {}),
-        }
-        request = prepare_visual_payload(request, constraints)
+        request = prepare_visual_payload(request, _vision_constraints(provider, model))
         real_by_alias = _alias_map_for_request(provider.endpoint, request)
         transport = _resolve_transport(provider, model)
         original_transport = transport

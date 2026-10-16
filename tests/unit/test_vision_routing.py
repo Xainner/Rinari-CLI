@@ -1,4 +1,5 @@
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -391,12 +392,17 @@ def test_native_rejection_continues_once_without_images_and_is_remembered(visual
     assert caller.invoke(request).content == "sin imagen"
     assert len(calls) == 2
     retried = calls[1][1].messages[0]
-    assert not retried.images and "fs.read_image" in retried.content
+    # The model is told it did not see them, so it neither describes nor rereads them (#14).
+    assert not retried.images and "were not shown to you" in retried.content
     assert request.messages[0].images  # canonical history is unchanged
     notice = [payload for name, payload in events if name == "vision.failed"]
     assert len(notice) == 1 and notice[0]["fallback"] == "without_images"
     assert "can't see images" in notice[0]["error"]
-    assert settings(caller.services)["model_overrides"] == {"main": False}
+    # An explicit refusal is learned, with its origin; the owner's declarations stay untouched.
+    assert settings(caller.services)["model_overrides"] == {}
+    learned = settings(caller.services)["learned"]["main"]
+    assert learned["vision"] is False and learned["source"] == "auto" and learned["at"]
+    assert notice[0]["marked_by"] == "auto"
     # Known now: the next call does not pay for the same rejection, and the
     # images already reported are not reported again.
     caller.invoke(request)
@@ -428,7 +434,12 @@ def test_an_opaque_400_with_unknown_vision_falls_back_but_not_for_a_declared_mod
     caller.main.router.main_vision = None
     assert caller.invoke(request).content == "ok"
     assert len(calls) == 3
-    assert settings(caller.services)["model_overrides"] == {"main": False}
+    # A bare 400 may be transient: this turn goes on without pixels, but
+    # nothing is remembered for good (plan 0.4.0 #14).
+    assert settings(caller.services)["model_overrides"] == {}
+    assert settings(caller.services)["learned"] == {}
+    caller.invoke(request)
+    assert len(calls) == 4 and not calls[3][1].messages[0].images
 
 
 def test_a_rejection_never_loops(visual):
@@ -743,3 +754,74 @@ def test_visual_payload_output_policy_matches_adapter_contracts(visual):
             == anthropic.default_max_tokens
         )
         assert anthropic._payload(configured, stream=streaming)["max_tokens"] == 32000
+
+
+def test_pixels_answered_by_an_unknown_model_are_learned_as_vision(visual):
+    """#14: a 200 with pixels delivered marks the model as seeing; a later 400 is real."""
+    import json
+
+    from rinari.providers.errors import ProviderError, ProviderErrorCode
+
+    caller, request, calls = visual
+    caller.main.router.main_vision = None
+    (caller.services.ctx.home / "vision.json").write_text(json.dumps({"mode": "conversation"}))
+    caller.invoke(request)
+    assert calls[-1][1].messages[0].images
+    assert settings(caller.services)["learned"]["main"]["vision"] is True
+
+    def opaque(provider, model, req):
+        calls.append((model, req))
+        error = ProviderError("Provider returned HTTP 400", code=ProviderErrorCode.SERVER_ERROR)
+        error.details["http_status"] = 400
+        raise error
+
+    caller.main.router.invoke = opaque
+    with pytest.raises(ProviderError):
+        VisionCaller(caller.services, caller.record, caller.main).invoke(request)
+
+
+def test_owner_then_endpoint_then_learned():
+    from rinari.application.vision import model_vision
+
+    config = {
+        "model_overrides": {"a": True},
+        "learned": {"a": {"vision": False}, "b": {"vision": False}},
+    }
+    assert model_vision(config, "a", False) == (True, "owner")
+    assert model_vision(config, "b", True) == (True, "endpoint")
+    assert model_vision(config, "b", None) == (False, "learned")
+    assert model_vision(config, "c", None) == (None, None)
+
+
+def test_turning_vision_back_on_forgets_the_automatic_marks(visual):
+    from rinari.application.vision import remember_no_vision, reset_model_vision
+
+    caller, _request, _calls = visual
+    configure(caller.services, {"mode": "conversation"})
+    remember_no_vision(caller.services, "main")
+    assert settings(caller.services)["learned"]["main"]["vision"] is False
+    configure(caller.services, {**settings(caller.services), "model_overrides": {"main": False}})
+    reset_model_vision(caller.services, "main")
+    assert settings(caller.services)["learned"] == {}
+    assert settings(caller.services)["model_overrides"] == {}
+
+
+def test_tool_images_go_to_the_model_once():
+    """#61d: once an assistant message follows a tool image, later calls carry a note."""
+    from rinari.models.images import ImageReference
+    from rinari.models.types import ChatMessage, ModelRequest, ToolCall
+    from rinari.models.visual_context import select_visual_context
+
+    image = ImageReference("artifact://s/media/a.png", Path("a.png"), "0" * 64, "image/png")
+    call = ChatMessage(
+        role="assistant", content="", tool_calls=(ToolCall("t1", "fs.read_image", {}),)
+    )
+    result = ChatMessage(role="tool", content="ok", tool_call_id="t1", images=(image,))
+    fresh = select_visual_context(ModelRequest(model="m", messages=(call, result)))
+    assert fresh.messages[1].images
+    later = ModelRequest(
+        model="m", messages=(call, result, ChatMessage(role="assistant", content="Veo un logo."))
+    )
+    seen = select_visual_context(later)
+    assert not seen.messages[1].images
+    assert "already looked at these images" in seen.messages[1].content

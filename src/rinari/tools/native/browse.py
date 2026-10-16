@@ -467,9 +467,17 @@ def browser_screenshot(input: dict, ctx: ToolContext) -> ToolResult:
         # How to show it to the owner: file:// paths do not render in the chat.
         "markdown": f"![{path.name}]({uri})",
     }
+    # The capture goes to the model in the same step, as `fs.read_image` does:
+    # without it the model had to read the same file again, one more call and
+    # one more round per capture (plan 0.4.0 #11). A model without vision gets
+    # it retired with a note by the visual router; the turn goes on.
+    from rinari.models.images import ImageReference
+
+    image = ImageReference(uri, store._storage_path(record.storage_path), digest, "image/png")
     return ToolResult(
         ok=True,
         data=data,
+        images=(image,),
         artifacts=(ArtifactRef(uri, path.name, "image"),),
         presentation={"kind": "image", "image": data},
     )
@@ -949,8 +957,9 @@ def browse_tools() -> list[ToolDefinition]:
         ToolDefinition(
             name="browser.screenshot",
             description=(
-                "Capture the page as a PNG image. It returns an artifact:// image; to show "
-                "it in the chat, include the returned `markdown` in your reply."
+                "Capture the page as a PNG image. The capture already comes to you as an "
+                "image in this result: do not read it again with fs.read_image. To show it "
+                "to the owner in the chat, include the returned `markdown` in your reply."
             ),
             input_schema=optional_target,
             risk=RISK_LOW,

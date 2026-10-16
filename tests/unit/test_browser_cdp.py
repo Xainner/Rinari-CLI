@@ -1302,6 +1302,9 @@ def test_browser_screenshot_is_a_session_image_the_chat_can_show(
     assert result.data["markdown"] == f"![{result.data['name']}]({uri})"
     assert result.presentation["kind"] == "image"
     assert result.artifacts[0].kind == "image" and result.artifacts[0].uri == uri
+    # The model sees the capture in the same step: no fs.read_image afterwards (#11).
+    assert [image.uri for image in result.images] == [uri]
+    assert result.images[0].path.is_file()
     manager.close()
 
 

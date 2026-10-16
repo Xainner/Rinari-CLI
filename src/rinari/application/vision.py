@@ -41,7 +41,11 @@ DEFAULT = {
     "mode": "automatic",
     "model_id": None,
     "confirm_unknown": False,
+    # What the owner declared (`rinari vision capability`, the Vision settings).
     "model_overrides": {},
+    # What Rinari learned by itself (plan 0.4.0 #14): below the owner and below
+    # what the endpoint announces, so a learned "no" never outranks either.
+    "learned": {},
 }  # Legacy flag is ignored.
 
 
@@ -74,6 +78,11 @@ def configure(services, value):
     overrides = config["model_overrides"]
     if not isinstance(overrides, dict) or any(type(v) is not bool for v in overrides.values()):
         raise ValueError("Model vision overrides must map model IDs to booleans")
+    learned = config["learned"]
+    if not isinstance(learned, dict) or any(
+        not isinstance(v, dict) or type(v.get("vision")) is not bool for v in learned.values()
+    ):
+        raise ValueError("Learned vision must map model IDs to {vision: bool}")
     for ref in overrides:
         services.models.resolve(ref)
     if config["mode"] == "dedicated" and not config["model_id"]:
@@ -108,32 +117,83 @@ def configure(services, value):
     return settings(services)
 
 
-def remember_no_vision(services, model_id):
-    """Record that a model refused images, so later turns do not resend them.
+def model_vision(config, model_id, discovered):
+    """Whether a model reads images, and who says so (plan 0.4.0 #14).
 
-    It is the same override a user sets by hand (`rinari vision capability`),
-    so it is visible and reversible. Best effort: failing to remember must
-    not fail the turn that just recovered.
+    The owner's declaration first, then what the endpoint announces (or the
+    catalog), then what Rinari learned from a call. `(None, None)` is unknown.
     """
-    if not model_id:
-        return
-    try:
-        current = {key: value for key, value in settings(services).items() if key != "execution"}
-        overrides = dict(current.get("model_overrides") or {})
-        if overrides.get(model_id) is False:
-            return
-        for ref in list(overrides):
-            # A deleted model's override would make the whole write invalid.
+    overrides = config.get("model_overrides") or {}
+    if model_id in overrides:
+        return overrides[model_id], "owner"
+    if discovered is not None:
+        return discovered, "endpoint"
+    learned = (config.get("learned") or {}).get(model_id)
+    if learned is not None:
+        return learned["vision"], "learned"
+    return None, None
+
+
+def _write_learned(services, change):
+    current = {key: value for key, value in settings(services).items() if key != "execution"}
+    overrides = dict(current.get("model_overrides") or {})
+    learned = dict(current.get("learned") or {})
+    change(overrides, learned)
+    for table in (overrides, learned):
+        for ref in list(table):
+            # A deleted model's entry would make the whole write invalid.
             try:
                 services.models.resolve(ref)
             except Exception:
-                overrides.pop(ref)
-        overrides[model_id] = False
-        configure(services, {**current, "model_overrides": overrides})
+                table.pop(ref)
+    configure(services, {**current, "model_overrides": overrides, "learned": learned})
+
+
+def remember_vision(services, model_id, sees, *, error=None):
+    """Record what a call showed about a model's vision, with when and why.
+
+    Best effort: failing to remember must not fail the turn that just ran.
+    """
+    if not model_id:
+        return
+    from datetime import UTC, datetime
+
+    def change(_overrides, learned):
+        previous = learned.get(model_id)
+        if previous is not None and previous.get("vision") is sees:
+            return
+        entry = {"vision": bool(sees), "source": "auto", "at": datetime.now(UTC).isoformat()}
+        if error:
+            entry["error"] = str(error)[:300]
+        learned[model_id] = entry
+
+    try:
+        _write_learned(services, change)
     except Exception:
         import logging
 
-        logging.getLogger(__name__).warning("could not remember %s as without vision", model_id)
+        logging.getLogger(__name__).warning("could not remember vision for %s", model_id)
+
+
+def remember_no_vision(services, model_id, error=None):
+    """A provider refused the images explicitly: later turns do not resend them."""
+    remember_vision(services, model_id, False, error=error)
+
+
+def reset_model_vision(services, model_id):
+    """Turn vision back on for a model Rinari marked without it.
+
+    Forgets what Rinari learned, and an old automatic "no" that predates
+    learning (it was stored as if the owner had declared it).
+    """
+
+    def change(overrides, learned):
+        learned.pop(model_id, None)
+        if overrides.get(model_id) is False:
+            overrides.pop(model_id)
+
+    _write_learned(services, change)
+    return settings(services)
 
 
 class VisionCaller:
@@ -148,6 +208,9 @@ class VisionCaller:
         self.budget_getter = lambda: None
         self._events_lock = threading.RLock()
         self._withheld = set()  # image URIs already reported as not sent
+        # A bare 400 with images, on a model nobody knows: no pixels for the
+        # rest of this caller's life, but nothing remembered for good (#14).
+        self._blind_here = False
 
     def _operation(self):
         from rinari.runtime.vision import resolve_visual_route
@@ -160,17 +223,14 @@ class VisionCaller:
             except NotFoundError:
                 selected = None
         if selected and (
-            config.get("model_overrides", {}).get(selected.model_id, selected.capabilities().vision)
-            is False
+            model_vision(config, selected.model_id, selected.capabilities().vision)[0] is False
         ):
             selected = None
         decision = resolve_visual_route(
             "dedicated"
             if config["mode"] == "automatic" and config.get("model_id")
             else config["mode"],
-            config.get("model_overrides", {}).get(
-                self.main.model_id, self.main.capabilities().vision
-            ),
+            model_vision(config, self.main.model_id, self.main.capabilities().vision)[0],
             selected is not None,
         )
         primary = self.main if decision.route == "conversation" else selected
@@ -592,7 +652,7 @@ class VisionCaller:
                 raise errors[0]
         self._check()
         prepared = replace(request, messages=tuple(messages))
-        if any(m.images for m in prepared.messages) and self._known_blind():
+        if any(m.images for m in prepared.messages) and (self._known_blind() or self._blind_here):
             # Learned from an earlier rejection: do not pay for it again.
             prepared = self._without_pixels(prepared, rejected=False)
         streamed = False
@@ -616,6 +676,10 @@ class VisionCaller:
             prepared = self._without_pixels(prepared, rejected=True, error=exc)
             result = call(prepared)
         self._check()
+        if any(m.images for m in prepared.messages) and self._main_vision() is None:
+            # The endpoint took the pixels and answered: it sees (#14). From
+            # now on a 400 is a real error, not a reason to stop sending them.
+            remember_vision(self.services, self.main.model_id, True)
         native = [
             {
                 "message_ref": self._origin(m),
@@ -637,13 +701,25 @@ class VisionCaller:
             )
         return result
 
+    def _main_vision_source(self):
+        return model_vision(
+            settings(self.services), self.main.model_id, self.main.capabilities().vision
+        )
+
     def _main_vision(self):
-        overrides = settings(self.services).get("model_overrides", {})
-        return overrides.get(self.main.model_id, self.main.capabilities().vision)
+        return self._main_vision_source()[0]
 
     def _known_blind(self):
-        """The main model is remembered (or declared) unable to read images."""
-        return settings(self.services).get("model_overrides", {}).get(self.main.model_id) is False
+        """The owner declared, or Rinari learned, that the main model reads no images.
+
+        Not an adapter default: those say "no" for models nobody asked about,
+        and the call itself is the better test.
+        """
+        config = settings(self.services)
+        if self.main.model_id in (config.get("model_overrides") or {}):
+            return config["model_overrides"][self.main.model_id] is False
+        learned = (config.get("learned") or {}).get(self.main.model_id)
+        return learned is not None and learned["vision"] is False
 
     def _rejects_pixels(self, exc, request):
         """The provider refused the images, not the request.
@@ -651,8 +727,8 @@ class VisionCaller:
         An explicit modality rejection always qualifies. A bare 400 qualifies
         only while nobody knows whether this model sees images: endpoints
         (llama.cpp, gateways, OAuth backends) often answer an image they cannot
-        read with an opaque 400, and the turn died on it. A model declared
-        with vision keeps its 400 as a real error.
+        read with an opaque 400, and the turn died on it. A model declared,
+        announced or learned with vision keeps its 400 as a real error.
         """
         from rinari.providers.errors import ProviderErrorCode
 
@@ -676,10 +752,19 @@ class VisionCaller:
 
         stripped = replace(
             request,
-            messages=tuple(retire_images(m) if m.images else m for m in request.messages),
+            messages=tuple(
+                retire_images(m, unseen=True) if m.images else m for m in request.messages
+            ),
         )
-        if rejected:
-            remember_no_vision(self.services, self.main.model_id)
+        from rinari.providers.errors import ProviderErrorCode
+
+        explicit = getattr(error, "error_code", None) == ProviderErrorCode.VISION_UNSUPPORTED
+        if rejected and explicit:
+            # Only an explicit refusal is remembered for good (#14).
+            remember_no_vision(self.services, self.main.model_id, error=error)
+        elif rejected:
+            # A bare 400 may be transient: no pixels for the rest of this turn only.
+            self._blind_here = True
         # Say it once per image: history keeps resending the same pixels on
         # every call, and older ones were already reported when they were new.
         current = {
@@ -707,6 +792,9 @@ class VisionCaller:
                 "fallback": "without_images",
                 "images_withheld": count,
                 "reason": "vision_unsupported" if rejected else "known_without_vision",
+                # Who decided it, so the app offers to turn vision back on when
+                # it was Rinari and not the owner (#14).
+                "marked_by": self._marked_by(rejected, explicit),
                 "error": (
                     "This model can't see images; continued without them. "
                     "Configure a visual model in Vision settings to analyze them."
@@ -715,6 +803,16 @@ class VisionCaller:
             },
         )
         return stripped
+
+    def _marked_by(self, rejected, explicit):
+        if rejected:
+            return "auto" if explicit else "turn"
+        source = self._main_vision_source()[1]
+        if source == "learned":
+            return "auto"
+        # An old automatic "no" was stored as the owner's; the app offers to
+        # turn vision back on for it too.
+        return source
 
     def invoke(self, request):
         return self._invoke(request)

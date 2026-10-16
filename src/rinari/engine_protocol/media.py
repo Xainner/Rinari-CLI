@@ -61,7 +61,13 @@ def register_media(dispatcher, services):
         from rinari.runtime.vision import visual_status
 
         decision = visual_status(caller)
-        vision = caller.capabilities().vision
+        from rinari.application.vision import model_vision
+        from rinari.application.vision import settings as vision_settings
+
+        # The owner's declaration, then the endpoint, then what Rinari learned (#14).
+        vision, vision_source = model_vision(
+            vision_settings(services), record.model_id, caller.capabilities().vision
+        )
         destination = (
             caller.destination() if decision.available and hasattr(caller, "destination") else None
         )
@@ -78,6 +84,7 @@ def register_media(dispatcher, services):
             else None,
             "destination_provider": destination.provider.alias if destination else None,
             "route": decision.route,
+            "vision_source": vision_source,
         }
 
     def receive(params):
@@ -237,6 +244,21 @@ def register_media(dispatcher, services):
             raise EngineProtocolError(INVALID_PARAMS, str(exc)) from exc
 
     dispatcher.register("vision.settings.get", lambda params: settings(services))
+
+    def reset_vision(params):
+        from rinari.application.vision import reset_model_vision
+
+        model_id = params.get("model_id")
+        if not isinstance(model_id, str) or not model_id:
+            raise EngineProtocolError(
+                INVALID_PARAMS, "Param 'model_id' must be a non-empty string."
+            )
+        try:
+            return reset_model_vision(services, services.models.resolve(model_id).id)
+        except ValueError as exc:
+            raise EngineProtocolError(INVALID_PARAMS, str(exc)) from exc
+
+    dispatcher.register("vision.model.reset", reset_vision)
     from rinari.context.settings import load as context_settings
     from rinari.context.settings import save as save_context_settings
 
