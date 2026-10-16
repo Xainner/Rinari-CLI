@@ -4011,8 +4011,12 @@ class EngineServer:
         provider = params.get("provider")
         if provider is not None and not isinstance(provider, str):
             raise EngineProtocolError(INVALID_PARAMS, "Param 'provider' must be a string.")
-        items = [self._model_view(model) for model in self._services.models.list(provider)]
-        return {"models": items}
+        include_disabled = params.get("include_disabled", False)
+        if not isinstance(include_disabled, bool):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'include_disabled' must be a boolean.")
+        # A turned-off provider's models leave every picker; Settings asks for them (#97).
+        models = self._services.models.list(provider, include_disabled=include_disabled)
+        return {"models": [self._model_view(model) for model in models]}
 
     def _provider_alias(self, provider_id: str) -> str | None:
         try:
@@ -4127,15 +4131,33 @@ class EngineServer:
         settings = params.get("settings")
         if settings is not None and not isinstance(settings, dict):
             raise EngineProtocolError(INVALID_PARAMS, "Param 'settings' must be an object.")
+        enabled = params.get("enabled")
+        if enabled is not None and not isinstance(enabled, bool):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'enabled' must be a boolean.")
         if not any(
             key in params
-            for key in ("alias", "endpoint", "settings", "account_hint", "secret", "secret_env")
+            for key in (
+                "alias",
+                "endpoint",
+                "settings",
+                "account_hint",
+                "secret",
+                "secret_env",
+                "enabled",
+            )
         ):
             raise EngineProtocolError(
                 INVALID_PARAMS,
                 "Nothing to update: pass alias, endpoint, settings, account_hint, "
-                "secret or secret_env.",
+                "secret, secret_env or enabled.",
             )
+        if enabled is not None and not any(
+            key in params
+            for key in ("alias", "endpoint", "settings", "account_hint", "secret", "secret_env")
+        ):
+            # On/off alone (plan 0.4.0 #97).
+            record = providers.set_enabled(self._need_str(params, "ref"), enabled)
+            return {"provider": self._provider_view(providers.get(record.id))}
         record = providers.apply_update(
             self._need_str(params, "ref"),
             new_alias=self._opt_str(params, "alias"),
@@ -4145,6 +4167,8 @@ class EngineServer:
             secret=secret or None,
             secret_env=secret_env or None,
         )
+        if enabled is not None:
+            record = providers.set_enabled(record.id, enabled)
         return {"provider": self._provider_view(providers.get(record.id))}
 
     def _provider_remove(self, params: dict[str, Any]) -> dict[str, Any]:

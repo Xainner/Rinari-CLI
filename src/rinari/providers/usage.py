@@ -128,6 +128,9 @@ class ProviderUsageService:
             "detail": "Remote account usage is not exposed by this integration.",
             "retry_at": None,
         }
+        if not getattr(provider, "enabled", True):
+            # Turned off (#97): its account is not read.
+            return {**base, "status": "disabled", "detail": "This provider is turned off."}
         if product in ("ollama", "lmstudio"):
             return {**base, "detail": "Remote quotas do not apply to local providers."}
         if product not in ("opencode-go", "openrouter", "deepseek", "chatgpt"):

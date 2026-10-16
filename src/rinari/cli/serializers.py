@@ -25,6 +25,7 @@ def provider_dict(
         "last_used_model_id": record.last_used_model_id,
         "active": active,
         "credential_ref": credential_ref,
+        "enabled": record.enabled,
         "created_at": record.created_at,
         "updated_at": record.updated_at,
     }

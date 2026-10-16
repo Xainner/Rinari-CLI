@@ -25,6 +25,8 @@ class ProviderRecord:
     status_checked_at: str | None
     created_at: str
     updated_at: str
+    #: Off: its models are hidden and nothing calls it (plan 0.4.0 #97).
+    enabled: bool = True
 
 
 @dataclass(slots=True)

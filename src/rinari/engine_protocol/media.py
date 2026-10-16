@@ -339,7 +339,8 @@ def register_media(dispatcher, services):
         if params.get("refresh") is True:
             windows.forget(services.ctx)
         rows = []
-        for model in services.models.list():
+        # A turned-off provider is not asked for its windows (#97).
+        for model in services.models.list(include_disabled=False):
             try:
                 rows.append(model_status(model))
             except Exception as exc:

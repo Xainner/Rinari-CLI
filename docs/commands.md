@@ -1198,6 +1198,8 @@ providers list
 providers add
 providers login
 providers logout
+providers disable
+providers enable
 providers auth
 providers show
 providers test
@@ -1321,6 +1323,25 @@ authentication becomes disconnected
 ```
 
 This is intentionally different from `providers remove`.
+
+---
+
+## `providers disable` / `providers enable`
+
+```bash
+rinari providers disable opencode-go
+rinari providers enable opencode-go
+```
+
+Semantics:
+
+```text
+provider, models and credential remain saved
+its models leave every picker (model.list hides them unless include_disabled)
+no discovery, no usage reads and no model calls reach it
+a turn that still asks for one of its models fails with PROVIDER_DISABLED
+turning off the active provider leaves Rinari without one until another is used
+```
 
 ---
 

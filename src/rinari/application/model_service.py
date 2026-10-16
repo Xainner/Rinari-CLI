@@ -71,10 +71,20 @@ class ModelService:
 
     # -- lookup ---------------------------------------------------------
 
-    def list(self, provider_ref: str | None = None) -> list[ModelRecord]:
+    def list(
+        self, provider_ref: str | None = None, *, include_disabled: bool = True
+    ) -> list[ModelRecord]:
+        """Saved models. Without `include_disabled`, a turned-off provider's
+        models are left out (plan 0.4.0 #97): that is what every picker sees."""
         if provider_ref is None:
-            return self._ctx.model_repo.list()
+            models = self._ctx.model_repo.list()
+            if include_disabled:
+                return models
+            enabled = {p.id for p in self._providers.list(include_disabled=False)}
+            return [m for m in models if m.provider_id in enabled]
         provider = self._providers.get(provider_ref)
+        if not include_disabled and not provider.enabled:
+            return []
         return self._ctx.model_repo.list(provider.id)
 
     def resolve(self, ref: str, provider_ref: str | None = None) -> ModelRecord:
@@ -134,6 +144,7 @@ class ModelService:
         provider = self._providers.get(provider_ref) if provider_ref else self._active_provider()
         if provider is None:
             raise NotFoundError("No provider selected", hint="Pass --provider <alias>.")
+        self._providers.ensure_enabled(provider)
         adapter = adapter_for(provider, self._client)
         try:
             discovered = adapter.list_models(
@@ -245,6 +256,7 @@ class ModelService:
     def use(self, ref: str, provider_ref: str | None = None) -> ResolvedModel:
         record = self.resolve(ref, provider_ref)
         provider = self._providers.get(record.provider_id)
+        self._providers.ensure_enabled(provider, record.alias)
         active_id = self._ctx.config_repo.get(KEY_ACTIVE_PROVIDER)
         switched = active_id != provider.id
         now = self._now()
@@ -364,6 +376,16 @@ class ModelService:
         results: dict[str, RefreshResult] = {}
         for rec in providers:
             models = self._ctx.model_repo.list(rec.id)
+            if not rec.enabled:
+                # Turned off (#97): nothing reads it, its saved models stay as they are.
+                results[rec.alias] = RefreshResult(
+                    saved=len(models),
+                    still_available=0,
+                    marked_unavailable=0,
+                    discovered=0,
+                    error="disabled",
+                )
+                continue
             if not models and not add_new:
                 results[rec.alias] = RefreshResult(0, 0, 0, 0)
                 continue

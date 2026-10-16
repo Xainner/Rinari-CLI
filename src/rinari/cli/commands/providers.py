@@ -51,9 +51,10 @@ def providers_list(
             return
         typer.echo(f"{'ALIAS':<20} {'TYPE':<10} {'AUTH':<8} {'STATUS':<12} ACTIVE")
         for r in records:
+            status = STATUS_LABELS[r.status_connected] if r.enabled else "off"
             typer.echo(
                 f"{r.alias:<20} {r.type:<10} {r.auth_method:<8} "
-                f"{STATUS_LABELS[r.status_connected]:<12} {'*' if r.id == active_id else ''}"
+                f"{status:<12} {'*' if r.id == active_id else ''}"
             )
 
 
@@ -164,6 +165,30 @@ def providers_logout(ctx: typer.Context, alias: str = typer.Argument(...)) -> No
             emit_json(success_envelope("providers.logout", provider_dict(record)))
             return
         typer.echo(f"Logged out {record.alias!r}. Configuration preserved.")
+
+
+@app.command("disable")
+@with_error_handling("providers.disable")
+def providers_disable(ctx: typer.Context, alias: str = typer.Argument(...)) -> None:
+    """Turn a provider off: its models are hidden and nothing calls it."""
+    with services(ctx) as s:
+        record = s.providers.set_enabled(alias, False)
+        if is_json(ctx):
+            emit_json(success_envelope("providers.disable", provider_dict(record)))
+            return
+        typer.echo(f"Provider {record.alias!r} turned off. Its models and credential stay saved.")
+
+
+@app.command("enable")
+@with_error_handling("providers.enable")
+def providers_enable(ctx: typer.Context, alias: str = typer.Argument(...)) -> None:
+    """Turn a provider back on."""
+    with services(ctx) as s:
+        record = s.providers.set_enabled(alias, True)
+        if is_json(ctx):
+            emit_json(success_envelope("providers.enable", provider_dict(record)))
+            return
+        typer.echo(f"Provider {record.alias!r} turned on.")
 
 
 @app.command("auth")

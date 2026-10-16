@@ -64,7 +64,7 @@ def role_caller(ctx, router, role: str, *, exclude_model_id: str | None = None):
     if model is None:
         return None
     provider = ctx.provider_repo.get(model.provider_id)
-    if provider is None:
+    if provider is None or not provider.enabled:
         return None
     return ModelCaller(router, provider, model.id)
 

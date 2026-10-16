@@ -466,6 +466,8 @@ class ModelRouter:
                 hint="Add one first: `rinari models add --provider <alias> <model>`.",
             )
         model = self._models.resolve(model_id)
+        # A turned-off provider gets no call at all (plan 0.4.0 #97).
+        self._providers.ensure_enabled(provider, model.alias)
         if model.provider_id != provider.id:
             owner = self._providers.get(model.provider_id).alias
             raise InvalidUsageError(
