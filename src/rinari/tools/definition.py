@@ -367,6 +367,9 @@ class ToolContext:
     # ChecklistService (rinari.checklist): checklist.update keeps the
     # conversation's live list. None outside a desktop or CLI session.
     checklist: Any = None
+    # GoalService (rinari.goals) while this conversation pursues a goal;
+    # None otherwise, which also hides goal.update.
+    goals: Any = None
     # FollowupService (rinari.followups): followup.suggest leaves notes.
     followups: Any = None
     # A project's other trusted working folders (policy treats them as the

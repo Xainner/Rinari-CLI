@@ -264,6 +264,9 @@ def build_assembler_context(
     leftover = _checklist_text(services, record.id)
     if leftover:
         task_state = f"{leftover}\n\n{task_state}" if task_state else leftover
+    goal = _goal_text(services, record.id)
+    if goal:
+        task_state = f"{goal}\n\n{task_state}" if task_state else goal
     from rinari.prompts.modes import mode_instructions
 
     skills_tuple, catalog = _skill_prompt_parts(services, root, record)
@@ -430,6 +433,26 @@ def _checklist_text(services: ServiceContainer, session_id: str) -> str | None:
     try:
         return service.render_for_prompt(session_id)
     except Exception:  # context is best effort, never a failed turn
+        return None
+
+
+def _goal_text(services: ServiceContainer, session_id: str) -> str | None:
+    """The goal being pursued, in the task state of every turn (plan 0.4.0 #23)."""
+    service = getattr(services, "goals", None)
+    if service is None:
+        return None
+    try:
+        return service.render_for_prompt(session_id)
+    except Exception:  # context is best effort, never a failed turn
+        return None
+
+
+def _pursued_goals(services: ServiceContainer, session_id: str):
+    """The goal service for goal.update, only while a goal is pursued."""
+    service = getattr(services, "goals", None)
+    try:
+        return service if service is not None and service.pursuing(session_id) else None
+    except Exception:
         return None
 
 
@@ -745,6 +768,7 @@ def build_agent_session(
         validation=services.verification,
         memory=services.memory,
         checklist=getattr(services, "checklist", None),
+        goals=_pursued_goals(services, record.id),
         followups=getattr(services, "followups", None),
         extra_project_roots=extra_roots,
         activity_sink=activity_sink,

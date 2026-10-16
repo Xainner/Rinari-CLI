@@ -110,6 +110,7 @@ FIELDS = {
     "agent.synthesize": "conflicts:a",
     "user.ask": "request_id:s status:s answers:o",
     "checklist.update": "revision:i counts:o warnings:a",
+    "goal.update": "state:s iteration:i note:s",
     "followup.suggest": "suggestion_id:s status:s",
     "session.peers": "peers:a",
     "session.send": "message_id:s to_session_id:s state:s hop:i",

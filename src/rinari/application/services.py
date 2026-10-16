@@ -25,6 +25,7 @@ from rinari.checkpoints.service import CheckpointService
 from rinari.context.retrieval import ContextRetrievalService
 from rinari.context.service import ContextService
 from rinari.followups import FollowupService
+from rinari.goals import GoalService
 from rinari.hooks import HookService
 from rinari.mcp import McpService
 from rinari.memory import MemoryService
@@ -67,6 +68,7 @@ class ServiceContainer:
     schedules: ScheduleService = None
     rinari_profiles: RinariProfileService = None
     checklist: ChecklistService = None
+    goals: GoalService = None
     followups: FollowupService = None
 
 
@@ -144,6 +146,7 @@ def build_services(
         schedules=schedules,
         rinari_profiles=rinari_profiles,
         checklist=ChecklistService(ctx),
+        goals=GoalService(ctx),
         followups=FollowupService(ctx),
     )
 

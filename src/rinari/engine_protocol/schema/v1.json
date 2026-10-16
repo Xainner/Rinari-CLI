@@ -71,6 +71,9 @@
     "checklistItem",
     "checklistCounts",
     "checklist",
+    "goal",
+    "goalAssessment",
+    "goalBudget",
     "followupSuggestion"
   ],
   "$defs": {
@@ -292,6 +295,12 @@
         "session.permission.get",
         "session.checklist.clear",
         "session.checklist.complete",
+        "session.goal.get",
+        "session.goal.set",
+        "session.goal.pause",
+        "session.goal.resume",
+        "session.goal.clear",
+        "session.goal.budget",
         "session.checklist.get",
         "session.permission.set",
         "session.turn.start",
@@ -615,6 +624,8 @@
         "profile_bundle.changed",
         "project.moved",
         "checklist.updated",
+        "goal.updated",
+        "goal.reported",
         "followup.suggested",
         "followup.resolved"
       ]
@@ -2122,6 +2133,19 @@
             "string",
             "null"
           ]
+        },
+        "goal_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "iteration": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
         }
       }
     },
@@ -4344,6 +4368,126 @@
               "type": "null"
             }
           ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "goal": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "goal_id",
+        "objective",
+        "state",
+        "budget",
+        "iteration",
+        "tokens_used",
+        "active_seconds",
+        "assessment",
+        "reason",
+        "revision",
+        "started_at",
+        "updated_at"
+      ],
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "goal_id": {
+          "type": "string"
+        },
+        "objective": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "pursuing",
+            "paused",
+            "waiting_limits",
+            "achieved",
+            "blocked",
+            "stalled",
+            "budget_limited",
+            "cleared"
+          ]
+        },
+        "budget": {
+          "$ref": "#/$defs/goalBudget"
+        },
+        "iteration": {
+          "type": "integer"
+        },
+        "tokens_used": {
+          "type": "integer"
+        },
+        "active_seconds": {
+          "type": "number"
+        },
+        "assessment": {
+          "$ref": "#/$defs/goalAssessment"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "started_at": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "goalBudget": {
+      "type": "object",
+      "properties": {
+        "turns": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "minutes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "tokens": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "goalAssessment": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "progress",
+            "achieved",
+            "blocked"
+          ]
+        },
+        "summary": {
+          "type": "string"
+        },
+        "evidence": {
+          "type": "string"
+        },
+        "remaining": {
+          "type": "string"
+        },
+        "iteration": {
+          "type": "integer"
+        },
+        "gate": {
+          "type": "object"
+        },
+        "_signature": {
+          "type": "array"
         }
       },
       "additionalProperties": false

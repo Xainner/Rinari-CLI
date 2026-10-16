@@ -231,9 +231,7 @@ class ChecklistService:
             items = [{**item, "status": "completed"} for item in current.items]
             for item in items:
                 item.pop("blocked_reason", None)
-            return self._write(
-                session_id, current.turn_id, current, state="completed", items=items
-            )
+            return self._write(session_id, current.turn_id, current, state="completed", items=items)
 
     def clear(self, session_id: str) -> Checklist | None:
         with self._lock:

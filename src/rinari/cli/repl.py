@@ -203,6 +203,8 @@ def run_repl(
 
     interrupted_this_turn = False
     prompt = initial_prompt
+    # The next turn is an iteration of the conversation's goal (plan 0.4.0 #23).
+    goal_turn = False
 
     while True:
         session.token.reset()
@@ -238,8 +240,10 @@ def run_repl(
                 return f"resume:{outcome.resume_ref}{pending}"
             if outcome.action == "turn" and outcome.prompt:
                 prompt = outcome.prompt
+                goal_turn = outcome.goal
                 continue
             continue
+        this_goal_turn, goal_turn = goal_turn, False
 
         if not json_mode:
             typer.echo()
@@ -333,12 +337,17 @@ def run_repl(
             sys.stdout.write("\n")
             sys.stdout.flush()
             typer.echo("turn cancelled (Ctrl+C again to exit)", err=True)
+            if this_goal_turn:
+                _fold_goal_turn(session, console, "cancelled")
             continue
         except RinariError as err:
             _stop_status()
             typer.echo(f"error: {err.message}", err=True)
             if err.hint:
                 typer.echo(f"hint: {err.hint}", err=True)
+            if this_goal_turn:
+                code = getattr(err, "error_code", "")
+                _fold_goal_turn(session, console, "failed", str(code or ""), err.message)
             continue
         finally:
             _stop_status()
@@ -395,6 +404,39 @@ def run_repl(
             session.promoted_root = None
             if banner_allowed:
                 render.render_banner(console, build_snapshot(session), mode)
+
+        if this_goal_turn:
+            terminal = (
+                "cancelled"
+                if result.kind == "cancelled"
+                else "stopped"
+                if result.stop_reason is not None
+                else "completed"
+            )
+            if _fold_goal_turn(session, console, terminal, result=result):
+                upcoming = slash.next_goal_turn(session)
+                if upcoming.prompt:
+                    prompt, goal_turn = upcoming.prompt, True
+
+
+def _fold_goal_turn(
+    session, console, terminal: str, code: str = "", message: str = "", *, result=None
+) -> bool:
+    """Fold a goal turn into the goal; True when the next iteration should run."""
+    from rinari.goals.service import TurnOutcome
+
+    usage = getattr(result, "usage", None)
+    outcome = TurnOutcome(
+        terminal=terminal,
+        error_code=code,
+        error_message=message,
+        gate=getattr(result, "completion", None),
+        tokens=int(getattr(usage, "input_tokens", 0) or 0)
+        + int(getattr(usage, "output_tokens", 0) or 0),
+    )
+    goal, go_on = session.services.goals.after_turn(session.record.id, outcome)
+    console.print(Text(slash.goal_line(goal), style="cyan"))
+    return go_on
 
 
 def _turn_payload(result, session) -> dict:

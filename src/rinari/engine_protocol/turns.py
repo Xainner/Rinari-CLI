@@ -119,6 +119,10 @@ class _ActiveTurn:
     steering_open: bool = True
     steer_count: int = 0
     terminal_event: str | None = None
+    # What the goal runner needs from a finished turn (plan 0.4.0 #23).
+    goal_result: Any = None
+    goal_error: tuple[str, str] = ("", "")
+    files_changed: int = 0
     governor: dict[str, Any] = field(
         default_factory=lambda: {
             "execution": "automatic",
@@ -902,6 +906,7 @@ class TurnManager:
             changes_finalized = True
             changeset = tracker.finalize()
             if changeset is not None:
+                turn.files_changed = len(changeset.get("files") or [])
                 self._activity_cb(turn)("turn.changes.completed", changeset)
 
         try:
@@ -977,6 +982,7 @@ class TurnManager:
                     turn_id=turn_id,
                     memory_origin=turn.memory_origin,
                 )
+            turn.goal_result = result
             if result.kind == "cancelled":
                 self._cancel_running_activities(turn)
                 finalize_changes()
@@ -1007,6 +1013,7 @@ class TurnManager:
             finalize_changes()
             self._activity_cb(turn)("turn.cancelled", {})
         except EngineProtocolError as err:
+            turn.goal_error = (err.code, err.message)
             self._fail_running_activities(turn, err.message)
             finalize_changes()
             self._activity_cb(turn)(
@@ -1024,6 +1031,10 @@ class TurnManager:
             self._fail_running_activities(turn, str(err))
             finalize_changes()
             mapped = errors.from_rinari_error(err)
+            turn.goal_error = (
+                str(getattr(err, "error_code", "") or mapped.code),
+                mapped.message,
+            )
             self._activity_cb(turn)(
                 "turn.failed",
                 {
@@ -1079,6 +1090,7 @@ class TurnManager:
             self._settle_steering(turn, leftover)
             self._checklist_end(turn)
             self._start_next_queued(turn.session_id)
+            self._goal_after_turn(turn)
 
     def _prepare_session(self, turn: _ActiveTurn, record: Any, reasoning_effort: str | None) -> Any:
         """Build the per-turn runtime without stranding cancellation or the UI.
@@ -1389,6 +1401,109 @@ class TurnManager:
     def start_next_queued(self, session_id: str) -> None:
         """Single scheduler per session: manual queue first, then the peer inbox."""
         self._start_next_queued(session_id)
+
+    # -- goals (plan 0.4.0 #23) ---------------------------------------------------
+
+    def _goal_service(self) -> Any:
+        return getattr(self._services, "goals", None)
+
+    def emit_goal(self, goal: Any, session_id: str) -> None:
+        self._emit(
+            event(
+                "goal.updated",
+                {"session_id": session_id, "goal": goal.as_dict() if goal is not None else None},
+            )
+        )
+
+    def _goal_after_turn(self, turn: _ActiveTurn) -> None:
+        """Fold a finished turn into the goal and start the next iteration.
+
+        Runs after the owner's queue had its chance: a queued message goes
+        first and the goal goes on when that turn ends.
+        """
+        service = self._goal_service()
+        if service is None:
+            return
+        from rinari.goals.service import TurnOutcome
+
+        try:
+            origin = turn.origin or {}
+            terminal = (turn.terminal_event or "turn.completed").removeprefix("turn.")
+            if origin.get("source") == "goal":
+                result = turn.goal_result
+                usage = getattr(result, "usage", None)
+                tokens = int(getattr(usage, "input_tokens", 0) or 0) + int(
+                    getattr(usage, "output_tokens", 0) or 0
+                )
+                checklist = None
+                checklist_service = self._checklist_service()
+                if checklist_service is not None:
+                    with contextlib.suppress(Exception):
+                        current = checklist_service.get(turn.session_id)
+                        checklist = current.revision if current is not None else None
+                outcome = TurnOutcome(
+                    terminal=terminal,
+                    error_code=turn.goal_error[0],
+                    error_message=turn.goal_error[1],
+                    recoverable=bool(getattr(result, "recoverable", False)),
+                    gate=getattr(result, "completion", None),
+                    tokens=tokens,
+                    seconds=max(0.0, time.time() - turn.started_at),
+                    files_changed=turn.files_changed,
+                    checklist_revision=checklist,
+                )
+                goal, go_on = service.after_turn(turn.session_id, outcome)
+                self.emit_goal(goal, turn.session_id)
+            else:
+                goal = service.pursuing(turn.session_id)
+                if goal is not None and terminal == "cancelled":
+                    # The owner pressed Stop: nothing starts behind their back.
+                    self.emit_goal(service.pause(turn.session_id, "stopped"), turn.session_id)
+                    return
+                go_on = goal is not None
+            if go_on:
+                self.start_goal_turn(turn.session_id)
+        except Exception:
+            logger.exception("goal runner failed")
+
+    def start_goal_turn(self, session_id: str) -> dict[str, Any] | None:
+        """Start the next iteration of a pursued goal, if the session is free."""
+        service = self._goal_service()
+        if service is None:
+            return None
+        goal = service.pursuing(session_id)
+        if goal is None:
+            return None
+        with self._lock:
+            busy = any(
+                not active.done.is_set() and active.session_id == session_id
+                for active in self._turns.values()
+            ) or bool(self._queue.get(session_id))
+        if busy:
+            return None
+        message = service.continuation(goal)
+        goal = service.begin_iteration(session_id)
+        if goal is None:
+            return None
+        self.emit_goal(goal, session_id)
+        try:
+            return self.start_turn(
+                session_id,
+                message,
+                origin={
+                    "kind": "user",
+                    "source": "goal",
+                    "goal_id": goal.goal_id,
+                    "iteration": goal.iteration,
+                },
+                display_message=goal.objective,
+                memory_origin="automation",
+            )
+        except EngineProtocolError as exc:
+            if exc.code != errors.TURN_RUNNING:
+                paused = service.pause(session_id, exc.message)
+                self.emit_goal(paused, session_id)
+            return None
 
     def _start_next_queued(self, session_id: str) -> None:
         with self._lock:

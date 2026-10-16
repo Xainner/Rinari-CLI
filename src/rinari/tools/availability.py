@@ -14,6 +14,8 @@ HOSTS = {
     "process": "processes",
     "pty": "pty",
     "channel": "channel_host",
+    # goal.update exists only in a conversation whose goal is pursued.
+    "goal": "goals",
 }
 
 

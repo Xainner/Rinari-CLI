@@ -253,9 +253,13 @@ class EngineServer:
         self._dispatcher.register("followup.dismiss", self._followup_dismiss)
         self._dispatcher.register("followup.accept", self._followup_accept)
         self._dispatcher.register("session.checklist.clear", self._session_checklist_clear)
-        self._dispatcher.register(
-            "session.checklist.complete", self._session_checklist_complete
-        )
+        self._dispatcher.register("session.checklist.complete", self._session_checklist_complete)
+        self._dispatcher.register("session.goal.get", self._session_goal_get)
+        self._dispatcher.register("session.goal.set", self._session_goal_set)
+        self._dispatcher.register("session.goal.pause", self._session_goal_pause)
+        self._dispatcher.register("session.goal.resume", self._session_goal_resume)
+        self._dispatcher.register("session.goal.clear", self._session_goal_clear)
+        self._dispatcher.register("session.goal.budget", self._session_goal_budget)
         self._dispatcher.register("session.permission.set", self._session_permission_set)
         self._dispatcher.register("session.turn.start", self._turn_start)
         self._dispatcher.register("command.list", self._command_list)
@@ -1631,6 +1635,80 @@ class EngineServer:
         service = getattr(self._services, "checklist", None)
         cleared = service.clear(session_id) if service is not None else None
         return {"checklist": cleared.as_dict() if cleared is not None else None}
+
+    # -- goals (plan 0.4.0 #23) ---------------------------------------------------
+
+    def _goals(self):
+        service = getattr(self._services, "goals", None)
+        if service is None:
+            raise EngineProtocolError(ENGINE_ERROR, "Goals are not available.")
+        return service
+
+    def _goal_call(self, function, *args):
+        from rinari.goals import GoalError
+
+        try:
+            return function(*args)
+        except GoalError as exc:
+            raise EngineProtocolError(INVALID_PARAMS, str(exc)) from exc
+
+    def _goal_reply(self, session_id: str, goal, turn: dict | None = None) -> dict[str, Any]:
+        self._turns.emit_goal(goal, session_id)
+        reply: dict[str, Any] = {"goal": goal.as_dict() if goal is not None else None}
+        if turn is not None:
+            reply["turn"] = {"turn_id": turn.get("turn_id")}
+        return reply
+
+    def _session_goal_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        session_id = self._services.sessions.show(self._need_str(params, "session_id")).id
+        goal = self._goals().visible(session_id)
+        return {"goal": goal.as_dict() if goal is not None else None}
+
+    def _session_goal_set(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Set (or replace) the goal and start pursuing it when the session is free."""
+        session_id = self._services.sessions.show(self._need_str(params, "session_id")).id
+        objective = self._need_str(params, "objective")
+        budget = params.get("budget")
+        start = params.get("start", True)
+        if not isinstance(start, bool):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'start' must be a boolean.")
+        goal = self._goal_call(self._goals().set, session_id, objective, budget)
+        self._turns.emit_goal(goal, session_id)
+        turn = self._turns.start_goal_turn(session_id) if start else None
+        current = self._goals().get(session_id)
+        return self._goal_reply(session_id, current, turn)
+
+    def _session_goal_pause(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Pause: the turn running now finishes, and no new one starts."""
+        session_id = self._services.sessions.show(self._need_str(params, "session_id")).id
+        goal = self._goal_call(self._goals().pause, session_id, "paused by the owner")
+        return self._goal_reply(session_id, goal)
+
+    def _session_goal_resume(self, params: dict[str, Any]) -> dict[str, Any]:
+        session_id = self._services.sessions.show(self._need_str(params, "session_id")).id
+        start = params.get("start", True)
+        if not isinstance(start, bool):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'start' must be a boolean.")
+        goal = self._goal_call(self._goals().resume, session_id)
+        self._turns.emit_goal(goal, session_id)
+        # start=false: the owner's hint goes first as a normal turn, and the
+        # goal goes on when that turn ends.
+        turn = self._turns.start_goal_turn(session_id) if start else None
+        return self._goal_reply(session_id, self._goals().get(session_id), turn)
+
+    def _session_goal_clear(self, params: dict[str, Any]) -> dict[str, Any]:
+        session_id = self._services.sessions.show(self._need_str(params, "session_id")).id
+        goal = self._goal_call(self._goals().clear, session_id)
+        return self._goal_reply(session_id, goal)
+
+    def _session_goal_budget(self, params: dict[str, Any]) -> dict[str, Any]:
+        """The owner's caps (turns, minutes, tokens); {} removes them."""
+        session_id = self._services.sessions.show(self._need_str(params, "session_id")).id
+        budget = params.get("budget")
+        if not isinstance(budget, dict):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'budget' must be an object.")
+        goal = self._goal_call(self._goals().set_budget, session_id, budget)
+        return self._goal_reply(session_id, goal)
 
     def _session_checklist_complete(self, params: dict[str, Any]) -> dict[str, Any]:
         """The owner marks every step of a list left open as done."""

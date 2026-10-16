@@ -108,6 +108,10 @@ CAPABILITIES: dict[str, bool] = {
     # checklist.update keeps a live list per conversation: checklist.updated
     # on the turn, settled from the outcome, session.checklist.get/clear.
     "turn_checklist_v1": True,
+    # A goal Rinari pursues turn after turn (plan 0.4.0 #23):
+    # session.goal.get/set/pause/resume/clear/budget, goal.updated, and the
+    # goal turns' origin {kind: user, source: goal, goal_id, iteration}.
+    "session_goal_v1": True,
     # followup.suggest notes: followup.suggested/resolved on the turn,
     # followup.list/dismiss/accept (accept starts a new conversation).
     "followup_suggestions_v1": True,

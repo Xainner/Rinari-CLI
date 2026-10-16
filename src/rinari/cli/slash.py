@@ -41,6 +41,8 @@ class SlashOutcome:
     action: str  # "stay" | "exit" | "new_session" | "resume_session" | "turn"
     prompt: str | None = None
     resume_ref: str | None = None
+    # The turn is an iteration of the conversation's goal (plan 0.4.0 #23).
+    goal: bool = False
 
 
 _STAY = SlashOutcome("stay")
@@ -234,6 +236,8 @@ def handle(session: AgentSession, console: Console, message: str) -> SlashOutcom
     if command == "/tasks":
         _print_tasks(session, console, arg)
         return _STAY
+    if command == "/goal":
+        return _goal(session, console, rest)
     if command == "/diff":
         _print_diff(session, console)
         return _STAY
@@ -289,6 +293,60 @@ def handle(session: AgentSession, console: Console, message: str) -> SlashOutcom
     if command == "/resume":
         return SlashOutcome("resume_session", resume_ref=arg)
     return _skill_command(session, command[1:], rest)
+
+
+def goal_line(goal) -> str:
+    """One line for the terminal: state, iteration, time and tokens."""
+    if goal is None:
+        return "goal: none (/goal <objective> sets one)"
+    minutes = int(goal.active_seconds // 60)
+    line = (
+        f"goal [{goal.state}] {goal.objective} · iteration {goal.iteration} · "
+        f"{minutes} min · {goal.tokens_used} tokens"
+    )
+    return line + (f" · {goal.reason}" if goal.reason else "")
+
+
+def next_goal_turn(session: AgentSession) -> SlashOutcome:
+    """The next iteration of a pursued goal as a turn, or stay."""
+    service = session.services.goals
+    goal = service.pursuing(session.record.id)
+    if goal is None:
+        return _STAY
+    message = service.continuation(goal)
+    service.begin_iteration(session.record.id)
+    # The terminal session is built once: goal.update needs the service now.
+    import dataclasses
+
+    session.context.tool_ctx = dataclasses.replace(session.context.tool_ctx, goals=service)
+    return SlashOutcome("turn", prompt=message, goal=True)
+
+
+def _goal(session: AgentSession, console: Console, rest: str) -> SlashOutcome:
+    """`/goal <objective>` sets it and starts; pause, resume and clear manage it."""
+    from rinari.goals import GoalError
+
+    service = session.services.goals
+    word = rest.strip().lower()
+    try:
+        if not word:
+            console.print(goal_line(service.visible(session.record.id)))
+            return _STAY
+        if word == "pause":
+            console.print(goal_line(service.pause(session.record.id, "paused by the owner")))
+            return _STAY
+        if word == "clear":
+            service.clear(session.record.id)
+            console.print("goal cleared")
+            return _STAY
+        if word == "resume":
+            service.resume(session.record.id)
+            return next_goal_turn(session)
+        service.set(session.record.id, rest.strip())
+    except GoalError as exc:
+        raise InvalidUsageError(str(exc)) from exc
+    console.print(goal_line(service.get(session.record.id)))
+    return next_goal_turn(session)
 
 
 def _print_tasks(session: AgentSession, console: Console, filter_arg: str | None) -> None:

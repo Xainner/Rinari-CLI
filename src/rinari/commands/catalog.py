@@ -100,6 +100,12 @@ COMMANDS: tuple[CommandSpec, ...] = (
     CommandSpec("lesson", "learn", "Save what the last turn taught as a lesson", "[focus]"),
     CommandSpec("merge-skills", "learn", "Merge similar skills into one", "<skill> <skill> [...]"),
     CommandSpec("skills", "ui", "Open the skill library (terminal: list or search)", "[query]"),
+    CommandSpec(
+        "goal",
+        "ui",
+        "Pursue a goal turn after turn until it is achieved",
+        "[objective | pause | resume | clear]",
+    ),
     CommandSpec("compact", "ui", "Compact the context now"),
     CommandSpec("context", "ui", "Context usage and what fills it"),
     CommandSpec("model", "ui", "Change the model of this conversation", "[alias]"),
