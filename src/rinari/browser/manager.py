@@ -203,6 +203,11 @@ class BrowserManager:
         # A desktop turn builds a new runtime. Never share Chromium's singleton
         # profile with a previous runtime (or another engine process).
         self._profile_instance = uuid.uuid4().hex
+        #: A real Chrome/Edge window the owner asked for (plan 0.4.0 #45): the
+        #: desktop backend waits here while the session works over there, and
+        #: comes back when that window is closed.
+        self._native_backend: Any | None = None
+        self._external_profile: Path | None = None
 
     # -- state ----------------------------------------------------------------
 
@@ -227,9 +232,67 @@ class BrowserManager:
 
     @property
     def profile_dir(self) -> Path:
+        if self._external_profile is not None:
+            return self._external_profile
         return self._home_root / "browser" / "profiles" / self.session_id / self._profile_instance
 
+    @property
+    def external(self) -> bool:
+        """The session works in a real Chrome/Edge window (#45)."""
+        self._settle_external()
+        return self._native_backend is not None
+
+    def use_external(self, url: str, profile_dir: Path) -> dict[str, Any]:
+        """Open `url` in a real, visible Chrome/Edge with Rinari's profile (#45).
+
+        For a site that rejects Rinari's own browser with a human
+        verification. The owner passes the check there; the agent keeps
+        working in that same window, and the profile (one per project, never
+        the owner's personal one) keeps the signed-in session for next time.
+        Closing that window brings the session back to the desktop browser.
+        """
+        self._settle_external()
+        if self._native_backend is None:
+            self._native_backend = self._backend
+            self._backend = None
+        self._external_profile = Path(profile_dir)
+        self._headless = False
+        try:
+            self.launch()
+            pages = self.targets()
+            if pages:
+                self.navigate(pages[0]["target_id"], url)
+                return {"target_id": pages[0]["target_id"], "url": url}
+            return self.new_page(url)
+        except BrowserError:
+            self._leave_external()
+            raise
+
+    def _leave_external(self) -> None:
+        """Back to the desktop browser; the external window, if any, closes."""
+        if self._session is not None or self._process is not None:
+            with contextlib.suppress(Exception):
+                self._disconnect()
+            if self._process is not None:
+                with contextlib.suppress(Exception):
+                    self._kill_process()
+        self._endpoint = None
+        if self._native_backend is not None:
+            self._backend = self._native_backend
+            self._native_backend = None
+        self._external_profile = None
+        self._headless = True
+
+    def _settle_external(self) -> None:
+        """The owner closed the external window: the desktop browser is back."""
+        if self._native_backend is None:
+            return
+        session = self._session
+        if session is None or session.closed or session.fatal is not None:
+            self._leave_external()
+
     def status(self) -> dict[str, Any]:
+        self._settle_external()
         if self._backend is not None:
             # El estado del backend nativo no tiene endpoint ni proceso que
             # enseñar, y fingir uno sería mentir sobre lo que hay detrás
@@ -250,6 +313,7 @@ class BrowserManager:
             "endpoint": self._endpoint,
             "managed": self._process is not None,
             "headless": self._headless,
+            "external": self._native_backend is not None,
             "targets": len(self.targets()) if self.connected else 0,
             "diagnostics": self.diagnostics(),
         }
@@ -325,6 +389,7 @@ class BrowserManager:
         return self._endpoint or target
 
     def launch(self, command: str | None = None, port: int | None = None) -> str:
+        self._settle_external()
         if self._backend is not None:
             # El contexto nativo ya existe o no existe; no hay proceso que
             # lanzar. La comprobación va **antes** que `self.connected`: con el
@@ -401,6 +466,13 @@ class BrowserManager:
 
     def close(self) -> dict[str, Any]:
         closed: list[str] = []
+        if self._native_backend is not None:
+            # Closing the session also closes the desktop context waiting
+            # behind the external window.
+            self._native_backend.close()
+            self._native_backend = None
+            self._external_profile = None
+            closed.append("host-context")
         if self._backend is not None:
             self._backend.close()
             closed.append("host-context")
@@ -574,6 +646,7 @@ class BrowserManager:
         return session, self._attached[target_id]
 
     def targets(self) -> list[dict[str, Any]]:
+        self._settle_external()
         if self._backend is not None:
             return list(self._backend.targets())
         session = self._require_session()
@@ -591,6 +664,7 @@ class BrowserManager:
         return out
 
     def new_page(self, url: str = "about:blank") -> dict[str, Any]:
+        self._settle_external()
         if self._backend is not None:
             return dict(self._backend.new_page(url))
         session = self._require_session()
@@ -621,6 +695,7 @@ class BrowserManager:
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         self._raise_if_cancelled(cancelled)
+        self._settle_external()
         if self._backend is not None:
             return self._backend.send(
                 target_id,

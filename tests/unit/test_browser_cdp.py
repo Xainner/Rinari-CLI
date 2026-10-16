@@ -75,6 +75,8 @@ class FakeCdpServer:
         self._next_session = 1
         self.commands: list[tuple[str, dict, str | None]] = []
         self.download_file: bytes | None = None
+        #: The page shows a human verification check (plan 0.4.0 #45).
+        self.human_check: str | None = None
         self.last_pong: bytes | None = None
         self._conns: list[socket.socket] = []
         self._thread = threading.Thread(target=self._serve, daemon=True)
@@ -493,6 +495,13 @@ class FakeCdpServer:
         raise _CdpRouteError(f"Unknown method: {method}")
 
     def _evaluate(self, expression: str) -> dict:
+        if "_cf_chl_opt" in expression:
+            if self.human_check is None:
+                return {"type": "object", "value": None}
+            return {
+                "type": "object",
+                "value": {"kind": self.human_check, "url": "https://login.example/"},
+            }
         if "document.documentElement" in expression:
             if self.big_html:
                 html = "<html><body>" + ("x" * 300_000) + "</body></html>"
@@ -1402,3 +1411,80 @@ def test_local_page_paths() -> None:
     assert local_page_path(Path("/tmp/x y/p.html").resolve().as_uri()) == str(
         Path("/tmp/x y/p.html").resolve()
     )
+
+
+def test_a_human_check_stops_the_agent_instead_of_retrying(tmp_path, fake_cdp, monkeypatch) -> None:
+    """Plan 0.4.0 #45: the page asks for a person; the tool says so."""
+    from rinari.browser import human_check
+
+    monkeypatch.setattr(human_check, "SETTLE_S", 0.0)
+    manager = _connected_manager(tmp_path, fake_cdp, monkeypatch)
+    runtime = _runtime(tmp_path, manager=manager, network_mode="allow")
+    ctx = _ctx(tmp_path, manager=manager, network=NetworkGuard(NetworkPolicy(mode="allow")))
+    fake_cdp.human_check = "turnstile"
+    result = runtime.execute("browser.navigate", {"url": "https://login.example/"}, ctx)
+    assert not result.ok
+    assert result.data["browser_error"] == "HUMAN_CHECK"
+    assert result.data["check"] == "turnstile"
+    assert result.data["url"] == "https://login.example/"
+    assert result.error.retryable is False
+    assert "must not try to solve" in result.error.message
+    assert "user.ask" in result.error.message
+    # Looking at the page again says the same, so the agent does not loop.
+    again = runtime.execute("browser.snapshot", {}, ctx)
+    assert again.data["browser_error"] == "HUMAN_CHECK"
+
+    fake_cdp.human_check = None
+    clear = runtime.execute("browser.snapshot", {}, ctx)
+    assert clear.ok, clear.error
+    manager.close()
+
+
+def test_the_session_moves_to_a_real_chrome_and_comes_back(tmp_path, fake_cdp, monkeypatch) -> None:
+    """Plan 0.4.0 #45: «Abrir en Chrome/Edge con Rinari» and closing it."""
+
+    class Native:
+        kind = "electron-native"
+        closed = False
+        connected = True
+        control = "agent"
+        control_revision = 1
+
+        def status(self):
+            return {"backend": self.kind}
+
+        def targets(self):
+            return [{"target_id": "native", "url": "https://login.example/", "title": ""}]
+
+        def close(self):
+            self.closed = True
+
+    native = Native()
+    manager = BrowserManager(session_id="s1", home_root=tmp_path, backend=native)
+    launched: list[tuple[bool, Path]] = []
+
+    def launch(command=None, port=None):
+        launched.append((manager._headless, manager.profile_dir))
+        return manager.connect(fake_cdp.base_url)
+
+    monkeypatch.setattr(manager, "launch", launch)
+    profile = tmp_path / "browser" / "profiles" / "external" / "proj-1"
+    opened = manager.use_external("https://login.example/", profile)
+    assert opened["url"] == "https://login.example/"
+    # A visible window, with the project's own profile.
+    assert launched == [(False, profile)]
+    assert manager.external
+    assert manager.status()["external"] is True
+    # The agent now works over there.
+    assert any(page["url"] == "https://login.example/" for page in manager.targets())
+
+    # The owner closes that window: the desktop browser is back.
+    fake_cdp.drop()
+    deadline = time.monotonic() + 3
+    while manager.external and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not manager.external
+    assert manager.targets()[0]["target_id"] == "native"
+    assert manager.profile_dir != profile
+    manager.close()
+    assert native.closed

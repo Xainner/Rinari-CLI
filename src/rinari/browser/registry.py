@@ -117,8 +117,15 @@ class BrowserRegistry:
             raise BrowserError(
                 "BROWSER_DISCONNECTED", "this session has no desktop browser context"
             )
-        backend = entry["manager"]._backend
+        manager = entry["manager"]
+        backend = manager._native_backend or manager._backend
         return backend.set_control(owner, expected_revision=expected_revision, automatic=automatic)
+
+    def manager(self, session_id: str) -> Any | None:
+        """The session's browser, without creating one."""
+        with self._lock:
+            entry = self._contexts.get(session_id)
+        return entry["manager"] if entry is not None else None
 
     def release(self, session_id: str) -> None:
         """Cierra el contexto de una sesión. Idempotente."""
@@ -163,16 +170,17 @@ class BrowserRegistry:
             }
 
         manager = entry["manager"]
-        backend = manager._backend
+        external = manager.external
+        backend = manager._native_backend if external else manager._backend
         observed = self._bridge.observed(entry["context_id"])
         targets = observed.get("targets") or []
 
         # `ready` exige contexto **y** una página lista. Anunciarlo sólo por
         # tener binding haría que la UI mostrara un browser que aún no puede
         # enseñar nada (§5.2: soporte + registro + contexto listo).
-        if manager.is_disposed:
+        if backend is None or getattr(backend, "closed", False):
             state = "disposed"
-        elif not manager.connected:
+        elif not backend.connected:
             state = "disconnected"
         elif targets:
             state = "ready"
@@ -193,4 +201,6 @@ class BrowserRegistry:
             "control_revision": backend.control_revision,
             "targets": targets,
             "active_target_id": observed.get("active_target_id"),
+            # The session works in a real Chrome/Edge window (#45).
+            "external": external,
         }

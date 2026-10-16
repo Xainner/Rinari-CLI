@@ -782,6 +782,67 @@ def browser_download(input: dict, ctx: ToolContext) -> ToolResult:
 # -- registry -----------------------------------------------------------------------
 
 
+#: Tools after which the page may be showing a human verification check
+#: (plan 0.4.0 #45): the ones that land on a page or change it, and the ones
+#: the agent uses to look at it.
+_HUMAN_CHECKED = {
+    "browser.open",
+    "browser.navigate",
+    "browser.click",
+    "browser.type",
+    "browser.snapshot",
+    "browser.a11y",
+    "browser.screenshot",
+}
+
+
+def _human_checked(handler: Callable[[dict, ToolContext], ToolResult]):
+    """Run the tool, then say so when the page asks for a human (#45).
+
+    The tool's own work stands (the page is open, the click happened); what
+    changes is that the agent gets `HUMAN_CHECK` instead of a page to keep
+    poking at, so it stops and asks the owner rather than retrying.
+    """
+    from rinari.browser import human_check
+
+    def run(input: dict, ctx: ToolContext) -> ToolResult:
+        result = handler(input, ctx)
+        manager = _manager(ctx)
+        if not result.ok or manager is None:
+            return result
+        target = input.get("target_id") if isinstance(input.get("target_id"), str) else None
+        if target is None and isinstance(result.data, dict):
+            created = result.data.get("target_id")
+            target = created if isinstance(created, str) and created else None
+        cancelled = _cancelled_fn(ctx)
+
+        def evaluate(expression: str) -> Any:
+            return manager.evaluate(target, expression, cancelled=cancelled).get("value")
+
+        found = human_check.detect(evaluate, cancelled=cancelled, settle_s=human_check.SETTLE_S)
+        if found is None:
+            return result
+        return ToolResult(
+            ok=False,
+            data={
+                "browser_error": "HUMAN_CHECK",
+                "check": found["kind"],
+                "url": found["url"],
+                # What the tool did still happened: the page is there.
+                "outcome": "applied",
+            },
+            error=ToolErrorInfo(
+                code=ToolErrorCode.AUTH_REQUIRED,
+                message=human_check.message(found),
+                retryable=False,
+            ),
+            artifacts=result.artifacts,
+            images=result.images,
+        )
+
+    return run
+
+
 def browse_tools() -> list[ToolDefinition]:
     optional_target = {
         "type": "object",
@@ -1267,6 +1328,7 @@ def browse_tools() -> list[ToolDefinition]:
             tool,
             always_loaded=False,
             idempotent=tool.idempotent and tool.name not in non_repeatable,
+            handler=_human_checked(tool.handler) if tool.name in _HUMAN_CHECKED else tool.handler,
         )
         for tool in tools
     ]

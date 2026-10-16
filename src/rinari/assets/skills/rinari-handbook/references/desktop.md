@@ -17,7 +17,7 @@ The desktop is a client of the Engine: everything it shows comes from Engine sta
 
 ## Side panel (per session)
 - **Archivos**: files the conversation opened or changed; images and artifacts preview as images. A path in a message opens here.
-- **Navegador**: the native browser the agent drives.
+- **Navegador**: the native browser the agent drives. Sites with a human verification (Cloudflare Turnstile, hCaptcha, reCAPTCHA, «Checking your browser») reject it by design: the browser tools answer `HUMAN_CHECK`. Never solve, bypass or retry it; ask the owner to do that step in their own browser (the card in the chat offers **Abrir en mi navegador**).
 - **Workspace**: tabs **Cambios** (files changed per turn, review and undo), **Tareas**, **Verificación**, **Checkpoints**, **Artefactos** (images preview), **Contexto y uso** (context status, last compaction, compact now).
 
 ## Activity

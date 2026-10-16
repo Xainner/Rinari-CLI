@@ -195,6 +195,7 @@ class EngineServer:
         self._dispatcher.register("browser.context.get", self._browser_context_get)
         self._dispatcher.register("browser.control.set", self._browser_control_set)
         self._dispatcher.register("browser.context.prepare", self._browser_context_prepare)
+        self._dispatcher.register("browser.external.open", self._browser_external_open)
         self._dispatcher.register("target.list", self._target_list)
         self._dispatcher.register("target.add", self._target_add)
         self._dispatcher.register("session.list", self._session_list)
@@ -630,6 +631,52 @@ class EngineServer:
         # `automatic`: la interfaz da la vista en vivo sola (entre turnos). El
         # agente la recupera en su primera acción; un control tomado a mano no.
         return self._browser_registry.set_control(record.id, owner, expected, automatic=automatic)
+
+    def _browser_external_open(self, params: dict[str, Any]) -> dict[str, Any]:
+        """`browser.external.open`: the session goes on in a real Chrome/Edge (#45).
+
+        The owner asks for it from the human-verification card: the page
+        opens in a visible window of the installed Chrome or Edge, with a
+        Rinari profile kept per project (never the owner's own profile or
+        passwords). The owner passes the check there and the agent keeps
+        working in that window. Launching takes seconds, so it runs in a
+        worker and the result arrives as `browser.external.changed`.
+        """
+        record = self._services.sessions.show(self._need_str(params, "session_id"))
+        url = self._need_str(params, "url")
+        if not url.startswith(("https://", "http://")):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'url' must be an http(s) URL.")
+        manager = self._browser_registry.acquire(record.id)
+        if manager is None:
+            raise EngineProtocolError(
+                INVALID_PARAMS, "This session has no browser to move to Chrome or Edge."
+            )
+        key = record.project_id or "chat"
+        profile = self._services.ctx.home / "browser" / "profiles" / "external" / key
+        publish = self._browser_host.publish
+
+        def run() -> None:
+            from rinari.browser.manager import BrowserError
+
+            try:
+                opened = manager.use_external(url, profile)
+            except BrowserError as exc:
+                publish(
+                    "browser.external.changed",
+                    {
+                        "session_id": record.id,
+                        "state": "failed",
+                        "error": {"code": exc.code, "message": exc.message},
+                    },
+                )
+                return
+            publish(
+                "browser.external.changed",
+                {"session_id": record.id, "state": "open", "url": opened.get("url") or url},
+            )
+
+        threading.Thread(target=run, name="browser-external-open", daemon=True).start()
+        return {"session_id": record.id, "state": "opening"}
 
     # -- sessions --------------------------------------------------------
 
