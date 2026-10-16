@@ -21,6 +21,42 @@ _EXCERPT = 160
 # Compiled executables cannot be read as instructions; text scripts (.sh,
 # .ps1, .bat…) are scanned line by line like everything else.
 _BINARY_SUFFIXES = frozenset({".exe", ".dll", ".so", ".dylib", ".bin", ".msi", ".scr", ".com"})
+# Media and fonts go into the content hash by chunks and are never scanned:
+# a skill with reference videos took tens of seconds to review (plan 0.4.0 #53).
+_MEDIA_SUFFIXES = frozenset(
+    {
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".webp",
+        ".bmp",
+        ".ico",
+        ".tif",
+        ".tiff",
+        ".avif",
+        ".mp4",
+        ".mov",
+        ".webm",
+        ".mkv",
+        ".avi",
+        ".mp3",
+        ".wav",
+        ".ogg",
+        ".flac",
+        ".m4a",
+        ".ttf",
+        ".otf",
+        ".woff",
+        ".woff2",
+        ".pdf",
+        ".zip",
+        ".gz",
+        ".psd",
+        ".blend",
+    }
+)
+_CHUNK = 1024 * 1024
 # Zero-width and bidi-override characters: text that reads differently than it
 # looks. Built from code points so this file itself contains none of them.
 _ZERO_WIDTH = (0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF)
@@ -135,14 +171,20 @@ class Review:
         }
 
 
+def _hash_file(digest, root: Path, path: Path) -> None:
+    digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+    digest.update(b"\0")
+    with path.open("rb") as stream:
+        while chunk := stream.read(_CHUNK):
+            digest.update(chunk)
+    digest.update(b"\0")
+
+
 def content_hash(root: Path) -> str:
     """sha256 over (relative path, bytes) of every file, in a stable order."""
     digest = hashlib.sha256()
     for path in _files(root):
-        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
-        digest.update(b"\0")
+        _hash_file(digest, root, path)
     return digest.hexdigest()
 
 
@@ -150,17 +192,28 @@ def review_skill(root: Path) -> Review:
     findings: list[Finding] = []
     total = 0
     files = _files(root)
+    digest = hashlib.sha256()
     for path in files:
         relative = path.relative_to(root).as_posix()
         size = path.stat().st_size
         total += size
-        if path.suffix.lower() in _BINARY_SUFFIXES:
+        suffix = path.suffix.lower()
+        if suffix in _BINARY_SUFFIXES:
+            _hash_file(digest, root, path)
             findings.append(Finding("EXECUTABLE_FILE", "warning", relative, None, path.name))
             continue
+        if suffix in _MEDIA_SUFFIXES:
+            _hash_file(digest, root, path)
+            continue
         if size > _SCAN_MAX_BYTES:
+            _hash_file(digest, root, path)
             findings.append(Finding("LARGE_FILE", "warning", relative, None, f"{size} bytes"))
             continue
         raw = path.read_bytes()
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(raw)
+        digest.update(b"\0")
         if b"\0" in raw:
             continue  # binary asset (image, font…): nothing to read as instructions
         text = raw.decode("utf-8", errors="replace")
@@ -173,7 +226,7 @@ def review_skill(root: Path) -> Review:
                 if pattern.search(line):
                     findings.append(Finding(code, severity, relative, number, _excerpt(line)))
     return Review(
-        content_hash=content_hash(root),
+        content_hash=digest.hexdigest(),
         files=len(files),
         size=total,
         findings=tuple(findings),

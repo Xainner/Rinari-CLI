@@ -188,7 +188,11 @@ def test_install_from_github_subfolder_and_ambiguous_repo(services) -> None:
     installed = services.skills.install("https://github.com/acme/skills/tree/main/skills/pdf-tools")
     assert installed.name == "pdf-tools" and installed.format == "standard"
     assert (services.skills.user_skills_dir() / "pdf-tools" / "scripts" / "extract.py").is_file()
-    assert seen == ["https://codeload.github.com/acme/skills/zip/main"]
+    # The tree API comes first (plan 0.4.0 #53); without it, the archive.
+    assert seen == [
+        "https://api.github.com/repos/acme/skills/git/trees/main?recursive=1",
+        "https://codeload.github.com/acme/skills/zip/main",
+    ]
     record = services.ctx.skill_repo.get("pdf-tools")
     assert record["source_kind"] == "github" and record["origin"] == "installed"
 

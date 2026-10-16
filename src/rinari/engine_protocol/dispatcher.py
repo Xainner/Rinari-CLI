@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -15,6 +17,10 @@ from rinari.shared.errors import RinariError
 Handler = Callable[[dict[str, Any]], dict[str, Any]]
 
 _ID_RE = re.compile(r'"id"\s*:\s*"([^"]+)"')
+_log = logging.getLogger(__name__)
+# A request that holds the request thread this long delays every other one
+# (plan 0.4.0 #53): its name and duration go to the log, never its params.
+SLOW_REQUEST_S = 3.0
 
 
 def _extract_id(line: str) -> Any:
@@ -72,6 +78,7 @@ class EngineDispatcher:
                 details={"method": method},
             )
         self._seen_ids.add(request_id)
+        started = time.monotonic()
         try:
             return success(request_id, handler(params))
         except EngineProtocolError as err:
@@ -83,3 +90,7 @@ class EngineDispatcher:
             )
         except Exception as err:  # defensive: never break the stdio frame stream
             return failure(request_id, errors.ENGINE_ERROR, f"{type(err).__name__}: {err}")
+        finally:
+            elapsed = time.monotonic() - started
+            if elapsed >= SLOW_REQUEST_S:
+                _log.warning("Slow request on the request thread: %s took %.1fs", method, elapsed)
