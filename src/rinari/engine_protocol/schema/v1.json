@@ -565,6 +565,7 @@
         "host.browser.request",
         "browser.control.changed",
         "browser.external.changed",
+        "project.trust.changed",
         "turn.stopped",
         "document.job.updated",
         "model.started",
@@ -4453,6 +4454,12 @@
               "type": "null"
             }
           ]
+        },
+        "has_hooks": {
+          "type": "boolean"
+        },
+        "has_mcp": {
+          "type": "boolean"
         }
       },
       "additionalProperties": false

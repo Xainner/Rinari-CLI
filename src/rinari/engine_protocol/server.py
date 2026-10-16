@@ -149,6 +149,21 @@ def _prepare_turn_attachments(
     return attachment_prompt(prepared), image_refs, [item.reference() for item in prepared]
 
 
+#: Files in a folder that declare commands to run (plan 0.4.0 #60). Rinari runs
+#: the hooks once the folder is trusted; the MCP files are other tools' (Rinari
+#: keeps its project servers in its own database), but a folder that brings
+#: them, like one cloned from the internet, deserves a look before trusting.
+_HOOK_FILES = (".rinari/hooks.json",)
+_MCP_FILES = (".mcp.json", ".rinari/mcp.json", ".vscode/mcp.json", ".cursor/mcp.json")
+
+
+def _runs_commands(root: Path) -> dict[str, bool]:
+    def present(names: tuple[str, ...]) -> bool:
+        return any((root / name).is_file() for name in names)
+
+    return {"has_hooks": present(_HOOK_FILES), "has_mcp": present(_MCP_FILES)}
+
+
 class EngineServer:
     def __init__(self, services: ServiceContainer, user_home: Path | str | None = None) -> None:
         self._services = services
@@ -3511,9 +3526,11 @@ class EngineServer:
             if check.canonical_path:
                 row["trust_state"] = self._services.trust.status(Path(check.canonical_path)).state
                 row["git_head"] = HEADS.get(check.canonical_path).as_dict()
+                row.update(_runs_commands(Path(check.canonical_path)))
             else:
                 row["trust_state"] = None
                 row["git_head"] = None
+                row.update(has_hooks=False, has_mcp=False)
             report.append(row)
         return report
 

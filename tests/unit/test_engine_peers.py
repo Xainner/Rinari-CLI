@@ -994,3 +994,62 @@ def test_a_turn_that_never_used_the_browser_does_not_show_it_live(server, tmp_pa
         },
     )
     assert _ok(server, "browser.view.get", {"session_id": session})["state"] == "connected"
+
+
+class _GitDuringTurn(ScriptedModel):
+    """Answers, but first runs git in the project like a shell call would."""
+
+    def __init__(self, root, *commands) -> None:
+        super().__init__([_answer("listo")])
+        self._root = root
+        self._commands = commands
+
+    def invoke(self, request):
+        import subprocess
+
+        for command in self._commands:
+            subprocess.run(["git", *command], cwd=self._root, check=True, capture_output=True)
+        self._commands = ()
+        return super().invoke(request)
+
+
+def _trusted_project(server, tmp_path, name):
+    folder = tmp_path / name
+    folder.mkdir()
+    created = _ok(
+        server, "project.create", {"name": name, "folders": [{"path": str(folder), "trust": True}]}
+    )
+    return folder, created["session"]["id"]
+
+
+def test_git_init_during_a_turn_keeps_trust_and_says_so(server, tmp_path, models):
+    """Plan 0.4.0 #38: no new trust prompt for a fresh local repository."""
+    folder, session = _trusted_project(server, tmp_path, "plain")
+    models[session] = _GitDuringTurn(folder, ["init", "-q"])
+    _start(server, session, "convierte esto en un repo")
+    _wait_terminal(server, session)
+    changed = _wait_event(server, "project.trust.changed", session_id=session)
+    assert changed["payload"]["state"] == "trusted"
+    assert changed["payload"]["reason"] == "git-init"
+
+
+def test_a_turn_that_changes_the_identity_asks_at_once(server, tmp_path, models):
+    """Plan 0.4.0 #38: the desktop hears it when the turn ends, not on reopening."""
+    folder, session = _trusted_project(server, tmp_path, "cloned")
+    models[session] = _GitDuringTurn(
+        folder, ["init", "-q"], ["remote", "add", "origin", "https://example.invalid/x.git"]
+    )
+    _start(server, session, "clona el repo aquí")
+    _wait_terminal(server, session)
+    changed = _wait_event(server, "project.trust.changed", session_id=session)
+    assert changed["payload"]["state"] == "revalidation-required"
+    assert changed["payload"]["previous_state"] == "trusted"
+    assert changed["payload"]["reason"] == "identity-changed"
+
+
+def test_a_turn_that_leaves_the_folder_alone_says_nothing(server, tmp_path, models):
+    _folder, session = _trusted_project(server, tmp_path, "quiet")
+    models[session] = ScriptedModel([_answer("hola")])
+    _start(server, session, "hola")
+    _wait_terminal(server, session)
+    assert not _seen(server, "project.trust.changed")

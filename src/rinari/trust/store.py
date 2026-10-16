@@ -8,6 +8,7 @@ the entry *need revalidation* instead of silently staying active.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,9 @@ class TrustStatus:
     state: str
     fingerprint: str | None
     trusted_at: str | None
+    # Set when this read re-identified the grant on its own: "git-init" when a
+    # trusted plain folder became a fresh local repository (plan 0.4.0 #38).
+    reidentified: str | None = None
 
 
 def fingerprint_for(root: Path) -> str:
@@ -58,6 +62,28 @@ def fingerprint_for(root: Path) -> str:
         except OSError:
             pass
     return _sha256(f"dir:{root}")
+
+
+def _fresh_local_repo(root: Path, previous: str | None, current: str) -> bool:
+    """A trusted plain folder (or marker project) that just became a local repo.
+
+    True only when the old grant was the folder's own non-Git identity, the
+    `.git` is a directory inside the folder (not a file pointing elsewhere)
+    and the repository has no remotes.
+    """
+    if not previous or not current.startswith("git-v2:"):
+        return False
+    root = Path(root).expanduser().resolve()
+    if not (root / ".git").is_dir():
+        return False
+    plain = {_sha256(f"dir:{root}")}
+    marker = root / ".rinari" / "project.toml"
+    if marker.is_file():
+        with contextlib.suppress(OSError):
+            plain.add(_sha256(marker.read_bytes()))
+    if previous not in plain:
+        return False
+    return not _git(root, ["remote"]).strip()
 
 
 def _git(cwd: Path, args: list[str]) -> str:
@@ -127,6 +153,16 @@ class TrustService:
             if entry.fingerprint == _sha256(f"head={head}\nremotes={remotes}"):
                 entry.fingerprint = current
                 self._ctx.trust_repo.upsert(entry)
+        reidentified = None
+        if current != entry.fingerprint and _fresh_local_repo(raw, entry.fingerprint, current):
+            # `git init` inside a folder that was already trusted changes its
+            # fingerprint but not who owns it. Asking again (and only on the
+            # next open) is noise. A repository brought from elsewhere (with
+            # remotes, or a `.git` file pointing out) is still asked about.
+            entry.fingerprint = current
+            entry.updated_at = now_iso(self._ctx.clock)
+            self._ctx.trust_repo.upsert(entry)
+            reidentified = "git-init"
         state = STATE_TRUSTED if current == entry.fingerprint else STATE_REVALIDATION
         return TrustStatus(
             path=str(raw),
@@ -134,6 +170,7 @@ class TrustService:
             state=state,
             fingerprint=current,
             trusted_at=entry.trusted_at,
+            reidentified=reidentified,
         )
 
     def list(self) -> list[TrustStatus]:

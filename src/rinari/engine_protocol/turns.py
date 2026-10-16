@@ -936,6 +936,7 @@ class TurnManager:
                 turn.files_changed = len(changeset.get("files") or [])
                 self._activity_cb(turn)("turn.changes.completed", changeset)
 
+        trusted_before = self._trusted_folders(record)
         try:
             self._checklist_begin(turn)
             agent_session = self._prepare_session(turn, record, reasoning_effort)
@@ -1116,8 +1117,56 @@ class TurnManager:
             self._local.token = None
             self._settle_steering(turn, leftover)
             self._checklist_end(turn)
+            self._trust_after_turn(record, trusted_before)
             self._start_next_queued(turn.session_id)
             self._goal_after_turn(turn)
+
+    def _trusted_folders(self, record: Any) -> dict[str, str]:
+        """The project's folders that were trusted when the turn started (#38)."""
+        if getattr(record, "kind", None) != "PROJECT" or not getattr(record, "project_id", None):
+            return {}
+        try:
+            folders = self._services.projects.folders.list(record.project_id)
+        except Exception:
+            return {}
+        trusted: dict[str, str] = {}
+        for folder in folders:
+            path = Path(folder["path"])
+            if not path.is_dir():
+                continue
+            with contextlib.suppress(Exception):
+                state = self._services.trust.status(path).state
+                if state == "trusted":
+                    trusted[str(path)] = state
+        return trusted
+
+    def _trust_after_turn(self, record: Any, trusted_before: dict[str, str]) -> None:
+        """Tell the desktop now when the turn changed a folder's identity (#38).
+
+        It used to find out only when the conversation was opened again. A
+        `git init` without remotes keeps the trust on its own and is reported
+        as information; any other change asks for trust again right away.
+        """
+        for raw, previous in trusted_before.items():
+            try:
+                status = self._services.trust.status(Path(raw))
+            except Exception:
+                continue
+            if status.state == previous and status.reidentified is None:
+                continue
+            self._emit(
+                event(
+                    "project.trust.changed",
+                    {
+                        "session_id": record.id,
+                        "project_id": record.project_id,
+                        "path": raw,
+                        "state": status.state,
+                        "previous_state": previous,
+                        "reason": status.reidentified or "identity-changed",
+                    },
+                )
+            )
 
     def _prepare_session(self, turn: _ActiveTurn, record: Any, reasoning_effort: str | None) -> Any:
         """Build the per-turn runtime without stranding cancellation or the UI.
