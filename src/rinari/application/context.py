@@ -90,7 +90,12 @@ def build_app_context(
     root = resolve_home(home)
     layout = ensure_layout(root)
     db = Database(layout.state_db)
-    MigrationRunner(db, clock).migrate()
+    MigrationRunner(
+        db,
+        clock,
+        backup_root=layout.root / "backups",
+        backup_extra=(layout.root / "policies",),
+    ).migrate()
 
     user_data: dict | None = None
     if config_path is not None:

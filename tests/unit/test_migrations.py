@@ -361,3 +361,45 @@ def test_stored_runtime_notes_are_marked_as_harness_not_as_the_owner(db, tmp_pat
         "m4": {"kind": "harness", "source": "subagents"},
         "m5": None,
     }
+
+
+def test_new_migrations_on_an_existing_home_back_it_up_first(db, tmp_path):
+    custom = tmp_path / "migrations"
+    custom.mkdir()
+    (custom / "0001_initial.sql").write_text(
+        BUNDLED_0001.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    backups = tmp_path / "backups"
+    policies = tmp_path / "policies"
+    policies.mkdir()
+    (policies / "approval_grants.json").write_text("{}", encoding="utf-8")
+    fresh = MigrationRunner(db, FakeClock(), directory=custom, backup_root=backups)
+    fresh.migrate()
+    # A brand-new home has nothing to keep.
+    assert fresh.last_backup is None
+    assert not backups.exists()
+
+    (custom / "0002_add_note.sql").write_text(
+        "CREATE TABLE note_test (id TEXT PRIMARY KEY)", encoding="utf-8"
+    )
+    runner = MigrationRunner(
+        db, FakeClock(), directory=custom, backup_root=backups, backup_extra=(policies,)
+    )
+    assert runner.migrate() == [2]
+    folder = runner.last_backup
+    assert folder is not None and folder.parent == backups
+    assert folder.name.startswith("antes-de-migrar-0001-a-0002-")
+    # The copy is the database as it was before 0002, with the policies.
+    copy = sqlite3.connect(folder / "state.db")
+    try:
+        rows = copy.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = {row[0] for row in rows}
+    finally:
+        copy.close()
+    assert "note_test" not in tables
+    assert (folder / "policies" / "approval_grants.json").read_text(encoding="utf-8") == "{}"
+
+    # Nothing pending: no new backup.
+    again = MigrationRunner(db, FakeClock(), directory=custom, backup_root=backups)
+    assert again.migrate() == []
+    assert again.last_backup is None
