@@ -37,6 +37,16 @@ def _mock_models_client() -> httpx.Client:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/models"):
             return httpx.Response(200, json={"data": [{"id": "mx-1"}, {"id": "mx-2"}]})
+        if request.url.path.endswith("/chat/completions"):
+            # «Probar» is a real minimal call (plan 0.4.0 #94).
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"role": "assistant", "content": "OK"}, "finish_reason": "stop"}
+                    ]
+                },
+            )
         return httpx.Response(404, json={"error": {"message": "nope"}})
 
     return httpx.Client(transport=httpx.MockTransport(handler))

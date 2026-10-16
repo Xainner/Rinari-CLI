@@ -1604,3 +1604,52 @@ def test_openai_compatible_payload_sends_the_projected_schema() -> None:
     sent = payload["tools"][0]["function"]["parameters"]
     assert "oneOf" not in sent and set(sent["properties"]) == {"command", "argv"}
     assert "oneOf" in schema
+
+
+def test_a_refused_protocol_is_learned_kept_and_the_call_goes_on(monkeypatch, tmp_path) -> None:
+    # Plan 0.4.0 #94: «Model does not support this protocol» on the chat route.
+    import json as _json
+
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        seen.append(url)
+        if "/google/" in url:
+            chunk = {
+                "candidates": [
+                    {
+                        "content": {"role": "model", "parts": [{"text": "OK"}]},
+                        "finishReason": "STOP",
+                    }
+                ]
+            }
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=f"data: {_json.dumps(chunk)}\n\n".encode(),
+            )
+        return httpx.Response(
+            400, json={"error": {"message": "Model does not support this protocol."}}
+        )
+
+    events: list = []
+    ctx, services = _app_and_services(handler, monkeypatch, tmp_path)
+    try:
+        provider = services.providers.add(_add_custom_input("go", OPENCODE_GO_URL))
+        model = services.models.add(provider.alias, "mystery-model", "mystery")
+        router = ModelRouter(services.providers, services.models, http_client=_client(handler))
+        request = _request(usage_observer=lambda name, payload: events.append((name, payload)))
+        response = router.invoke(provider, model.id, request)
+        assert response.content == "OK"
+        assert services.models.resolve(model.id).settings["transport"] == "google"
+        assert (
+            "provider.protocol.learned",
+            {"model": "mystery-model", "transport": "google"},
+        ) in events
+        # Next time it goes straight to the learned protocol.
+        seen.clear()
+        router.invoke(provider, model.id, _request())
+        assert all("/google/" in url for url in seen)
+    finally:
+        ctx.close()

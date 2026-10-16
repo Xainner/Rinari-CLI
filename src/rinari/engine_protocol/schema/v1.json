@@ -611,6 +611,7 @@
         "provider.reasoning.dropped",
         "provider.max_tokens.reduced",
         "model.fallback",
+        "provider.protocol.learned",
         "skill.job.completed",
         "skill.job.failed",
         "skill.learned",

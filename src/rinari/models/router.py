@@ -56,12 +56,23 @@ def _resolve_transport(provider, model) -> str:
         ):
             return "responses"
         return "chat"
-    if transport not in ("chat", "responses", "anthropic"):
+    if transport not in ("chat", "responses", "anthropic", "google"):
         raise InvalidUsageError(
             f"unknown transport {transport!r} on model {model.alias!r}",
-            hint="Expected one of: chat, responses, anthropic.",
+            hint="Expected one of: chat, responses, anthropic, google.",
         )
     return transport
+
+
+# Protocols an aggregator may serve a model by, tried in this order when it
+# refuses the one Rinari picked (plan 0.4.0 #94).
+LEARNABLE_TRANSPORTS = ("google", "anthropic", "responses", "chat")
+
+
+def refuses_protocol(exc: Exception) -> bool:
+    """OpenCode's «Model does not support this protocol»: the route, not the request."""
+    text = str(exc).lower()
+    return "does not support this protocol" in text or "unsupported protocol" in text
 
 
 def _alias_map_for_request(endpoint: str | None, request: ModelRequest) -> dict[str, str] | None:
@@ -555,6 +566,64 @@ class ModelRouter:
             )
         return self.adapter(provider), transport
 
+    def _learning_protocol(
+        self, provider, model, request, transport, call, *, output_started=lambda: False
+    ):
+        """`call(transport)`; when the endpoint refuses that protocol for this
+        model, find the one it serves with a minimal call, keep it on the model
+        and call again (plan 0.4.0 #94). An explicit per-model protocol is the
+        owner's choice and is never changed."""
+        try:
+            return call(transport)
+        except ProviderModelError as exc:
+            if (
+                not refuses_protocol(exc)
+                or output_started()
+                or (model.settings or {}).get("transport")
+            ):
+                raise
+            learned = self._learn_transport(provider, model, request, transport)
+            if learned is None:
+                raise
+            return call(learned)
+
+    def _learn_transport(self, provider, model, request, current):
+        from rinari.models.types import ChatMessage, ModelRequest
+
+        probe = ModelRequest(
+            model=request.model,
+            messages=(ChatMessage.user("Reply with OK."),),
+            max_tokens=32,
+            session_id=request.session_id,
+        )
+        for candidate in LEARNABLE_TRANSPORTS:
+            if candidate == current:
+                continue
+            try:
+                adapter, wire = self._transport_adapter(provider, candidate)
+                self._authenticated_call(
+                    provider,
+                    lambda secret, adapter=adapter, wire=wire: adapter.invoke(
+                        probe, secret, provider.endpoint, transport=wire
+                    ),
+                )
+            except Exception:
+                continue
+            ctx = getattr(self._models, "_ctx", None)
+            if ctx is not None:
+                with contextlib.suppress(Exception):
+                    ctx.model_repo.update(
+                        replace(model, settings={**(model.settings or {}), "transport": candidate})
+                    )
+            if request.usage_observer is not None:
+                with contextlib.suppress(Exception):
+                    request.usage_observer(
+                        "provider.protocol.learned",
+                        {"model": model.provider_model_id, "transport": candidate},
+                    )
+            return candidate
+        return None
+
     def _authenticated_call(self, provider, call, *, output_started=lambda: False):
         from rinari.providers.errors import ProviderError, ProviderErrorCode
         from rinari.shared.errors import NetworkError, ProviderModelError
@@ -631,8 +700,14 @@ class ModelRouter:
                     request,
                     lambda attempt: within_affordable_tokens(
                         attempt,
-                        lambda current: self._adapter_invoke(
-                            provider, current, transport, real_by_alias
+                        lambda current: self._learning_protocol(
+                            provider,
+                            model,
+                            current,
+                            transport,
+                            lambda chosen: self._adapter_invoke(
+                                provider, current, chosen, real_by_alias
+                            ),
                         ),
                     ),
                 ),
@@ -684,6 +759,7 @@ class ModelRouter:
         request = prepare_visual_payload(request, constraints)
         real_by_alias = _alias_map_for_request(provider.endpoint, request)
         transport = _resolve_transport(provider, model)
+        original_transport = transport
         adapter, transport = self._transport_adapter(provider, transport)
         emitted = False
         from rinari.models.usage_tracking import observe_call
@@ -695,17 +771,32 @@ class ModelRouter:
                 if on_visible is not None:
                     on_visible(delta)
 
-            def attempt(current):
+            def stream_by(current, chosen):
+                stream_adapter, wire = (
+                    (adapter, transport)
+                    if chosen == original_transport
+                    else self._transport_adapter(provider, chosen)
+                )
                 return self._authenticated_call(
                     provider,
-                    lambda secret: adapter.invoke_stream(
+                    lambda secret: stream_adapter.invoke_stream(
                         current,
                         secret,
                         provider.endpoint,
                         deliver,
-                        transport=transport,
+                        transport=wire,
                         tool_aliases=real_by_alias,
                     ),
+                    output_started=lambda: emitted,
+                )
+
+            def attempt(current):
+                return self._learning_protocol(
+                    provider,
+                    model,
+                    current,
+                    original_transport,
+                    lambda chosen: stream_by(current, chosen),
                     output_started=lambda: emitted,
                 )
 

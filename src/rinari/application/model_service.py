@@ -300,6 +300,40 @@ class ModelService:
 
     # -- discovery / refresh / test --------------------------------------
 
+    # A model the public catalog does not know yet: refresh it first, at most
+    # this often (plan 0.4.0 #94: a Gemini model a day newer than the catalog
+    # went out by the wrong protocol).
+    CATALOG_REFRESH_EVERY_S = 3600
+    _KEY_CATALOG_REFRESHED = "models.catalog.unknown_refresh_at"
+
+    def _catalog_for_unknown(self, provider, discovered) -> None:
+        from rinari.providers import metadata
+        from rinari.providers.catalog import product_for
+
+        product = product_for(provider)
+        if product not in metadata.PUBLIC_PRODUCTS:
+            return
+        known = metadata.catalog()["models"].get(product, {})
+        if all(model_id in known for model_id in discovered):
+            return
+        now = self._ctx.clock.now()
+        last = self._ctx.config_repo.get(self._KEY_CATALOG_REFRESHED)
+        try:
+            if last is not None and now - float(last) < self.CATALOG_REFRESH_EVERY_S:
+                return
+        except ValueError:
+            pass
+        from rinari.storage.records import ConfigValue
+
+        self._ctx.config_repo.set(
+            ConfigValue(key=self._KEY_CATALOG_REFRESHED, value=str(now), updated_at=self._now())
+        )
+        try:
+            get = self._client.get if self._client is not None else httpx.get
+            self.last_catalog_refresh = metadata.refresh_public_catalog(get)
+        except Exception as exc:  # offline: the catalog already in use stays
+            self.last_catalog_refresh = {"error": f"{exc.__class__.__name__}: {exc}"}
+
     def refresh(
         self,
         provider_ref: str | None = None,
@@ -348,6 +382,8 @@ class ModelService:
                     error=f"{exc.__class__.__name__}: {getattr(exc, 'message', exc)}",
                 )
                 continue
+            if add_new and not public_catalog:
+                self._catalog_for_unknown(rec, discovered)
             from rinari.context import windows
 
             # The context resolver shares this discovery instead of repeating it,
@@ -399,25 +435,41 @@ class ModelService:
         return alias
 
     def test(self, ref: str, provider_ref: str | None = None) -> ModelTestResult:
+        """A real minimal call by the model's protocol (plan 0.4.0 #94): «works ·
+        google protocol · 0.7 s», or why not. Being in the provider's list said
+        nothing about whether the model could be used."""
+        import time
+
+        from rinari.models.router import ModelRouter, _resolve_transport
+        from rinari.models.types import ChatMessage, ModelRequest
+
         record = self.resolve(ref, provider_ref)
         provider = self._providers.get(record.provider_id)
-        adapter = adapter_for(provider, self._client)
-        health = adapter.health(self._providers.resolve_secret(provider), provider.endpoint)
-        if not health.connected:
+        router = ModelRouter(self._providers, self, http_client=self._client)
+        started = time.monotonic()
+        try:
+            router.invoke(
+                provider,
+                record.id,
+                ModelRequest(
+                    model=record.provider_model_id,
+                    messages=(ChatMessage.user("Reply with OK."),),
+                    max_tokens=32,
+                ),
+            )
+        except Exception as exc:
             return ModelTestResult(
                 ok=False,
-                detail=health.detail or "provider not reachable",
+                detail=str(getattr(exc, "message", exc))[:300],
                 model=record,
                 provider=provider,
             )
-        found = any(m.provider_model_id == record.provider_model_id for m in health.models)
+        seconds = time.monotonic() - started
+        current = self.resolve(record.id)
+        protocol = _resolve_transport(provider, current)
         return ModelTestResult(
-            ok=found,
-            detail=(
-                f"model {record.provider_model_id!r} present in provider catalog"
-                if found
-                else f"model {record.provider_model_id!r} not found in provider catalog"
-            ),
-            model=record,
+            ok=True,
+            detail=f"works · {protocol} protocol · {seconds:.1f} s",
+            model=current,
             provider=provider,
         )

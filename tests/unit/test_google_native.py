@@ -165,3 +165,35 @@ def test_opencode_google_models_choose_the_google_transport() -> None:
     meta = model_metadata(provider, "gemini-4-argon-contributor")
     assert meta.get("transport") == "google"
     assert meta["route_supported"] is True
+
+
+def test_an_unknown_model_refreshes_the_public_catalog_at_most_hourly(
+    app_ctx, tmp_path, monkeypatch
+):
+    # Plan 0.4.0 #94: the catalog was a day older than the Gemini model.
+    from rinari.application.provider_service import AddProviderInput
+    from rinari.application.services import build_services
+    from rinari.providers import metadata
+
+    home = tmp_path / "home"
+    home.mkdir()
+    services = build_services(app_ctx, user_home=home)
+    provider = services.providers.add(
+        AddProviderInput(
+            alias="go",
+            provider_type="custom",
+            endpoint=GO,
+            secret="dummy-not-real",
+            settings={"product_id": "opencode-go"},
+        )
+    )
+    calls = []
+    monkeypatch.setattr(
+        metadata, "refresh_public_catalog", lambda get: calls.append(1) or {"models": 1}
+    )
+    known = next(iter(metadata.catalog()["models"]["opencode-go"]))
+    services.models._catalog_for_unknown(provider, {known: {}})
+    assert calls == []
+    services.models._catalog_for_unknown(provider, {"gemini-9-brand-new": {}})
+    services.models._catalog_for_unknown(provider, {"gemini-9-brand-new": {}})
+    assert calls == [1]
