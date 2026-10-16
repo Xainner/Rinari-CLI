@@ -600,6 +600,7 @@
         "provider.usage.updated",
         "provider.auth.updated",
         "provider.reasoning.dropped",
+        "provider.max_tokens.reduced",
         "skill.job.completed",
         "skill.job.failed",
         "skill.learned",

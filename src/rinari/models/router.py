@@ -258,6 +258,38 @@ def without_rejected_reasoning(request: ModelRequest, call, *, output_started=la
         return call(replace(request, reasoning_effort=None))
 
 
+# Below this, a smaller answer is not worth a second call.
+MIN_AFFORDABLE_TOKENS = 1024
+
+
+def within_affordable_tokens(request: ModelRequest, call, *, output_started=lambda: False):
+    """`call(request)`, repeated once with a lower max_tokens when the
+    provider said the balance only covers N output tokens (OpenRouter's 402
+    «can only afford N», plan 0.4.0 #3). Without max_tokens the provider
+    reserves the model's whole output to check the balance; 90 % of N fits.
+    """
+    try:
+        return call(request)
+    except ProviderModelError as exc:
+        affordable = exc.details.get("affordable_output_tokens")
+        current = request.max_tokens
+        if (
+            not isinstance(affordable, int)
+            or affordable < MIN_AFFORDABLE_TOKENS
+            or (current is not None and affordable >= current)
+            or exc.details.get("partial")
+            or output_started()
+        ):
+            raise
+        reduced = int(affordable * 0.9)
+        if request.usage_observer is not None:
+            request.usage_observer(
+                "provider.max_tokens.reduced",
+                {"model": request.model, "max_tokens": reduced, "affordable": affordable},
+            )
+        return call(replace(request, max_tokens=reduced))
+
+
 def scheduled(method):
     from functools import wraps
 
@@ -592,8 +624,11 @@ class ModelRouter:
             lambda _: _unalias_response(
                 without_rejected_reasoning(
                     request,
-                    lambda attempt: self._adapter_invoke(
-                        provider, attempt, transport, real_by_alias
+                    lambda attempt: within_affordable_tokens(
+                        attempt,
+                        lambda current: self._adapter_invoke(
+                            provider, current, transport, real_by_alias
+                        ),
                     ),
                 ),
                 real_by_alias,
@@ -669,7 +704,13 @@ class ModelRouter:
                     output_started=lambda: emitted,
                 )
 
-            return without_rejected_reasoning(request, attempt, output_started=lambda: emitted)
+            return without_rejected_reasoning(
+                request,
+                lambda current: within_affordable_tokens(
+                    current, attempt, output_started=lambda: emitted
+                ),
+                output_started=lambda: emitted,
+            )
 
         response = observe_call(request, invoke, on_delta)
         return self._scope_response(

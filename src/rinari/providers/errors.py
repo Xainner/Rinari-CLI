@@ -9,6 +9,7 @@ reduce tools / ask auth / stop.
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable
 from enum import StrEnum
@@ -164,6 +165,18 @@ def _error_payload(response: httpx.Response) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+_AFFORDABLE = re.compile(r"can only afford\s+([\d][\d,. ]*)", re.IGNORECASE)
+
+
+def affordable_output_tokens(message: str | None) -> int | None:
+    """The output tokens a 402 says the balance still covers, if it says so."""
+    match = _AFFORDABLE.search(message or "")
+    if match is None:
+        return None
+    digits = re.sub(r"\D", "", match.group(1))
+    return int(digits) if digits else None
+
+
 def _safe_error_fields(payload: dict[str, Any] | None) -> tuple[str, str | None, str | None]:
     """Return bounded message/type/code fields from common provider envelopes."""
     if not payload:
@@ -246,6 +259,11 @@ def _classify_http_error(
             **common,
         )
         result.details["limit_kind"] = "quota"
+        affordable = affordable_output_tokens(error_message)
+        if affordable is not None:
+            # OpenRouter: «can only afford N» when the balance covers fewer
+            # output tokens than requested (plan 0.4.0 #3).
+            result.details["affordable_output_tokens"] = affordable
         return result
     if status in (401, 403):
         return ProviderError(
