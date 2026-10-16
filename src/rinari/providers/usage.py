@@ -65,6 +65,21 @@ def window(key, value, *, scope="account", label=None):
     }
 
 
+def window_reset_passed(snapshot, now: float, fetched: float) -> bool:
+    """Whether a window in `snapshot` reset between `fetched` and `now`."""
+    for item in (snapshot or {}).get("windows") or []:
+        resets = item.get("resets_at")
+        if not isinstance(resets, str):
+            continue
+        try:
+            moment = datetime.fromisoformat(resets).timestamp()
+        except ValueError:
+            continue
+        if fetched < moment <= now:
+            return True
+    return False
+
+
 class ProviderUsageService:
     def __init__(self, providers, *, clock=time.time):
         self.providers = providers
@@ -146,7 +161,15 @@ class ProviderUsageService:
         age = now - cached.get("fetched", 0)
         invalidated = repository.get_json(f"provider.usage.invalidated.{provider.id}") or 0
         refresh = refresh or invalidated > cached.get("fetched", 0)
-        if cached and (now < cached.get("retry", 0) or (not refresh and age < 60)):
+        # A window whose reset time passed after the snapshot was taken is
+        # stale whatever its age (plan 0.4.0 #27): «100 % used, resets at
+        # 23:03» kept showing at 23:03.
+        reset_passed = window_reset_passed(snapshot, now, cached.get("fetched", 0))
+        if reset_passed:
+            refresh = True
+        if cached and (
+            (now < cached.get("retry", 0) and not reset_passed) or (not refresh and age < 60)
+        ):
             return {
                 **snapshot,
                 "status": "stale"

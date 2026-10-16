@@ -962,3 +962,29 @@ def test_opencode_chat_models_that_reason_offer_effort():
     assert reasoning["reasoning_effort"] is True
     assert reasoning["reasoning_levels"] == ["low", "medium", "high"]
     assert model_metadata(provider, "deepseek-flash")["reasoning_effort"] is False
+
+
+def test_a_window_that_reset_is_read_again_whatever_its_age(app_ctx):
+    # Plan 0.4.0 #27: «100 % used, resets 23:03» stayed after 23:03.
+    from datetime import UTC, datetime
+
+    now = [1_790_000_000]
+    calls = []
+
+    def handler(req):
+        calls.append(req)
+        used = 100 if len(calls) == 1 else 2
+        resets = datetime.fromtimestamp(now[0] + 30, UTC).isoformat()
+        return httpx.Response(
+            200, json={"usage": {"rolling": {"percent": used, "resetsAt": resets}}}
+        )
+
+    services, p = setup(app_ctx, handler)
+    usage = ProviderUsageService(services.providers, clock=lambda: now[0])
+    assert usage.get(p.id)["windows"][0]["remaining_percent"] == 0
+    now[0] += 20
+    assert usage.get(p.id)["windows"][0]["remaining_percent"] == 0  # not reset yet: cached
+    assert len(calls) == 1
+    now[0] += 25  # 45 s after the read, past the reset
+    assert usage.get(p.id)["windows"][0]["remaining_percent"] == 98
+    assert len(calls) == 2
