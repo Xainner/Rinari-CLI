@@ -119,6 +119,18 @@ CAPABILITIES: dict[str, bool] = {
     # Fallback and auxiliary models (plan 0.4.0 #80): models.roles.get/set,
     # model.fallback on the turn when it switches.
     "model_roles_v1": True,
+    # Implement or adjust a finished plan without a user bubble (plan 0.4.0
+    # #55): session.turn.start origin {kind: user, source: plan_implement |
+    # plan_adjust, plan_turn_id, comment?}; implementing runs in BUILD with
+    # the plan's numbered steps as the checklist (reason "plan").
+    "plan_turns_v1": True,
+    # The conversation's repository for «Resumen» (plan 0.4.0 #82):
+    # repo.status (git now, GitHub via repo.status.updated) and
+    # repo.pr.create (gh, in the background: repo.pr.created / failed).
+    "repo_status_v1": True,
+    # session.summary (sources, results, connectors, background) and
+    # session.summary.changed, coalesced per session (plan 0.4.0 #82).
+    "session_summary_v1": True,
     # followup.suggest notes: followup.suggested/resolved on the turn,
     # followup.list/dismiss/accept (accept starts a new conversation).
     "followup_suggestions_v1": True,

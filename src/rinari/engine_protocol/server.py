@@ -165,6 +165,11 @@ class EngineServer:
         self._dispatcher = EngineDispatcher()
         self._model_jobs: dict[str, dict[str, Any]] = {}
         self._model_jobs_lock = threading.Lock()
+        # GitHub reads in flight for repo.status (#82), by (root, branch).
+        self._repo_refreshing: set[tuple[str, str]] = set()
+        self._repo_lock = threading.Lock()
+        # session.summary.changed, coalesced per session (#82).
+        self._summary_pending: set[str] = set()
         # Broker del browser nativo (documento 03 §5). El bridge existe siempre;
         # lo que decide si hay browser nativo es que un host se registre. Un
         # Engine sin host de escritorio no cambia de comportamiento.
@@ -208,6 +213,7 @@ class EngineServer:
         from rinari.engine_protocol.resume import ResumeRunner
 
         self._resume = ResumeRunner(self)
+        self._turns.add_observer(self._summary_observe)
         self._services.schedules.on_proposed = lambda payload: self._turns.emit_external(
             event("schedule.proposed", payload)
         )
@@ -305,6 +311,9 @@ class EngineServer:
         self._dispatcher.register("project.delete", self._project_delete)
         self._dispatcher.register("project.open", self._project_open)
         self._dispatcher.register("project.status", self._project_status)
+        self._dispatcher.register("repo.status", self._repo_status)
+        self._dispatcher.register("session.summary", self._session_summary)
+        self._dispatcher.register("repo.pr.create", self._repo_pr_create)
         self._dispatcher.register("project.intelligence", self._project_intelligence)
         self._dispatcher.register("project.trust", self._project_trust)
         self._dispatcher.register("pty.start", self._pty_start)
@@ -2219,6 +2228,152 @@ class EngineServer:
             "created": created,
         }
 
+    def _session_summary(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Sources, results, connectors and background work of a conversation
+        (plan 0.4.0 #82): what the «Resumen» panel cannot gather by itself."""
+        from rinari.engine_protocol.summary import build_summary
+
+        return build_summary(self, self._need_str(params, "session_id"))
+
+    def _summary_observe(self, frame: dict[str, Any]) -> None:
+        from rinari.engine_protocol.summary import changed_by
+
+        if frame.get("event") == "session.summary.changed":
+            return
+        reason = changed_by(frame)
+        session_id = (frame.get("payload") or {}).get("session_id")
+        if reason is None or not isinstance(session_id, str) or not session_id:
+            return
+        with self._repo_lock:
+            if session_id in self._summary_pending:
+                return
+            self._summary_pending.add(session_id)
+
+        def announce() -> None:
+            with self._repo_lock:
+                self._summary_pending.discard(session_id)
+            self._turns.emit_external(
+                event("session.summary.changed", {"session_id": session_id, "reason": reason})
+            )
+
+        timer = threading.Timer(1.0, announce)
+        timer.daemon = True
+        timer.start()
+
+    def _repo_cwd(self, params: dict[str, Any]) -> tuple[str, Path | None]:
+        record = self._services.sessions.show(self._need_str(params, "session_id"))
+        folder = record.current_cwd or record.project_root_snapshot
+        return record.id, Path(folder) if folder else None
+
+    def _repo_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        """The conversation's repository for «Resumen» (plan 0.4.0 #82), read-only.
+
+        Git is answered now; the GitHub part (`gh` sign-in, the branch's pull
+        requests and checks) comes from a cache and, when stale or with
+        `refresh`, is read in the background and announced with
+        `repo.status.updated`. `remote_pending` says one is on its way.
+        """
+        from rinari.engine_protocol import repo
+
+        refresh = params.get("refresh", False)
+        if not isinstance(refresh, bool):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'refresh' must be a boolean.")
+        session_id, cwd = self._repo_cwd(params)
+        status = repo.local_status(cwd)
+        key = repo.remote_key(status)
+        cached, fresh = repo.cached_remote(key) if key else (None, True)
+        pending = bool(key) and (refresh or not fresh)
+        if pending:
+            self._repo_refresh(session_id, status, key)
+        return {
+            "session_id": session_id,
+            **status,
+            "gh": (cached or {}).get("gh"),
+            "prs": (cached or {}).get("prs", []),
+            "remote_pending": pending,
+        }
+
+    def _repo_refresh(self, session_id: str, status: dict[str, Any], key: tuple[str, str]) -> None:
+        from rinari.engine_protocol import repo
+
+        with self._repo_lock:
+            if key in self._repo_refreshing:
+                return
+            self._repo_refreshing.add(key)
+
+        def read() -> None:
+            try:
+                info = repo.remote_info(key)
+                self._turns.emit_external(
+                    event(
+                        "repo.status.updated",
+                        {"session_id": session_id, **status, **info, "remote_pending": False},
+                    )
+                )
+            except Exception:
+                logger.exception("repo.status GitHub read failed")
+            finally:
+                with self._repo_lock:
+                    self._repo_refreshing.discard(key)
+
+        threading.Thread(target=read, name="repo-status", daemon=True).start()
+
+    def _repo_pr_create(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Open a pull request for the branch with `gh` (plan 0.4.0 #82).
+
+        The desktop confirms first. Checks that need no network answer now
+        (INVALID_PARAMS-style codes such as NOT_PUSHED); `gh` runs in the
+        background and ends with `repo.pr.created` or `repo.pr.failed`.
+        """
+        from rinari.engine_protocol import repo
+
+        title = self._need_str(params, "title").strip()
+        base = self._need_str(params, "base").strip()
+        body = params.get("body", "")
+        if not isinstance(body, str):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'body' must be a string.")
+        if not title or not base:
+            raise EngineProtocolError(INVALID_PARAMS, "Params 'title' and 'base' are required.")
+        session_id, cwd = self._repo_cwd(params)
+        status = repo.local_status(cwd)
+        try:
+            repo.check_pr(status, base)
+        except repo.RepoError as exc:
+            raise EngineProtocolError(exc.code, exc.message, details=exc.details) from exc
+        job_id = self._services.ctx.ids.new("job")
+
+        def create() -> None:
+            try:
+                created = repo.pr_create(status, title, base, body)
+            except repo.RepoError as exc:
+                payload = {"code": exc.code, "message": exc.message, "details": exc.details}
+                self._turns.emit_external(
+                    event(
+                        "repo.pr.failed",
+                        {"session_id": session_id, "job_id": job_id, "error": payload},
+                    )
+                )
+                return
+            except Exception as exc:  # defensive: the desktop must hear back
+                payload = {"code": "PR_CREATE_FAILED", "message": str(exc)[:500], "details": {}}
+                self._turns.emit_external(
+                    event(
+                        "repo.pr.failed",
+                        {"session_id": session_id, "job_id": job_id, "error": payload},
+                    )
+                )
+                return
+            self._turns.emit_external(
+                event("repo.pr.created", {"session_id": session_id, "job_id": job_id, **created})
+            )
+            key = repo.remote_key(status)
+            if key:
+                repo.forget_remote(key)
+                self._repo_refresh(session_id, status, key)
+
+        threading.Thread(target=create, name="repo-pr-create", daemon=True).start()
+        return {"status": "started", "job_id": job_id, "session_id": session_id}
+
     def _project_status(self, params: dict[str, Any]) -> dict[str, Any]:
         """Git truth plus session binding: the dashboard header source."""
         project_id = params.get("project_id")
@@ -3512,7 +3667,13 @@ class EngineServer:
             raise EngineProtocolError(
                 INVALID_PARAMS, "Param 'session_id' must be a non-empty string."
             )
+        from rinari.engine_protocol import plan_turns
+
+        plan_origin = plan_turns.parse_origin(params.get("origin"))
         message = params.get("message")
+        if plan_origin is not None and (message is None or message == ""):
+            # Implement / adjust a plan (#55): the Engine writes the instruction.
+            message = plan_origin.get("comment") or "plan"
         if not isinstance(message, str) or not message.strip():
             raise EngineProtocolError(INVALID_PARAMS, "Param 'message' must be a non-empty string.")
         reasoning_effort = params.get("reasoning_effort")
@@ -3543,6 +3704,10 @@ class EngineServer:
             )
         except EngineProtocolError:
             raise
+        if plan_origin is not None:
+            return self._plan_turn_start(
+                session_id, plan_origin, reasoning_effort, image_refs, attachment_metadata, params
+            )
         request, command_name = self._expand_command(session_id, params.get("command"), message)
         origin = None
         if command_name:
@@ -3567,6 +3732,56 @@ class EngineServer:
             allow_unconfirmed_vision=params.get("allow_unconfirmed_vision") is True,
             command=command_name,
             origin=origin,
+        )
+
+    def _plan_turn_start(
+        self,
+        session_id: str,
+        origin: dict[str, Any],
+        reasoning_effort: Any,
+        image_refs: Any,
+        attachment_metadata: Any,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Implement or adjust a finished plan (plan 0.4.0 #55).
+
+        No user bubble: the origin names the plan turn and the chat shows a
+        separator. Implementing runs in BUILD with the plan's steps as the
+        checklist; adjusting runs in PLAN with the owner's comment.
+        """
+        from rinari.application.session_service import SESSION_MODE_BUILD, SESSION_MODE_PLAN
+        from rinari.engine_protocol import plan_turns
+
+        record = self._services.sessions.show(session_id)
+        plan = plan_turns.find_plan(self._services.ctx.db, record.id, origin["plan_turn_id"])
+        implement = origin["source"] == "plan_implement"
+        mode = SESSION_MODE_BUILD if implement else SESSION_MODE_PLAN
+        if record.mode != mode:
+            record = self._services.sessions.set_mode(record.id, mode)
+            self._turns.emit_external(
+                event("session.mode.changed", {"session_id": record.id, "mode": record.mode})
+            )
+        origin = {**origin, "plan_title": plan.title}
+        if implement:
+            steps = plan_turns.plan_steps(plan.content)
+            origin["plan_steps"] = len(steps)
+            message = plan_turns.implement_message(plan)
+            seed = plan_turns.checklist_items(steps) or None
+            display = plan.title
+        else:
+            message = plan_turns.adjust_message(plan, origin["comment"])
+            seed = None
+            display = origin["comment"]
+        return self._turns.start_turn(
+            record.id,
+            message,
+            reasoning_effort,
+            attachments=image_refs,
+            display_message=display,
+            attachment_metadata=attachment_metadata,
+            allow_unconfirmed_vision=params.get("allow_unconfirmed_vision") is True,
+            origin=origin,
+            seed_checklist=seed,
         )
 
     def _command_list(self, params: dict[str, Any]) -> dict[str, Any]:

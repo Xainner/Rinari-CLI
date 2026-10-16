@@ -58,6 +58,27 @@ def run_git(
     cancellation: CancellationToken | None = None,
 ) -> GitCommandResult:
     """Run one bounded Git probe and preserve a structured failure reason."""
+    return run_process(
+        ["git", "--no-pager", "-c", "core.fsmonitor=false", *args],
+        cwd,
+        timeout_s=timeout_s,
+        cancellation=cancellation,
+        env={"GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"},
+        label=f"git {' '.join(args)}",
+    )
+
+
+def run_process(
+    argv: list[str],
+    cwd: Path,
+    *,
+    timeout_s: float,
+    cancellation: CancellationToken | None = None,
+    env: dict[str, str] | None = None,
+    label: str | None = None,
+) -> GitCommandResult:
+    """One bounded child process (git, gh) with the same Windows-safe pipes."""
+    label = label or " ".join(argv)
     started = time.monotonic()
     try:
         if cancellation is not None:
@@ -68,14 +89,14 @@ def run_git(
         ):
             creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
             proc = subprocess.Popen(
-                ["git", "--no-pager", "-c", "core.fsmonitor=false", *args],
+                argv,
                 cwd=cwd,
                 stdout=output,
                 stderr=diagnostics,
                 stdin=subprocess.DEVNULL,
                 creationflags=creationflags,
                 start_new_session=os.name != "nt",
-                env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"},
+                env={**os.environ, **(env or {})},
             )
             unsubscribe = (
                 cancellation.on_cancel(lambda: _terminate_tree(proc)) if cancellation else None
@@ -88,7 +109,7 @@ def run_git(
                     stdout="",
                     returncode=None,
                     timed_out=True,
-                    error=f"git {' '.join(args)} exceeded {timeout_s:.2f}s",
+                    error=f"{label} exceeded {timeout_s:.2f}s",
                 )
             finally:
                 if unsubscribe is not None:
@@ -103,7 +124,7 @@ def run_git(
                 return GitCommandResult(
                     stdout=stdout,
                     returncode=return_code,
-                    error=f"git {' '.join(args)} exited with {return_code}",
+                    error=f"{label} exited with {return_code}",
                     stderr=stderr,
                 )
             return GitCommandResult(stdout=stdout, returncode=return_code)
@@ -111,7 +132,7 @@ def run_git(
         return GitCommandResult(
             stdout="",
             returncode=None,
-            error=f"git {' '.join(args)} could not start: {exc}",
+            error=f"{label} could not start: {exc}",
         )
     finally:
         # Keep the monotonic read here so clock instrumentation can wrap this
@@ -131,4 +152,4 @@ def capture_git(cwd: Path, args: list[str], *, timeout_s: float) -> str | None:
     return result.stdout if result.returncode == 0 and not result.timed_out else None
 
 
-__all__ = ["GitCommandResult", "capture_git", "run_git"]
+__all__ = ["GitCommandResult", "capture_git", "run_git", "run_process"]

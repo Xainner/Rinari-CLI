@@ -103,6 +103,8 @@ class _ActiveTurn:
     continue_after: bool = False
     # Slash command that started the turn (`learn`…); becomes turn_command.
     command: str = ""
+    # Checklist the turn starts with: the steps of the plan it implements (#55).
+    seed_checklist: list[dict[str, Any]] | None = None
     activity_lock: Any = field(default_factory=threading.RLock)
     # The first visible text of the turn decides `model.changed`, once.
     model_notice_checked: bool = False
@@ -363,6 +365,16 @@ class TurnManager:
             self._activity_cb(turn)(
                 "checklist.updated", {"reason": "rollover", "checklist": cleared.as_dict()}
             )
+        if turn.seed_checklist:
+            # Implementing a plan: its steps are the turn's list (plan 0.4.0 #55).
+            try:
+                seeded, _ = service.replace(turn.session_id, turn.seed_checklist)
+            except Exception:
+                logger.exception("plan checklist seed failed")
+                return
+            self._activity_cb(turn)(
+                "checklist.updated", {"reason": "plan", "checklist": seeded.as_dict()}
+            )
 
     def _checklist_end(self, turn: _ActiveTurn) -> None:
         followups = getattr(self._services, "followups", None)
@@ -604,6 +616,7 @@ class TurnManager:
         peer_message_id: str | None = None,
         command: str = "",
         continue_after: bool = False,
+        seed_checklist: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         record = self._services.sessions.show(session_id)
         if record.state in {SESSION_STATE_CLOSED, SESSION_STATE_ARCHIVED}:
@@ -637,6 +650,7 @@ class TurnManager:
             compaction_only=compaction_only,
             continue_after=continue_after and compaction_only,
             command=command,
+            seed_checklist=seed_checklist,
         )
         with self._lock:
             record = self._services.sessions.show(session_id)

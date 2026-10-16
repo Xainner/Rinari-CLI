@@ -75,7 +75,10 @@
     "goal",
     "goalAssessment",
     "goalBudget",
-    "followupSuggestion"
+    "followupSuggestion",
+    "conversationSummary",
+    "repoPullRequest",
+    "repoStatus"
   ],
   "$defs": {
     "webPreview": {
@@ -541,7 +544,10 @@
         "project.folders.validate",
         "project.create",
         "project.folder.add",
-        "project.folder.remove"
+        "project.folder.remove",
+        "repo.status",
+        "repo.pr.create",
+        "session.summary"
       ]
     },
     "event": {
@@ -640,7 +646,11 @@
         "goal.reported",
         "session.resume.updated",
         "followup.suggested",
-        "followup.resolved"
+        "followup.resolved",
+        "repo.status.updated",
+        "repo.pr.created",
+        "repo.pr.failed",
+        "session.summary.changed"
       ]
     },
     "attachment": {
@@ -2159,6 +2169,33 @@
             "null"
           ],
           "minimum": 0
+        },
+        "plan_turn_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The PLAN turn a plan_implement / plan_adjust turn acts on (plan 0.4.0 #55)."
+        },
+        "plan_title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "plan_steps": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "comment": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "What the owner asked to change in a plan_adjust turn."
         }
       }
     },
@@ -4570,6 +4607,315 @@
         }
       },
       "additionalProperties": false
+    },
+    "repoPullRequest": {
+      "type": "object",
+      "required": [
+        "number",
+        "title",
+        "state",
+        "url"
+      ],
+      "properties": {
+        "number": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "title": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string",
+          "description": "open, merged or closed"
+        },
+        "url": {
+          "type": "string"
+        },
+        "checks": {
+          "enum": [
+            "success",
+            "failure",
+            "pending",
+            null
+          ]
+        }
+      }
+    },
+    "repoStatus": {
+      "type": "object",
+      "description": "The conversation's repository (plan 0.4.0 #82). Read-only.",
+      "required": [
+        "available"
+      ],
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "available": {
+          "type": "boolean"
+        },
+        "root": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "upstream": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ahead": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "behind": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dirty": {
+          "type": "boolean"
+        },
+        "changed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "remote_url": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Without credentials."
+        },
+        "github": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "owner": {
+              "type": "string"
+            },
+            "repo": {
+              "type": "string"
+            }
+          }
+        },
+        "gh": {
+          "enum": [
+            "missing",
+            "unauthenticated",
+            "ready",
+            null
+          ]
+        },
+        "prs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/repoPullRequest"
+          }
+        },
+        "remote_pending": {
+          "type": "boolean",
+          "description": "The GitHub part is being read; repo.status.updated follows."
+        }
+      }
+    },
+    "conversationSummary": {
+      "type": "object",
+      "description": "What «Resumen» cannot gather by itself (plan 0.4.0 #82).",
+      "required": [
+        "session_id",
+        "sources",
+        "results",
+        "connectors",
+        "background"
+      ],
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "sources": {
+          "type": "object",
+          "properties": {
+            "pages": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "url": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            },
+            "searches": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "query": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            },
+            "mcp": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "connector": {
+                    "type": "string"
+                  },
+                  "calls": {
+                    "type": "integer"
+                  },
+                  "tools": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "at": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            },
+            "total": {
+              "type": "integer"
+            }
+          }
+        },
+        "results": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "image",
+                  "video",
+                  "audio",
+                  "document",
+                  "file"
+                ]
+              },
+              "tool": {
+                "type": "string"
+              },
+              "turn_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "exists": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        "connectors": {
+          "type": "object",
+          "properties": {
+            "mcp": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "scope": {
+                    "type": "string"
+                  },
+                  "connected": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            },
+            "skills": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "version": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "background": {
+          "type": "object",
+          "properties": {
+            "processes": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "scheduled": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      }
     }
   }
 }
