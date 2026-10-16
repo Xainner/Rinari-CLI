@@ -145,6 +145,7 @@ FIELDS = {
     "browser.snapshot": "html:s bytes:i truncated:b",
     "browser.a11y": "nodes:a total:i truncated:b",
     "browser.screenshot": "path:s bytes:i sha256:s",
+    "browser.viewport": "width:i?",
     "browser.click": "clicked:o",
     "browser.fill": "filled:s chars:i",
     "browser.type": "typed:i",

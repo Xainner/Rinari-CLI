@@ -537,3 +537,25 @@ def test_el_apagado_del_engine_no_deja_workers_colgados() -> None:
     thread.join(timeout=3)
     assert out["error"].code == "BROWSER_DISCONNECTED"
     assert br.available is False
+
+
+def test_el_uso_del_dueno_llega_al_backend_de_su_contexto() -> None:
+    """Plan 0.4.0 #46: el host avisa de cada uso; solo lo oye ese contexto."""
+    br, _events, reg = registered()
+    heard: list[tuple[str, bool, bool]] = []
+    br.on_owner_activity("ctx-a", lambda hold, active: heard.append(("a", hold, active)))
+    br.on_owner_activity("ctx-b", lambda hold, active: heard.append(("b", hold, active)))
+    for detail in ("free", "hold", "release"):
+        assert br.event(
+            {
+                "binding_id": reg["binding_id"],
+                "kind": "owner-activity",
+                "context_id": "ctx-a",
+                "detail": detail,
+            }
+        ) == {"accepted": True}
+    # `release`: el foco salió solo; no es uso.
+    assert heard == [("a", False, True), ("a", True, True), ("a", False, False)]
+    br.forget("ctx-a")
+    br.event({"binding_id": reg["binding_id"], "kind": "owner-activity", "context_id": "ctx-a"})
+    assert len(heard) == 3

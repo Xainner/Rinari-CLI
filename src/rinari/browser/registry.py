@@ -92,6 +92,22 @@ class BrowserRegistry:
                     },
                 )
             )
+            # El agente espera a que el dueño suelte el navegador (#46): la
+            # interfaz lo enseña con el mismo evento del control.
+            backend.on_waiting_change(
+                lambda waiting, sid=session_id, cid=context_id: self._bridge.publish(
+                    "browser.control.changed",
+                    {
+                        "session_id": sid,
+                        "context_id": cid,
+                        "control": backend.control,
+                        "control_state": backend.status().get("control_state"),
+                        "control_revision": backend.control_revision,
+                        "agent_waiting": waiting,
+                    },
+                )
+            )
+            self._bridge.on_owner_activity(context_id, backend.note_owner_activity)
             manager = BrowserManager(
                 session_id=session_id,
                 home_root=self._home_root,
@@ -199,6 +215,9 @@ class BrowserRegistry:
             "control": backend.control,
             "control_state": backend.status().get("control_state"),
             "control_revision": backend.control_revision,
+            "agent_waiting": bool(backend.status().get("agent_waiting")),
+            # El ancho de página que pidió el agente (#44b); `None`: el panel.
+            "viewport_width": backend.status().get("viewport_width"),
             "targets": targets,
             "active_target_id": observed.get("active_target_id"),
             # The session works in a real Chrome/Edge window (#45).

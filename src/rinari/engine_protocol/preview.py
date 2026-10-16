@@ -254,6 +254,38 @@ class WebPreviews:
             "error": error,
         }
 
+    def list(self, params):
+        """Lo que está en marcha en el proyecto de la sesión (plan 0.4.0 #46).
+
+        La página de inicio del navegador lo enseña en «En marcha»: las vistas
+        previas de cualquier conversación del mismo proyecto (de la propia, si
+        no tiene proyecto). Sin sondear cada servidor: solo lo que se conoce.
+        """
+        session = self.desktop.services.sessions.show(params["session_id"])
+        if session.project_id:
+            mates = {
+                record.id
+                for record in self.desktop.services.sessions.list(
+                    project_id=session.project_id, limit=500
+                )
+            }
+        else:
+            mates = {session.id}
+        with self._lock:
+            items = [item for item in self._items.values() if item.session_id in mates]
+        return {
+            "previews": [
+                {
+                    "preview_id": item.id,
+                    "session_id": item.session_id,
+                    "url": item.url,
+                    "label": item.path.name,
+                    "kind": item.kind,
+                }
+                for item in sorted(items, key=lambda item: item.touched, reverse=True)
+            ]
+        }
+
     def stop(self, params):
         item = self._need(params)
         self._stop(item.id)

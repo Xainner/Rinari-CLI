@@ -584,7 +584,9 @@ class BrowserManager:
     # -- targets ---------------------------------------------------------------
 
     @contextlib.contextmanager
-    def _mutation(self, operation: str) -> Iterator[None]:
+    def _mutation(
+        self, operation: str, cancelled: Callable[[], bool] | None = None
+    ) -> Iterator[None]:
         """Una mutación semántica es indivisible frente al traspaso (§7).
 
         Un click no es una operación: son unas coordenadas y tres eventos de
@@ -600,7 +602,7 @@ class BrowserManager:
         if scope is None:
             yield
             return
-        with scope(operation):
+        with scope(operation, cancelled):
             yield
 
     def _require_session(self) -> CdpSession:
@@ -671,6 +673,33 @@ class BrowserManager:
         result = session.send("Target.createTarget", {"url": url})
         return {"target_id": result["targetId"], "url": url}
 
+    def set_viewport(
+        self,
+        width: int | None,
+        *,
+        target_id: str | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
+        """Fija el ancho de la página (plan 0.4.0 #44b); `None` vuelve a
+        ajustarla al panel. Para probar un diseño en varios anchos."""
+        with self._mutation("browser.viewport", cancelled):
+            self._settle_external()
+            if self._backend is not None:
+                result = self._backend.set_viewport(width, cancelled=cancelled)
+                return {"width": width, **{k: v for k, v in result.items() if k != "width"}}
+            if width is None:
+                self.call(
+                    target_id, "Emulation.clearDeviceMetricsOverride", {}, cancelled=cancelled
+                )
+            else:
+                self.call(
+                    target_id,
+                    "Emulation.setDeviceMetricsOverride",
+                    {"width": width, "height": 800, "deviceScaleFactor": 0, "mobile": width < 600},
+                    cancelled=cancelled,
+                )
+            return {"width": width}
+
     def close_page(self, target_id: str) -> dict[str, Any]:
         with self._mutation("browser.tabs_close"):
             if self._backend is not None:
@@ -720,7 +749,7 @@ class BrowserManager:
         max_chars: int = 8000,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        with self._mutation("browser.evaluate"):
+        with self._mutation("browser.evaluate", cancelled):
             self._raise_if_cancelled(cancelled)
             # Por `call` para que el backend inyectado también reciba esta ruta:
             # `snapshot`, `click` y `fill` se apoyan en `evaluate`, así que dejarla
@@ -755,7 +784,7 @@ class BrowserManager:
         *,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        with self._mutation("browser.navigate"):
+        with self._mutation("browser.navigate", cancelled):
             self._raise_if_cancelled(cancelled)
             result = self.call(
                 target_id,
@@ -909,7 +938,7 @@ class BrowserManager:
         y: float | None = None,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        with self._mutation("browser.click"):
+        with self._mutation("browser.click", cancelled):
             px, py = self._point(target_id, selector, x, y, cancelled)
             for event in (
                 {"type": "mouseMoved", "x": px, "y": py, "button": "none"},
@@ -927,7 +956,7 @@ class BrowserManager:
         *,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        with self._mutation("browser.fill"):
+        with self._mutation("browser.fill", cancelled):
             self.evaluate(
                 target_id,
                 _JS_FILL % (json.dumps(selector), json.dumps(value), json.dumps(value)),
@@ -944,7 +973,7 @@ class BrowserManager:
         press_enter: bool = False,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        with self._mutation("browser.type"):
+        with self._mutation("browser.type", cancelled):
             if len(text) > MAX_TYPED_CHARS:
                 raise BrowserError(
                     "INVALID_ARGUMENT", f"text is limited to {MAX_TYPED_CHARS} characters"
@@ -982,7 +1011,7 @@ class BrowserManager:
         *,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        with self._mutation("browser.select"):
+        with self._mutation("browser.select", cancelled):
             out = self.evaluate(
                 target_id,
                 _JS_SELECT % (json.dumps(selector), json.dumps(value)),
@@ -998,7 +1027,7 @@ class BrowserManager:
         *,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        with self._mutation("browser.check"):
+        with self._mutation("browser.check", cancelled):
             out = self.evaluate(
                 target_id,
                 _JS_CHECK % (json.dumps(selector), "true" if checked else "false"),
@@ -1016,7 +1045,7 @@ class BrowserManager:
         y: float | None = None,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        with self._mutation("browser.scroll"):
+        with self._mutation("browser.scroll", cancelled):
             if x is None or y is None:
                 out = self.evaluate(target_id, _JS_VIEWPORT, cancelled=cancelled)
                 size = out.get("value") or {}
@@ -1052,7 +1081,7 @@ class BrowserManager:
         steps: int = 5,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        with self._mutation("browser.drag"):
+        with self._mutation("browser.drag", cancelled):
             if steps < 1:
                 raise BrowserError("INVALID_ARGUMENT", "steps must be >= 1")
             sx, sy = self._point(target_id, from_selector, from_x, from_y, cancelled)
@@ -1094,7 +1123,7 @@ class BrowserManager:
         provenance: dict[str, Any] | None = None,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        with self._mutation("browser.upload"):
+        with self._mutation("browser.upload", cancelled):
             self._raise_if_cancelled(cancelled)
             resolved = Path(file_path).resolve()
             if self._backend is not None:
@@ -1331,7 +1360,7 @@ class BrowserManager:
         *,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        with self._mutation("browser.set_cookie"):
+        with self._mutation("browser.set_cookie", cancelled):
             self._raise_if_cancelled(cancelled)
             if self._backend is not None:
                 self._backend.set_cookie(target_id, name, value, url, cancelled=cancelled)

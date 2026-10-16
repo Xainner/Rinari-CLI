@@ -504,6 +504,7 @@
         "browser.context.prepare",
         "browser.control.set",
         "browser.external.open",
+        "workspace.preview.list",
         "host.browser.register",
         "host.browser.unregister",
         "host.browser.reply",

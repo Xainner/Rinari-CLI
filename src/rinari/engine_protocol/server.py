@@ -240,6 +240,7 @@ class EngineServer:
         self._dispatcher.register("workspace.preview.start", self._previews.start)
         self._dispatcher.register("workspace.preview.status", self._previews.status)
         self._dispatcher.register("workspace.preview.stop", self._previews.stop)
+        self._dispatcher.register("workspace.preview.list", self._previews.list)
         self._dispatcher.register("session.move", self._desktop.move)
         self._dispatcher.register("workspace.file.read", self._desktop.read)
         self._dispatcher.register("workspace.file.resolve", self._desktop.resolve)

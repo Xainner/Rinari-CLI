@@ -405,6 +405,8 @@ class FakeCdpServer:
             return {}, False, []
         if method in ("Page.enable", "Accessibility.enable", "DOM.enable"):
             return {}, False, []
+        if method in ("Emulation.setDeviceMetricsOverride", "Emulation.clearDeviceMetricsOverride"):
+            return {}, False, []
         if method == "Runtime.evaluate":
             inner = self._evaluate(params.get("expression", ""))
             if "exceptionDetails" in inner:
@@ -1488,3 +1490,23 @@ def test_the_session_moves_to_a_real_chrome_and_comes_back(tmp_path, fake_cdp, m
     assert manager.profile_dir != profile
     manager.close()
     assert native.closed
+
+
+def test_browser_viewport_validates_the_width(tmp_path, fake_cdp, monkeypatch) -> None:
+    """Plan 0.4.0 #44b."""
+    from rinari.browser import human_check
+
+    monkeypatch.setattr(human_check, "SETTLE_S", 0.0)
+    manager = _connected_manager(tmp_path, fake_cdp, monkeypatch)
+    runtime = _runtime(tmp_path, manager=manager, network_mode="allow", answer="y")
+    ctx = _ctx(tmp_path, manager=manager)
+    for bad in (100, 9000, "wide", True):
+        result = runtime.execute("browser.viewport", {"width": bad}, ctx)
+        assert not result.ok
+    ok = runtime.execute("browser.viewport", {"width": 390}, ctx)
+    assert ok.ok, ok.error
+    assert ok.data["width"] == 390
+    assert any(cmd[0] == "Emulation.setDeviceMetricsOverride" for cmd in fake_cdp.commands)
+    back = runtime.execute("browser.viewport", {"width": "fit"}, ctx)
+    assert back.ok and back.data["width"] is None
+    manager.close()

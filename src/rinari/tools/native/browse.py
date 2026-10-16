@@ -66,9 +66,9 @@ _CODE_MAP: dict[str, ToolErrorCode] = {
     # El código crudo viaja en `browser_error`, que es lo que lo distingue de
     # cualquier otro UNKNOWN.
     "CAPTURE_EMPTY": ToolErrorCode.UNKNOWN,
-    # El usuario tomó el control del browser (documento 03 §7). La herramienta
-    # recibe un estado de intervención explícito en vez de ejecutarse a
-    # escondidas o quedarse reintentando.
+    # El dueño está usando el navegador (documento 03 §7). El agente espera a
+    # que lo suelte (plan 0.4.0 #46); si no lo suelta en un buen rato, la
+    # herramienta lo dice en vez de ejecutarse a escondidas o reintentar.
     "BROWSER_INTERVENED": ToolErrorCode.CONFLICT,
     "BROWSER_CONTROL_CONFLICT": ToolErrorCode.CONFLICT,
     # La identidad validada por el Engine ya no coincide cuando el host va a
@@ -483,6 +483,27 @@ def browser_screenshot(input: dict, ctx: ToolContext) -> ToolResult:
     )
 
 
+#: Los anchos que se pueden pedir; fuera de esto no es una pantalla real.
+_VIEWPORT_RANGE = (320, 2560)
+
+
+def browser_viewport(input: dict, ctx: ToolContext) -> ToolResult:
+    """Ancho de la página para probar un diseño (plan 0.4.0 #44b)."""
+    width = input.get("width")
+    if width in (None, "fit"):
+        width = None
+    elif isinstance(width, bool) or not isinstance(width, int):
+        return _run_invalid('width must be an integer number of pixels, or "fit"')
+    elif not _VIEWPORT_RANGE[0] <= width <= _VIEWPORT_RANGE[1]:
+        return _run_invalid(
+            f"width must be between {_VIEWPORT_RANGE[0]} and {_VIEWPORT_RANGE[1]} pixels"
+        )
+    return _run(
+        ctx,
+        lambda: _manager(ctx).set_viewport(width, cancelled=_cancelled_fn(ctx)),  # type: ignore[union-attr]
+    )
+
+
 def browser_click(input: dict, ctx: ToolContext) -> ToolResult:
     target = _page_target(input, ctx)
     if isinstance(target, ToolResult):
@@ -810,6 +831,10 @@ def _human_checked(handler: Callable[[dict, ToolContext], ToolResult]):
         manager = _manager(ctx)
         if not result.ok or manager is None:
             return result
+        # Mirar la página es un `evaluate`, y con el dueño usando el navegador
+        # eso esperaría a que lo suelte (#46). Si lo está usando, ya la ve él.
+        if manager.status().get("control_state", "agent") != "agent":
+            return result
         target = input.get("target_id") if isinstance(input.get("target_id"), str) else None
         if target is None and isinstance(result.data, dict):
             created = result.data.get("target_id")
@@ -1029,6 +1054,33 @@ def browse_tools() -> list[ToolDefinition]:
             handler=browser_screenshot,
             namespace="browser",
             capabilities=("browser.read",),
+        ),
+        ToolDefinition(
+            name="browser.viewport",
+            description=(
+                "Set the page width to test a layout: 390 (phone), 768 (tablet), 1280 "
+                '(desktop), 1920 (wide), or any width from 320 to 2560; "fit" goes back to '
+                "the panel width. The page lays out at that width (the owner scrolls the panel "
+                "sideways to see it); clicks and screenshots stay in page coordinates."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "width": {
+                        "anyOf": [
+                            {"type": "integer", "minimum": 320, "maximum": 2560},
+                            {"type": "string", "enum": ["fit"]},
+                        ]
+                    }
+                },
+                "required": ["width"],
+            },
+            risk=RISK_LOW,
+            side_effects=SIDE_EFFECT_LOCAL_REVERSIBLE,
+            classify=_write_classify,
+            handler=browser_viewport,
+            namespace="browser",
+            capabilities=("browser.mutate",),
         ),
         ToolDefinition(
             name="browser.click",

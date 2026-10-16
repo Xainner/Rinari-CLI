@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,19 @@ from rinari.browser import host_backend
 from rinari.browser.host_backend import HostBackend
 from rinari.browser.manager import BrowserError
 from rinari.engine_protocol.browser_host import BrowserHostBridge
+
+
+@pytest.fixture(autouse=True)
+def _owner_keeps_using_it(monkeypatch):
+    """Con el dueño al mando el agente espera a que lo suelte (plan 0.4.0 #46).
+
+    Aquí el dueño «sigue usándolo» durante toda la prueba y la espera es
+    corta: lo que antes era un rechazo inmediato es ahora agotar la espera,
+    con el mismo código y sin que salga nada hacia el host.
+    """
+    monkeypatch.setattr(host_backend, "OWNER_IDLE_S", 60.0)
+    monkeypatch.setattr(host_backend, "OWNER_WAIT_S", 0.3)
+    monkeypatch.setattr(host_backend, "_WAIT_STEP_S", 0.02)
 
 
 class FakeBridge:
@@ -186,6 +200,9 @@ class TestArbitraje:
             with pytest.raises(BrowserError) as raised:
                 host.send("t1", method, {})
             assert raised.value.code == "BROWSER_INTERVENED"
+            # Esperó al dueño y se le acabó el tiempo. El runtime no lo repite
+            # solo (serían otros dos minutos): el mensaje le dice al modelo
+            # que espere o pregunte.
             assert raised.value.retryable is False
         # No es que fallen al llegar: es que no salen.
         assert fake.calls == []
@@ -261,7 +278,7 @@ class TestArbitraje:
         with pytest.raises(BrowserError) as raised:
             host.send("t1", "Page.navigate", {"url": "http://127.0.0.1/x"})
         assert raised.value.code == "BROWSER_INTERVENED"
-        assert "took control" in raised.value.message
+        assert "still using this browser" in raised.value.message
 
     def test_pedirlo_dos_veces_mientras_se_toma_no_arranca_otra_transicion(self) -> None:
         """Documento 03 §7: el traspaso lo decide **un** hilo.
@@ -953,3 +970,102 @@ class TestMutacionSemanticaIndivisible:
             host.send("t1", "Accessibility.getFullAXTree", {})
             assert len(host._leases) == 1
         assert host._leases == {}
+
+
+class TestControlSinBotones:
+    """Plan 0.4.0 #46: el dueño toma el navegador usándolo y el agente lo
+    retoma cuando lleva un rato sin tocarlo."""
+
+    def test_el_agente_retoma_cuando_el_dueno_deja_de_usarlo(self, monkeypatch) -> None:
+        monkeypatch.setattr(host_backend, "OWNER_IDLE_S", 0.15)
+        monkeypatch.setattr(host_backend, "OWNER_WAIT_S", 5.0)
+        host, fake = backend()
+        waiting: list[bool] = []
+        host.on_waiting_change(waiting.append)
+        host.set_control("user")
+        assert host.wait_for_control(timeout=5) == "user"
+        fake.calls.clear()
+        host.send("t1", "Page.navigate", {"url": "http://127.0.0.1/x"})
+        assert fake.calls == [("page.navigate", {"url": "http://127.0.0.1/x"})]
+        assert host.control == "agent"
+        # Esperó, y la interfaz lo supo al empezar y al terminar.
+        assert waiting == [True, False]
+        assert host.status()["agent_waiting"] is False
+
+    def test_mientras_el_dueno_sigue_usandolo_el_agente_espera(self, monkeypatch) -> None:
+        monkeypatch.setattr(host_backend, "OWNER_IDLE_S", 0.2)
+        monkeypatch.setattr(host_backend, "OWNER_WAIT_S", 5.0)
+        host, fake = backend()
+        host.set_control("user")
+        assert host.wait_for_control(timeout=5) == "user"
+        fake.calls.clear()
+        done = threading.Event()
+        threading.Thread(
+            target=lambda: (host.send("t1", "Page.navigate", {"url": "http://a/"}), done.set()),
+            daemon=True,
+        ).start()
+        # El dueño sigue: cada 0.1 s vuelve a tocarlo.
+        for _ in range(6):
+            host.note_owner_activity()
+            assert not done.wait(0.1)
+            assert host.status()["agent_waiting"] is True
+        assert fake.calls == []
+        assert done.wait(2)
+        assert fake.calls == [("page.navigate", {"url": "http://a/"})]
+
+    def test_con_una_contrasena_o_un_campo_a_medias_no_entra(self, monkeypatch) -> None:
+        monkeypatch.setattr(host_backend, "OWNER_IDLE_S", 0.05)
+        monkeypatch.setattr(host_backend, "OWNER_WAIT_S", 0.4)
+        host, fake = backend()
+        host.set_control("user")
+        assert host.wait_for_control(timeout=5) == "user"
+        host.note_owner_activity(hold=True)
+        fake.calls.clear()
+        with pytest.raises(BrowserError) as raised:
+            host.send("t1", "Input.dispatchKeyEvent", {})
+        assert raised.value.code == "BROWSER_INTERVENED"
+        assert fake.calls == []
+        # Al soltar el campo, el agente puede volver.
+        host.note_owner_activity(hold=False)
+        threading.Event().wait(0.1)
+        host.send("t1", "Input.dispatchKeyEvent", {})
+        assert [call[0] for call in fake.calls] == ["page.key"]
+
+    def test_parar_el_turno_deja_de_esperar(self, monkeypatch) -> None:
+        monkeypatch.setattr(host_backend, "OWNER_WAIT_S", 30.0)
+        host, _ = backend()
+        host.set_control("user")
+        assert host.wait_for_control(timeout=5) == "user"
+        with (
+            pytest.raises(BrowserError) as raised,
+            host.mutation_scope("browser.click", cancelled=lambda: True),
+        ):
+            pass
+        assert raised.value.code == "CANCELLED"
+        assert host.status()["agent_waiting"] is False
+
+    def test_que_la_pagina_pierda_el_foco_no_cuenta_como_uso(self, monkeypatch) -> None:
+        monkeypatch.setattr(host_backend, "OWNER_IDLE_S", 0.2)
+        monkeypatch.setattr(host_backend, "OWNER_WAIT_S", 5.0)
+        host, _ = backend()
+        host.set_control("user")
+        assert host.wait_for_control(timeout=5) == "user"
+        host.note_owner_activity(hold=True)
+        threading.Event().wait(0.25)
+        # Rinari se lleva el foco: suelta el campo sin reiniciar la cuenta.
+        host.note_owner_activity(hold=False, active=False)
+        started = time.monotonic()
+        host.send("t1", "Page.navigate", {"url": "http://a/"})
+        assert time.monotonic() - started < 0.15
+        assert host.control == "agent"
+
+
+def test_el_ancho_de_pagina_viaja_al_host_y_queda_en_el_estado() -> None:
+    """Plan 0.4.0 #44b: el agente prueba un diseño en otro ancho."""
+    host, fake = backend()
+    fake.answer = {"width": 1280}
+    host.set_viewport(1280)
+    assert fake.calls[-1] == ("context.setViewport", {"width": 1280})
+    assert host.status()["viewport_width"] == 1280
+    host.set_viewport(None)
+    assert host.status()["viewport_width"] is None
