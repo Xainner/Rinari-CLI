@@ -1114,11 +1114,18 @@ def _result_error(event: dict[str, Any]) -> ProviderError:
     # Usage first: the CLI answers both "out of credits" and plain throttling
     # with a 429, and only the first one is not worth retrying.
     if "usage limit" in lowered or "usage credits" in lowered or "quota" in lowered:
-        return ProviderError(
+        error = ProviderError(
             "The Claude subscription has no usage left for this model.",
             code=ProviderErrorCode.QUOTA_EXHAUSTED,
             hint="Pick another model, or check your plan at claude.ai/settings/usage.",
         )
+        from rinari.providers.resets import resets_at
+
+        # «resets 5pm (America/Costa_Rica)» in the CLI's text (plan 0.4.0 #24).
+        moment = resets_at(text=str(detail))
+        if moment is not None:
+            error.details["resets_at"] = moment
+        return error
     if status == 429 or _RATE_LIMITED.search(lowered):
         return ProviderError(
             "Claude rate-limited this request.",

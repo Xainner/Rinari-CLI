@@ -177,6 +177,15 @@ def affordable_output_tokens(message: str | None) -> int | None:
     return int(digits) if digits else None
 
 
+def _note_reset(error: ProviderError, response: httpx.Response, payload: Any) -> None:
+    """When the limit resets, if the provider said so (plan 0.4.0 #24)."""
+    from rinari.providers.resets import resets_at
+
+    moment = resets_at(payload=payload, headers=response.headers)
+    if moment is not None:
+        error.details["resets_at"] = moment
+
+
 def _safe_error_fields(payload: dict[str, Any] | None) -> tuple[str, str | None, str | None]:
     """Return bounded message/type/code fields from common provider envelopes."""
     if not payload:
@@ -259,6 +268,7 @@ def _classify_http_error(
             **common,
         )
         result.details["limit_kind"] = "quota"
+        _note_reset(result, response, payload)
         affordable = affordable_output_tokens(error_message)
         if affordable is not None:
             # OpenRouter: «can only afford N» when the balance covers fewer
@@ -330,6 +340,7 @@ def _classify_http_error(
         # Without a code the provider did not say whether it is a rate or a
         # quota: the UI says so instead of guessing.
         result.details["limit_kind"] = limit or "unknown"
+        _note_reset(result, response, payload)
         return result
     if status >= 500 or status in (408, 409, 425, 502, 503, 504):
         return ProviderError(message, code=ProviderErrorCode.SERVER_ERROR, retryable=True, **common)

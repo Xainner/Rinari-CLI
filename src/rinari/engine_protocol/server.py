@@ -205,6 +205,9 @@ class EngineServer:
         from rinari.engine_protocol.schedule import ScheduleRunner
 
         self._schedule = ScheduleRunner(self)
+        from rinari.engine_protocol.resume import ResumeRunner
+
+        self._resume = ResumeRunner(self)
         self._services.schedules.on_proposed = lambda payload: self._turns.emit_external(
             event("schedule.proposed", payload)
         )
@@ -260,6 +263,12 @@ class EngineServer:
         self._dispatcher.register("session.goal.resume", self._session_goal_resume)
         self._dispatcher.register("session.goal.clear", self._session_goal_clear)
         self._dispatcher.register("session.goal.budget", self._session_goal_budget)
+        self._dispatcher.register("session.resume.get", self._session_resume_get)
+        self._dispatcher.register("session.resume.arm", self._session_resume_arm)
+        self._dispatcher.register("session.resume.cancel", self._session_resume_cancel)
+        self._dispatcher.register("session.resume.now", self._session_resume_now)
+        self._dispatcher.register("resume.settings.get", self._resume_settings_get)
+        self._dispatcher.register("resume.settings.set", self._resume_settings_set)
         self._dispatcher.register("session.permission.set", self._session_permission_set)
         self._dispatcher.register("session.turn.start", self._turn_start)
         self._dispatcher.register("command.list", self._command_list)
@@ -481,9 +490,11 @@ class EngineServer:
     def start_background(self) -> None:
         """Background work of a serving Engine (not of one built for a test)."""
         self._schedule.start()
+        self._resume.start()
 
     def close(self) -> None:
         self._schedule.close()
+        self._resume.close()
         if hasattr(self, "_provider_auth_service"):
             self._provider_auth_service.close()
         self._attachment_jobs.close()
@@ -1635,6 +1646,43 @@ class EngineServer:
         service = getattr(self._services, "checklist", None)
         cleared = service.clear(session_id) if service is not None else None
         return {"checklist": cleared.as_dict() if cleared is not None else None}
+
+    # -- resumes (plan 0.4.0 #24) -------------------------------------------------
+
+    def _resume_view(self, session_id: str) -> dict[str, Any]:
+        resume = self._services.resumes.get(session_id)
+        return {"resume": resume.as_dict() if resume is not None else None}
+
+    def _session_resume_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        session_id = self._services.sessions.show(self._need_str(params, "session_id")).id
+        return self._resume_view(session_id)
+
+    def _session_resume_arm(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Continue by itself when the limit that stopped the last turn resets."""
+        session_id = self._services.sessions.show(self._need_str(params, "session_id")).id
+        resets_at = self._opt_str(params, "resets_at")
+        self._resume.arm(session_id, resets_at=resets_at)
+        return self._resume_view(session_id)
+
+    def _session_resume_cancel(self, params: dict[str, Any]) -> dict[str, Any]:
+        session_id = self._services.sessions.show(self._need_str(params, "session_id")).id
+        self._resume.cancel(session_id)
+        return self._resume_view(session_id)
+
+    def _session_resume_now(self, params: dict[str, Any]) -> dict[str, Any]:
+        session_id = self._services.sessions.show(self._need_str(params, "session_id")).id
+        continued = self._resume.now(session_id)
+        return {**self._resume_view(session_id), "continued": continued}
+
+    def _resume_settings_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        return {"auto_resume_on_limits": self._services.resumes.mode()}
+
+    def _resume_settings_set(self, params: dict[str, Any]) -> dict[str, Any]:
+        mode = self._need_str(params, "auto_resume_on_limits")
+        try:
+            return {"auto_resume_on_limits": self._services.resumes.set_mode(mode)}
+        except ValueError as exc:
+            raise EngineProtocolError(INVALID_PARAMS, str(exc)) from exc
 
     # -- goals (plan 0.4.0 #23) ---------------------------------------------------
 

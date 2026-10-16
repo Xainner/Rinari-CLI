@@ -237,6 +237,9 @@ class TurnManager:
         self._preparation_threads: set[threading.Thread] = set()
         self._approvals: dict[str, _PendingApproval] = {}
         self._observers: list[Any] = []
+        # A resume waiting for a provider limit holds the session's queue
+        # (plan 0.4.0 #24); set by the resume runner.
+        self.queue_hold: Any = None
         self._closed_approvals: dict[str, str] = {}
         self._queue: dict[str, collections.deque[_QueuedPrompt]] = {}
         # Sessions whose peer inbox admission is paused by an explicit Stop;
@@ -1505,7 +1508,18 @@ class TurnManager:
                 self.emit_goal(paused, session_id)
             return None
 
+    def kick_queue(self, session_id: str) -> None:
+        """Run the session's queue now if nothing holds it."""
+        self._start_next_queued(session_id)
+
     def _start_next_queued(self, session_id: str) -> None:
+        hold = self.queue_hold
+        if hold is not None:
+            try:
+                if hold(session_id):
+                    return
+            except Exception:
+                logger.exception("queue hold check failed")
         with self._lock:
             if any(
                 not turn.done.is_set() and turn.session_id == session_id

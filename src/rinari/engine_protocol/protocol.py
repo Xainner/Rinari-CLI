@@ -112,6 +112,10 @@ CAPABILITIES: dict[str, bool] = {
     # session.goal.get/set/pause/resume/clear/budget, goal.updated, and the
     # goal turns' origin {kind: user, source: goal, goal_id, iteration}.
     "session_goal_v1": True,
+    # Continue by itself when a provider limit resets (plan 0.4.0 #24):
+    # session.resume.get/arm/cancel/now, resume.settings.get/set,
+    # session.resume.updated, errors carry details.resets_at.
+    "session_resume_v1": True,
     # followup.suggest notes: followup.suggested/resolved on the turn,
     # followup.list/dismiss/accept (accept starts a new conversation).
     "followup_suggestions_v1": True,

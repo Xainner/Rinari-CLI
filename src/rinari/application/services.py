@@ -32,6 +32,7 @@ from rinari.memory import MemoryService
 from rinari.openapi import ApiService
 from rinari.plugins import PluginService
 from rinari.repo.index_service import IndexService
+from rinari.resumes import ResumeService
 from rinari.schedule.service import ScheduleService
 from rinari.skills.service import SkillService
 from rinari.tasks import TaskService
@@ -69,6 +70,7 @@ class ServiceContainer:
     rinari_profiles: RinariProfileService = None
     checklist: ChecklistService = None
     goals: GoalService = None
+    resumes: ResumeService = None
     followups: FollowupService = None
 
 
@@ -147,6 +149,7 @@ def build_services(
         rinari_profiles=rinari_profiles,
         checklist=ChecklistService(ctx),
         goals=GoalService(ctx),
+        resumes=ResumeService(ctx),
         followups=FollowupService(ctx),
     )
 

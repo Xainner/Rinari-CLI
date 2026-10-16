@@ -71,6 +71,7 @@
     "checklistItem",
     "checklistCounts",
     "checklist",
+    "sessionResume",
     "goal",
     "goalAssessment",
     "goalBudget",
@@ -301,6 +302,12 @@
         "session.goal.resume",
         "session.goal.clear",
         "session.goal.budget",
+        "resume.settings.set",
+        "resume.settings.get",
+        "session.resume.now",
+        "session.resume.cancel",
+        "session.resume.arm",
+        "session.resume.get",
         "session.checklist.get",
         "session.permission.set",
         "session.turn.start",
@@ -627,6 +634,7 @@
         "checklist.updated",
         "goal.updated",
         "goal.reported",
+        "session.resume.updated",
         "followup.suggested",
         "followup.resolved"
       ]
@@ -4489,6 +4497,71 @@
         },
         "_signature": {
           "type": "array"
+        }
+      },
+      "additionalProperties": false
+    },
+    "sessionResume": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "provider_id",
+        "mode",
+        "resume_at",
+        "state",
+        "attempts",
+        "goal_id",
+        "reason",
+        "revision",
+        "updated_at"
+      ],
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "provider_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "at",
+            "poll"
+          ]
+        },
+        "resume_at": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "waiting",
+            "done",
+            "cancelled",
+            "failed",
+            "expired"
+          ]
+        },
+        "attempts": {
+          "type": "integer"
+        },
+        "goal_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "updated_at": {
+          "type": "string"
         }
       },
       "additionalProperties": false
