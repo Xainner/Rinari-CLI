@@ -555,6 +555,15 @@ def _policy_summary(
 # ---------------------------------------------------------------------------
 
 
+def _speech_service(services: ServiceContainer):
+    from rinari.speech.service import SpeechService
+
+    try:
+        return SpeechService(services.ctx)
+    except Exception:
+        return None
+
+
 def _secrets_for_redaction(services: ServiceContainer) -> list[str]:
     secrets: list[str] = []
     for record in services.providers.list():
@@ -770,6 +779,7 @@ def build_agent_session(
         validation=services.verification,
         memory=services.memory,
         checklist=getattr(services, "checklist", None),
+        speech=_speech_service(services),
         goals=_pursued_goals(services, record.id),
         followups=getattr(services, "followups", None),
         extra_project_roots=extra_roots,

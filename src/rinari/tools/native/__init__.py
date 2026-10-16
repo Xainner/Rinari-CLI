@@ -25,9 +25,11 @@ __all__ = ["all_native_tools"]
 
 
 def all_native_tools() -> list[ToolDefinition]:
+    from rinari.tools.native.audio import audio_tools
     from rinari.tools.native.checklist import checklist_tools
     from rinari.tools.native.followup import followup_tools
     from rinari.tools.native.goal import goal_tools
+    from rinari.tools.native.present import present_tools
     from rinari.tools.native.questions import question_tools
 
     return [
@@ -35,6 +37,8 @@ def all_native_tools() -> list[ToolDefinition]:
         *checklist_tools(),
         *goal_tools(),
         *followup_tools(),
+        *present_tools(),
+        *audio_tools(),
         *artifact_tools(),
         *filesystem_tools(),
         *image_tools(),

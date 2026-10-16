@@ -435,6 +435,9 @@ class ToolContext:
     # proposal card. None outside a desktop turn (CLI, tests).
     activity_sink: Any = None
     tool_call_id: str = ""
+    # SpeechService (speech.service): audio.transcribe listens with the
+    # dictation engine (plan 0.4.0 #36). None where there is none.
+    speech: Any = None
     # ReadView (tools.read_cache) of the agent conversation running this call:
     # fs.read / fs.read_lines answer an unchanged re-read with a pointer to the
     # earlier result the model still sees. None reads normally (tests, hosts

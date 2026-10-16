@@ -1889,6 +1889,9 @@ class TurnManager:
             # Suggested and resolved update one note in the timeline.
             key = payload.get("suggestion_id") or payload["suggestion"]["id"]
             return f"followup:{key}"
+        if event_name == "file.presented":
+            # Its own card, apart from the file.present tool row (#35).
+            return f"present:{payload.get('present_id')}"
         if event_name == "checklist.updated":
             # One card per turn that updates in place.
             return f"checklist:{turn.turn_id}"

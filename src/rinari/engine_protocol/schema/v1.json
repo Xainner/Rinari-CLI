@@ -650,7 +650,9 @@
         "repo.status.updated",
         "repo.pr.created",
         "repo.pr.failed",
-        "session.summary.changed"
+        "session.summary.changed",
+        "file.presented",
+        "speech.setup_needed"
       ]
     },
     "attachment": {

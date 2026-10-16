@@ -127,6 +127,9 @@ def _prepare_turn_attachments(
     try:
         prepared = prepare_attachments(services.artifacts, session_id, attachments)
     except (OSError, ValueError, RuntimeError) as exc:
+        # In engine.log too (plan 0.4.0 #57): the reason with the file's real
+        # name, never its content.
+        logger.warning("attachment rejected: %s (%d attached)", exc, len(attachments))
         raise EngineProtocolError(INVALID_PARAMS, str(exc)) from exc
     image_refs = [reference for item in prepared for reference in item.images]
     if image_refs:

@@ -111,6 +111,8 @@ FIELDS = {
     "user.ask": "request_id:s status:s answers:o",
     "checklist.update": "revision:i counts:o warnings:a",
     "goal.update": "state:s iteration:i note:s",
+    "file.present": "presented:i items:a",
+    "audio.transcribe": "file:s text:s segments:a? model:s language:s elapsed_ms:i",
     "followup.suggest": "suggestion_id:s status:s",
     "session.peers": "peers:a",
     "session.send": "message_id:s to_session_id:s state:s hop:i",
