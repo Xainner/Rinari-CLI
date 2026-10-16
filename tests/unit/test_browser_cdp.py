@@ -1510,3 +1510,18 @@ def test_browser_viewport_validates_the_width(tmp_path, fake_cdp, monkeypatch) -
     back = runtime.execute("browser.viewport", {"width": "fit"}, ctx)
     assert back.ok and back.data["width"] is None
     manager.close()
+
+
+def test_an_empty_target_id_means_the_active_tab(tmp_path, fake_cdp, monkeypatch) -> None:
+    """A model sent target_id="" to browser.navigate and the tool refused."""
+    from rinari.browser import human_check
+
+    monkeypatch.setattr(human_check, "SETTLE_S", 0.0)
+    manager = _connected_manager(tmp_path, fake_cdp, monkeypatch)
+    runtime = _runtime(tmp_path, manager=manager, network_mode="allow")
+    ctx = _ctx(tmp_path, manager=manager, network=NetworkGuard(NetworkPolicy(mode="allow")))
+    result = runtime.execute(
+        "browser.navigate", {"url": "https://example.com/x", "target_id": ""}, ctx
+    )
+    assert result.ok, result.error
+    manager.close()

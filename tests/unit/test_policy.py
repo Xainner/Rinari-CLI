@@ -652,3 +652,10 @@ def test_shell_outside_workspace_only_plain_inspection_runs_free() -> None:
     for command in ("git commit -m x", "make", "ls; npm test", "cat a > b", "git status && rm x"):
         decision = PolicyEngine().decide(CAPABILITY_SHELL, elsewhere, command=command)
         assert decision.action is PolicyAction.ASK, command
+
+
+@pytest.mark.parametrize("profile", ["read-only", "workspace", "full-access"])
+def test_presenting_a_result_never_asks(profile) -> None:
+    """Plan 0.4.0: file.present asked approval as an uncovered capability."""
+    d = PolicyEngine().decide("file.present", _scope(kind="CHAT", root=None, profile=profile))
+    assert d.action is PolicyAction.ALLOW

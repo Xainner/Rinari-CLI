@@ -531,6 +531,14 @@ class PolicyEngine:
                 risk_class=risk_class,
                 rule_id="mcp_call",
             )
+        if capability == "file.present":
+            # Presenting a result only shows it to the owner in the chat: no
+            # side effects and nothing leaves the machine. It asked for
+            # approval as an «uncovered capability», which made no sense for
+            # the final delivery of the work.
+            return self._allow(
+                capability, "presenting a result to the owner has no side effects", risk, risk_class
+            )
         if capability in {"channel.send_attachment", "channel.reply", "channel.delivery_get"}:
             return PolicyDecision(
                 action=PolicyAction.ALLOW

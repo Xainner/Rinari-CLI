@@ -302,7 +302,9 @@ def browser_tabs_close(input: dict, ctx: ToolContext) -> ToolResult:
 
 def _page_target(input: dict, ctx: ToolContext) -> str | ToolResult | None:
     target = input.get("target_id")
-    if target is None:
+    # Models send target_id="" to mean «the active tab»; that is no target,
+    # not an invalid one (a session failed browser.navigate on it).
+    if target is None or target == "":
         return None
     if not isinstance(target, str) or not target:
         return _run_invalid("target_id must be a non-empty string")
