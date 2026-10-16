@@ -362,8 +362,10 @@ class TurnManager:
             logger.exception("checklist rollover failed")
             return
         if cleared is not None:
+            # Cleared (the last turn finished it) or active again (#66b).
+            reason = "rollover" if cleared.state == "cleared" else "resumed"
             self._activity_cb(turn)(
-                "checklist.updated", {"reason": "rollover", "checklist": cleared.as_dict()}
+                "checklist.updated", {"reason": reason, "checklist": cleared.as_dict()}
             )
         if turn.seed_checklist:
             # Implementing a plan: its steps are the turn's list (plan 0.4.0 #55).

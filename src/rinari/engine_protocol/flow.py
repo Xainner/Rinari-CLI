@@ -67,6 +67,8 @@ FLOW_EVENT_TYPES = (
     "question.requested",
     "question.resolved",
     "question.expired",
+    # La lista de pasos del turno (plan 0.4.0 #7): su última versión no vacía.
+    "checklist.updated",
 )
 
 
@@ -96,6 +98,9 @@ class TurnFacts:
     verification_failed: int = 0
     pending_interventions: int = 0
     origin_peer: bool = False
+    #: Última lista de pasos no vacía del turno: {"total", "done"} (#7). La
+    #: lista viva se vacía en el turno siguiente; su evento queda.
+    checklist: dict[str, int] | None = None
 
     @property
     def normalized_mode(self) -> str:
@@ -174,6 +179,16 @@ def turn_facts_from_events(record: Any, events: list[Any]) -> list[TurnFacts]:
                 facts.verification_passed += 1
             elif outcome in {"failed", "partial", "blocked"}:
                 facts.verification_failed += 1
+        elif name == "checklist.updated":
+            checklist = payload.get("checklist")
+            items = checklist.get("items") if isinstance(checklist, dict) else None
+            if isinstance(items, list) and items:
+                done = sum(
+                    1
+                    for item in items
+                    if isinstance(item, dict) and item.get("status") == "completed"
+                )
+                facts.checklist = {"total": len(items), "done": done}
         elif name in {"approval.requested", "question.requested"}:
             key = payload.get("approval_id") or payload.get("request_id") or payload.get("id")
             if key:
@@ -379,7 +394,17 @@ def stage_progress(
     # Sólo la etapa viva puede usar el grafo actual como su propio estado.
     if snapshot and status in {"active", "needs_you"}:
         return snapshot["done"] / snapshot["total"]
+    # Sin grafo, la lista de pasos del turno es la evidencia (#7): es
+    # histórica (su evento queda), así que vale también con la etapa cerrada.
+    checklist = stage_checklist(stage)
+    if checklist:
+        return checklist["done"] / checklist["total"]
     return None
+
+
+def stage_checklist(stage: Stage) -> dict[str, int] | None:
+    """La última lista de pasos no vacía de la etapa (#7)."""
+    return next((turn.checklist for turn in reversed(stage.turns) if turn.checklist), None)
 
 
 def _timestamp_ms(value: str | None) -> float | None:
@@ -460,6 +485,18 @@ def stage_payload(
         "checkpoints": stage_checkpoints,
         "origin_peer_turns": peer,
         "anchor": {"session_id": first.session_id, "turn_id": first.turn_id},
+    }
+
+
+def _checklist_tasks(turns: list[TurnFacts]) -> dict[str, int] | None:
+    """Sin tareas del grafo: la lista de pasos más reciente (#7)."""
+    latest = next((turn.checklist for turn in reversed(turns) if turn.checklist), None)
+    if latest is None:
+        return None
+    return {
+        "total": latest["total"],
+        "done": latest["done"],
+        "open": latest["total"] - latest["done"],
     }
 
 
@@ -546,8 +583,9 @@ def build_flow(
                     "done": sum(1 for task in tasks if task.get("status") == "done"),
                     "open": sum(1 for task in tasks if task.get("status") in OPEN_TASK_STATES),
                 }
-                if tasks is not None
-                else None
+                if tasks
+                else _checklist_tasks(ordered)
+                or ({"total": 0, "done": 0, "open": 0} if tasks is not None else None)
             ),
             "progress": progress,
             # Cobertura del número de arriba: con qué parte del flujo se ha

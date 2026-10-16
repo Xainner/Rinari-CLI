@@ -456,14 +456,29 @@ def _pursued_goals(services: ServiceContainer, session_id: str):
         return None
 
 
-def _checklist_reminder(services: ServiceContainer, session_id: str):
-    """The main turn's nudge when its live checklist falls behind the work."""
+def _checklist_reminder(services: ServiceContainer, session_id: str, request=None):
+    """The main turn's nudge when its live checklist falls behind the work,
+    or to start one when the work is several steps and there is none (#48)."""
     service = getattr(services, "checklist", None)
     if service is None:
         return None
     from rinari.checklist.reminder import ChecklistReminder
 
-    return ChecklistReminder(service, session_id).after_round
+    def mode() -> str:
+        return services.sessions.show(session_id).mode
+
+    return ChecklistReminder(service, session_id, mode=mode, request=request).after_round
+
+
+def _last_request(history) -> str:
+    """The owner's latest message in the conversation history (not a harness note)."""
+    for message in reversed(history):
+        if message.role != "user":
+            continue
+        if (message.origin or {}).get("kind") == "harness":
+            continue
+        return message.display_content or message.content or ""
+    return ""
 
 
 def _checklist_final_check(services: ServiceContainer, session_id: str):
@@ -881,8 +896,11 @@ def build_agent_session(
         history=_restore_history(services, record),
         collect_subagent_results=orchestrator.collect_for_final,
         collect_agent_notices=orchestrator.completion_notices,
-        checklist_reminder=_checklist_reminder(services, record.id),
+        checklist_reminder=None,
         checklist_final_check=_checklist_final_check(services, record.id),
+    )
+    context.checklist_reminder = _checklist_reminder(
+        services, record.id, request=lambda: _last_request(context.history)
     )
     if hasattr(gateway.current, "budget_getter"):
 

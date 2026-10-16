@@ -114,6 +114,8 @@ class ChecklistService:
         self._lock = threading.Lock()
         # The turn each session is running now (set by the turn manager).
         self._current_turn: dict[str, str] = {}
+        # What a list was before this turn made it active again (#66b).
+        self._resumed_from: dict[str, str] = {}
 
     # -- reads -----------------------------------------------------------------
 
@@ -138,7 +140,11 @@ class ChecklistService:
         marks = {"pending": " ", "in_progress": "~", "completed": "x", "blocked": "!"}
         lines = [
             "Checklist left from an earlier turn "
-            + ("(interrupted)" if current.state == "interrupted" else "(unfinished)")
+            + (
+                "(interrupted)"
+                if "interrupted" in (current.state, self._resumed_from.get(session_id))
+                else "(unfinished)"
+            )
             + ": reconcile it with checklist.update before continuing (mark what is "
             "really done, update the rest), or clear it with items: [] if the user "
             "moved on."
@@ -153,17 +159,29 @@ class ChecklistService:
     # -- writes ----------------------------------------------------------------
 
     def begin_turn(self, session_id: str, turn_id: str) -> Checklist | None:
-        """A turn starts. A completed list is cleared; returns it if it changed."""
+        """A turn starts; returns the list if it changed.
+
+        A completed list is cleared. One left open or interrupted by an
+        earlier turn is active again for this one (plan 0.4.0 #66b): it
+        stayed «open» while the model kept working on it, so the dock drew no
+        progress and the reminder never ran.
+        """
         with self._lock:
             self._current_turn[session_id] = turn_id
             current = self.get(session_id)
-            if current is None or current.state != "completed":
+            if current is None:
                 return None
-            return self._write(session_id, current.turn_id, current, state="cleared")
+            if current.state == "completed":
+                return self._write(session_id, current.turn_id, current, state="cleared")
+            if current.state in ("open", "interrupted") and current.items:
+                self._resumed_from[session_id] = current.state
+                return self._write(session_id, turn_id, current, state="active")
+            return None
 
     def end_turn(self, session_id: str) -> None:
         with self._lock:
             self._current_turn.pop(session_id, None)
+            self._resumed_from.pop(session_id, None)
 
     def replace(
         self, session_id: str, items: Any, explanation: Any = ""

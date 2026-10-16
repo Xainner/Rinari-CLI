@@ -127,7 +127,9 @@ def test_an_unfinished_list_is_handed_to_the_next_turn(service, session_id):
         ],
     )
     service.settle(session_id, "t1", "cancelled")
-    assert service.begin_turn(session_id, "t2") is None  # kept, not cleared
+    # Kept, not cleared, and active again for the new turn (#66b).
+    resumed = service.begin_turn(session_id, "t2")
+    assert resumed is not None and resumed.state == "active" and resumed.turn_id == "t2"
     text = service.render_for_prompt(session_id)
     assert "(interrupted)" in text and "[x] a: Escribir el parser" in text
     assert "(blocked: falta el CSV)" in text
