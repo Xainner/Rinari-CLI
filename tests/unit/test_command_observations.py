@@ -96,8 +96,8 @@ def test_other_tools_keep_the_json_envelope():
 def test_large_output_keeps_head_and_tail_and_points_at_the_complete_artifact():
     saved = {}
 
-    def spill(suffix, text):
-        uri = f"artifact://s/runtime/{suffix}.txt"
+    def spill(suffix, text, extension=".txt"):
+        uri = f"artifact://s/runtime/{suffix}{extension}"
         saved[uri] = text
         return ArtifactRef(uri=uri, name=suffix, kind="tool-output")
 
@@ -113,13 +113,17 @@ def test_large_output_keeps_head_and_tail_and_points_at_the_complete_artifact():
     # The error stream and the recovery pointer survive the cut.
     assert "FAILED test_x" in text
     uri = output.data["recovery"]["uri"]
-    assert f'artifact.read {{"uri": "{uri}"}}' in text
-    # The artifact holds the complete observation in the same readable form.
-    assert lines.rstrip("\n") in saved[uri] and "exit_code: 1" in saved[uri]
+    assert f'fs.read_lines {{"path": "{uri}", "start": 1}}' in text
+    # Plan 0.4.0 #76: the artifact holds the output itself, with its streams;
+    # the exit code and the rest of the call go beside it.
+    assert saved[uri].startswith("===== stdout =====\nline 0\n")
+    assert lines in saved[uri] and "===== stderr =====\nFAILED test_x" in saved[uri]
+    meta = next(value for key, value in saved.items() if "meta" in key)
+    assert '"exit_code": 1' in meta
 
 
 def test_a_single_huge_line_is_cut_instead_of_dropped():
-    def spill(suffix, text):
+    def spill(suffix, text, extension=".txt"):
         return ArtifactRef(uri=f"artifact://s/runtime/{suffix}", name=suffix)
 
     source = shell_result(data={"stdout": "x" * 200_000})

@@ -120,17 +120,33 @@ def project_result(result: ToolResult, *, tool: str, budget: int, spill, force=F
 
     artifacts = list(result.artifacts)
 
-    def save(value, suffix):
+    def save(value, suffix, extension=".txt"):
         text = (
-            value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+            value
+            if isinstance(value, str)
+            else json.dumps(value, ensure_ascii=False, default=str, indent=2)
         )
-        ref = spill(suffix, text)
+        ref = spill(suffix, text) if extension == ".txt" else spill(suffix, text, extension)
         artifacts.append(ref)
         return ref.uri
 
-    # The complete observation, exactly as the model would have read it: JSON
-    # for most tools, plain sections for command output.
-    uri = save(result.to_model_text(tool), "complete")
+    # Plan 0.4.0 #76: the complete output is saved as the text inside it,
+    # with real line breaks, so fs.read_lines and fs.search_text page it like
+    # any file. The call's other fields go beside it as JSON.
+    plain = None if isinstance(data.get("files"), list) else _plain_text(data)
+    if plain is not None:
+        text, extension = plain
+        uri = save(text, "complete", extension)
+        meta = {key: value for key, value in data.items() if key not in _TEXT_KEYS}
+        if meta:
+            save({"tool": tool, "ok": result.ok, "data": meta}, "meta", ".json")
+        lines = text.count("\n") + (0 if text.endswith("\n") else 1)
+        size_label = _size_label(len(text.encode("utf-8")))
+    else:
+        uri = save({"tool": tool, "ok": result.ok, "data": result.data}, "complete", ".json")
+        lines = None
+        size_label = None
+    described = f" ({size_label}, {lines} lines)" if size_label else ""
     projected = {
         "result_ref": uri,
         "delivery_partial": True,
@@ -141,7 +157,12 @@ def project_result(result: ToolResult, *, tool: str, budget: int, spill, force=F
                 data.get(key) is not None for key in ("next_line", "next_offset", "next_start_byte")
             )
         ),
-        "recovery": {"tool": "artifact.read", "uri": uri, "start_byte": 0},
+        "recovery": {"tool": "fs.read_lines", "uri": uri, "path": uri, "start": 1},
+        "note": (
+            f"Output too large to show whole{described}. The full text is saved as {uri}: "
+            f'page it with fs.read_lines {{"path": "{uri}", "start": 1}} or search it with '
+            "fs.search_text; do not run the call again to see it."
+        ),
     }
     kept = ("path", "uri", "exit_code", "running", "sha256")
     if tool in COMMAND_OUTPUT_TOOLS:
@@ -227,9 +248,57 @@ def project_result(result: ToolResult, *, tool: str, budget: int, spill, force=F
     return candidate
 
 
+_TEXT_KEYS = ("stdout", "stderr", "text", "markdown", "body", "content", "value")
+
+
+def _plain_text(data: dict) -> tuple[str, str] | None:
+    """The readable text inside a result and its file extension, or None."""
+    sections: list[tuple[str, str]] = []
+    for key in _TEXT_KEYS:
+        value = data.get(key)
+        if isinstance(value, str) and value:
+            sections.append((key, value))
+        elif key == "content" and isinstance(value, list):
+            # MCP: a list of content blocks; their text is what was said.
+            texts = [
+                item["text"]
+                for item in value
+                if isinstance(item, dict) and isinstance(item.get("text"), str)
+            ]
+            if texts:
+                sections.append((key, "\n\n".join(texts)))
+    if not sections:
+        return None
+    if len(sections) == 1:
+        key, text = sections[0]
+        head = text.lstrip()[:512].lower()
+        if key == "markdown":
+            return text, ".md"
+        if head.startswith(("<!doctype html", "<html")):
+            return text, ".html"
+        if head.startswith(("{", "[")):
+            try:
+                json.loads(text)
+            except ValueError:
+                return text, ".txt"
+            return text, ".json"
+        return text, ".txt"
+    parts = []
+    for key, text in sections:
+        parts.append(f"===== {key} =====\n{text}" + ("" if text.endswith("\n") else "\n"))
+    return "".join(parts), ".txt"
+
+
+def _size_label(size: int) -> str:
+    if size >= 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f} MB"
+    return f"{max(1, round(size / 1024))} KB"
+
+
 # Process output keeps its beginning and its end: the command's first lines
 # say what ran, the last ones carry the summary, the error and the exit
-# status. Every other text keeps its head (it continues with a cursor).
+# status (40 % head, 60 % tail: errors gather at the end). Every other text
+# keeps its head (it continues with a cursor).
 HEAD_TAIL_KEYS = frozenset({"stdout", "stderr"})
 # A single huge line (minified JSON, a progress bar without newlines) must not
 # make the excerpt all-or-nothing.
@@ -250,8 +319,10 @@ def _excerpt(units, count, is_text, head_and_tail):
         return "".join(units[:count])
     if not count:
         return ""
-    head = units[: (count + 1) // 2]
-    tail = units[len(units) - count // 2 :] if count // 2 else []
+    head_count = max(1, (count * 2 + 4) // 5)
+    tail_count = count - head_count
+    head = units[:head_count]
+    tail = units[len(units) - tail_count :] if tail_count else []
     omitted = sum(len(unit.encode("utf-8")) for unit in units[len(head) : len(units) - len(tail)])
     joined = "".join(head)
     if joined and not joined.endswith("\n"):

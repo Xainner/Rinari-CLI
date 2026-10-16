@@ -818,7 +818,9 @@ class ToolRuntime:
                 sanitized,
                 tool=tool.name if tool else "",
                 budget=budget - 128,
-                spill=lambda suffix, content: self._spill(f"{tool_call_id}-{suffix}", content, ctx),
+                spill=lambda suffix, content, extension=None: self._spill(
+                    f"{tool_call_id}-{suffix}", content, ctx, extension
+                ),
             )
             return dataclasses.replace(projected, full_observation=sanitized)
         except OSError as exc:
@@ -855,8 +857,8 @@ class ToolRuntime:
                 source,
                 tool=call.name,
                 budget=max(0, budget - 128),
-                spill=lambda suffix, content, call=call: self._spill(
-                    f"{call.id}-{suffix}", content, ctx
+                spill=lambda suffix, content, extension=None, call=call: self._spill(
+                    f"{call.id}-{suffix}", content, ctx, extension
                 ),
             )
             projected.append(
@@ -898,12 +900,18 @@ class ToolRuntime:
             return budget
         return min(budget, cap + _RECOVERY_METADATA_BYTES)
 
-    def _spill(self, tool_call_id: str, payload: str | bytes, ctx: ToolContext) -> ArtifactRef:
+    def _spill(
+        self,
+        tool_call_id: str,
+        payload: str | bytes,
+        ctx: ToolContext,
+        extension: str | None = None,
+    ) -> ArtifactRef:
         directory = ctx.artifact_root / ctx.session_id / "runtime"
         directory.mkdir(parents=True, exist_ok=True)
         safe_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in tool_call_id) or "result"
         safe_id = safe_id[:64]
-        suffix = ".bin" if isinstance(payload, bytes) else ".txt"
+        suffix = extension or (".bin" if isinstance(payload, bytes) else ".txt")
         digest = hashlib.sha256(
             payload if isinstance(payload, bytes) else payload.encode("utf-8")
         ).hexdigest()

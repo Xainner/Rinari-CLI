@@ -7,8 +7,8 @@ from rinari.tools.observations import project_result
 def project(result, budget=65536, tool="fs.read"):
     saved = {}
 
-    def spill(suffix, text):
-        uri = "artifact://session/runtime/" + suffix + ".txt"
+    def spill(suffix, text, extension=".txt"):
+        uri = "artifact://session/runtime/" + suffix + extension
         saved[uri] = text
         return ArtifactRef(uri=uri, name=suffix, kind="tool-output")
 

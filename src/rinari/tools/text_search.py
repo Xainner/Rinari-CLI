@@ -19,11 +19,15 @@ def search_text(root, arguments, ctx, *, literal=False, ignore_case=None, relati
     ignore_case = literal if ignore_case is None else ignore_case
     relative = not literal if relative is None else relative
     paths = []
+    # This session's saved outputs (plan 0.4.0 #76) are searched like files.
+    own = (Path(ctx.artifact_root) / ctx.session_id).resolve()
     for path in [root] if root.is_file() else walk_files(root, arguments.get("include"), 5001):
         if ctx.cancellation:
             ctx.cancellation.throw_if_cancelled()
+        resolved = path.resolve()
         try:
-            ctx.sandbox.assert_readable(path.resolve())
+            if own not in resolved.parents:
+                ctx.sandbox.assert_readable(resolved)
         except Exception:
             continue
         if not path.is_symlink():

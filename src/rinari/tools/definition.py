@@ -215,13 +215,16 @@ class ToolResult:
         if isinstance(recovery, dict) and recovery.get("uri"):
             source = " (the capture itself was cut)" if data.get("source_partial") else ""
             lines.append(
-                "partial: head and tail shown; full result with artifact.read "
-                f'{{"uri": "{recovery["uri"]}"}}{source}'
+                "partial: head and tail shown; full text with fs.read_lines "
+                f'{{"path": "{recovery["uri"]}", "start": 1}} or fs.search_text{source}'
             )
+            hidden_note = True
+        else:
+            hidden_note = False
         if data.get("truncated"):
             lines.append("truncated: output exceeded the capture limit")
         for key, value in data.items():
-            if key in hidden or value is None:
+            if key in hidden or value is None or (hidden_note and key == "note"):
                 continue
             rendered = (
                 value

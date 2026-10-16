@@ -8,7 +8,6 @@ persistence → approval → error → retry → resume) are covered.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -281,9 +280,11 @@ def test_e2e_large_output_spills_and_stays_bounded(tmp_path) -> None:
 
     uri = result.data["result_ref"]
     assert uri == result.artifacts[0].uri
-    assert result.data["recovery"]["tool"] == "artifact.read"
+    # Plan 0.4.0 #76: the saved text is paged like a file; artifact.read by
+    # bytes still works on the same reference.
+    assert result.data["recovery"]["tool"] == "fs.read_lines"
     assert result.data["recovery"]["uri"] == uri
-    assert result.data["recovery"]["start_byte"] == 0
+    assert result.data["recovery"]["start"] == 1
     assert len(result.to_model_text("test.big").encode("utf-8")) <= (
         tool_ctx.observation_budget_bytes
     )
@@ -323,10 +324,8 @@ def test_e2e_large_output_spills_and_stays_bounded(tmp_path) -> None:
 
     recovered_text = "".join(pages)
     assert len(recovered_text.encode("utf-8")) == size_bytes
-    recovered = json.loads(recovered_text)
-    assert recovered["ok"] is True
-    assert recovered["tool"] == "test.big"
-    assert recovered["data"] == big
+    # The text inside the result, not its JSON envelope.
+    assert recovered_text == big
 
 
 # -- approval deny: no execution, no double exec ----------------------------------------------

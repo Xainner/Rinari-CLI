@@ -330,15 +330,16 @@ def test_redaction_and_events(project) -> None:
     assert completed["turn_index"] == 2
     assert completed["tool_seq"] == 3
 
-    spilled = runtime.execute("fs.read", {"path": "big.py"}, ctx)
-    assert spilled.ok is True
-    assert spilled.data["delivery_partial"] is True
-    assert spilled.data["result_ref"].startswith("artifact://s1/runtime/")
-    assert spilled.data["recovery"]["tool"] == "artifact.read"
-    assert len(spilled.to_model_text().encode("utf-8")) < 64 * 1024
-    spill_files = list((tmp_path / "artifacts" / "s1" / "runtime").glob("*.txt"))
-    assert len(spill_files) == 1
-    assert spill_files[0].stat().st_size > 64 * 1024
+    # Plan 0.4.0 #76: a file too large to read whole comes back as its first
+    # page with where to continue, and no copy of it is saved.
+    paged = runtime.execute("fs.read", {"path": "big.py"}, ctx)
+    assert paged.ok is True
+    assert "delivery_partial" not in paged.data
+    assert paged.data["text"] and "data" * 100 in paged.data["text"]
+    assert paged.data["total_lines"] == 1 and paged.data["truncated"] is True
+    assert "(line cut)" in paged.data["text"]
+    assert len(paged.to_model_text().encode("utf-8")) < 64 * 1024
+    assert not list((tmp_path / "artifacts" / "s1" / "runtime").glob("*"))
 
 
 def test_cancelled_before_execution(project) -> None:

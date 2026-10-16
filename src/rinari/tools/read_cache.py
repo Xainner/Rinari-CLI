@@ -61,6 +61,9 @@ class ReadCache:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._reads: OrderedDict[str, list[str]] = OrderedDict()
+        # Per file: the content hash this conversation last read or wrote
+        # (plan 0.4.0 #76). Kept across compaction: it is about the file.
+        self._shas: OrderedDict[str, str] = OrderedDict()
         self._revision: Any = None
         self._history_len = 0
 
@@ -119,6 +122,21 @@ class ReadView:
         with self._cache._lock:
             self._cache._sync(self._revision(), len(history))
             self._cache._record(path_key(path), call_id)
+
+    def note_sha(self, path: str, sha256: str | None) -> None:
+        """The content this conversation last saw of `path` (read or written)."""
+        if not sha256:
+            return
+        key = path_key(path)
+        with self._cache._lock:
+            self._cache._shas.pop(key, None)
+            self._cache._shas[key] = sha256
+            while len(self._cache._shas) > _MAX_PATHS:
+                self._cache._shas.popitem(last=False)
+
+    def known_sha(self, path: str) -> str | None:
+        with self._cache._lock:
+            return self._cache._shas.get(path_key(path))
 
     def earlier(self, path: str, matches: Callable[[str, dict], bool]) -> EarlierRead | None:
         """The newest earlier read of `path` the model still sees with this text.
