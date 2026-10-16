@@ -957,3 +957,40 @@ def test_inbox_entries_are_paused_after_engine_restart(services, tmp_path, model
         assert entry["state"] in {"paused", "uncertain"}
     finally:
         fresh.close()
+
+
+def test_a_turn_that_never_used_the_browser_does_not_show_it_live(server, tmp_path, models):
+    """Each turn prepares its session's native browser in case it is needed.
+
+    Having one is not using it: `browser.view.get` says connected only once a
+    page is open. Before, any conversation that had run a turn lit the Browser
+    button as live.
+    """
+    session = _create_chat(server, tmp_path, "idle")
+    registration = _ok(
+        server,
+        "host.browser.register",
+        {"host_instance_id": "host-idle", "capabilities": ["browser_native_view_v1"]},
+    )
+    models[session] = ScriptedModel([_answer("sin navegador")])
+    _start(server, session, "hola")
+    _wait_terminal(server, session)
+
+    view = _ok(server, "browser.view.get", {"session_id": session})
+    assert view["backend"] == "electron-native"
+    assert view["state"] == "disconnected"
+
+    context = _ok(server, "browser.context.get", {"session_id": session})["context_id"]
+    _ok(
+        server,
+        "host.browser.event",
+        {
+            "binding_id": registration["binding_id"],
+            "engine_instance_id": registration.get("engine_instance_id"),
+            "kind": "targets",
+            "context_id": context,
+            "targets": [{"target_id": "t1", "url": "https://example.com/", "title": "Example"}],
+            "active_target_id": "t1",
+        },
+    )
+    assert _ok(server, "browser.view.get", {"session_id": session})["state"] == "connected"

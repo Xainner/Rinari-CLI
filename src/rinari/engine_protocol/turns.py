@@ -859,8 +859,16 @@ class TurnManager:
         # visor de capturas del backend externo, y con vista nativa la UI
         # muestra la superficie real, no una imagen de ella.
         if getattr(browser, "_backend", None) is not None:
+            # Cada turno prepara el navegador de su sesión por si lo usa, así
+            # que tenerlo no significa usarlo: «conectado» exige además una
+            # página abierta. Sin esto, cualquier conversación que hubiera
+            # corrido un turno encendía el botón Navegador «en vivo».
+            pages = (
+                self._browser_registry is not None
+                and self._browser_registry.describe(session_id).get("context_state") == "ready"
+            )
             return {
-                "state": "connected" if browser.connected else "disconnected",
+                "state": "connected" if browser.connected and pages else "disconnected",
                 "session_id": session_id,
                 "backend": "electron-native",
                 "native_surface": True,
