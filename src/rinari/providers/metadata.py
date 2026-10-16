@@ -212,8 +212,9 @@ def model_metadata(provider, model_id):
             transport = "anthropic"
         elif npm == "@ai-sdk/openai" or model_id in OPENCODE_RESPONSES_MODELS:
             transport = "responses"
-        elif npm == "@ai-sdk/google":
-            transport = "unsupported-google-native"
+        elif npm == "@ai-sdk/google" or model_id.startswith("gemini-"):
+            # Gemini's own protocol (plan 0.4.0 #94).
+            transport = "google"
     if (
         provider.type == "anthropic"
         or (provider.settings or {}).get("protocol") == "anthropic-compatible"
@@ -279,7 +280,13 @@ def model_metadata(provider, model_id):
     elif product not in ("custom", "chatgpt", "github-copilot") and transport == "chat":
         # Advertising thought generation is not evidence of the OpenAI effort dialect.
         metadata.update(reasoning_effort=False, reasoning_levels=[])
-    metadata["route_supported"] = transport in ("chat", "responses", "anthropic", "claude-cli")
+    metadata["route_supported"] = transport in (
+        "chat",
+        "responses",
+        "anthropic",
+        "claude-cli",
+        "google",
+    )
     return metadata
 
 

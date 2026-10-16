@@ -390,6 +390,7 @@ class ModelRouter:
             "chat",
             "responses",
             "anthropic",
+            "google",
         ):
             return replace(
                 base,
@@ -544,6 +545,10 @@ class ModelRouter:
             if hasattr(adapter, "_anthropic_adapter"):
                 return adapter._anthropic_adapter(), "chat"
             return AnthropicAdapter(client=self._client), "chat"
+        if transport == "google":
+            from rinari.providers.adapters.google_native import GoogleNativeAdapter
+
+            return GoogleNativeAdapter(client=self._client), "chat"
         if transport not in ("chat", "responses"):
             raise InvalidUsageError(
                 "This model requires a transport not yet implemented by Rinari."
