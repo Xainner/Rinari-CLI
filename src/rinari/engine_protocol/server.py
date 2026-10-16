@@ -253,6 +253,9 @@ class EngineServer:
         self._dispatcher.register("followup.dismiss", self._followup_dismiss)
         self._dispatcher.register("followup.accept", self._followup_accept)
         self._dispatcher.register("session.checklist.clear", self._session_checklist_clear)
+        self._dispatcher.register(
+            "session.checklist.complete", self._session_checklist_complete
+        )
         self._dispatcher.register("session.permission.set", self._session_permission_set)
         self._dispatcher.register("session.turn.start", self._turn_start)
         self._dispatcher.register("command.list", self._command_list)
@@ -1628,6 +1631,17 @@ class EngineServer:
         service = getattr(self._services, "checklist", None)
         cleared = service.clear(session_id) if service is not None else None
         return {"checklist": cleared.as_dict() if cleared is not None else None}
+
+    def _session_checklist_complete(self, params: dict[str, Any]) -> dict[str, Any]:
+        """The owner marks every step of a list left open as done."""
+        session_id = self._services.sessions.show(self._need_str(params, "session_id")).id
+        if self._turns.has_active_turn(session_id):
+            raise EngineProtocolError(
+                TURN_RUNNING, "Rinari is working on this list; mark it when the turn ends."
+            )
+        service = getattr(self._services, "checklist", None)
+        done = service.complete_all(session_id) if service is not None else None
+        return {"checklist": done.as_dict() if done is not None else None}
 
     def _session_model_set(self, params: dict[str, Any]) -> dict[str, Any]:
         ref = self._need_str(params, "ref")

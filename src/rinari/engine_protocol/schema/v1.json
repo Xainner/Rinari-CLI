@@ -291,6 +291,7 @@
         "session.model.set",
         "session.permission.get",
         "session.checklist.clear",
+        "session.checklist.complete",
         "session.checklist.get",
         "session.permission.set",
         "session.turn.start",

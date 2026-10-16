@@ -178,6 +178,9 @@ class AgentContext:
     # Live checklist that fell behind the work (rinari.checklist.reminder):
     # called after each tool round with the tools it ran.
     checklist_reminder: Callable[[list[str]], str | None] | None = None
+    # Once per turn, before the final answer: a note when the live checklist
+    # still has open steps (rinari.checklist.reminder.before_final).
+    checklist_final_check: Callable[[], str | None] | None = None
     # Messages the owner sent while this turn runs (steering). Each call
     # hands over what arrived since the last one; the loop puts them in the
     # history after the current step and the model reads them next.
@@ -289,6 +292,10 @@ class AgentLoop:
         opening_asked = False
         language_asked = False
         empty_retried = False
+        checklist_checked = False
+        # The answer given before the checklist note; it stands if the model
+        # then only updates the list.
+        answered: str | None = None
         circuit_breaker = EmergencyCircuitBreaker(budget) if budget is not None else None
 
         # A present meter is authoritative for model-call iterations; the
@@ -545,6 +552,37 @@ class AgentLoop:
                 ctx.history.append(ChatMessage.harness(_OPENING_REMINDER, "opening"))
                 continue
 
+            if (
+                not response.has_tool_calls
+                and answered is not None
+                and not (response.content or "").strip()
+            ):
+                # The checklist note was answered with the update alone.
+                response = replace(response, content=answered)
+                answered = None
+                kind = "truncated" if response.stop_reason is StopReason.MAX_TOKENS else "answer"
+                self._emit_hook("BeforeFinal", {"kind": kind, "preview": response.content[:200]})
+                self._emit(
+                    ctx.session_id,
+                    EVENT_TURN_COMPLETED,
+                    _turn_completed_payload(
+                        kind,
+                        tool_calls_executed,
+                        budget,
+                        turn_index,
+                        requested=tool_calls_requested,
+                        rejected=tool_calls_rejected,
+                    ),
+                )
+                return TurnResult(
+                    kind=kind,
+                    content=response.content or "",
+                    tool_calls=tool_calls_executed,
+                    usage=total_usage,
+                    budget=budget.snapshot() if budget is not None else None,
+                    governor=governor.snapshot(),
+                )
+
             if not response.has_tool_calls:
                 empty = (
                     not (response.content or "").strip()
@@ -600,6 +638,19 @@ class AgentLoop:
                     language_asked = True
                     ctx.history.append(ChatMessage.harness(_LANGUAGE_REMINDER, "language"))
                     continue
+                if (
+                    not checklist_checked
+                    and ctx.checklist_final_check is not None
+                    and response.stop_reason is not StopReason.MAX_TOKENS
+                ):
+                    checklist_checked = True
+                    note = None
+                    with contextlib.suppress(Exception):
+                        note = ctx.checklist_final_check()
+                    if note:
+                        answered = response.content or ""
+                        ctx.history.append(ChatMessage.harness(note, "checklist-final"))
+                        continue
                 kind = "truncated" if response.stop_reason is StopReason.MAX_TOKENS else "answer"
                 self._emit_hook(
                     "BeforeFinal", {"kind": kind, "preview": (response.content or "")[:200]}

@@ -101,9 +101,11 @@ def test_an_ending_that_was_not_a_completion_is_interrupted(service, session_id,
 
 def test_everything_done_is_completed_and_the_next_turn_clears_it(service, session_id):
     service.begin_turn(session_id, "t1")
-    service.replace(session_id, _items("completed", "completed"))
-    # Even a cancelled turn whose steps were all done ends completed.
-    assert service.settle(session_id, "t1", "cancelled").state == "completed"
+    # Every step done is «done» at once (plan 0.4.0 #59), whatever the turn
+    # does next; settling has nothing left to change.
+    assert service.replace(session_id, _items("completed", "completed"))[0].state == "completed"
+    assert service.settle(session_id, "t1", "cancelled") is None
+    assert service.get(session_id).state == "completed"
     assert service.render_for_prompt(session_id) is None
     cleared = service.begin_turn(session_id, "t2")
     assert cleared is not None and cleared.state == "cleared"
@@ -217,6 +219,7 @@ class _Model:
     def __init__(self, scripted, block_after: int | None = None) -> None:
         self.scripted = list(scripted)
         self.calls = 0
+        self.requests: list[ModelRequest] = []
         self.block_after = block_after
         self.abort = threading.Event()
         self.blocking = threading.Event()
@@ -226,6 +229,7 @@ class _Model:
 
     def invoke(self, request: ModelRequest) -> ModelResponse:
         self.calls += 1
+        self.requests.append(request)
         if self.block_after is not None and self.calls > self.block_after:
             self.blocking.set()
             while not self.abort.wait(0.05):
@@ -285,7 +289,9 @@ def test_a_turn_with_steps_left_ends_open_and_the_next_finishes_it(server, tmp_p
     session_id = _call(server, "session.create", {"cwd": str(tmp_path), "chat": True})["result"][
         "session"
     ]["id"]
-    model = _Model([_update(_items("completed", "in_progress")), _done()])
+    # The model answers with a step still open, gets the one check, and
+    # answers again without updating: the list honestly ends open.
+    model = _Model([_update(_items("completed", "in_progress")), _done(), _done("falta el paso 2")])
     monkeypatch.setattr(agent_runtime, "_caller_for", lambda services, rec: model)
     seen = _turn(server, session_id, "haz dos cosas")
     updates = _checklist_events(seen)
@@ -406,3 +412,60 @@ def test_no_reminder_for_a_finished_cleared_or_missing_list(service, session_id)
     assert reminder.after_round(["shell.exec"]) is None
     service.replace(session_id, [])
     assert reminder.after_round(["shell.exec"]) is None
+
+
+# -- plan 0.4.0 #59: the check before the answer --------------------------------------
+
+
+def test_a_list_left_behind_gets_one_check_and_the_answer_stands(server, tmp_path, monkeypatch):
+    session_id = _call(server, "session.create", {"cwd": str(tmp_path), "chat": True})["result"][
+        "session"
+    ]["id"]
+    model = _Model(
+        [
+            _update(_items("completed", "in_progress", "pending")),
+            _done("Listo: el MP3 está en la carpeta."),
+            _update(_items("completed", "completed", "completed"), "c2"),
+            ModelResponse(content="", stop_reason=StopReason.END_TURN),
+        ]
+    )
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda services, rec: model)
+    seen = _turn(server, session_id, "baja la canción")
+    notes = [
+        m
+        for m in model.requests[-2].messages
+        if (m.origin or {}).get("source") == "checklist-final"
+    ]
+    assert len(notes) == 1 and "Paso 2" in notes[0].content
+    completed = next(e for e in seen if e["event"] == "turn.completed")
+    assert completed["payload"]["content"] == "Listo: el MP3 está en la carpeta."
+    assert _checklist_events(seen)[-1]["checklist"]["state"] == "completed"
+    assert model.calls == 4
+
+
+def test_an_up_to_date_list_gets_no_check(server, tmp_path, monkeypatch):
+    session_id = _call(server, "session.create", {"cwd": str(tmp_path), "chat": True})["result"][
+        "session"
+    ]["id"]
+    model = _Model([_update(_items("completed", "completed")), _done()])
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda services, rec: model)
+    _turn(server, session_id, "haz dos cosas")
+    assert model.calls == 2
+
+
+def test_reopening_a_finished_list_makes_it_active_again(service, session_id):
+    service.begin_turn(session_id, "t1")
+    assert service.replace(session_id, _items("completed"))[0].state == "completed"
+    assert service.replace(session_id, _items("completed", "pending"))[0].state == "active"
+
+
+def test_the_owner_marks_a_list_left_open_as_done(server, tmp_path, monkeypatch):
+    session_id = _call(server, "session.create", {"cwd": str(tmp_path), "chat": True})["result"][
+        "session"
+    ]["id"]
+    model = _Model([_update(_items("completed", "pending")), _done(), _done("falta el paso 2")])
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda services, rec: model)
+    _turn(server, session_id, "haz dos cosas")
+    done = _call(server, "session.checklist.complete", {"session_id": session_id})["result"]
+    assert done["checklist"]["state"] == "completed"
+    assert [item["status"] for item in done["checklist"]["items"]] == ["completed", "completed"]

@@ -443,6 +443,16 @@ def _checklist_reminder(services: ServiceContainer, session_id: str):
     return ChecklistReminder(service, session_id).after_round
 
 
+def _checklist_final_check(services: ServiceContainer, session_id: str):
+    """The main turn's one check, before its answer, of a list left behind."""
+    service = getattr(services, "checklist", None)
+    if service is None:
+        return None
+    from rinari.checklist.reminder import ChecklistReminder
+
+    return ChecklistReminder(service, session_id).before_final
+
+
 def _task_state_text(services: ServiceContainer, root: Path) -> str:
     """Task graph snapshot + completion contract for the task-state segment."""
     tasks = services.ctx.task_repo.list(str(root))[:10]
@@ -836,6 +846,7 @@ def build_agent_session(
         collect_subagent_results=orchestrator.collect_for_final,
         collect_agent_notices=orchestrator.completion_notices,
         checklist_reminder=_checklist_reminder(services, record.id),
+        checklist_final_check=_checklist_final_check(services, record.id),
     )
     if hasattr(gateway.current, "budget_getter"):
 
