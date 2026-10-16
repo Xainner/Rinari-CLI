@@ -359,3 +359,47 @@ def test_checks_made_stale_by_a_later_change_say_so(app_ctx, tmp_path):
     fresh = service.record(project, kind="test", result="passed", command="pytest")
     again = service.evaluate(project, record_ids={fresh["id"]})
     assert again.outcome == OUTCOME_DONE, again.reasons
+
+
+# -- plan 0.4.0 #61c ------------------------------------------------------------------
+
+
+def test_without_a_test_suite_manual_evidence_completes(app_ctx, tmp_path):
+    ctx = _tool_ctx(app_ctx, tmp_path)
+    recorded = _handler("verify.record").handler(
+        {"kind": "manual", "result": "passed", "summary": "logo.png opens, 512x512"}, ctx
+    )
+    assert recorded.ok
+    decision = _handler("verify.evaluate").handler({}, ctx)
+    assert decision.ok and decision.data["outcome"] == OUTCOME_DONE
+
+
+def test_the_ids_verify_record_returns_are_accepted(app_ctx, tmp_path):
+    ctx = _tool_ctx(app_ctx, tmp_path)
+    recorded = _handler("verify.record").handler(
+        {"kind": "manual", "result": "passed", "summary": "checked"}, ctx
+    )
+    record_id = recorded.data["id"]
+    for arguments in ({"task_ids": [record_id]}, {"record_ids": [record_id]}):
+        decision = _handler("verify.evaluate").handler(arguments, ctx)
+        assert decision.ok, decision.error
+        assert decision.data["outcome"] == OUTCOME_DONE
+
+
+def test_an_unknown_task_says_where_evidence_ids_go(app_ctx, tmp_path):
+    ctx = _tool_ctx(app_ctx, tmp_path)
+    decision = _handler("verify.evaluate").handler({"task_ids": ["task_missing"]}, ctx)
+    assert not decision.ok
+    assert "record_ids" in decision.error.message
+
+
+def test_with_a_test_suite_a_test_is_still_required(app_ctx, tmp_path):
+    import json
+
+    ctx = _tool_ctx(app_ctx, tmp_path)
+    (ctx.project_root / "package.json").write_text(
+        json.dumps({"scripts": {"test": "vitest run"}}), encoding="utf-8"
+    )
+    _handler("verify.record").handler({"kind": "manual", "result": "passed"}, ctx)
+    decision = _handler("verify.evaluate").handler({}, ctx)
+    assert decision.ok and decision.data["outcome"] != OUTCOME_DONE

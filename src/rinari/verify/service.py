@@ -79,6 +79,10 @@ class VerificationService:
 
     # -- planning ---------------------------------------------------------------
 
+    def has_test_suite(self, path: str | Path) -> bool:
+        """Whether the project has a test command to run (package scripts, config)."""
+        return bool(self._discovered_commands(self._root(path)).get("test"))
+
     def _discovered_commands(self, root: Path) -> dict[str, list[str]]:
         from rinari.repo.state import analyze_repository  # local: keep import light
 
@@ -152,7 +156,10 @@ class VerificationService:
             for task_id in task_ids:
                 task = self._ctx.task_repo.get(task_id)
                 if task is None:
-                    raise InvalidUsageError(f"Task not found: {task_id}")
+                    raise InvalidUsageError(
+                        f"Task not found: {task_id}. task_ids are task ids (task_…); the "
+                        "ids verify.record returns (val_…) go in record_ids."
+                    )
                 report = done_when_report(task)
                 report["title"] = task.get("title") or task_id
                 report["id"] = task["id"]

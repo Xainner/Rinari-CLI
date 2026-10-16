@@ -128,13 +128,23 @@ def verify_evaluate(input: dict, ctx: ToolContext) -> ToolResult:
     kinds = _as_str_list(input.get("required_kinds"), max_items=10)
     unresolved = _as_str_list(input.get("unresolved"), max_items=50)
     task_ids = _as_str_list(input.get("task_ids"), max_items=50)
-    if kinds is None or unresolved is None or task_ids is None:
+    record_ids = _as_str_list(input.get("record_ids"), max_items=50)
+    if kinds is None or unresolved is None or task_ids is None or record_ids is None:
         return _fail(
             ToolErrorCode.INVALID_ARGUMENT,
-            "required_kinds, unresolved and task_ids must be arrays",
+            "required_kinds, unresolved, task_ids and record_ids must be arrays",
         )
+    # Ids verify.record just returned, passed as task_ids, were refused as
+    # "Task not found" (plan 0.4.0 #61c): they are evidence ids.
+    from rinari.verify.records import VALIDATION_ID_PREFIX
+
+    evidence_ids = [i for i in task_ids if i.startswith(f"{VALIDATION_ID_PREFIX}_")]
+    task_ids = [i for i in task_ids if i not in evidence_ids]
+    record_ids = [*record_ids, *evidence_ids]
     if not kinds:
-        kinds = ["test"]
+        # What verify.plan said: with no test suite, the evidence is checking
+        # the result by hand (manual/custom), not a test the project lacks.
+        kinds = ["test"] if service.has_test_suite(root) else []
     blocked_reason = input.get("blocked_reason")
     require_evidence = input.get("require_evidence")
     if not isinstance(blocked_reason, str) and blocked_reason is not None:
@@ -149,6 +159,7 @@ def verify_evaluate(input: dict, ctx: ToolContext) -> ToolResult:
             blocked_reason=blocked_reason,
             task_ids=task_ids,
             require_evidence=True if require_evidence is None else require_evidence,
+            record_ids=set(record_ids) if record_ids else None,
         )
     except Exception as exc:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, getattr(exc, "message", str(exc)))
@@ -224,7 +235,9 @@ def verify_tools() -> list[ToolDefinition]:
                 "Returns outcome DONE | IMPLEMENTED_UNVERIFIED | PARTIAL | BLOCKED | "
                 "FAILED plus reasons and the evidence used. Pass unresolved failures "
                 "you are aware of; a claimed success with failing recorded evidence "
-                "evaluates to FAILED."
+                "evaluates to FAILED. Without required_kinds, a project with a test "
+                "suite needs a test and one without needs any passing check (manual "
+                "counts). record_ids limits it to the evidence verify.record returned."
             ),
             input_schema={
                 "type": "object",
@@ -239,6 +252,10 @@ def verify_tools() -> list[ToolDefinition]:
                     },
                     "blocked_reason": {"type": "string"},
                     "task_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "record_ids": {
                         "type": "array",
                         "items": {"type": "string"},
                     },
