@@ -45,6 +45,9 @@ class FakeRemote:
         self.requests: list[dict[str, Any]] = []
         self.deletes: list[dict[str, str]] = []
         self.pings_answered = 0
+        self.progress_steps = 0
+        self.progress_every_s = 0.0
+        self.progress_tokens: list[Any] = []
         self.lock = threading.Lock()
 
     def reply(self, msg: dict[str, Any]) -> dict[str, Any] | None:
@@ -146,6 +149,29 @@ def _handler(remote: FakeRemote):
                 headers["Mcp-Session-Id"] = remote.session
             if answer is None:
                 self._send(202, headers=headers)
+                return
+            if remote.mode == "slow-sse" and msg.get("method") == "tools/list":
+                # Plan 0.4.0 #48: a long call that reports progress while it
+                # works, finishing well after the client timeout.
+                remote.progress_tokens.append(
+                    ((msg.get("params") or {}).get("_meta") or {}).get("progressToken")
+                )
+                self.send_response(200)
+                for key, value in {**headers, "Content-Type": "text/event-stream"}.items():
+                    self.send_header(key, value)
+                self.end_headers()
+                for step in range(remote.progress_steps):
+                    note = {
+                        "jsonrpc": "2.0",
+                        "method": "notifications/progress",
+                        "params": {"progress": step, "total": remote.progress_steps},
+                    }
+                    self.wfile.write(f"data: {json.dumps(note)}\n\n".encode())
+                    self.wfile.flush()
+                    time.sleep(remote.progress_every_s)
+                self.wfile.write(f"data: {json.dumps(answer)}\n\n".encode())
+                self.wfile.flush()
+                self.close_connection = True
                 return
             if remote.mode == "sse":
                 frames = [
@@ -583,3 +609,26 @@ def test_protocol_remote_crud_probe_and_test(server, remote) -> None:
         },
     )
     assert leak["error"]["code"] == "INVALID_PARAMS"
+
+
+def test_progress_notifications_keep_a_long_call_alive(remote) -> None:
+    remote.mode = "slow-sse"
+    remote.progress_steps = 5
+    remote.progress_every_s = 0.3
+    client = _client(remote.url, timeout_s=0.8)
+    client.connect()
+    # 1.5 s in all, with a 0.8 s timeout: only the progress keeps it alive.
+    assert [t.name for t in client.list_tools()] == ["echo", "sum"]
+    client.close()
+
+
+def test_silence_still_times_out(remote) -> None:
+    remote.mode = "slow-sse"
+    remote.progress_steps = 1
+    remote.progress_every_s = 1.5
+    client = _client(remote.url, timeout_s=0.5)
+    client.connect()
+    with pytest.raises(McpError) as excinfo:
+        client.list_tools()
+    assert excinfo.value.code == "MCP_TIMEOUT"
+    client.close()

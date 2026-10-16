@@ -211,7 +211,8 @@ def _do_streamed(
     ) as response:
         body = bytearray()
         truncated = False
-        for chunk in response.iter_raw():
+        # Decoded (gzip/deflate undone): the cap applies to what is read.
+        for chunk in response.iter_bytes():
             body.extend(chunk)
             if len(body) > max_bytes:
                 truncated = True
@@ -221,7 +222,7 @@ def _do_streamed(
             str(response.url),
             dict(response.headers),
             response.headers.get("content-type", ""),
-            bytes(body),
+            bytes(body[:max_bytes]),
             truncated,
         )
 

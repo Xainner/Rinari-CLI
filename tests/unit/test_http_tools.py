@@ -53,15 +53,11 @@ def _handler_by_url(routes: dict[str, httpx.Response]):
 
 
 def _attempt_handler(responses: list[httpx.Response]):
-    """Per-attempt responses for the mock seam.
-
-    The mock transport is probed twice per attempt (stream attempt + fallback
-    full read), so both calls of a pair serve the same attempt's response.
-    """
+    """Per-attempt responses for the mock seam (one request per attempt)."""
     state = {"calls": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        idx = min(state["calls"] // 2, len(responses) - 1)
+        idx = min(state["calls"], len(responses) - 1)
         state["calls"] += 1
         return responses[idx]
 
@@ -638,3 +634,38 @@ def test_http_request_real_runtime_allowed_end_to_end(tmp_path) -> None:
     assert result.ok, result.error
     assert result.data["status"] == 200
     assert result.data["body"] == '{"ok": 1}'
+
+
+@pytest.mark.parametrize("encoding", ["gzip", "deflate"])
+def test_request_decompresses_the_body(encoding) -> None:
+    # Plan 0.4.0 #61a: the body is decoded, not the raw compressed bytes.
+    import gzip
+    import zlib
+
+    payload = b'{"hello": "mundo"}'
+    body = gzip.compress(payload) if encoding == "gzip" else zlib.compress(payload)
+    routes = {
+        "https://ex.com/z": httpx.Response(
+            200,
+            content=body,
+            headers={"content-type": "application/json", "content-encoding": encoding},
+        )
+    }
+    out = request("https://ex.com/z", client_factory=_factory(_handler_by_url(routes)))
+    assert out.body == payload
+
+
+def test_http_request_binary_body_goes_to_an_artifact_not_text(tmp_path) -> None:
+    import gzip
+
+    routes = {
+        "https://ex.com/raw": httpx.Response(
+            200, content=gzip.compress(b"x" * 100), headers={"content-type": "text/plain"}
+        )
+    }
+    ctx = _ctx(tmp_path, web=_factory(_handler_by_url(routes)))
+    result = _tool("http.request").handler({"url": "https://ex.com/raw"}, ctx)
+    assert result.ok, result.error
+    assert "body" not in result.data
+    assert result.data["binary"] is True
+    assert result.data["artifact"]["bytes"] > 0

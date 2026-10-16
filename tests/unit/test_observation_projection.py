@@ -103,3 +103,42 @@ def test_round_redistributes_small_results_without_exceeding_caps():
     assert budgets == [1000, 1000, 49000, 49000]
     assert sum(budgets) == 100000
     assert allocate_budgets([500000, 1], 65536, 262144) == [65536, 1]
+
+
+def _spill_into(saved):
+    def spill(suffix, text):
+        uri = "artifact://session/runtime/" + suffix + ".txt"
+        saved[uri] = text
+        return ArtifactRef(uri=uri, name=suffix, kind="tool-output")
+
+    return spill
+
+
+def test_binary_decoded_as_text_never_enters_the_context():
+    # Plan 0.4.0 #61b: gzip bytes decoded as text (what web.* returned before
+    # #61a) become a one-line notice; the full value is kept as evidence.
+    import gzip
+
+    from rinari.tools.observations import omit_unreadable
+
+    raw = gzip.compress(bytes(range(256)) * 64 + "".join(map(str, range(9000))).encode())
+    garbage = raw.decode("utf-8", errors="replace")
+    source = ToolResult(
+        ok=True, data={"stdout": garbage, "exit_code": 0, "files": [{"x": garbage}]}
+    )
+    saved = {}
+    output = omit_unreadable(source, spill=_spill_into(saved))
+    assert output.data["exit_code"] == 0
+    assert output.data["stdout"].startswith("[unreadable binary content omitted")
+    assert output.data["files"][0]["x"].startswith("[unreadable binary content omitted")
+    assert len(output.to_model_text("shell.exec")) < 1000
+    assert garbage in saved.values()
+    assert len(output.artifacts) == 2
+
+
+def test_readable_text_is_left_alone():
+    from rinari.tools.observations import omit_unreadable
+
+    text = "línea con acentos, tabs\t y colores \x1b[32mok\x1b[0m\n" * 200
+    source = ToolResult(ok=True, data={"stdout": text, "short": "\x01\x02"})
+    assert omit_unreadable(source, spill=_spill_into({})) is source

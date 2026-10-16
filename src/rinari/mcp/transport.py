@@ -18,10 +18,14 @@ import queue
 import re
 import subprocess
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 
 from .protocol import McpMessage, parse_message
+
+# A call that keeps reporting progress may wait this long in all.
+MAX_PROGRESS_WAIT_S = 30 * 60.0
 
 
 class TransportError(Exception):
@@ -124,7 +128,14 @@ class StdioTransport(McpTransport):
     def _wait_for_response(self, payload: str, timeout_s: float) -> McpMessage:
         match = re.search(r'"id"\s*:\s*(\d+)', payload)
         expected = int(match.group(1)) if match else None
+        # Every frame from the server restarts the wait, so progress
+        # notifications keep a long call alive; the ceiling bounds it in all.
+        ceiling = time.monotonic() + max(timeout_s, MAX_PROGRESS_WAIT_S)
         while True:
+            if time.monotonic() > ceiling:
+                raise TransportError(
+                    "TRANSPORT_TIMEOUT", f"server did not answer within {MAX_PROGRESS_WAIT_S:g}s"
+                )
             try:
                 line = self._queue.get(timeout=timeout_s)
             except queue.Empty as exc:

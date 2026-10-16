@@ -40,7 +40,7 @@ from rinari.runtime.budget import TOOL_CALLS as TOOL_CALLS_DIM
 from rinari.runtime.budget import BudgetMeter, EmergencyCircuitBreaker
 from rinari.runtime.cancellation import CancellationToken
 from rinari.runtime.governor import RECOVERY_PROMPTS, GovernorAction, TurnGovernor
-from rinari.runtime.loopdetection import LoopDetector
+from rinari.runtime.loopdetection import LoopDetector, outcome_digest
 from rinari.shared.errors import CancelledError
 from rinari.tools.definition import ToolContext, ToolErrorCode, ToolErrorInfo, ToolResult
 from rinari.tools.runtime import ToolRuntime
@@ -72,6 +72,16 @@ EVENT_TOOL_COMPLETED = "ToolCompleted"
 EVENT_TURN_COMPLETED = "AgentTurnCompleted"
 EVENT_LOOP_DETECTED = "LoopDetected"
 EVENT_OPENING_REQUESTED = "OpeningRequested"
+EVENT_EMPTY_RESPONSE = "EmptyResponse"
+# Sent once when a final response arrives with no text and no tool calls
+# (plan 0.4.0 #66a): common with quantized or long-reasoning models, which
+# end the turn mid-work after only reasoning.
+_EMPTY_REMINDER = (
+    "Runtime: your last response was empty (no text and no tool calls), so the user saw "
+    "nothing. Continue the work you were doing, or tell the user, in their language, "
+    "where it stands and what is left."
+)
+EMPTY_RESPONSE_STOP = "empty_response"
 # Sent when a task's first response calls tools without a word to the user.
 _OPENING_REMINDER = (
     "Runtime: your last response called tools without telling the user what you are "
@@ -278,6 +288,7 @@ class AgentLoop:
         opened = False
         opening_asked = False
         language_asked = False
+        empty_retried = False
         circuit_breaker = EmergencyCircuitBreaker(budget) if budget is not None else None
 
         # A present meter is authoritative for model-call iterations; the
@@ -535,6 +546,37 @@ class AgentLoop:
                 continue
 
             if not response.has_tool_calls:
+                empty = (
+                    not (response.content or "").strip()
+                    and response.stop_reason is not StopReason.MAX_TOKENS
+                    and not subagent_results
+                    and not steered
+                )
+                if empty:
+                    self._emit(
+                        ctx.session_id,
+                        EVENT_EMPTY_RESPONSE,
+                        {"model_call_id": model_call_id, "retried": empty_retried},
+                    )
+                    if not empty_retried:
+                        # Nothing is kept from the empty answer: the model
+                        # gets the note and one more call.
+                        empty_retried = True
+                        ctx.history.append(ChatMessage.harness(_EMPTY_REMINDER, "empty"))
+                        continue
+                    return self._stop(
+                        ctx.session_id,
+                        EMPTY_RESPONSE_STOP,
+                        "The model ended its turn without a reply, twice in a row.",
+                        tool_calls_executed,
+                        total_usage,
+                        budget,
+                        turn_index,
+                        requested=tool_calls_requested,
+                        rejected=tool_calls_rejected,
+                        governor=governor,
+                        stop_detail={"empty": True},
+                    )
                 ctx.history.append(
                     ChatMessage.assistant(
                         response.content or "", continuation=response.continuation
@@ -829,7 +871,11 @@ class AgentLoop:
                         if turn_index is not None:
                             tool_completed_payload["turn_index"] = turn_index
                         self._emit(ctx.session_id, EVENT_TOOL_COMPLETED, tool_completed_payload)
-                    loop.record_tool(call.name, call.arguments)
+                    loop.record_tool(
+                        call.name,
+                        call.arguments,
+                        outcome_digest(result.data if result.ok else result.error.message),
+                    )
                     if result.error is not None:
                         loop.record_error(call.name, result.error.code.value, result.error.message)
                     signal = loop.check() if group_end else None
@@ -1277,7 +1323,7 @@ class AgentLoop:
             budget=budget.snapshot() if budget is not None else None,
             governor=governor.snapshot() if governor is not None else None,
             stop_reason=("emergency_limit" if kind == "budget" else kind),
-            recoverable=kind in ("budget", "loop", "stagnation"),
+            recoverable=kind in ("budget", "loop", "stagnation", EMPTY_RESPONSE_STOP),
             stop_detail=stop_detail,
         )
 

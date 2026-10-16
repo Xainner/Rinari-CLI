@@ -330,3 +330,49 @@ def test_hardware_sections_preserve_partial_results():
     assert not sections["gpu"]["ok"]
     assert sections["gpu"]["exit_code"] == 127
     assert not sections["memory"]["ok"]
+
+
+# -- MCP output schemas (plan 0.4.0 #48) -------------------------------------------
+
+_MCP_SCHEMA = {
+    "type": "object",
+    "properties": {"result": {"type": "string"}},
+    "required": ["result"],
+}
+
+
+def _mcp_tool(payload):
+    return _def(
+        "mcp.Lab.prompt_guide",
+        lambda args, ctx: ToolResult(ok=True, data=payload, origin="mcp"),
+        output_schema=_MCP_SCHEMA,
+        manifest={"source": "mcp", "server": "Lab", "raw_name": "prompt_guide"},
+    )
+
+
+def test_mcp_schema_applies_to_structured_content(project) -> None:
+    tmp_path, root = project
+    payload = {"content": [{"type": "text", "text": "guía"}], "structuredContent": {"result": "ok"}}
+    rt = _runtime([_mcp_tool(payload)])
+    result = rt.execute("mcp.Lab.prompt_guide", _args(root), _ctx(tmp_path, root))
+    assert result.ok, result.error
+    assert "schema_warning" not in result.data
+
+
+def test_mcp_output_off_its_schema_still_delivers_its_text(project) -> None:
+    tmp_path, root = project
+    payload = {"content": [{"type": "text", "text": "Usa prompts cortos y concretos."}]}
+    rt = _runtime([_mcp_tool(payload)])
+    result = rt.execute("mcp.Lab.prompt_guide", _args(root), _ctx(tmp_path, root))
+    assert result.ok, result.error
+    assert result.data["content"][0]["text"] == "Usa prompts cortos y concretos."
+    assert "does not match its schema" in result.data["schema_warning"]
+
+
+def test_mcp_output_with_nothing_usable_fails(project) -> None:
+    tmp_path, root = project
+    payload = {"content": [], "structuredContent": {"other": 1}}
+    rt = _runtime([_mcp_tool(payload)])
+    result = rt.execute("mcp.Lab.prompt_guide", _args(root), _ctx(tmp_path, root))
+    assert not result.ok
+    assert result.error.code == ToolErrorCode.VALIDATION_FAILED

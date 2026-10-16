@@ -1049,3 +1049,52 @@ def test_the_language_rewrite_is_asked_only_once(env) -> None:
     loop = AgentLoop(model, env["runtime"], env["assembler"])
     result = loop.turn(env["ctx"], "¿Qué dice el informe del servidor?")
     assert result.kind == "answer" and len(model.requests) == 2
+
+
+# -- empty final responses (plan 0.4.0 #66a) -----------------------------------------
+
+
+def test_an_empty_final_response_gets_one_note_and_another_call(env) -> None:
+    listing = {"path": str(env["root"])}
+    model = FakeModel(
+        scripted=[
+            ModelResponse(content="Reviso.", tool_calls=(ToolCall("l1", "fs.list", listing),)),
+            ModelResponse(content=""),
+            ModelResponse(content="Listo: tiene una carpeta src."),
+        ]
+    )
+    events: list[str] = []
+    loop = AgentLoop(
+        model, env["runtime"], env["assembler"], event_sink=lambda s, t, p: events.append(t)
+    )
+    result = loop.turn(env["ctx"], "Revisa el proyecto")
+    assert result.kind == "answer"
+    assert result.content == "Listo: tiene una carpeta src."
+    sent = model.requests[2].messages
+    note = next(m for m in sent if (m.origin or {}).get("source") == "empty")
+    assert "your last response was empty" in note.content
+    # The empty answer itself is not kept in the history.
+    assert not any(
+        m.role == "assistant" and not (m.content or "") and not m.tool_calls for m in sent
+    )
+    assert events.count("EmptyResponse") == 1
+
+
+def test_two_empty_responses_stop_the_turn_as_recoverable(env) -> None:
+    model = FakeModel(scripted=[ModelResponse(content=""), ModelResponse(content="  \n")])
+    loop = AgentLoop(model, env["runtime"], env["assembler"])
+    result = loop.turn(env["ctx"], "Hola")
+    assert result.kind == "empty_response"
+    assert result.stop_reason == "empty_response"
+    assert result.recoverable is True
+    assert len(model.requests) == 2
+
+
+def test_a_cut_answer_is_not_treated_as_empty(env) -> None:
+    from rinari.models.types import StopReason
+
+    model = FakeModel(scripted=[ModelResponse(content="", stop_reason=StopReason.MAX_TOKENS)])
+    loop = AgentLoop(model, env["runtime"], env["assembler"])
+    result = loop.turn(env["ctx"], "Hola")
+    assert result.kind == "truncated"
+    assert len(model.requests) == 1

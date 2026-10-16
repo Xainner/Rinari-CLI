@@ -521,3 +521,116 @@ def test_the_history_redaction_marker_is_never_written_into_a_file(project) -> N
         tool_call_id="d",
     )
     assert ok.ok, ok.error
+
+
+# -- typed values sent as text (plan 0.4.0 #66e) ------------------------------------
+
+
+def test_typed_values_sent_as_text_are_converted() -> None:
+    from rinari.tools.schema import coerce_types
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "items": {"type": "array", "items": {"type": "object"}},
+            "load": {"type": "boolean"},
+            "limit": {"type": "integer"},
+            "name": {"type": "string"},
+            "files": {
+                "type": "array",
+                "items": {"type": "object", "properties": {"overwrite": {"type": "boolean"}}},
+            },
+        },
+    }
+    value, notes = coerce_types(
+        schema,
+        {
+            "items": '[{"text": "uno"}, {"text": "dos"}]',
+            "load": "True",
+            "limit": "5",
+            "name": "[not a list]",
+            "files": [{"overwrite": "false"}],
+        },
+    )
+    assert value == {
+        "items": [{"text": "uno"}, {"text": "dos"}],
+        "load": True,
+        "limit": 5,
+        "name": "[not a list]",
+        "files": [{"overwrite": False}],
+    }
+    assert len(notes) == 4
+    assert "used items as array (received it as text)" in notes
+
+
+@pytest.mark.parametrize(
+    ("kind", "text"),
+    [
+        ("array", '{"a": 1}'),
+        ("array", "[broken"),
+        ("object", "[1, 2]"),
+        ("boolean", "yes"),
+        ("integer", "2.5"),
+        ("number", "nan"),
+    ],
+)
+def test_ambiguous_text_is_left_for_validation(kind, text) -> None:
+    from rinari.tools.schema import coerce_types, validate_against
+
+    schema = {"type": "object", "properties": {"x": {"type": kind}}}
+    value, notes = coerce_types(schema, {"x": text})
+    assert value == {"x": text} and notes == []
+    errors = validate_against(schema, value)
+    assert errors and "send a JSON" in errors[0]
+
+
+def test_runtime_converts_a_list_sent_as_text_before_validation(project) -> None:
+    tmp_path, root, _ = project
+    ctx = _ctx(tmp_path, root, profile="full-access")
+    runtime, _events = _runtime(ctx, tmp_path, answer="y")
+    (root / "a.txt").write_text("hola", encoding="utf-8")
+
+    result = runtime.execute(
+        "fs.read_lines", {"path": "a.txt", "start": "1", "fresh": "true"}, ctx, tool_call_id="c1"
+    )
+
+    assert result.ok, result.error
+    assert "hola" in result.data["text"]
+    assert any("start as integer" in note for note in result.notes)
+    assert any("fresh as boolean" in note for note in result.notes)
+
+
+# -- tool names with the wrong separator (plan 0.4.0 #48) ---------------------------
+
+
+def test_tool_name_with_underscores_resolves_to_the_one_registered_tool() -> None:
+    from rinari.tools.runtime import resolve_tool_name
+
+    names = ["mcp.Rinari_Visual_Lab.get_job_preview", "mcp.Rinari_Visual_Lab.get_job", "fs.read"]
+    assert (
+        resolve_tool_name("mcp_Rinari_Visual_Lab_get_job_preview", names)
+        == "mcp.Rinari_Visual_Lab.get_job_preview"
+    )
+    assert resolve_tool_name("fs_read", names) == "fs.read"
+    assert resolve_tool_name("fs_write", names) is None
+    # Two tools fold to the same key: never guess.
+    assert resolve_tool_name("a_b_c", ["a.b_c", "a_b.c"]) is None
+
+
+def test_a_resolved_name_runs_through_the_same_policy(project) -> None:
+    tmp_path, root, _ = project
+    (root / "a.txt").write_text("hola", encoding="utf-8")
+    ctx = _ctx(tmp_path, root)
+    runtime, _events = _runtime(ctx, tmp_path)
+
+    result = runtime.execute("fs_read", {"path": "a.txt"}, ctx, tool_call_id="c1")
+    assert result.ok, result.error
+    assert result.notes[0] == "used tool fs.read (received fs_read)"
+
+    # Read-only: the resolved write is refused exactly like the real name.
+    read_only = _ctx(tmp_path, root, profile="read-only")
+    exact = runtime.execute("fs.write", {"path": "b.txt", "content": "x"}, read_only)
+    folded = runtime.execute("fs_write", {"path": "b.txt", "content": "x"}, read_only)
+    assert not (root / "b.txt").exists()
+    assert not exact.ok and not folded.ok
+    assert folded.error.code == exact.error.code

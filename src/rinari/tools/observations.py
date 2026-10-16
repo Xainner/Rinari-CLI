@@ -12,6 +12,57 @@ from rinari.tools.definition import (
     ToolResult,
 )
 
+# Strings shorter than this are never judged: a stray control is not garbage.
+_UNREADABLE_MIN_CHARS = 512
+_UNREADABLE_SAMPLE_CHARS = 8192
+
+
+def _unreadable(text: str) -> bool:
+    """Binary decoded as text: replacement characters and C0 controls."""
+    if len(text) < _UNREADABLE_MIN_CHARS:
+        return False
+    sample = text[:_UNREADABLE_SAMPLE_CHARS]
+    bad = sum(
+        1
+        for ch in sample
+        if ch == "\ufffd" or ch == "\x00" or (ch < " " and ch not in "\t\n\r\x0c\x1b")
+    )
+    return bad / len(sample) > 0.1
+
+
+def omit_unreadable(result: ToolResult, *, spill) -> ToolResult:
+    """Keep binary-as-text out of the model's context (plan 0.4.0 #61b).
+
+    A string field that is not readable text (bytes decoded as text) is saved
+    whole as evidence and replaced by a one-line notice with its reference, so
+    it never travels in every following model call.
+    """
+    if not isinstance(result.data, dict):
+        return result
+    artifacts = list(result.artifacts)
+    changed = False
+
+    def clean(value, path):
+        nonlocal changed
+        if isinstance(value, str) and _unreadable(value):
+            ref = spill(f"unreadable-{path}", value)
+            artifacts.append(ref)
+            changed = True
+            return (
+                f"[unreadable binary content omitted: {len(value)} characters; "
+                f"saved as {ref.uri}. It is not text: do not read it again as text.]"
+            )
+        if isinstance(value, dict):
+            return {key: clean(item, f"{path}-{key}") for key, item in value.items()}
+        if isinstance(value, list):
+            return [clean(item, f"{path}-{index}") for index, item in enumerate(value)]
+        return value
+
+    data = clean(result.data, "data")
+    if not changed:
+        return result
+    return replace(result, data=data, artifacts=tuple(artifacts))
+
 
 def project_result(result: ToolResult, *, tool: str, budget: int, spill, force=False) -> ToolResult:
     """Fit ``result`` into ``budget`` bytes without discarding evidence.

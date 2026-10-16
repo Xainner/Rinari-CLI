@@ -1979,6 +1979,8 @@ spill to artifacts upstream; continue reading them with
 - `PARTIAL_FAILURE`
 - `VALIDATION_FAILED`
 - `TOOL_NOT_FOUND`
+- `CONTENT_BINARY` (the resource is not readable text: a page that arrived binary; use `web.download`)
+- `UNSUPPORTED`
 - `UNKNOWN`
 
 ---

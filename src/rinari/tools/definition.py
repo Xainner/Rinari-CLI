@@ -54,6 +54,9 @@ class ToolErrorCode(StrEnum):
     PARTIAL_FAILURE = "PARTIAL_FAILURE"
     VALIDATION_FAILED = "VALIDATION_FAILED"
     TOOL_NOT_FOUND = "TOOL_NOT_FOUND"
+    # El recurso existe pero su contenido no es texto legible (una página que
+    # llegó binaria o comprimida). Nunca se entrega como texto al modelo.
+    CONTENT_BINARY = "CONTENT_BINARY"
     # La operación existe pero este backend no la implementa. Se distingue de
     # DEPENDENCY_ERROR a propósito: aquel es reintentable y este no lo es
     # —volver a intentarlo dará lo mismo—. Lo pide el documento 03 §4.2, que

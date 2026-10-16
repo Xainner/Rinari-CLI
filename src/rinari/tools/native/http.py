@@ -34,7 +34,7 @@ from rinari.tools.definition import (
     ToolResult,
 )
 from rinari.tools.native.web import _client_factory, _fail, _guard, _ok, _safe_name, _validate_url
-from rinari.web.client import MAX_RESPONSE_BYTES, WebRequestError
+from rinari.web.client import MAX_RESPONSE_BYTES, WebRequestError, looks_binary
 
 MAX_BODY_PREVIEW_CHARS = 8_000
 MAX_BODY_PRETTY_CHARS = 1_024
@@ -74,14 +74,16 @@ def _artifact_path(ctx: ToolContext, name: str, body: bytes) -> str:
     return str(target)
 
 
-def _is_textual(content_type: str) -> bool:
+def _is_textual(content_type: str, body: bytes = b"") -> bool:
+    """Text by content-type and by content: binary bodies never reach the model."""
     ctype = (content_type or "").lower()
-    return not ctype or "text" in ctype or "json" in ctype or "xml" in ctype
+    claims_text = not ctype or "text" in ctype or "json" in ctype or "xml" in ctype
+    return claims_text and not looks_binary(body)
 
 
 def _attach_body(data: dict, resp: HttpResponse, save_as: str | None, ctx: ToolContext) -> None:
     body = resp.body
-    textual = _is_textual(resp.content_type)
+    textual = _is_textual(resp.content_type, body)
     if textual:
         text = body.decode("utf-8", errors="replace")
         if len(text) <= MAX_BODY_PREVIEW_CHARS:
@@ -180,7 +182,11 @@ def http_request(input: dict, ctx: ToolContext) -> ToolResult:
     }
     if resp.retry_after_s is not None and resp.status == 429:
         data["retry_after_s"] = resp.retry_after_s
-    if save_as or not _is_textual(resp.content_type) or len(resp.body) > MAX_BODY_PREVIEW_CHARS:
+    if (
+        save_as
+        or not _is_textual(resp.content_type, resp.body)
+        or len(resp.body) > MAX_BODY_PREVIEW_CHARS
+    ):
         _attach_body(data, resp, save_as, ctx)
     else:
         data["body"] = resp.body.decode("utf-8", errors="replace")

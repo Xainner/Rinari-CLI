@@ -146,3 +146,25 @@ def test_cancelled_turn_persists_partial_history(env, monkeypatch) -> None:
     assert result.kind == "cancelled"
     assert [r.role for r in s.ctx.message_repo.list(record.id)] == ["user"]
     assert s.ctx.session_repo.get(record.id).state == "interrupted"
+
+
+def test_the_title_request_carries_the_session_id(env, monkeypatch) -> None:
+    # Plan 0.4.0 #48: OpenCode Go refuses a request without x-opencode-session,
+    # which comes from ModelRequest.session_id; the title call had none.
+    tmp_path, user_home, s = env
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    record = s.sessions.start(cwd, forced_chat=True).session
+    fake = FakeModel(
+        scripted=[
+            ModelResponse(content="Diseño del juego", stop_reason=StopReason.END_TURN),
+            ModelResponse(content="Va.", stop_reason=StopReason.END_TURN),
+        ]
+    )
+    fake.model_id = "fake-model-1"  # the title call names the conversation's model
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda services, rec: fake)
+    session = build_agent_session(s, record, interactive=False, user_home=user_home)
+    run_turn(session, "Diseñemos un juego de naves espaciales")
+    assert fake.requests, "no model call was made"
+    assert all(request.session_id == record.id for request in fake.requests)
+    assert s.sessions.show(record.id).title == "Diseño del juego"

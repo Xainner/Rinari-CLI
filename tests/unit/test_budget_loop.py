@@ -649,3 +649,26 @@ def test_identical_errors_in_the_nudged_response_do_not_count_toward_the_stop():
     det.begin_response()
     det.record_error("web.fetch", "TIMEOUT", "timed out")
     assert det.check() is None
+
+
+def test_waiting_on_a_job_that_advances_is_not_a_loop() -> None:
+    # Plan 0.4.0 #48: get_job with the same id while the progress moves is
+    # waiting, not repeating.
+    from rinari.runtime.loopdetection import outcome_digest
+
+    det = LoopDetector(repeats=3)
+    for progress in (10, 40, 70, 90, 100):
+        outcome = outcome_digest({"status": "running", "progress": progress, "elapsed_ms": 5})
+        det.record_tool("mcp.Lab.get_job", {"id": "job_1"}, outcome)
+        assert det.check() is None
+
+
+def test_the_same_result_again_is_still_a_loop_whatever_the_clock() -> None:
+    from rinari.runtime.loopdetection import outcome_digest
+
+    det = LoopDetector(repeats=3)
+    for tick in range(3):
+        outcome = outcome_digest({"status": "running", "progress": 40, "elapsed_ms": tick})
+        det.record_tool("mcp.Lab.get_job", {"id": "job_1"}, outcome)
+    signal = det.check()
+    assert signal is not None and signal.kind == "same-tool-args"

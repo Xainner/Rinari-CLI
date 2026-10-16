@@ -41,6 +41,8 @@ PROTOCOL_HEADER = "MCP-Protocol-Version"
 #: Version requested on `initialize` over HTTP (Streamable HTTP appeared in it).
 HTTP_PROTOCOL_VERSION = "2025-03-26"
 _ACCEPT = "application/json, text/event-stream"
+# A call that keeps reporting progress may wait this long in all.
+MAX_PROGRESS_WAIT_S = 30 * 60.0
 _CONNECT_TIMEOUT_CAP_S = 10.0
 
 
@@ -226,7 +228,7 @@ class StreamableHttpTransport(McpTransport):
                 content_type = response.headers.get("content-type", "").split(";")[0].strip()
                 content_type = content_type.lower()
                 if content_type == "text/event-stream":
-                    return self._from_sse(response, expected, deadline)
+                    return self._from_sse(response, expected, deadline, timeout_s)
                 if content_type == "application/json":
                     response.read()
                     return self._from_json(response.content, expected)
@@ -360,7 +362,11 @@ class StreamableHttpTransport(McpTransport):
             hint="not_an_mcp_endpoint",
         )
 
-    def _from_sse(self, response: httpx.Response, expected: Any, deadline: float) -> McpMessage:
+    def _from_sse(
+        self, response: httpx.Response, expected: Any, deadline: float, timeout_s: float
+    ) -> McpMessage:
+        # Progress renews the wait, never past MAX_PROGRESS_WAIT_S in all.
+        ceiling = time.monotonic() + max(timeout_s, MAX_PROGRESS_WAIT_S)
         for data in _sse_data(response.iter_lines()):
             if time.monotonic() > deadline:
                 raise TransportError(
@@ -375,7 +381,9 @@ class StreamableHttpTransport(McpTransport):
                 return message
             if message.method and message.id is not None and not message.is_response:
                 self._answer_server_request(message)
-            # Server notifications (progress, logging…) are ignored.
+            elif message.method == "notifications/progress":
+                deadline = min(max(deadline, time.monotonic() + timeout_s), ceiling)
+            # Other notifications (logging…) are ignored.
         raise TransportError(
             "TRANSPORT_IO",
             "the server closed the event stream before answering",

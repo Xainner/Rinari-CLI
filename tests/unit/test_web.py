@@ -491,3 +491,143 @@ def test_source_id_keeps_exact_snapshot_and_unknown_id_does_not_fetch(tmp_path):
     assert len(calls) == 1
     assert not runtime.execute("web.cite", {"source_id": "expired"}, ctx).ok
     assert len(calls) == 1
+
+
+# -- compressed and binary bodies (plan 0.4.0 #61a) --------------------------------
+
+
+def _compressed(encoding: str, payload: bytes) -> bytes:
+    import gzip
+    import zlib
+
+    if encoding == "gzip":
+        return gzip.compress(payload)
+    return zlib.compress(payload)
+
+
+@pytest.mark.parametrize("encoding", ["gzip", "deflate"])
+@pytest.mark.parametrize(
+    "tool", ["web.fetch", "web.open", "web.extract_text", "web.extract_markdown", "web.find"]
+)
+def test_compressed_pages_are_read_as_text(tmp_path, encoding, tool) -> None:
+    body = _compressed(encoding, PAGE_HTML.encode())
+    response = httpx.Response(
+        200,
+        content=body,
+        headers={"content-type": "text/html; charset=utf-8", "content-encoding": encoding},
+    )
+    ctx = _ctx(tmp_path, web=_factory(_handler({"https://ex.com/z": response})))
+    args = {"url": "https://ex.com/z"}
+    if tool == "web.find":
+        args["pattern"] = "Main Heading"
+    result = _tool(tool).handler(args, ctx)
+    assert result.ok, result.error
+    blob = str(result.data)
+    assert "Main Heading" in blob
+    assert "\x1f\x8b" not in blob
+
+
+def test_compressed_links_and_metadata(tmp_path) -> None:
+    response = httpx.Response(
+        200,
+        content=_compressed("gzip", PAGE_HTML.encode()),
+        headers={"content-type": "text/html", "content-encoding": "gzip"},
+    )
+    ctx = _ctx(tmp_path, web=_factory(_handler({"https://ex.com/z": response})))
+    links = _tool("web.links").handler({"url": "https://ex.com/z"}, ctx)
+    assert links.ok and links.data["total"] >= 2
+    meta = _tool("web.extract_metadata").handler({"url": "https://ex.com/z"}, ctx)
+    assert meta.ok and meta.data["title"] == "Doc & Co"
+
+
+def test_cap_applies_to_the_decompressed_body() -> None:
+    from rinari.web.client import MAX_RESPONSE_BYTES
+
+    payload = b"<html><body>" + b"a" * (MAX_RESPONSE_BYTES * 3) + b"</body></html>"
+    response = httpx.Response(
+        200,
+        content=_compressed("gzip", payload),
+        headers={"content-type": "text/html", "content-encoding": "gzip"},
+    )
+    fetched = fetch("https://ex.com/bomb", client_factory=_factory(lambda r: response))
+    assert fetched.truncated is True
+    assert len(fetched.body) == MAX_RESPONSE_BYTES
+    assert fetched.body.startswith(b"<html>")
+
+
+@pytest.mark.parametrize(
+    "tool", ["web.fetch", "web.open", "web.extract_text", "web.extract_markdown", "web.links"]
+)
+def test_binary_body_claiming_text_is_a_clear_error(tmp_path, tool) -> None:
+    # A server that compresses without saying so: the tool must not hand the
+    # model the raw bytes as if they were text.
+    import gzip
+
+    response = httpx.Response(
+        200, content=gzip.compress(PAGE_HTML.encode()), headers={"content-type": "text/html"}
+    )
+    ctx = _ctx(tmp_path, web=_factory(_handler({"https://ex.com/raw": response})))
+    result = _tool(tool).handler({"url": "https://ex.com/raw"}, ctx)
+    assert not result.ok
+    assert result.error.code == "CONTENT_BINARY"
+    assert "web.download" in result.error.message
+    assert result.error.details["content_type"] == "text/html"
+
+
+def test_looks_binary_tolerates_text_with_a_few_controls() -> None:
+    from rinari.web.client import looks_binary
+
+    assert not looks_binary("Hola, ¿qué tal?\n\tlínea\r\n".encode())
+    assert not looks_binary(b"")
+    assert not looks_binary(b"\x1b[31mred\x1b[0m text output\n" * 20)
+    assert looks_binary(b"\x1f\x8b\x08\x00rest")
+    assert looks_binary(b"text\x00with nul")
+    assert looks_binary(bytes(range(1, 32)) * 4)
+
+
+# -- web.download streams to disk (plan 0.4.0 #48) ---------------------------------
+
+
+def test_web_download_streams_a_large_file_with_its_hash(tmp_path) -> None:
+    body = bytes(range(256)) * (50 * 1024 * 4)  # 50 MiB
+    route = httpx.Response(200, content=body, headers={"content-type": "video/mp4"})
+    ctx = _ctx(tmp_path, web=_factory(_handler({"https://ex.com/clip.mp4": route})))
+    result = _tool("web.download").handler({"url": "https://ex.com/clip.mp4"}, ctx)
+    assert result.ok, result.error
+    path = Path(result.data["path"])
+    assert path.name == "clip.mp4"
+    assert result.data["bytes"] == len(body) == path.stat().st_size
+    assert result.data["sha256"] == _sha256(body)
+    assert not [p for p in path.parent.iterdir() if p.name.startswith(".download-")]
+
+
+def test_download_over_the_limit_keeps_nothing(tmp_path) -> None:
+    from rinari.web.client import download_to
+
+    route = httpx.Response(200, content=b"x" * 5000)
+    with pytest.raises(WebRequestError) as excinfo:
+        download_to(
+            "https://ex.com/big.bin",
+            tmp_path / "out",
+            lambda final_url, sha: "big.bin",
+            client_factory=_factory(_handler({"https://ex.com/big.bin": route})),
+            max_bytes=1024,
+        )
+    assert excinfo.value.code == "RESOURCE_EXHAUSTED"
+    assert list((tmp_path / "out").iterdir()) == []
+
+
+def test_download_cancelled_mid_way_keeps_nothing(tmp_path) -> None:
+    from rinari.web.client import download_to
+
+    route = httpx.Response(200, content=b"x" * 5000)
+    with pytest.raises(WebRequestError) as excinfo:
+        download_to(
+            "https://ex.com/a.bin",
+            tmp_path / "out",
+            lambda final_url, sha: "a.bin",
+            client_factory=_factory(_handler({"https://ex.com/a.bin": route})),
+            is_cancelled=lambda: True,
+        )
+    assert excinfo.value.code == "CANCELLED"
+    assert list((tmp_path / "out").iterdir()) == []

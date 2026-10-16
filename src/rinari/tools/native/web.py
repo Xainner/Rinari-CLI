@@ -35,7 +35,9 @@ from rinari.web.client import (
     SEARCH_MAX_RESULTS_DEFAULT,
     SEARCH_MAX_RESULTS_LIMIT,
     WebRequestError,
+    download_to,
     fetch,
+    looks_binary,
     search,
 )
 from rinari.web.html import parse_page
@@ -129,7 +131,35 @@ def source_snapshot(ctx, identifier):
 
 def _is_text(fetched) -> bool:
     ctype = (fetched.content_type or "").lower()
-    return not ctype or "text" in ctype or "json" in ctype or "xml" in ctype
+    claims_text = not ctype or "text" in ctype or "json" in ctype or "xml" in ctype
+    return claims_text and not looks_binary(fetched.body)
+
+
+def _binary_failure(fetched) -> ToolResult:
+    """The page is not readable text: a clear error instead of garbage."""
+    ctype = fetched.content_type or "unknown"
+    return ToolResult(
+        ok=False,
+        error=ToolErrorInfo(
+            code=ToolErrorCode.CONTENT_BINARY,
+            message=(
+                f"{fetched.final_url} returned binary content (content-type: {ctype}), "
+                "not text. Use web.download to save it as a file."
+            ),
+            details={
+                "content_type": ctype,
+                "bytes": len(fetched.body),
+                "url": fetched.final_url,
+            },
+        ),
+    )
+
+
+def _page_text(fetched) -> tuple[str | None, ToolResult | None]:
+    """(decoded text, None) for a readable page; (None, failure) for binary."""
+    if not _is_text(fetched):
+        return None, _binary_failure(fetched)
+    return fetched.body.decode("utf-8", errors="replace"), None
 
 
 def _fetch_guarded(
@@ -229,6 +259,11 @@ def web_fetch(input: dict, ctx: ToolContext) -> ToolResult:
     if error is not None:
         return error
     data: dict = {"truncated": fetched.truncated}
+    ctype = (fetched.content_type or "").lower()
+    if (not ctype or "text" in ctype or "json" in ctype or "xml" in ctype) and looks_binary(
+        fetched.body
+    ):
+        return _binary_failure(fetched)
     if _is_text(fetched):
         text = fetched.body.decode("utf-8", errors="replace")
         page = parse_page(text, fetched.final_url) if "<html" in text[:4096].lower() else None
@@ -262,12 +297,10 @@ def web_open(input: dict, ctx: ToolContext) -> ToolResult:
     )
     if error is not None:
         return error
-    if not _is_text(fetched):
-        return _fail(
-            ToolErrorCode.INVALID_ARGUMENT,
-            f"URL did not return text content (content-type: {fetched.content_type or 'unknown'})",
-        )
-    page = parse_page(fetched.body.decode("utf-8", errors="replace"), fetched.final_url)
+    text, failure = _page_text(fetched)
+    if failure is not None:
+        return failure
+    page = parse_page(text, fetched.final_url)
     return _ok(
         {
             "url": fetched.final_url,
@@ -292,7 +325,10 @@ def web_links(input: dict, ctx: ToolContext) -> ToolResult:
     )
     if error is not None:
         return error
-    page = parse_page(fetched.body.decode("utf-8", errors="replace"), fetched.final_url)
+    text, failure = _page_text(fetched)
+    if failure is not None:
+        return failure
+    page = parse_page(text, fetched.final_url)
     links = page.links[:MAX_LINKS_RESULT]
     return _ok({"url": fetched.final_url, "links": links, "total": len(page.links)})
 
@@ -312,7 +348,10 @@ def web_find(input: dict, ctx: ToolContext) -> ToolResult:
     )
     if error is not None:
         return error
-    text = parse_page(fetched.body.decode("utf-8", errors="replace"), fetched.final_url).text()
+    raw, failure = _page_text(fetched)
+    if failure is not None:
+        return failure
+    text = parse_page(raw, fetched.final_url).text()
     lines = text.splitlines()
     needle = pattern.lower()
     hits = []
@@ -343,7 +382,10 @@ def web_extract_text(input: dict, ctx: ToolContext) -> ToolResult:
     )
     if error is not None:
         return error
-    text = parse_page(fetched.body.decode("utf-8", errors="replace"), fetched.final_url).text()
+    raw, failure = _page_text(fetched)
+    if failure is not None:
+        return failure
+    text = parse_page(raw, fetched.final_url).text()
     return _ok(
         {
             "url": fetched.final_url,
@@ -363,7 +405,10 @@ def web_extract_markdown(input: dict, ctx: ToolContext) -> ToolResult:
     )
     if error is not None:
         return error
-    page = parse_page(fetched.body.decode("utf-8", errors="replace"), fetched.final_url)
+    text, failure = _page_text(fetched)
+    if failure is not None:
+        return failure
+    page = parse_page(text, fetched.final_url)
     markdown = page.markdown()
     return _ok(
         {
@@ -384,7 +429,10 @@ def web_extract_metadata(input: dict, ctx: ToolContext) -> ToolResult:
     )
     if error is not None:
         return error
-    page = parse_page(fetched.body.decode("utf-8", errors="replace"), fetched.final_url)
+    text, failure = _page_text(fetched)
+    if failure is not None:
+        return failure
+    page = parse_page(text, fetched.final_url)
     return _ok(
         {
             "url": fetched.final_url,
@@ -404,27 +452,48 @@ def web_download(input: dict, ctx: ToolContext) -> ToolResult:
     url = _validate_url(input.get("url"))
     if url is None:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "url must be an http(s) URL")
-    fetched, error = _fetch_guarded(ctx, url, timeout_s=60.0, refresh=True)
-    if error is not None:
-        return error
-    artifact_root = Path(ctx.artifact_root)
-    artifact_root.mkdir(parents=True, exist_ok=True)
-    name = _safe_name(url, f"download-{fetched.sha256[:8]}")
-    target = artifact_root / name
+    denied = _guard(ctx, url)
+    if denied is not None:
+        return denied
+    if ctx.cancellation:
+        ctx.cancellation.throw_if_cancelled()
     try:
-        target.write_bytes(fetched.body)
+        downloaded = download_to(
+            url,
+            Path(ctx.artifact_root),
+            lambda final_url, sha256: _safe_name(final_url, f"download-{sha256[:8]}"),
+            client_factory=_client_factory(ctx),
+            timeout_s=60.0,
+            is_cancelled=(lambda: ctx.cancellation.cancelled) if ctx.cancellation else None,
+        )
+    except WebRequestError as exc:
+        return _fail(ToolErrorCode(exc.code), exc.message, retryable=exc.retryable)
     except OSError as exc:
         return _fail(
             ToolErrorCode.PERMISSION_DENIED, f"Download write failed: {exc.__class__.__name__}"
         )
+    # A redirect may have left the allowed network: the file stays only if
+    # its final address passes the guard too.
+    denied = _guard(ctx, downloaded.final_url)
+    if denied is not None:
+        downloaded.path.unlink(missing_ok=True)
+        return denied
     return _ok(
         {
-            "path": str(target),
-            "bytes": len(fetched.body),
-            "sha256": fetched.sha256,
-            "content_type": fetched.content_type,
-            "truncated": fetched.truncated,
-            "provenance": _provenance(fetched, ctx),
+            "path": str(downloaded.path),
+            "bytes": downloaded.bytes,
+            "sha256": downloaded.sha256,
+            "content_type": downloaded.content_type,
+            "truncated": False,
+            "provenance": {
+                "url": downloaded.url,
+                "final_url": downloaded.final_url,
+                "status": downloaded.status,
+                "content_type": downloaded.content_type,
+                "bytes": downloaded.bytes,
+                "sha256": downloaded.sha256,
+                "fetched_at": now_iso(ctx.clock),
+            },
         }
     )
 
@@ -617,7 +686,10 @@ def web_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="web.download",
-            description="Download a URL into the session artifact directory (bounded 2 MiB).",
+            description=(
+                "Download a URL into the session artifact directory, streamed to disk "
+                "(up to 1 GiB); returns the path, size and SHA-256."
+            ),
             input_schema={
                 "type": "object",
                 "properties": {"url": {"type": "string"}},
@@ -626,7 +698,8 @@ def web_tools() -> list[ToolDefinition]:
             },
             risk=RISK_MEDIUM,
             side_effects=SIDE_EFFECT_LOCAL_REVERSIBLE,
-            timeout_ms=90_000,
+            # Large files take minutes; the read timeout still ends a stalled one.
+            timeout_ms=30 * 60_000,
             handler=web_download,
             **common,
         ),

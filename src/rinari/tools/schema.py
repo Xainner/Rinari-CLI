@@ -10,6 +10,7 @@ enough for model-supplied arguments.
 from __future__ import annotations
 
 import difflib
+import json
 import math
 import re
 from typing import Any
@@ -84,6 +85,79 @@ def _required_alternatives(clauses: list[Any]) -> list[str] | None:
     return alternatives
 
 
+_TYPE_EXAMPLES = {
+    "array": '["a", "b"]',
+    "object": '{"key": "value"}',
+    "boolean": "true",
+    "integer": "3",
+    "number": "1.5",
+}
+
+
+def coerce_types(schema: Any, value: Any, path: str = "$") -> tuple[Any, list[str]]:
+    """Values a model sent as text that have exactly one typed meaning.
+
+    Quantized and smaller models often send `"[\"a\"]"` for a list, `"True"`
+    for a boolean or `"3"` for a number. Each one cost a round trip. Only a
+    string whose declared type is a single non-string type is touched, and
+    only when it parses to exactly that type; anything else is left for
+    validation to reject. Returns the value and one note per conversion.
+    """
+    notes: list[str] = []
+    if not isinstance(schema, dict):
+        return value, notes
+    expected = schema.get("type")
+    if isinstance(value, str) and isinstance(expected, str) and expected != "string":
+        converted = _parse_as(expected, value)
+        if converted is not _NO_VALUE:
+            notes.append(f"used {path[2:] or 'value'} as {expected} (received it as text)")
+            value = converted
+    if isinstance(value, dict) and isinstance(schema.get("properties"), dict):
+        rewritten = dict(value)
+        for key, sub in schema["properties"].items():
+            if key in rewritten:
+                rewritten[key], inner = coerce_types(sub, rewritten[key], f"{path}.{key}")
+                notes.extend(inner)
+        value = rewritten
+    if isinstance(value, list) and isinstance(schema.get("items"), dict):
+        items = []
+        for index, item in enumerate(value):
+            item, inner = coerce_types(schema["items"], item, f"{path}[{index}]")
+            items.append(item)
+            notes.extend(inner)
+        value = items
+    return value, notes
+
+
+_NO_VALUE = object()
+
+
+def _parse_as(expected: str, text: str) -> Any:
+    stripped = text.strip()
+    if expected == "boolean":
+        lowered = stripped.lower()
+        return {"true": True, "false": False}.get(lowered, _NO_VALUE)
+    if expected in ("integer", "number"):
+        try:
+            number = json.loads(stripped)
+        except ValueError:
+            return _NO_VALUE
+        if isinstance(number, bool) or not isinstance(number, (int, float)):
+            return _NO_VALUE
+        if expected == "integer" and isinstance(number, float):
+            return int(number) if number.is_integer() else _NO_VALUE
+        return number
+    if expected in ("array", "object"):
+        if not stripped.startswith("[" if expected == "array" else "{"):
+            return _NO_VALUE
+        try:
+            parsed = json.loads(stripped)
+        except ValueError:
+            return _NO_VALUE
+        return parsed if _matches_type(expected, parsed) else _NO_VALUE
+    return _NO_VALUE
+
+
 def validate_against(schema: dict[str, Any], value: Any) -> list[str]:
     """Return a list of human-readable violations (empty list = valid)."""
     errors: list[str] = []
@@ -118,7 +192,9 @@ def _validate(schema: dict[str, Any], value: Any, path: str, errors: list[str]) 
 
     expected_type = schema.get("type")
     if expected_type is not None and not _matches_type(expected_type, value):
-        errors.append(f"{path}: expected type {expected_type}, got {type_name(value)}")
+        example = _TYPE_EXAMPLES.get(expected_type) if isinstance(expected_type, str) else None
+        hint = f" (send a JSON {expected_type}, e.g. {example})" if example else ""
+        errors.append(f"{path}: expected type {expected_type}, got {type_name(value)}{hint}")
         return
 
     if isinstance(value, dict):

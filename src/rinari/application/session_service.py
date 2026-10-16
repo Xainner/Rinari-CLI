@@ -8,6 +8,7 @@ state (turns, tool calls) joins in phase 2 without changing this contract.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -68,6 +69,55 @@ SESSION_MODE_PLAN = "plan"
 SESSION_MODE_BUILD = "build"
 SESSION_MODE_REVIEW = "review"
 SESSION_MODES = (SESSION_MODE_PLAN, SESSION_MODE_BUILD, SESSION_MODE_REVIEW)
+
+
+def _title_failure_detail(exc: Exception) -> str:
+    """What the provider said when a title failed, for the log only.
+
+    A bare "error:ProviderError" says nothing about the cause. The provider's
+    own fields (taxonomy code, provider, model, request id) and its message,
+    collapsed and cut to 300 characters, are enough to diagnose it. The
+    user's message is not logged; a provider message rarely quotes the
+    request, and the cut bounds it when it does."""
+    parts: list[str] = []
+    for label, value in (
+        ("code", getattr(exc, "error_code", None)),
+        ("provider", getattr(exc, "provider", None)),
+        ("model", getattr(exc, "model", None)),
+        ("request_id", getattr(exc, "request_id", None)),
+        ("retryable", getattr(exc, "retryable", None)),
+    ):
+        if value is not None and value != "":
+            parts.append(f"{label}={getattr(value, 'value', value)}")
+    message = " ".join(str(exc).split())
+    if message:
+        parts.append(f"message={message[:300]!r}")
+    return f" [{', '.join(parts)}]" if parts else ""
+
+
+# Lead-ins that say nothing about the topic: a provisional title skips them
+# ("Necesito que hagas lo siguiente: Usando el MCP…" -> "Usando el MCP…").
+_TITLE_LEAD_INS = re.compile(
+    r"^(?:(?:hola|holi|hey|buenas|buenos días|buenas tardes|buenas noches|hi|hello)[,!.\s]+)?"
+    r"(?:(?:oye|mira|por favor|please)[,\s]+)?"
+    r"(?:(?:necesito|quiero|quisiera|me gustaría) que (?:me )?(?:hagas|ayudes(?: a| con)?)"
+    r"(?: lo siguiente| esto)?|(?:puedes|podrías|podrias|me puedes|me podrías)"
+    r"|(?:can|could|would) you(?: please)?|i need you to|i want you to)?[\s:,]*",
+    re.IGNORECASE,
+)
+PROVISIONAL_TITLE_CHARS = 72
+
+
+def provisional_title(text: str) -> str:
+    """The request itself as a stand-in title, without greetings or lead-ins."""
+    clean = " ".join(text.split())
+    trimmed = _TITLE_LEAD_INS.sub("", clean, count=1).strip(" :,.¿?¡!")
+    if len(trimmed) >= 3:
+        clean = trimmed[0].upper() + trimmed[1:]
+    if len(clean) > PROVISIONAL_TITLE_CHARS:
+        prefix = clean[: PROVISIONAL_TITLE_CHARS - 3]
+        clean = (prefix.rsplit(" ", 1)[0] or prefix) + "…"
+    return clean
 
 
 def profile_for_mode(mode: str | None) -> PermissionProfile:
@@ -680,12 +730,13 @@ class SessionService:
                 (m for m in self._ctx.message_repo.list(record.id) if m.role == "user"), None
             )
             source_text = (first.display_content or first.content or "") if first else message
-        clean = " ".join(source_text.split())
+            # A first message without a topic ("Holi") retried forever from
+            # itself (#61e): the retry also reads the latest request.
+            if message.strip() and " ".join(message.split()) != " ".join(source_text.split()):
+                source_text = f"{source_text}\n\n{message}"
+        clean = provisional_title(source_text)
         if not clean:
             return record
-        if len(clean) > 72:
-            prefix = clean[:69]
-            clean = (prefix.rsplit(" ", 1)[0] or prefix) + "…"
         title, source, failure = clean, TITLE_SOURCE_FALLBACK, None
         if title_factory is None:
             failure = "unavailable"
@@ -717,7 +768,9 @@ class SessionService:
             except Exception as exc:
                 # Naming is optional metadata; provider failure must not lose the turn.
                 failure = getattr(exc, "title_failure", None) or f"error:{type(exc).__name__}"
-                logger.warning("Session title generation failed (%s)", failure)
+                logger.warning(
+                    "Session title generation failed (%s)%s", failure, _title_failure_detail(exc)
+                )
         latest = self._resolve(ref)
         current = [
             e for e in self._ctx.event_repo.list(record.id) if e.type == EVENT_SESSION_RENAMED

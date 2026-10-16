@@ -2244,6 +2244,9 @@ def _run_turn_unlocked(
         response = session.caller.invoke(
             ModelRequest(
                 model=session.caller.model_id or "",
+                # Providers that route by session (OpenCode Go asks for
+                # x-opencode-session) refused every title without it (#48).
+                session_id=session.record.id,
                 messages=(
                     ChatMessage.system(
                         "Write a concise conversation title (3-7 words) summarizing the user's "

@@ -49,6 +49,7 @@ from rinari.tools.definition import (
 )
 from rinari.tools.registry import ToolRegistry
 from rinari.tools.schema import (
+    coerce_types,
     declared_properties,
     unknown_arguments_message,
     validate_against,
@@ -132,6 +133,24 @@ _RECOVERY_METADATA_BYTES = 1024
 _DYNAMIC_SOURCES = frozenset({"plugin", "mcp", "openapi"})
 
 
+def _tool_key(name: str) -> str:
+    """A tool name with dots, dashes and case folded: `mcp_X_y` ~ `mcp.X.y`."""
+    return name.replace(".", "_").replace("-", "_").casefold()
+
+
+def resolve_tool_name(name: str, names: list[str]) -> str | None:
+    """The one registered tool a misspelled separator means, or None.
+
+    Models write `mcp_Server_tool` for `mcp.Server.tool` (plan 0.4.0 #48).
+    Only an exact match after folding separators counts, and only when it is
+    unique: two candidates, or none, are never guessed. The resolved tool is
+    then validated, classified and approved exactly like its real name.
+    """
+    key = _tool_key(name)
+    matches = [candidate for candidate in names if _tool_key(candidate) == key]
+    return matches[0] if len(matches) == 1 else None
+
+
 class ToolRuntime:
     def __init__(
         self,
@@ -180,7 +199,9 @@ class ToolRuntime:
         requested.update(trace or {})
         self._event("ToolRequested", requested)
         request_id = arguments.get("request_id")
-        tool = self.registry.get(tool_name)
+        tool = self.registry.get(tool_name) or self.registry.get(
+            resolve_tool_name(tool_name, self.registry.names()) or ""
+        )
         if prepared is not None:
             result = prepared() if callable(prepared) else prepared
         elif request_id and (not isinstance(request_id, str) or len(request_id) > 128):
@@ -249,6 +270,12 @@ class ToolRuntime:
     def prepare(self, tool_name: str, arguments: dict, ctx: ToolContext, tool_call_id: str):
         """Validate and authorize on the coordinator; return a bounded execution closure."""
         tool = self.registry.get(tool_name)
+        resolved_from: str | None = None
+        if tool is None:
+            resolved = resolve_tool_name(tool_name, self.registry.names())
+            if resolved is not None:
+                resolved_from, tool_name = tool_name, resolved
+                tool = self.registry.get(tool_name)
         if tool is None:
             return self._error(
                 ctx,
@@ -274,18 +301,25 @@ class ToolRuntime:
             arguments = {**arguments, "url": snapshot.url}
 
         notes: tuple[str, ...] = ()
+        if resolved_from is not None:
+            notes = (f"used tool {tool_name} (received {resolved_from})",)
         if tool.normalize is not None and tool.manifest.get("source") not in _DYNAMIC_SOURCES:
             try:
                 arguments, rewritten = tool.normalize(arguments)
             except ValueError as exc:
                 return self._error(ctx, ToolErrorCode.INVALID_ARGUMENT, str(exc))
-            notes = tuple(rewritten)
-            if notes:
-                # Persisted so the variants models send can be measured.
-                normalized = {"tool": tool_name, "notes": list(notes)}
-                if tool_call_id:
-                    normalized["tool_call_id"] = tool_call_id
-                self._event("ToolArgumentsNormalized", normalized)
+            notes = (*notes, *rewritten)
+        # Lists, objects, booleans and numbers sent as text (plan 0.4.0 #66e):
+        # converted only when they parse to exactly the declared type, so the
+        # policy below judges the typed call.
+        arguments, coerced = coerce_types(tool.input_schema, arguments)
+        notes = (*notes, *coerced)
+        if notes:
+            # Persisted so the variants models send can be measured.
+            normalized = {"tool": tool_name, "notes": list(notes)}
+            if tool_call_id:
+                normalized["tool_call_id"] = tool_call_id
+            self._event("ToolArgumentsNormalized", normalized)
         prepared = self._authorize(tool, arguments, ctx, tool_call_id)
         if not notes:
             return prepared
@@ -455,16 +489,9 @@ class ToolRuntime:
                         result, data={**result.data, "source_id": snapshot_id(snapshot)}
                     )
             if result.ok and tool.output_schema:
-                # P0.5: the contract is enforced, not decorative â€” dynamic
+                # P0.5: the contract is enforced, not decorative: dynamic
                 # sources (plugins/MCP/OpenAPI) must honor their schema.
-                output_errors = validate_against(tool.output_schema, result.data)
-                if output_errors:
-                    return self._error(
-                        ctx,
-                        ToolErrorCode.VALIDATION_FAILED,
-                        f"tool {tool_name} output violates its output_schema: "
-                        + "; ".join(output_errors[:5]),
-                    )
+                result = self._check_output_schema(tool, tool_name, result, ctx)
             if (
                 result.ok
                 or attempt >= attempts
@@ -474,6 +501,47 @@ class ToolRuntime:
             if cancellation is not None:
                 cancellation.throw_if_cancelled()
         return self._postprocess(result, ctx, tool_call_id, tool)
+
+    def _check_output_schema(
+        self, tool: ToolDefinition, tool_name: str, result: ToolResult, ctx: ToolContext
+    ) -> ToolResult:
+        """Validate a result against the tool's declared output schema.
+
+        For MCP the schema describes `structuredContent` (the spec), not the
+        whole payload. A result that breaks its schema but carries readable
+        text still reaches the model, with a warning (plan 0.4.0 #48): the
+        text was what mattered, and refusing it cost a retry. Only a result
+        with nothing usable fails.
+        """
+        is_mcp = tool.manifest.get("source") == "mcp"
+        data = result.data if isinstance(result.data, dict) else {}
+        if is_mcp:
+            subject = data.get("structuredContent")
+            errors = (
+                ["structuredContent is missing"]
+                if subject is None
+                else validate_against(tool.output_schema, subject)
+            )
+        else:
+            errors = validate_against(tool.output_schema, result.data)
+        if not errors:
+            return result
+        summary = "; ".join(errors[:5])
+        texts = [
+            item.get("text")
+            for item in (data.get("content") or [])
+            if isinstance(item, dict) and isinstance(item.get("text"), str) and item["text"].strip()
+        ]
+        if is_mcp and texts:
+            return dataclasses.replace(
+                result,
+                data={**data, "schema_warning": f"the output does not match its schema: {summary}"},
+            )
+        return self._error(
+            ctx,
+            ToolErrorCode.VALIDATION_FAILED,
+            f"tool {tool_name} output violates its output_schema: {summary}",
+        )
 
     # NEVER auto-retry an ambiguous result for these: a duplicate send is
     # worse than surfacing the failure (P0.5).
@@ -738,10 +806,14 @@ class ToolRuntime:
             truncated=result.truncated,
         )
 
-        from rinari.tools.observations import project_result
+        from rinari.tools.observations import omit_unreadable, project_result
 
         budget = self._result_budget(tool, data, ctx.observation_budget_bytes)
         try:
+            sanitized = omit_unreadable(
+                sanitized,
+                spill=lambda suffix, content: self._spill(f"{tool_call_id}-{suffix}", content, ctx),
+            )
             projected = project_result(
                 sanitized,
                 tool=tool.name if tool else "",

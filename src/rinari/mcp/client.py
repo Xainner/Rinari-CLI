@@ -6,6 +6,7 @@ connected server; the agent loop never talks JSON-RPC directly.
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -183,7 +184,15 @@ class McpClient:
         return [McpToolInfo.from_raw(t) for t in tools if isinstance(t, dict) and t.get("name")]
 
     def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
-        result = self._call(METHOD_TOOLS_CALL, {"name": name, "arguments": arguments or {}})
+        # A progress token lets the server send notifications/progress while
+        # it works; each one renews the wait (plan 0.4.0 #48), so a long job
+        # that reports progress is not cut at the server timeout.
+        params = {
+            "name": name,
+            "arguments": arguments or {},
+            "_meta": {"progressToken": f"rinari-{uuid.uuid4().hex[:12]}"},
+        }
+        result = self._call(METHOD_TOOLS_CALL, params)
         if not isinstance(result, dict):
             return {"content": [], "raw": result}
         if result.get("isError"):
