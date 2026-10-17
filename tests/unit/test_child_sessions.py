@@ -67,6 +67,31 @@ def _idle(server, session_id):
     return not server._turns.children._busy(session_id)
 
 
+@pytest.fixture(autouse=True)
+def _settled(server):
+    """Before the engine closes, no turn thread is left running.
+
+    A child's end starts its mother's report turn a moment later: tests
+    that checked «both idle» could close the database in between.
+    """
+    yield
+
+    def quiet() -> bool:
+        threads = list(getattr(server._turns, "_threads", {}).values())
+        return all(not thread.is_alive() for thread in threads)
+
+    deadline = time.time() + 20
+    calm_since = None
+    while time.time() < deadline:
+        if quiet():
+            calm_since = calm_since or time.time()
+            if time.time() - calm_since >= 0.5:
+                return
+        else:
+            calm_since = None
+        time.sleep(0.05)
+
+
 @pytest.fixture
 def routed(monkeypatch):
     model = Routed()
@@ -460,4 +485,7 @@ def test_the_owner_opens_a_child_by_hand(server, tmp_path, routed) -> None:
     child = opened["result"]["child_session_id"]
     assert opened["result"]["title"].startswith("Revisa los enlaces rotos")
     assert opened["result"]["origin"] == "start"
+    # Both idle is not enough: between the child's end and the mother's
+    # report turn there is a moment when neither runs (teardown raced it).
+    assert _wait(lambda: routed.requests.get(mother))
     assert _wait(lambda: _idle(server, child) and _idle(server, mother))
