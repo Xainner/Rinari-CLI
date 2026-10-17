@@ -431,6 +431,9 @@ class EngineServer:
         from rinari.engine_protocol.advanced import register_advanced
 
         register_advanced(self._dispatcher, self._services)
+        from rinari.engine_protocol.workspace_tree import register_workspace_tree
+
+        register_workspace_tree(self._dispatcher, self._services)
         self._dispatcher.register("artifact.list", self._artifact_list)
         self._dispatcher.register("artifact.read", self._artifact_read)
         self._dispatcher.register("artifact.export", self._artifact_export)

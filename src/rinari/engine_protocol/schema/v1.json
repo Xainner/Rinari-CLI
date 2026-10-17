@@ -482,6 +482,7 @@
         "session.peer_message.forward",
         "session.branch",
         "workspace.file.search",
+        "workspace.dir.list",
         "artifact.list",
         "artifact.read",
         "artifact.export",
