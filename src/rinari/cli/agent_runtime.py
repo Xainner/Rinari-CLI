@@ -219,13 +219,6 @@ def build_assembler_context(
     else:
         soul = load_active_soul(services.ctx.home).text
     canonical, extended = split_soul(soul)
-    # Character intensity (Soul 4.0) scales whichever Soul is in effect.
-    from rinari.soul.intensity import intensity_instructions
-    from rinari.soul.store import SoulStore
-
-    if canonical:
-        level = SoulStore(services.ctx.home).character_intensity()
-        canonical = f"{canonical}\n\n{intensity_instructions(level)}"
     root = Path(record.project_root_snapshot) if record.project_root_snapshot else None
     environment: dict = {
         "cwd": record.current_cwd,
@@ -306,6 +299,7 @@ def build_assembler_context(
             "inspect and stop those processes from the desktop Processes panel."
         ),
         soul=canonical,
+        voice=_voice_text(services),
         extended_identity=extended,
         project_instructions=instructions,
         skill_catalog=catalog,
@@ -411,6 +405,17 @@ def _auto_learn(services: ServiceContainer) -> str:
         return services.skills.auto_learn()
     except Exception:
         return "never"
+
+
+def _voice_text(services: ServiceContainer) -> str:
+    """Character intensity (#87): the level's rules, read on every turn."""
+    from rinari.soul.intensity import intensity_instructions
+    from rinari.soul.store import SoulStore
+
+    try:
+        return intensity_instructions(SoulStore(services.ctx.home).character_intensity())
+    except Exception:
+        return ""
 
 
 def _memory_text(
@@ -2383,6 +2388,11 @@ def _run_turn_unlocked(
     memory = _memory_text(services, _root_of(session.record), query=message, record=session.record)
     if memory != base.memory:
         base = replace(base, memory=memory)
+        session.context.assembler_base = base
+    # A level changed in Settings (or by the CLI) applies on the next turn.
+    voice = _voice_text(services)
+    if voice != base.voice:
+        base = replace(base, voice=voice)
         session.context.assembler_base = base
     # The date, the model (it can be switched mid-session) and the rest of
     # the runtime facts follow the turn, not the session's creation.

@@ -58,6 +58,10 @@ class AssemblerContext:
     # lives in `extended_identity` and is injected only per-turn when
     # `include_extended_identity` is set by the session host.
     soul: str = ""
+    # Character intensity (#87): rendered last in the system prompt, after the
+    # formatting rules, so the chosen voice is not washed out by them. Applies
+    # even when the Soul has no text.
+    voice: str = ""
     extended_identity: str = ""
     include_extended_identity: bool = False
     preferences: str | None = None
@@ -320,6 +324,16 @@ class PromptAssembler:
                     content=note,
                     trust=SegmentTrust.TRUSTED,
                     cache_policy=CachePolicy.TURN,
+                )
+            )
+        if context.voice:
+            segments.append(
+                PromptSegment(
+                    id="voice",
+                    kind=SegmentKind.SOUL,
+                    content=context.voice,
+                    trust=SegmentTrust.TRUSTED,
+                    cache_policy=CachePolicy.SESSION,
                 )
             )
         for index, evidence in enumerate(context.evidence):
