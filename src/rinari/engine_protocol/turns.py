@@ -275,6 +275,10 @@ class TurnManager:
         from rinari.engine_protocol.channels import ChannelBroker
 
         self.channels = ChannelBroker()
+        # «In this chat» / «in this session» grants, one list per conversation (#56).
+        from rinari.policy.session_grants import SessionGrantRegistry
+
+        self.grants = SessionGrantRegistry(services.ctx.db)
         self.peers = PeerBroker(self)
         # Child sessions a conversation opens for a separate piece of work.
         from rinari.engine_protocol.children import ChildSessions
@@ -1350,7 +1354,7 @@ class TurnManager:
                     activity_sink=self._activity_cb(turn),
                     reasoning_effort=reasoning_effort,
                     origin_kind=(turn.origin or {}).get("kind") or "user",
-                    session_grants=self.peers.session_grants(record.id),
+                    session_grants=self.grants.for_session(record.id),
                     **({"remote_target": turn.remote_target} if turn.remote_target else {}),
                     **(
                         {

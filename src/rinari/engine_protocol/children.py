@@ -280,8 +280,7 @@ class ChildSessions:
                 ),
             )
         # A cached grant list of the child would miss these.
-        with contextlib.suppress(Exception):
-            self._turns.peers._grants.pop(child_id, None)
+        self._turns.grants.forget(child_id)
 
     @staticmethod
     def _brief_message(parent: Any, prompt: str, done_when: str, worktree: dict | None) -> str:

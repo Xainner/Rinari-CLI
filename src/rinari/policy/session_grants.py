@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import sqlite3
+import threading
 from datetime import UTC, datetime
 from typing import Any
 
@@ -62,6 +63,32 @@ class SessionGrants(list):
                     grant.granted_at or datetime.now(UTC).isoformat(timespec="seconds"),
                 ),
             )
+
+
+class SessionGrantRegistry:
+    """One grant list per conversation, shared by every turn that runs in it.
+
+    The turn's ApprovalEngine appends to the list it is given, so a session
+    keeps the same object for as long as the Engine runs; `forget` drops the
+    cached copy when the rows changed underneath (a child inherits its
+    mother's grants by inserting rows).
+    """
+
+    def __init__(self, db: Any) -> None:
+        self._db = db
+        self._lock = threading.Lock()
+        self._lists: dict[str, SessionGrants] = {}
+
+    def for_session(self, session_id: str) -> SessionGrants:
+        with self._lock:
+            grants = self._lists.get(session_id)
+            if grants is None:
+                grants = self._lists[session_id] = SessionGrants(self._db, session_id)
+            return grants
+
+    def forget(self, session_id: str) -> None:
+        with self._lock:
+            self._lists.pop(session_id, None)
 
 
 def drop_peer_grants(db: Any, session_id: str) -> None:

@@ -260,7 +260,7 @@ class ScheduleRunner:
         if task["model"]:
             self._services.sessions.set_model(session_id, task["model"], None)
         # Approved when the task was created: the run does not ask again.
-        grants = self._turns.peers.session_grants(session_id)
+        grants = self._turns.grants.for_session(session_id)
         for grant in task["grants"]:
             grants.append(
                 ApprovalGrant(

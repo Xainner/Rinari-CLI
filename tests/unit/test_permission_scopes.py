@@ -13,10 +13,10 @@ from dataclasses import replace
 import httpx
 
 from rinari.policy.approval_store import ProjectGrantStore
-from rinari.policy.approvals import ApprovalEngine, ApprovalRequest, GrantScope
+from rinari.policy.approvals import ApprovalEngine, ApprovalGrant, ApprovalRequest, GrantScope
 from rinari.policy.engine import PermissionProfile, PolicyEngine
 from rinari.policy.network import NetworkPolicy
-from rinari.policy.session_grants import SessionGrants, drop_peer_grants
+from rinari.policy.session_grants import SessionGrantRegistry, SessionGrants, drop_peer_grants
 from rinari.shared.clock import FakeClock
 from rinari.storage.db import Database
 from rinari.storage.migrations.runner import MigrationRunner
@@ -118,3 +118,31 @@ def test_this_chat_grants_survive_a_restart_and_go_with_the_chat(tmp_path) -> No
     # Deleting the chat deletes them.
     db.execute("DELETE FROM sessions WHERE id = 's1'")
     assert len(SessionGrants(db, "s1")) == 0
+
+
+def test_one_grant_list_per_conversation_outside_the_peer_broker(tmp_path) -> None:
+    """The «in this chat» grants do not depend on Boards' peer messaging."""
+    db = _db(tmp_path)
+    registry = SessionGrantRegistry(db)
+    grants = registry.for_session("s1")
+    assert registry.for_session("s1") is grants
+    grants.append(
+        ApprovalGrant(
+            capability="shell.exec",
+            scope=GrantScope.SESSION,
+            target="npm test",
+            session_id="s1",
+            project_id="chats",
+        )
+    )
+    # Rows written underneath (a child inheriting its mother's) show after forget.
+    db.execute(
+        "INSERT INTO session_approval_grants "
+        "(session_id, capability, rule_id, target, project_id, granted_at) "
+        "VALUES ('s1', 'net.send', NULL, 'example.com', 'chats', '2026-10-17T00:00:00')"
+    )
+    assert len(registry.for_session("s1")) == 1
+    registry.forget("s1")
+    fresh = registry.for_session("s1")
+    assert fresh is not grants
+    assert {grant.capability for grant in fresh} == {"shell.exec", "net.send"}

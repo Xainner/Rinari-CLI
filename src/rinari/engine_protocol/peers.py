@@ -20,7 +20,7 @@ from typing import Any
 
 from rinari.engine_protocol.errors import INVALID_PARAMS, EngineProtocolError
 from rinari.engine_protocol.messages import event
-from rinari.policy.session_grants import SessionGrants, drop_peer_grants
+from rinari.policy.session_grants import drop_peer_grants
 from rinari.tools.definition import ToolErrorCode, ToolErrorInfo, ToolResult
 
 MAX_PEER_SENDS_PER_TURN = 5
@@ -78,11 +78,6 @@ class PeerBroker:
         self._services = turns._services
         self._operations = turns.operations
         self._lock = threading.RLock()
-        # Approval grants per session, kept with the conversation (#56). The
-        # `session.message` ones of a peer group go with a revocation or when
-        # the session leaves the group.
-        self._grants: dict[str, list] = {}
-        self._grants_epoch: dict[str, int] = {}
 
     # -- group control (client) ---------------------------------------------------
 
@@ -212,19 +207,10 @@ class PeerBroker:
             return None
         return {"group": group, "member": member}
 
-    def session_grants(self, session_id: str) -> list:
-        """Session-bound grant store injected into the turn's ApprovalEngine.
-
-        Kept with the conversation (#56), so it survives a restart.
-        """
-        with self._lock:
-            grants = self._grants.get(session_id)
-            if grants is None:
-                grants = self._grants[session_id] = SessionGrants(self._services.ctx.db, session_id)
-            return grants
-
     def _drop_peer_grants(self, session_id: str) -> None:
-        self._grants.pop(session_id, None)
+        # The `session.message` grants of a peer group go with a revocation or
+        # when the session leaves the group; its own grants stay (#56).
+        self._turns.grants.forget(session_id)
         drop_peer_grants(self._services.ctx.db, session_id)
 
     def _invalidate_grants_for(self, group: dict[str, Any], before: dict[str, Any] | None) -> None:
