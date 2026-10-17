@@ -469,9 +469,6 @@ class _SubagentRunner:
             browser=browser,
             pty=None,
             channel_host=None,
-            # Children never message peers: the binding belongs to the owner
-            # session and the provenance ceiling of the parent turn carries over.
-            peer_host=None,
             memory_source=None,
             # A child proposes no memory of its own (memory.propose refuses
             # outside the owner's conversation): the parent's timeline sink

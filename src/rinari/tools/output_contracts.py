@@ -123,8 +123,6 @@ FIELDS = {
     "project.instructions.propose": "proposal_id:s status:s updates:b message:s",
     "audio.transcribe": "file:s text:s segments:a? model:s language:s elapsed_ms:i",
     "followup.suggest": "suggestion_id:s status:s",
-    "session.peers": "peers:a",
-    "session.send": "message_id:s to_session_id:s state:s hop:i",
     "verify.record": "id:s kind:s result:s summary:s",
     "verify.plan": "checks:a",
     "verify.evaluate": "outcome:s reasons:a",

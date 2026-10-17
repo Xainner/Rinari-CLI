@@ -473,7 +473,6 @@ from dataclasses import replace as _replace  # noqa: E402
 from rinari.policy.engine import (  # noqa: E402
     CAPABILITY_MCP_WRITE,
     CAPABILITY_NETWORK,
-    CAPABILITY_SESSION_MESSAGE,
 )
 
 
@@ -517,9 +516,6 @@ def test_full_access_acts_without_asking() -> None:
     assert (
         engine.decide(CAPABILITY_NETWORK, full, host="api.example.com", network_mode="send").action
         is PolicyAction.ALLOW
-    )
-    assert (
-        engine.decide(CAPABILITY_SESSION_MESSAGE, full, target="ses_b").action is PolicyAction.ALLOW
     )
     assert engine.decide("capability.activate", full).action is PolicyAction.ALLOW
     assert engine.decide("state.mutate", _scope()).action is PolicyAction.ALLOW

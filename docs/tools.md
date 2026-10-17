@@ -2257,33 +2257,13 @@ generation. Visual provider content is materialized only at the adapter boundary
 validated, session-scoped image references; events/history contain references, not
 base64. Original files remain distinct from reduced visual inputs.
 
-## Peer messaging between sessions (Boards)
+## Peer messaging between sessions (retired)
 
-`session.peers` and `session.send` let the agent of one session message the
-agent of another session of the same board. They exist only when a trusted
-host binding is present (the session is a member of an enabled peer group
-registered by the desktop through `session.peer_group.set`); subagents and
-remote turns never receive them. Both are discovered through
-`capability.search` and run through the normal runtime.
-
-`session.send` is classified as `session.message` with the destination as
-target: policy asks the owner per destination (`allow_session` binds exactly
-to that target and lives only for the engine process), denies in read-only
-and refuses a missing target. The engine, never the model, resolves the source
-session, group, chain and hop. Limits: 32 000 chars, 5 sends per turn, 3 hops
-per chain (`PEER_LOOP`), 20 deliveries per chain; identical sends in the same
-turn are deduplicated.
-
-A delivery is accepted, not executed: the receiver starts its own turn when
-idle (queued otherwise) with the text wrapped as content from another agent,
-`origin.kind = "peer"` persisted on the message and `memory_origin =
-"automation"`. In that turn the runtime enforces a provenance ceiling in code:
-`fs.write`, `shell.exec`, `process.local`, `browser.mutate`,
-`network.outbound`, `mcp.call`, `state.write`, `git.local`, `agent.spawn`,
-`agent.message` and `agent.synthesize` fail with `POLICY_DENIED` without
-prompting. The owner turns a message into a real task by forwarding it
-(`session.peer_message.forward`, origin `user`). See
-`docs/desktop/09-peer-messaging.md` for the protocol contract.
+Boards' `session.peers` / `session.send` and the `session.peer_group.*` /
+`session.peer_message.*` methods were retired in 0.4.0 (block 25): agents that
+talk to each other belong to Rinari Agency, which builds its own base. Turns
+that already ran with `origin.kind = "peer"` keep it in their history. The old
+contract is in `docs/historia/09-peer-messaging.md`.
 
 ### Browser connection reliability
 

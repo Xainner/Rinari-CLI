@@ -770,7 +770,6 @@ def build_agent_session(
     reasoning_effort: str | None = None,
     remote_target: dict | None = None,
     channel_host=None,
-    peer_host=None,
     children_host=None,
     origin_kind: str = "user",
     session_grants: list | None = None,
@@ -858,7 +857,6 @@ def build_agent_session(
         mcp=services.mcp,
         exposure=_exposure_for(services, record, root),
         channel_host=channel_host,
-        peer_host=peer_host,
         origin_kind=origin_kind,
     )
     parent_runtime = []
@@ -867,9 +865,8 @@ def build_agent_session(
         record,
         root,
         token,
-        # Subagents never inherit peer messaging: the binding is per owner
-        # session and a child cannot message on the parent's behalf.
-        replace(tool_ctx, channel_host=None, peer_host=None),
+        # Subagents never inherit the owner's channel binding.
+        replace(tool_ctx, channel_host=None),
         policy,
         gateway,
         activity_sink,
@@ -885,7 +882,6 @@ def build_agent_session(
         questions_enabled=question_prompt is not None,
         remote_target=remote_target,
         channel_host=channel_host,
-        peer_host=peer_host,
         children_host=children_host,
         session_grants=session_grants,
         network_policy=network_policy,
@@ -1206,7 +1202,6 @@ def _build_tools(
     questions_enabled: bool = False,
     remote_target: dict | None = None,
     channel_host=None,
-    peer_host=None,
     children_host=None,
     session_grants: list | None = None,
 ) -> ToolRuntime:
@@ -1262,13 +1257,6 @@ def _build_tools(
                 from rinari.tools.native.children import child_tools
 
                 registry.register_all(child_tools(children_host))
-        if peer_host is not None:
-            # Deferred exposure: only sessions bound to an enabled peer group
-            # can even discover `session.peers` / `session.send`.
-            with registry.loading("peers"):
-                from rinari.tools.native.peers import peer_tools
-
-                registry.register_all(peer_tools(peer_host))
         # Unified capability search sees whatever is registered above it, so it
         # is added last (harness.md: search across native/plugin/MCP/OpenAPI/browser).
         from rinari.capability_search import capability_activation_tools, capability_search_tool

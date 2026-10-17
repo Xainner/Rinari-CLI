@@ -580,12 +580,6 @@ class EngineServer:
         self._dispatcher.register("session.queue.list", self._queue_list)
         self._dispatcher.register("session.queue.clear", self._queue_clear)
         self._dispatcher.register("session.queue.resume", self._queue_resume)
-        self._dispatcher.register("session.peer_group.set", self._peer_group_set)
-        self._dispatcher.register("session.peer_group.get", self._peer_group_get)
-        self._dispatcher.register("session.peer_group.revoke", self._peer_group_revoke)
-        self._dispatcher.register("session.peer_message.list", self._peer_message_list)
-        self._dispatcher.register("session.peer_message.cancel", self._peer_message_cancel)
-        self._dispatcher.register("session.peer_message.forward", self._peer_message_forward)
         self._dispatcher.register("profile_bundle.list", self._bundle_list)
         self._dispatcher.register("profile_bundle.get", self._bundle_get)
         self._dispatcher.register("profile_bundle.create", self._bundle_create)
@@ -894,7 +888,7 @@ class EngineServer:
         # Una sesión archivada no tiene pestañas abiertas: sus watches seguirían
         # leyendo el disco cada 500 ms hasta apagar el Engine.
         self._desktop.close_session(record.id)
-        self._turns.peers.on_session_gone(record.id)
+        self._turns.grants.forget(record.id)
         return {"session": session_to_dict(result)}
 
     def _session_pin(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -924,7 +918,7 @@ class EngineServer:
         self._desktop.close_session(record.id)
         self._turns.close_browser(record.id)
         self._turns.close_processes(record.id)
-        self._turns.peers.on_session_gone(record.id)
+        self._turns.grants.forget(record.id)
         return {"session": session_to_dict(result)}
 
     def _session_delete(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -962,7 +956,7 @@ class EngineServer:
         self._desktop.close_session(record.id)
         self._turns.close_browser(record.id)
         self._turns.close_processes(record.id)
-        self._turns.peers.on_session_gone(record.id)
+        self._turns.grants.forget(record.id)
         if cascade:
             artifacts_removed = self._services.artifacts.gc(session_id=sid)
             artifacts_kept = 0
@@ -3902,26 +3896,6 @@ class EngineServer:
 
     def _queue_resume(self, params: dict[str, Any]) -> dict[str, Any]:
         return self._turns.queue_resume(params or {})
-
-    # -- peer messaging between sessions (Boards) ------------------------------
-
-    def _peer_group_set(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self._turns.peers.set_group(params or {})
-
-    def _peer_group_get(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self._turns.peers.get_group(params or {})
-
-    def _peer_group_revoke(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self._turns.peers.revoke_group(params or {})
-
-    def _peer_message_list(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self._turns.peers.list_messages(params or {})
-
-    def _peer_message_cancel(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self._turns.peers.cancel_message(params or {})
-
-    def _peer_message_forward(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self._turns.peers.forward(params or {})
 
     # -- profile bundles (Phase 11) -----------------------------------------------
 

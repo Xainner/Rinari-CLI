@@ -16,9 +16,6 @@ from typing import Any
 
 from rinari.policy.approvals import ApprovalGrant, GrantScope
 
-# Grants a board's peer group gives; revoking the group takes them back.
-PEER_CAPABILITY = "session.message"
-
 
 class SessionGrants(list):
     def __init__(self, db: Any, session_id: str) -> None:
@@ -89,12 +86,3 @@ class SessionGrantRegistry:
     def forget(self, session_id: str) -> None:
         with self._lock:
             self._lists.pop(session_id, None)
-
-
-def drop_peer_grants(db: Any, session_id: str) -> None:
-    """A revoked peer group takes back what it allowed, and nothing else."""
-    with contextlib.suppress(sqlite3.Error):
-        db.execute(
-            "DELETE FROM session_approval_grants WHERE session_id = ? AND capability = ?",
-            (session_id, PEER_CAPABILITY),
-        )

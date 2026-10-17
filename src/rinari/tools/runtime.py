@@ -23,7 +23,6 @@ from typing import Any
 from rinari.policy.approvals import ApprovalEngine, ApprovalRequest
 from rinari.policy.engine import (
     CAPABILITY_NETWORK,
-    CAPABILITY_SESSION_MESSAGE,
     PolicyAction,
     PolicyEngine,
     SessionScope,
@@ -423,8 +422,6 @@ class ToolRuntime:
                     )
             if tool_name.startswith("channel.") and ctx.channel_host is None:
                 return self._error(ctx, ToolErrorCode.PERMISSION_DENIED, "No channel binding")
-            if tool_name in ("session.peers", "session.send") and ctx.peer_host is None:
-                return self._error(ctx, ToolErrorCode.PERMISSION_DENIED, "No peer binding")
             self._event("PolicyChecked", {"tool": tool_name, "capability": action.capability})
             decision = self.policy.decide(
                 action.capability,
@@ -434,7 +431,6 @@ class ToolRuntime:
                 host=action.target if action.capability == CAPABILITY_NETWORK else None,
                 risk=tool.risk,
                 risk_class=tool.side_effects,
-                target=action.target if action.capability == CAPABILITY_SESSION_MESSAGE else None,
                 network_mode=getattr(action, "mode", None) or "read",
             )
             self._event(

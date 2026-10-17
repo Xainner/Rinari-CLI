@@ -23,9 +23,9 @@ protocol.
 7. `06-interactive-workspace.md` — questions and session workspaces
    (`interactive_questions_v1`, `desktop_workspace_v1`).
 8. `07-web-previews.md` — static/dev previews owned by the engine.
-9. `09-peer-messaging.md` — messages between the agent sessions of a board
+9. ~~`09-peer-messaging.md`~~ — retired in 0.4.0; the old contract is in
+   `docs/historia/09-peer-messaging.md`.
 10. `10-project-flow.md` — stages of a project or chat derived from persisted turns (`flow.get`)
-   (`session_peer_messaging_v1`): groups, consent, provenance ceiling.
 
 ## Priority (Code's view)
 

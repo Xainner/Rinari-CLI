@@ -16,7 +16,7 @@ from rinari.policy.approval_store import ProjectGrantStore
 from rinari.policy.approvals import ApprovalEngine, ApprovalGrant, ApprovalRequest, GrantScope
 from rinari.policy.engine import PermissionProfile, PolicyEngine
 from rinari.policy.network import NetworkPolicy
-from rinari.policy.session_grants import SessionGrantRegistry, SessionGrants, drop_peer_grants
+from rinari.policy.session_grants import SessionGrantRegistry, SessionGrants
 from rinari.shared.clock import FakeClock
 from rinari.storage.db import Database
 from rinari.storage.migrations.runner import MigrationRunner
@@ -112,8 +112,6 @@ def test_this_chat_grants_survive_a_restart_and_go_with_the_chat(tmp_path) -> No
     other = ApprovalEngine(prompt=lambda _r: "n", session_grants=SessionGrants(db, "s2"))
     assert not other.check(replace(request, session_id="s2")).granted
 
-    # A peer group's revocation takes back only its own grants.
-    drop_peer_grants(db, "s1")
     assert len(SessionGrants(db, "s1")) == 1
     # Deleting the chat deletes them.
     db.execute("DELETE FROM sessions WHERE id = 's1'")

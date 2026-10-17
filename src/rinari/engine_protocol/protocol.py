@@ -153,9 +153,6 @@ CAPABILITIES: dict[str, bool] = {
     # projectSummary.git_head: each project's branch read from .git/HEAD
     # (no git subprocess), so project lists can show it.
     "project_git_head_v1": True,
-    # Peer messaging between agent sessions (Boards): untrusted data, per-target
-    # consent, provenance ceiling in the receiving turn.
-    "session_peer_messaging_v1": True,
     "project_flow_v1": True,
     # project.delete: an archived project and everything Rinari keeps about it.
     "project_delete_v1": True,

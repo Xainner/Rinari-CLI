@@ -23,3 +23,6 @@ y `git log -- TODO.md` hasta esa fecha.
 - [skill-authoring-regression.md](skill-authoring-regression.md) — la
   regresión de `/learn` con `MISSING_PROCEDURE` y cómo se verificó el arreglo
   (2026-09-26).
+- [09-peer-messaging.md](09-peer-messaging.md) — el contrato de la mensajería entre
+  paneles de Boards (2026-09-15), retirada en 0.4.0 (bloque 25): la comunicación
+  entre agentes será de Rinari Agency.

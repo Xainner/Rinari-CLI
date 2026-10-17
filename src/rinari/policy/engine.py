@@ -86,10 +86,6 @@ CAPABILITY_BROWSER_WRITE = "browser.mutate"
 #   mcp.call  any other MCP tool call; external side effects require consent
 CAPABILITY_MCP_READ = "mcp.read"
 CAPABILITY_MCP_WRITE = "mcp.call"
-# Peer messaging (Boards). Sending text to another agent session starts a
-# turn there and may forward data to a different provider: always consent,
-# bound exactly to one destination; PLAN/REVIEW/read-only never send.
-CAPABILITY_SESSION_MESSAGE = "session.message"
 
 
 @dataclass(frozen=True, slots=True)
@@ -466,32 +462,6 @@ class PolicyEngine:
         network_mode: str = "read",
     ) -> PolicyDecision:
         read_only = scope.profile is PermissionProfile.READ_ONLY
-        if capability == CAPABILITY_SESSION_MESSAGE:
-            if read_only:
-                return self._deny(
-                    capability,
-                    "PLAN, REVIEW and read-only sessions do not message other agents",
-                    target=target,
-                    risk=risk,
-                    risk_class=risk_class,
-                )
-            if not target:
-                return self._deny(
-                    capability,
-                    "peer message without a destination session",
-                    risk=risk,
-                    risk_class=risk_class,
-                )
-            return self._outbound(
-                scope,
-                capability,
-                "sending a message to another agent session (consent per destination)",
-                target=target,
-                risk=risk,
-                risk_class=risk_class,
-                rule_id="peer-message",
-                binding_mode="exact",
-            )
         if read_only and capability == CAPABILITY_SHELL:
             # A review re-runs the tests; a command can also change files, so
             # read-only asks for each one and never keeps the answer (as

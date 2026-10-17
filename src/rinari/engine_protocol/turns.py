@@ -34,7 +34,6 @@ from rinari.engine_protocol import errors
 from rinari.engine_protocol.errors import EngineProtocolError
 from rinari.engine_protocol.messages import event
 from rinari.engine_protocol.operations import OperationStore
-from rinari.engine_protocol.peers import PeerBroker
 from rinari.engine_protocol.token_usage import TurnTokenTracker
 from rinari.models.types import ChatMessage
 from rinari.policy.approvals import ApprovalRequest
@@ -89,8 +88,6 @@ class _ActiveTurn:
     # propietario. Un origen `peer` limita el runtime (techo de procedencia)
     # y alimenta la cadena/hop de cualquier envío posterior.
     origin: dict[str, Any] | None = None
-    peer_message_id: str | None = None
-    peer_sends: int = 0
     cancel_requested: threading.Event = field(default_factory=threading.Event)
     started_at: float = field(default_factory=time.time)
     status: str = "running"
@@ -264,9 +261,6 @@ class TurnManager:
         self.queue_hold: Any = None
         self._closed_approvals: dict[str, str] = {}
         self._queue: dict[str, collections.deque[_QueuedPrompt]] = {}
-        # Sessions whose peer inbox admission is paused by an explicit Stop;
-        # `session.queue.resume` lifts it.
-        self._peer_paused: set[str] = set()
         self._lock = threading.RLock()
         self._local = threading.local()
         from rinari.engine_protocol.questions import QuestionBroker
@@ -279,13 +273,10 @@ class TurnManager:
         from rinari.policy.session_grants import SessionGrantRegistry
 
         self.grants = SessionGrantRegistry(services.ctx.db)
-        self.peers = PeerBroker(self)
         # Child sessions a conversation opens for a separate piece of work.
         from rinari.engine_protocol.children import ChildSessions
 
         self.children = ChildSessions(self)
-        # A new engine process never replays deliveries accepted by an older one.
-        self.peers.on_engine_start()
         # Nor leaves its turns open: one that died mid-turn is closed now.
         self.reconcile_orphan_turns()
         try:
@@ -721,7 +712,6 @@ class TurnManager:
         memory_origin: str = "interactive",
         compaction_only: bool = False,
         origin: dict[str, Any] | None = None,
-        peer_message_id: str | None = None,
         command: str = "",
         continue_after: bool = False,
         seed_checklist: list[dict[str, Any]] | None = None,
@@ -753,7 +743,6 @@ class TurnManager:
             operation_id=operation_id,
             attachments=attachments,
             origin=origin,
-            peer_message_id=peer_message_id,
             display_message=display_message,
             attachment_metadata=attachment_metadata,
             allow_unconfirmed_vision=allow_unconfirmed_vision,
@@ -879,11 +868,6 @@ class TurnManager:
             raise EngineProtocolError(
                 errors.NO_ACTIVE_TURN, f"Session {session_id} has no running turn."
             )
-        # Stop pauses peer admission before the cancellation lands so the
-        # turn's finally block never starts the next peer delivery.
-        with self._lock:
-            self._peer_paused.add(session_id)
-        self.operations.inbox_pause_session(session_id, "stopped by user")
         turn.cancel_requested.set()
         turn.status = "cancelling"
         if turn.session is not None:
@@ -1358,15 +1342,6 @@ class TurnManager:
                     **({"remote_target": turn.remote_target} if turn.remote_target else {}),
                     **(
                         {
-                            "peer_host": lambda tool, args, ctx: self.peers.call(
-                                turn, self._activity_cb(turn), tool, args, ctx
-                            )
-                        }
-                        if not turn.remote_target and self.peers.binding_for(record.id)
-                        else {}
-                    ),
-                    **(
-                        {
                             "children_host": lambda tool, args, ctx: self.children.call(
                                 turn, tool, args, ctx
                             )
@@ -1775,16 +1750,13 @@ class TurnManager:
         return {"session_id": record.id, "position": position, "pending": position}
 
     def _pending_count(self, session_id: str) -> int:
-        manual = len(self._queue.get(session_id, ()))
-        inbox = len(self.operations.inbox_list(session_id, ("queued",)))
-        return manual + inbox
+        return len(self._queue.get(session_id, ()))
 
     def queue_list(self, session_id: str) -> dict[str, Any]:
-        """Legacy `queue: string[]` plus typed `entries` (manual and peer inbox)."""
+        """Legacy `queue: string[]` plus typed `entries`."""
         record = self._services.sessions.show(session_id)
         with self._lock:
             manual = list(self._queue.get(record.id, ()))
-        inbox = self.operations.inbox_list(record.id, ("queued", "paused", "uncertain"))
         entries: list[dict[str, Any]] = [
             {
                 "message_id": None,
@@ -1794,21 +1766,7 @@ class TurnManager:
             }
             for item in manual
         ]
-        entries.extend(
-            {
-                "message_id": entry["message_id"],
-                "message": entry.get("display_message") or entry["content"],
-                "state": entry["state"],
-                "origin": entry["origin"],
-                "error": entry.get("error"),
-            }
-            for entry in inbox
-        )
-        queued_texts = [item.message for item in manual] + [
-            entry.get("display_message") or entry["content"]
-            for entry in inbox
-            if entry["state"] == "queued"
-        ]
+        queued_texts = [item.message for item in manual]
         return {
             "session_id": record.id,
             "queue": queued_texts,
@@ -1820,22 +1778,16 @@ class TurnManager:
         record = self._services.sessions.show(session_id)
         with self._lock:
             removed = len(self._queue.pop(record.id, ()))
-        for entry in self.operations.inbox_list(record.id, ("queued", "paused")):
-            self.operations.inbox_cancel(entry["message_id"])
-            removed += 1
-            self._emit_peer_update(entry["message_id"])
         self._emit(event("session.queue.updated", {"session_id": record.id, "pending": 0}))
         return {"session_id": record.id, "removed": removed}
 
     def queue_resume(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Explicit intervention: paused peer deliveries become eligible again."""
+        """Explicit intervention: the session's queue runs again."""
         session_id = params.get("session_id")
         if not isinstance(session_id, str) or not session_id:
             raise EngineProtocolError(errors.INVALID_PARAMS, "Param 'session_id' must be a string.")
         record = self._services.sessions.show(session_id)
-        with self._lock:
-            self._peer_paused.discard(record.id)
-        resumed = self.operations.inbox_resume_session(record.id)
+        resumed = 0
         self._emit(
             event(
                 "session.queue.updated",
@@ -1846,7 +1798,7 @@ class TurnManager:
         return {"session_id": record.id, "resumed": resumed}
 
     def start_next_queued(self, session_id: str) -> None:
-        """Single scheduler per session: manual queue first, then the peer inbox."""
+        """Single scheduler per session: the queued messages, in order."""
         self._start_next_queued(session_id)
 
     # -- goals (plan 0.4.0 #23) ---------------------------------------------------
@@ -1974,7 +1926,6 @@ class TurnManager:
             item = pending.popleft() if pending else None
             if pending is not None and not pending:
                 self._queue.pop(session_id, None)
-            peer_paused = session_id in self._peer_paused
         if item is not None:
             self._emit(
                 event(
@@ -1993,56 +1944,6 @@ class TurnManager:
                 with self._lock:
                     self._queue.setdefault(session_id, collections.deque()).appendleft(item)
             return
-        if peer_paused:
-            return
-        turn_id = self._services.ctx.ids.new("turn")
-        entry = self.operations.inbox_claim_next(session_id, turn_id)
-        if entry is None:
-            return
-        binding = self.peers.binding_for(session_id)
-        if entry["origin"].get("kind") == "peer" and (
-            binding is None
-            or not binding["member"]["receive"]
-            or binding["group"]["authorization_epoch"] != entry.get("authorization_epoch")
-        ):
-            # Authorization changed after acceptance: never run with a stale grant.
-            self.operations.inbox_update(
-                entry["message_id"], "paused", error="authorization changed"
-            )
-            self._emit_peer_update(entry["message_id"])
-            return
-        try:
-            self.start_turn(
-                session_id,
-                entry["content"],
-                turn_id=turn_id,
-                display_message=entry.get("display_message"),
-                memory_origin="automation",
-                origin=entry["origin"],
-                peer_message_id=entry["message_id"],
-            )
-        except EngineProtocolError as exc:
-            if exc.code == errors.TURN_RUNNING:
-                # Lost a race with another scheduler call: the running turn's
-                # finally block will claim it again.
-                self.operations.inbox_update(entry["message_id"], "queued")
-            else:
-                self.operations.inbox_update(entry["message_id"], "paused", error=exc.message)
-                self._emit_peer_update(entry["message_id"])
-            return
-        self.operations.inbox_update(entry["message_id"], "running")
-        self._emit_peer_update(entry["message_id"])
-
-    def _emit_peer_update(self, message_id: str) -> None:
-        entry = self.operations.inbox_get(message_id)
-        if entry:
-            self.emit_external(
-                event("session.peer.message.updated", PeerBroker.message_payload(entry))
-            )
-
-    def _finish_peer_delivery(self, turn: _ActiveTurn, state: str) -> None:
-        for message_id in self.operations.inbox_finish_turn(turn.turn_id, state):
-            self._emit_peer_update(message_id)
 
     # -- streaming callbacks (worker thread) --------------------------------
 
@@ -2197,8 +2098,6 @@ class TurnManager:
                 turn.activities[activity_key] = {**current, **safe, "event": event_name}
             if event_name in {"turn.completed", "turn.failed", "turn.cancelled", "turn.stopped"}:
                 self.operations.finish(turn.turn_id, event_name.removeprefix("turn."))
-                if turn.peer_message_id:
-                    self._finish_peer_delivery(turn, event_name.removeprefix("turn."))
             if effective_event != "model.content.delta" and (
                 event_name != "usage.updated" or persist_usage
             ):
@@ -2481,7 +2380,7 @@ class TurnManager:
             # Where "allow_project" keeps the grant: this project, or every
             # loose chat.
             "grant_scope": "chats" if request.project_id in (None, "chats") else "project",
-            # `exact`: a session grant binds to this target only (peer messaging).
+            # `exact`: a session grant binds to this target only.
             "binding_mode": request.binding_mode,
         }
         if turn is not None:
