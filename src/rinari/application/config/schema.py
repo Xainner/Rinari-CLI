@@ -18,16 +18,8 @@ SESSION_MODES = ("ask", "plan", "agent", "review", "full-access")
 
 
 @dataclass(frozen=True, slots=True)
-class AgentSettings:
-    max_turns: int = 200
-    max_tool_calls: int = 500
-    max_runtime_minutes: int = 120
-
-
-@dataclass(frozen=True, slots=True)
 class RuntimeSafeguardsSettings:
     loop_detection: bool = True
-    progress_detection: bool = True
     context_compaction: bool = True
 
 
@@ -54,7 +46,6 @@ class RuntimeToolsSettings:
 @dataclass(frozen=True, slots=True)
 class RuntimeSettings:
     tools: RuntimeToolsSettings = field(default_factory=RuntimeToolsSettings)
-    execution: str = "automatic"
     safeguards: RuntimeSafeguardsSettings = field(default_factory=RuntimeSafeguardsSettings)
     emergency: RuntimeEmergencySettings = field(default_factory=RuntimeEmergencySettings)
     cost: RuntimeCostSettings = field(default_factory=RuntimeCostSettings)
@@ -77,7 +68,6 @@ class AgentsSettings:
 @dataclass(frozen=True, slots=True)
 class PermissionsSettings:
     profile: str = "workspace"
-    approval_policy: str = "on-request"
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,45 +76,20 @@ class NetworkSettings:
 
 
 @dataclass(frozen=True, slots=True)
-class WorkspaceSettings:
-    project_root_markers: tuple[str, ...] = (
-        ".git",
-        "package.json",
-        "pyproject.toml",
-        "go.mod",
-    )
-
-
-@dataclass(frozen=True, slots=True)
-class InstructionsSettings:
-    global_file: str = "~/.rinari/RINARI.md"
-    project_names: tuple[str, ...] = ("RINARI.override.md", "RINARI.md")
-
-
-@dataclass(frozen=True, slots=True)
-class TelemetrySettings:
-    local_traces: bool = True
-    redact_secrets: bool = True
-
-
-@dataclass(frozen=True, slots=True)
 class Config:
     user_name: str = ""
     language: str = ""
     model: str = ""
     profile: str = "workspace"
-    agent: AgentSettings = field(default_factory=AgentSettings)
     runtime: RuntimeSettings = field(default_factory=RuntimeSettings)
     context: ContextSettings = field(default_factory=ContextSettings)
     agents: AgentsSettings = field(default_factory=AgentsSettings)
     permissions: PermissionsSettings = field(default_factory=PermissionsSettings)
     network: NetworkSettings = field(default_factory=NetworkSettings)
-    workspace: WorkspaceSettings = field(default_factory=WorkspaceSettings)
-    instructions: InstructionsSettings = field(default_factory=InstructionsSettings)
-    telemetry: TelemetrySettings = field(default_factory=TelemetrySettings)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Config:
+        data = without_retired(data)
         _validate(data)
         runtime = _section(data, "runtime", "runtime")
         safeguards = _nested_table(runtime, "safeguards", "runtime.safeguards")
@@ -142,11 +107,6 @@ class Config:
             # (~/.rinari/profiles/<name>.toml); existence is validated during
             # profile resolution, not here.
             profile=_str(data, "profile", "str", minimum=1),
-            agent=AgentSettings(
-                max_turns=_int(data, "agent", "max_turns", 1, 10_000),
-                max_tool_calls=_int(data, "agent", "max_tool_calls", 1, 100_000),
-                max_runtime_minutes=_int(data, "agent", "max_runtime_minutes", 1, 1440),
-            ),
             runtime=RuntimeSettings(
                 tools=RuntimeToolsSettings(
                     max_concurrency=_plain_int(
@@ -167,15 +127,9 @@ class Config:
                         67108864,
                     ),
                 ),
-                execution=_plain_enum(runtime, "execution", "runtime.execution", ("automatic",)),
                 safeguards=RuntimeSafeguardsSettings(
                     loop_detection=_plain_bool(
                         safeguards, "loop_detection", "runtime.safeguards.loop_detection"
-                    ),
-                    progress_detection=_plain_bool(
-                        safeguards,
-                        "progress_detection",
-                        "runtime.safeguards.progress_detection",
                     ),
                     context_compaction=_plain_bool(
                         safeguards,
@@ -233,20 +187,8 @@ class Config:
             ),
             permissions=PermissionsSettings(
                 profile=_enum(data, "permissions.profile", PROFILE_NAMES, "str"),
-                approval_policy=_str(data, "permissions.approval_policy", "str", minimum=1),
             ),
             network=NetworkSettings(mode=_enum(data, "network.mode", NETWORK_MODES, "str")),
-            workspace=WorkspaceSettings(
-                project_root_markers=_str_list(data, "workspace", "project_root_markers"),
-            ),
-            instructions=InstructionsSettings(
-                global_file=_str(data, "instructions.global_file", "str"),
-                project_names=_str_list(data, "instructions", "project_names"),
-            ),
-            telemetry=TelemetrySettings(
-                local_traces=_bool(data, "telemetry", "local_traces"),
-                redact_secrets=_bool(data, "telemetry", "redact_secrets"),
-            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -255,21 +197,14 @@ class Config:
             "language": self.language,
             "model": self.model,
             "profile": self.profile,
-            "agent": {
-                "max_turns": self.agent.max_turns,
-                "max_tool_calls": self.agent.max_tool_calls,
-                "max_runtime_minutes": self.agent.max_runtime_minutes,
-            },
             "runtime": {
                 "tools": {
                     "max_concurrency": self.runtime.tools.max_concurrency,
                     "observation_bytes": self.runtime.tools.observation_bytes,
                     "round_observation_bytes": self.runtime.tools.round_observation_bytes,
                 },
-                "execution": self.runtime.execution,
                 "safeguards": {
                     "loop_detection": self.runtime.safeguards.loop_detection,
-                    "progress_detection": self.runtime.safeguards.progress_detection,
                     "context_compaction": self.runtime.safeguards.context_compaction,
                 },
                 "emergency": {
@@ -292,48 +227,24 @@ class Config:
             },
             "permissions": {
                 "profile": self.permissions.profile,
-                "approval_policy": self.permissions.approval_policy,
             },
             "network": {"mode": self.network.mode},
-            "workspace": {"project_root_markers": list(self.workspace.project_root_markers)},
-            "instructions": {
-                "global_file": self.instructions.global_file,
-                "project_names": list(self.instructions.project_names),
-            },
-            "telemetry": {
-                "local_traces": self.telemetry.local_traces,
-                "redact_secrets": self.telemetry.redact_secrets,
-            },
         }
 
     def value(self, dotted: str) -> Any | None:
         return _walk(self.to_dict(), dotted)
 
     def sections(self) -> tuple[str, ...]:
-        return (
-            "agent",
-            "runtime",
-            "context",
-            "agents",
-            "permissions",
-            "network",
-            "workspace",
-            "instructions",
-            "telemetry",
-        )
+        return ("runtime", "context", "agents", "permissions", "network")
 
 
 def _section_keys(section: str) -> list[str]:
     return {
-        "agent": ["max_turns", "max_tool_calls", "max_runtime_minutes"],
-        "runtime": ["execution", "safeguards", "emergency", "cost", "tools"],
+        "runtime": ["safeguards", "emergency", "cost", "tools"],
         "context": ["compact_at_percent", "artifact_output_threshold_kb"],
         "agents": ["enabled", "max_concurrent", "max_depth", "max_total"],
-        "permissions": ["profile", "approval_policy"],
+        "permissions": ["profile"],
         "network": ["mode"],
-        "workspace": ["project_root_markers"],
-        "instructions": ["global_file", "project_names"],
-        "telemetry": ["local_traces", "redact_secrets"],
     }[section]
 
 
@@ -346,9 +257,7 @@ def leaf_keys() -> list[str]:
                     "runtime.tools.max_concurrency",
                     "runtime.tools.observation_bytes",
                     "runtime.tools.round_observation_bytes",
-                    "runtime.execution",
                     "runtime.safeguards.loop_detection",
-                    "runtime.safeguards.progress_detection",
                     "runtime.safeguards.context_compaction",
                     "runtime.emergency.max_runtime_minutes",
                     "runtime.emergency.max_model_calls",
@@ -364,6 +273,11 @@ def leaf_keys() -> list[str]:
 
 def key_type(dotted: str) -> str:
     """Declared type of a dotted key for `config set` value parsing."""
+    if is_retired(dotted):
+        raise ConfigurationError(
+            f"'{dotted}' is no longer a setting: nothing in Rinari read it.",
+            hint="An old config file that has it still loads; the value is ignored.",
+        )
     parts = dotted.split(".")
     if len(parts) == 1:
         if parts[0] in ("user_name", "language", "model"):
@@ -381,7 +295,6 @@ def key_type(dotted: str) -> str:
             "runtime.tools.observation_bytes": "int",
             "runtime.tools.round_observation_bytes": "int",
             "runtime.safeguards.loop_detection": "bool",
-            "runtime.safeguards.progress_detection": "bool",
             "runtime.safeguards.context_compaction": "bool",
             "runtime.emergency.max_runtime_minutes": "int",
             "runtime.emergency.max_model_calls": "int",
@@ -400,10 +313,6 @@ def key_type(dotted: str) -> str:
     if key not in _section_keys(section):
         raise ConfigurationError(f"Unknown config key: {dotted}")
     types = {
-        ("agent", "max_turns"): "int",
-        ("agent", "max_tool_calls"): "int",
-        ("agent", "max_runtime_minutes"): "int",
-        ("runtime", "execution"): "str",
         ("context", "compact_at_percent"): "int",
         ("context", "artifact_output_threshold_kb"): "int",
         ("agents", "enabled"): "bool",
@@ -411,13 +320,7 @@ def key_type(dotted: str) -> str:
         ("agents", "max_depth"): "int",
         ("agents", "max_total"): "int",
         ("permissions", "profile"): "str",
-        ("permissions", "approval_policy"): "str",
         ("network", "mode"): "str",
-        ("workspace", "project_root_markers"): "list[str]",
-        ("instructions", "global_file"): "str",
-        ("instructions", "project_names"): "list[str]",
-        ("telemetry", "local_traces"): "bool",
-        ("telemetry", "redact_secrets"): "bool",
     }
     return types[(section, key)]
 
@@ -555,7 +458,7 @@ def _validate(data: dict[str, Any]) -> None:
     if isinstance(runtime, dict):
         nested_allowed = {
             "tools": {"max_concurrency", "observation_bytes", "round_observation_bytes"},
-            "safeguards": {"loop_detection", "progress_detection", "context_compaction"},
+            "safeguards": {"loop_detection", "context_compaction"},
             "emergency": {
                 "max_runtime_minutes",
                 "max_model_calls",
@@ -573,6 +476,45 @@ def _validate(data: dict[str, Any]) -> None:
                         f"runtime.{table}.",
                         f"unknown key(s): {', '.join(sorted(stray))}",
                     )
+
+
+# Settings nothing read (plan 0.4.0 #96): an old config file that has them still
+# loads, and they are dropped on the way in.
+RETIRED = (
+    "agent",
+    "workspace",
+    "instructions",
+    "telemetry",
+    "runtime.execution",
+    "runtime.safeguards.progress_detection",
+    "permissions.approval_policy",
+)
+
+
+def is_retired(dotted: str) -> bool:
+    return any(dotted == key or dotted.startswith(key + ".") for key in RETIRED)
+
+
+def without_retired(data: dict[str, Any]) -> dict[str, Any]:
+    """A copy of `data` without the retired settings."""
+    clean = {key: value for key, value in data.items() if key not in RETIRED}
+    for dotted in RETIRED:
+        parts = dotted.split(".")
+        if len(parts) < 2:
+            continue
+        parent = clean
+        chain = []
+        for part in parts[:-1]:
+            node = parent.get(part) if isinstance(parent, dict) else None
+            if not isinstance(node, dict):
+                break
+            node = dict(node)
+            parent[part] = node
+            chain.append(node)
+            parent = node
+        else:
+            parent.pop(parts[-1], None)
+    return clean
 
 
 def _fail(where: str, problem: str) -> None:

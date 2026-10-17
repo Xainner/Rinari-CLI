@@ -47,8 +47,8 @@ temperature = 0.7
 """
 
 MODERN_EXTRA = """
-[agent]
-max_turns = 200
+[agents]
+max_total = 12
 """
 
 runner = CliRunner()
@@ -97,7 +97,7 @@ def test_migrate_legacy_upgrades_in_place(home, tmp_path):
     assert "profile" not in new_raw
     assert "user" not in new_raw
     assert new_raw["user_name"] == "Xainner"
-    assert new_raw["agent"]["max_turns"] == 200
+    assert new_raw["agents"]["max_total"] == 12
 
     # The migrated file loads through the normal validation path.
     effective = load_effective_config(home)

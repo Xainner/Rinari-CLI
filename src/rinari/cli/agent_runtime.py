@@ -1042,7 +1042,6 @@ def _build_orchestrator(
     parent_runtime=None,
 ):
     """Per-session orchestrator with the production scoped-loop runner."""
-    from rinari.agents.definition import MAX_CONCURRENT, MAX_DEPTH, MAX_TOTAL
     from rinari.agents.orchestrator import AgentOrchestrator
     from rinari.agents.runtime import SubagentRuntimeConfig, make_subagent_runner
     from rinari.agents.worktree_manager import WorktreeManager
@@ -1105,15 +1104,18 @@ def _build_orchestrator(
             name = "agent.completed" if status == "completed" else "agent.failed"
             activity_sink(name, dict(payload))
 
+    limits = services.ctx.config.config.agents
     orchestrator = AgentOrchestrator(
         make_subagent_runner(config),
         registry=services.agents,
         worktrees=worktrees,
         task_service=services.tasks if record.kind == "PROJECT" else None,
         task_path=str(root) if (record.kind == "PROJECT" and root is not None) else None,
-        max_concurrent=MAX_CONCURRENT,
-        max_depth=MAX_DEPTH,
-        max_total=MAX_TOTAL,
+        # The owner's limits (Ajustes → Avanzado, plan 0.4.0 #96); before, the
+        # file's values were ignored for these constants' defaults.
+        max_concurrent=limits.max_concurrent,
+        max_depth=limits.max_depth,
+        max_total=limits.max_total,
         clock=services.ctx.clock,
         event_sink=orchestrator_event,
     )
@@ -1230,7 +1232,7 @@ def _build_tools(
             from rinari.tools.native.rinari_state import RinariStateHost, rinari_state_tools
 
             registry.register_all(rinari_state_tools(RinariStateHost(services, root)))
-        if orchestrator is not None:
+        if orchestrator is not None and services.ctx.config.config.agents.enabled:
             with registry.loading("agents"):
                 from rinari.agents.tools import AgentToolHost, agent_tools
 

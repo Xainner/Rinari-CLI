@@ -2694,10 +2694,9 @@ repo/
 model = "coding-default"
 profile = "workspace"
 
-[agent]
-max_turns = 200
-max_tool_calls = 500
+[runtime.emergency]
 max_runtime_minutes = 120
+max_model_calls = 500
 
 [context]
 compact_at_percent = 80
@@ -2711,21 +2710,9 @@ max_total = 12
 
 [permissions]
 profile = "workspace"
-approval_policy = "on-request"
 
 [network]
 mode = "ask"
-
-[workspace]
-project_root_markers = [".git", "package.json", "pyproject.toml", "go.mod"]
-
-[instructions]
-global_file = "~/.rinari/RINARI.md"
-project_names = ["RINARI.override.md", "RINARI.md"]
-
-[telemetry]
-local_traces = true
-redact_secrets = true
 ```
 
 ---

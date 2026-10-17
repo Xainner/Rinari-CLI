@@ -2038,8 +2038,8 @@ config reset
 Examples:
 
 ```bash
-rinari config get agent.max_turns
-rinari config set agent.max_turns 200
+rinari config get agents.max_total
+rinari config set agents.max_total 12
 rinari config unset context.compact_at_percent
 rinari config edit --global
 rinari config edit --project
