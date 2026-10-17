@@ -57,6 +57,10 @@ MAX_QUEUE_DEPTH = 20
 MAX_QUEUE_MESSAGE_CHARS = 32768
 # What the model reads before a message the owner sent mid-turn. The chat
 # shows only the owner's text (display content).
+STEER_NOW_PREFIX = (
+    "[The user interrupted your current step to tell you this. Read it now; it may "
+    "change or refine the current task. Anything you were writing was cut off.]\n\n"
+)
 STEER_PREFIX = (
     "[The user sent this while you were working. Take it into account from here on; "
     "it may change or refine the current task.]\n\n"
@@ -110,6 +114,8 @@ class _ActiveTurn:
     # mode, and starts with these tools already loaded.
     read_only: bool = False
     activate_tools: tuple[str, ...] = ()
+    # The process registry whose exits refresh this turn's context (#90).
+    process_watch: Any | None = None
     activity_lock: Any = field(default_factory=threading.RLock)
     # The first visible text of the turn decides `model.changed`, once.
     model_notice_checked: bool = False
@@ -240,6 +246,12 @@ class TurnManager:
         # servidor al construirse; sin ella el comportamiento es el de siempre.
         self._browser_registry: Any | None = None
         self._desktop_processes: dict[str, Any] = {}
+        # #90: the durable list of the processes the model starts.
+        self._process_ledger: Any | None = None
+        with contextlib.suppress(Exception):
+            from rinari.engine_protocol.process_ledger import ProcessLedger
+
+            self._process_ledger = ProcessLedger(services.ctx.layout.root)
         self._threads: dict[str, threading.Thread] = {}
         self._preparation_threads: set[threading.Thread] = set()
         self._approvals: dict[str, _PendingApproval] = {}
@@ -1052,6 +1064,7 @@ class TurnManager:
                         self._desktop_browsers[turn.session_id] = browser
                 if browser is not None:
                     context.tool_ctx = replace(context.tool_ctx, browser=browser)
+            self._watch_processes(turn, context, processes)
             tracker = self._services.changes.begin(
                 self._services,
                 record,
@@ -1208,9 +1221,34 @@ class TurnManager:
             self._local.token = None
             self._settle_steering(turn, leftover)
             self._checklist_end(turn)
+            watched = getattr(turn, "process_watch", None)
+            if watched is not None:
+                watched.on_exit = None
             self._trust_after_turn(record, trusted_before)
             self._start_next_queued(turn.session_id)
             self._goal_after_turn(turn)
+
+    def _watch_processes(self, turn: _ActiveTurn, context: Any, processes: Any) -> None:
+        """Tell the model what it has running, and what ends during the turn (#90)."""
+        from rinari.tools.native.process import ProcessRegistry, processes_note
+
+        if not isinstance(processes, ProcessRegistry):
+            return
+        if processes.ledger is None and self._process_ledger is not None:
+            processes.ledger = self._process_ledger
+            processes.session_id = turn.session_id
+        base_state = context.assembler_base.task_state
+        ended: list[Any] = []
+
+        def refresh() -> None:
+            ended.extend(processes.take_exit_notices())
+            note = processes_note(processes, ended)
+            state = "\n\n".join(part for part in (base_state, note) if part) or None
+            context.assembler_base = replace(context.assembler_base, task_state=state)
+
+        refresh()
+        processes.on_exit = refresh
+        turn.process_watch = processes
 
     def _trusted_folders(self, record: Any) -> dict[str, str]:
         """The project's folders that were trusted when the turn started (#38)."""
@@ -1382,6 +1420,7 @@ class TurnManager:
         attachment_context: str = "",
         image_refs: list | None = None,
         attachment_metadata: list | None = None,
+        now: bool = False,
     ) -> dict[str, Any]:
         """`attachment_context`, `image_refs` and `attachment_metadata` come from
         the same preparation as a normal message (plan 0.4.0 #54): the files
@@ -1424,24 +1463,67 @@ class TurnManager:
                 turn.steering.append(
                     ChatMessage(
                         role="user",
-                        content=STEER_PREFIX + body,
+                        content=(STEER_NOW_PREFIX if now else STEER_PREFIX) + body,
                         display_content=text,
                         images=self._steer_images(turn, record.id, image_refs),
                         attachments=tuple(attachment_metadata or ()),
-                        origin={"kind": "user", "steer_id": steer_id},
+                        origin={
+                            "kind": "user",
+                            "steer_id": steer_id,
+                            **({"interrupt": True} if now else {}),
+                        },
                     )
                 )
-                return {
+                target = turn
+                delivered = {
                     "session_id": record.id,
                     "delivery": "steer",
                     "turn_id": turn.turn_id,
                     "steer_id": steer_id,
                 }
+            else:
+                target = None
+        if target is not None:
+            if now:
+                delivered["interrupted"] = self._interrupt_step(target)
+            return delivered
         # No turn to steer (it just ended, or is finishing): an ordinary
         # message for the next turn, started now when the session is idle.
         queued = self.queue_add(record.id, text)
         self._start_next_queued(record.id)
         return {"session_id": record.id, "delivery": "queued", "position": queued["position"]}
+
+    def _interrupt_step(self, turn: _ActiveTurn) -> list[str]:
+        """End the current step, not the turn, so the message is read now (#31).
+
+        An answer being written is cut (it stays as partial); a command in the
+        foreground moves to the background (#32); a pending approval counts as
+        «no». Background processes and subagents are left alone.
+        """
+        from rinari.tools.native.shell import request_background, running_foreground
+
+        done: list[str] = []
+        session = turn.session
+        context = getattr(session, "context", None) if session is not None else None
+        if context is not None:
+            if context.step_interrupt is None:
+                context.step_interrupt = threading.Event()
+            context.step_interrupt.set()
+            done.append("answer")
+        for call_id in running_foreground(turn.session_id):
+            if request_background(turn.session_id, call_id, "steer_now"):
+                done.append(f"command:{call_id}")
+        with self._lock:
+            pending = [
+                approval.approval_id
+                for approval in self._approvals.values()
+                if approval.session_id == turn.session_id and not approval.decided.is_set()
+            ]
+        for approval_id in pending:
+            with contextlib.suppress(Exception):
+                self.resolve_approval(approval_id, "deny")
+                done.append(f"approval:{approval_id}")
+        return done
 
     def _steer_images(self, turn: _ActiveTurn, session_id: str, image_refs: list | None) -> tuple:
         """Pixels only for a model that sees; otherwise the manifest names the

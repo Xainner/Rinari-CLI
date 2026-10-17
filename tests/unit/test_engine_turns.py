@@ -1993,3 +1993,119 @@ def test_command_secret_runs_for_real_but_is_hidden_from_storage_ui_and_later_tu
 def _conversation(messages):
     """The request without its per-call context note (it now always names the language)."""
     return [m for m in messages if not m.is_turn_context]
+
+
+# -- «Enviar ahora» (plan 0.4.0 #31) ---------------------------------------------------
+
+
+class _SlowWriter(FakeModel):
+    """Writes slowly until interrupted; the next call answers the owner."""
+
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(streaming=True, tool_calls=True, structured_output=True)
+
+    def invoke_stream(self, request, on_delta):
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            for _ in range(400):
+                on_delta("palabra ")
+                time.sleep(0.02)
+            return ModelResponse(content="nunca debía terminar", stop_reason=StopReason.END_TURN)
+        return ModelResponse(content="De acuerdo, cambio de plan.", stop_reason=StopReason.END_TURN)
+
+
+def test_send_now_cuts_the_answer_being_written_and_the_turn_reads_it(
+    server, tmp_path, monkeypatch
+) -> None:
+    session_id = _create_chat(server, tmp_path, tag="now")
+    model = _SlowWriter(scripted=[])
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda services, rec: model)
+    assert server.handle_line(
+        _req("n1", "session.turn.start", {"session_id": session_id, "message": "escribe largo"})
+    )["ok"]
+    deadline = time.time() + 10
+    while not model.requests and time.time() < deadline:
+        time.sleep(0.02)
+    time.sleep(0.3)
+    sent = server.handle_line(
+        _req(
+            "n2", "session.turn.steer_now", {"session_id": session_id, "message": "para, otra cosa"}
+        )
+    )
+    assert sent["ok"], sent
+    assert sent["result"]["delivery"] == "steer"
+    assert "answer" in sent["result"]["interrupted"]
+    events = _collect_until(server, session_id)
+    assert events[-1]["event"] == "turn.completed"
+    applied = [e for e in events if e["event"] == "steer.applied"]
+    # The bubble says the message cut the step.
+    assert applied and applied[0]["payload"].get("interrupted") is True
+    assert len(model.requests) == 2
+    second = "\n".join(str(m.content) for m in model.requests[1].messages)
+    assert "interrupted your current step" in second and "para, otra cosa" in second
+    # What was written before the interruption stays as a partial answer.
+    assert any(
+        m.role == "assistant" and "palabra" in str(m.content) for m in model.requests[1].messages
+    )
+
+
+def test_send_now_with_no_turn_is_an_ordinary_next_message(server, tmp_path, monkeypatch) -> None:
+    session_id = _create_chat(server, tmp_path, tag="idle")
+    model = FakeModel(scripted=[_answer()])
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda services, rec: model)
+    sent = server.handle_line(
+        _req("q1", "session.turn.steer_now", {"session_id": session_id, "message": "hola"})
+    )
+    assert sent["ok"] and sent["result"]["delivery"] == "queued"
+    _collect_until(server, session_id)
+
+
+def test_send_now_moves_a_foreground_command_to_the_background(
+    server, tmp_path, monkeypatch
+) -> None:
+    import sys
+
+    from rinari.models.types import ToolCall
+
+    script = tmp_path / "install.py"
+    script.write_text("import time\nprint('instalando', flush=True)\ntime.sleep(60)\n")
+    session_id = _create_chat(server, tmp_path, tag="cmd")
+    run = ModelResponse(
+        content="Instalo.",
+        tool_calls=(
+            ToolCall("call_install", "shell.exec", {"command": f'"{sys.executable}" "{script}"'}),
+        ),
+        stop_reason=StopReason.TOOL_CALLS,
+    )
+    model = FakeModel(scripted=[run, _answer()])
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda services, rec: model)
+    server.handle_line(
+        _req("c1", "session.turn.start", {"session_id": session_id, "message": "instala"})
+    )
+    from rinari.tools.native.shell import running_foreground
+
+    deadline = time.time() + 15
+    while "call_install" not in running_foreground(session_id) and time.time() < deadline:
+        # The owner may need to approve the command first.
+        for evt in server.drain_events():
+            if evt.get("event") == "approval.requested":
+                server.handle_line(
+                    _req(
+                        "a1",
+                        "approval.resolve",
+                        {"approval_id": evt["payload"]["approval_id"], "decision": "allow_once"},
+                    )
+                )
+        time.sleep(0.05)
+    assert "call_install" in running_foreground(session_id)
+    sent = server.handle_line(
+        _req("c2", "session.turn.steer_now", {"session_id": session_id, "message": "sigue luego"})
+    )
+    assert "command:call_install" in sent["result"]["interrupted"]
+    _collect_until(server, session_id)
+    registry = server.turns._desktop_processes[session_id]
+    try:
+        running = [h for h in registry.list() if h.exit_code is None]
+        assert len(running) == 1 and "instalando" in running[0].stdout.text()
+    finally:
+        registry.stop_all(include_persistent=True)

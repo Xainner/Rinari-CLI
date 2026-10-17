@@ -522,6 +522,12 @@
         "context.models",
         "flow.get",
         "project.init.start",
+        "session.tool.background",
+        "session.turn.steer_now",
+        "process.orphans.list",
+        "process.orphan.stop",
+        "process.persistent.list",
+        "process.persistent.stop",
         "project.instructions.resolve",
         "provider.catalog.get",
         "provider.usage.get",
@@ -1384,6 +1390,12 @@
         },
         "url": {
           "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "persist": {
+          "type": "boolean"
         },
         "running": {
           "type": "boolean"

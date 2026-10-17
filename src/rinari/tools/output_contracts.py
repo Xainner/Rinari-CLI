@@ -48,7 +48,7 @@ FIELDS = {
     "git.show": "ref:s stat:s truncated:b",
     "git.branch": "current:s? branches:a",
     "shell.exec": "exit_code:i stdout:s stderr:s truncated:b handle:s running:b",
-    "process.start": "handle:s pid:i? running:b",
+    "process.start": "handle:s pid:i? running:b name:s? port:i? ready:b? reused:b?",
     "process.wait": "handle:s exit_code:i? timed_out:b",
     "process.output": "handle:s stdout:s stderr:s cursor:o has_more:b running:b exit_code:i?",
     "process.signal": "handle:s signal:s",
@@ -112,6 +112,14 @@ FIELDS = {
     "checklist.update": "revision:i counts:o warnings:a",
     "goal.update": "state:s iteration:i note:s",
     "file.present": "presented:i items:a",
+    "process.logs": (
+        "handle:s name:s? pid:i running:b exit_code:i? port:i? "
+        "ready:b? persist:b last_line:s? age_s:n lines:a older_dropped:b"
+    ),
+    "process.stop": (
+        "handle:s name:s? pid:i running:b exit_code:i? port:i? "
+        "ready:b? persist:b last_line:s? age_s:n stopped:b"
+    ),
     "project.instructions.propose": "proposal_id:s status:s updates:b message:s",
     "audio.transcribe": "file:s text:s segments:a? model:s language:s elapsed_ms:i",
     "followup.suggest": "suggestion_id:s status:s",

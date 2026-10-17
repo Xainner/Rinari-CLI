@@ -51,5 +51,10 @@ def engine(
         services = stack.enter_context(deps.services(ctx))
         server = EngineServer(services)
         server.start_background()
-        code = run_stdio(server)
+        try:
+            code = run_stdio(server)
+        finally:
+            # The desktop closed or the pipe broke: stop what the model left
+            # running (#90). It used to outlive every Engine as an orphan.
+            server.stop_owned_processes()
     raise typer.Exit(code)

@@ -305,6 +305,7 @@ class EngineServer:
         self._dispatcher.register("operation.cancel", self._operation_cancel)
         self._dispatcher.register("session.turn.cancel", self._turn_cancel)
         self._dispatcher.register("session.turn.steer", self._turn_steer)
+        self._dispatcher.register("session.turn.steer_now", self._turn_steer_now)
         self._dispatcher.register("session.turn.steer.update", self._turn_steer_update)
         self._dispatcher.register("session.turn.steer.cancel", self._turn_steer_cancel)
         self._dispatcher.register("turn.changes.get", self._turn_changes_get)
@@ -316,6 +317,11 @@ class EngineServer:
         self._dispatcher.register("channel.pending", lambda params: self._turns.channels.list())
         self._dispatcher.register("flow.get", self._flow_get)
         self._dispatcher.register("project.init.start", self._project_init_start)
+        self._dispatcher.register("session.tool.background", self._session_tool_background)
+        self._dispatcher.register("process.orphans.list", self._process_orphans_list)
+        self._dispatcher.register("process.orphan.stop", self._process_orphan_stop)
+        self._dispatcher.register("process.persistent.list", self._process_persistent_list)
+        self._dispatcher.register("process.persistent.stop", self._process_persistent_stop)
         self._dispatcher.register(
             "project.instructions.resolve", self._project_instructions_resolve
         )
@@ -1931,6 +1937,77 @@ class EngineServer:
         return {"session": view}
 
     # -- flow (project_flow_v1) ----------------------------------------------------
+
+    # -- processes left behind (#90) ---------------------------------------------------
+
+    def _session_tool_background(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Move a foreground shell.exec of this session to the background (#32)."""
+        from rinari.tools.native.shell import request_background
+
+        session_id = self._need_str(params, "session_id")
+        tool_call_id = self._need_str(params, "tool_call_id")
+        moved = request_background(session_id, tool_call_id)
+        if not moved:
+            raise NotFoundError("That command is no longer running in the foreground.")
+        return {"session_id": session_id, "tool_call_id": tool_call_id, "requested": True}
+
+    def _process_orphans_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Processes an earlier Engine started that are still running."""
+        _ = params
+        ledger = self._turns._process_ledger
+        return {"orphans": ledger.orphans() if ledger is not None else []}
+
+    def _process_orphan_stop(self, params: dict[str, Any]) -> dict[str, Any]:
+        ledger = self._turns._process_ledger
+        stopped = ledger is not None and ledger.stop_orphan(self._need_str(params, "id"))
+        return {"stopped": bool(stopped)}
+
+    def _persistent(self) -> list[tuple[str, Any, Any]]:
+        rows = []
+        for session_id, registry in list(self._turns._desktop_processes.items()):
+            for handle in registry.list():
+                if handle.exit_code is None and getattr(handle, "persist", False):
+                    rows.append((session_id, registry, handle))
+        return rows
+
+    def _process_persistent_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Running processes the model asked to keep: the desktop asks before quitting."""
+        _ = params
+        return {
+            "processes": [
+                {
+                    "session_id": session_id,
+                    "handle": handle.id,
+                    "name": handle.name,
+                    "command": handle.command
+                    if isinstance(handle.command, str)
+                    else " ".join(map(str, handle.command)),
+                    "port": handle.port,
+                }
+                for session_id, _registry, handle in self._persistent()
+            ]
+        }
+
+    def _process_persistent_stop(self, params: dict[str, Any]) -> dict[str, Any]:
+        stopped = []
+        for session_id, registry, handle in self._persistent():
+            registry.kill(handle)
+            stopped.append({"session_id": session_id, "handle": handle.id})
+        return {"stopped": stopped}
+
+    def stop_owned_processes(self) -> None:
+        """At exit: stop what the model left running, except what it asked to keep (#90).
+
+        Quick by design: the next Engine waits on the home lock. With Job
+        Objects, Windows ends whatever this misses when the process goes.
+        """
+        for registry in list(self._turns._desktop_processes.values()):
+            with contextlib.suppress(Exception):
+                registry.stop_all(include_persistent=False)
+        with contextlib.suppress(Exception):
+            self._pty.shutdown()
+        with contextlib.suppress(Exception):
+            self._previews.close()
 
     def _project_init_start(self, params: dict[str, Any]) -> dict[str, Any]:
         """`/init` (#81): a read-only turn that proposes the project's RINARI.md."""
@@ -4078,7 +4155,12 @@ class EngineServer:
             attachment_context=context,
             image_refs=image_refs,
             attachment_metadata=metadata,
+            now=params.get("_now") is True,
         )
+
+    def _turn_steer_now(self, params: dict[str, Any]) -> dict[str, Any]:
+        """«Enviar ahora» (#31): the message is read now; only the current step ends."""
+        return self._turn_steer({**params, "_now": True})
 
     def _turn_steer_update(self, params: dict[str, Any]) -> dict[str, Any]:
         message = params.get("message")

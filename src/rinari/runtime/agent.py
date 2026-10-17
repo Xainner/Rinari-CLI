@@ -185,6 +185,9 @@ class AgentContext:
     # hands over what arrived since the last one; the loop puts them in the
     # history after the current step and the model reads them next.
     collect_steering: Callable[[], list[ChatMessage]] | None = None
+    # «Enviar ahora» (#31): set to end the answer being written; the next
+    # step reads the owner's message. Cleared once honoured.
+    step_interrupt: threading.Event | None = None
     # Reads whose full text this conversation already holds (tools.read_cache);
     # created on first use and cleared when compaction rewrites the history.
     read_cache: Any = None
@@ -387,13 +390,31 @@ class AgentLoop:
                 nonlocal accepted_output
                 accepted_output = False
 
-            def call_model(current: ModelRequest, call_id: str = model_call_id) -> Any:
-                return self._call_with_retries(
-                    ctx, current, visible_delta, cancel, call_id, budget, restart_output
-                )
+            written: list[str] = []
 
-            def visible_delta(text: str, call_id: str = model_call_id) -> None:
+            def call_model(
+                current: ModelRequest, call_id: str = model_call_id, written: list = written
+            ) -> Any:
+                try:
+                    return self._call_with_retries(
+                        ctx, current, visible_delta, cancel, call_id, budget, restart_output
+                    )
+                except StepInterrupted:
+                    # What was written stays as a partial answer; the owner's
+                    # message waits in the steering queue, so the loop goes on.
+                    if ctx.step_interrupt is not None:
+                        ctx.step_interrupt.clear()
+                    from rinari.models.types import ModelResponse
+
+                    return ModelResponse(content="".join(written), stop_reason=StopReason.END_TURN)
+
+            def visible_delta(
+                text: str, call_id: str = model_call_id, written: list = written
+            ) -> None:
                 nonlocal accepted_output
+                if ctx.step_interrupt is not None and ctx.step_interrupt.is_set():
+                    raise StepInterrupted()
+                written.append(text)
                 accepted_output = accepted_output or bool(text)
                 if on_delta is not None:
                     on_delta(text)
@@ -1108,6 +1129,8 @@ class AgentLoop:
                         if (message.origin or {}).get("source")
                         else {}
                     ),
+                    # «Enviar ahora» (#31): the bubble says it cut the step.
+                    **({"interrupted": True} if (message.origin or {}).get("interrupt") else {}),
                 },
             )
 
@@ -1706,6 +1729,10 @@ def _reserve_retry(budget: BudgetMeter | None) -> bool:
     except ValueError:
         return False
     return True
+
+
+class StepInterrupted(Exception):
+    """The owner sent a message «now» (#31): end this answer, keep the turn."""
 
 
 def _cancellable_wait(seconds: float, cancel: CancellationToken) -> None:

@@ -249,12 +249,18 @@ class DesktopProcesses:
         )
         code = item.process.poll()
         running = code is None
-        readiness, checked_at = self._readiness_for(identity, None)
+        # A process the model named with its port (#90) opens in the browser.
+        port = getattr(item, "port", None)
+        url = f"http://localhost:{port}" if isinstance(port, int) else None
+        readiness, checked_at = self._readiness_for(identity, url if running else None)
         return {
             "id": identity,
             "kind": kind,
             "command": command,
             "cwd": item.cwd,
+            **({"url": url} if url else {}),
+            **({"name": item.name} if getattr(item, "name", None) else {}),
+            "persist": bool(getattr(item, "persist", False)),
             "pid": item.process.pid,
             "started_at": item.started_at,
             "running": running,
