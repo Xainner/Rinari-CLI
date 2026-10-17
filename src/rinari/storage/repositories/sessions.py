@@ -312,6 +312,41 @@ class SessionEventRepository:
             params.append(limit)
         return [_event_to_record(r) for r in self._db.query(sql, params)]
 
+    def turn_order(self, session_id: str) -> list[str]:
+        """Turn ids in the order they started, without reading their events."""
+        rows = self._db.query(
+            "SELECT turn_id, MIN(seq) AS first FROM session_events "
+            "WHERE session_id = ? AND turn_id IS NOT NULL GROUP BY turn_id ORDER BY first",
+            (session_id,),
+        )
+        return [str(row["turn_id"]) for row in rows]
+
+    def list_for_turns(self, session_id: str, turn_ids: Sequence[str]) -> list[SessionEventRecord]:
+        """Only the events of these turns: a page of the timeline, not all of it."""
+        if not turn_ids:
+            return []
+        marks = ", ".join("?" for _ in turn_ids)
+        rows = self._db.query(
+            f"SELECT * FROM session_events WHERE session_id = ? AND turn_id IN ({marks}) "
+            "ORDER BY seq ASC",
+            (session_id, *turn_ids),
+        )
+        return [_event_to_record(r) for r in rows]
+
+    def compact_tool_output(self, session_id: str, turn_id: str, tool_call_id: str) -> int:
+        """Drop the live output chunks of a tool that ended (#91).
+
+        The terminal event carries the output; the chunks only served the live
+        view. Rows of a tool still running are never touched.
+        """
+        cursor = self._db.execute(
+            "DELETE FROM session_events WHERE session_id = ? AND turn_id = ? "
+            "AND type = 'tool.output.delta' "
+            "AND json_extract(payload_json, '$.tool_call_id') = ?",
+            (session_id, turn_id, tool_call_id),
+        )
+        return int(getattr(cursor, "rowcount", 0) or 0)
+
     def latest(self, session_id: str, types: Sequence[str]) -> SessionEventRecord | None:
         """The most recent event of these types, if any."""
         marks = ", ".join("?" for _ in types)
@@ -404,6 +439,42 @@ class SessionMessageRepository:
         rows = self._db.query(
             "SELECT * FROM session_messages WHERE session_id = ? ORDER BY seq ASC",
             (session_id,),
+        )
+        return [_message_to_record(r) for r in rows]
+
+    def count(self, session_id: str) -> int:
+        row = self._db.query_one(
+            "SELECT COUNT(*) AS n FROM session_messages WHERE session_id = ?", (session_id,)
+        )
+        return int(row["n"]) if row else 0
+
+    def page(
+        self, session_id: str, limit: int, before_seq: int | None = None
+    ) -> list[SessionMessageRecord]:
+        """The newest `limit` messages (before `before_seq`), oldest first (#70).
+
+        A long conversation used to be read whole to keep its last 200 rows.
+        """
+        sql = "SELECT * FROM session_messages WHERE session_id = ?"
+        params: list[object] = [session_id]
+        if before_seq is not None:
+            sql += " AND seq < ?"
+            params.append(before_seq)
+        sql += " ORDER BY seq DESC LIMIT ?"
+        params.append(limit)
+        rows = self._db.query(sql, params)
+        return [_message_to_record(r) for r in reversed(rows)]
+
+    def list_for_turns(
+        self, session_id: str, turn_ids: Sequence[str]
+    ) -> list[SessionMessageRecord]:
+        if not turn_ids:
+            return []
+        marks = ", ".join("?" for _ in turn_ids)
+        rows = self._db.query(
+            f"SELECT * FROM session_messages WHERE session_id = ? AND turn_id IN ({marks}) "
+            "ORDER BY seq ASC",
+            (session_id, *turn_ids),
         )
         return [_message_to_record(r) for r in rows]
 

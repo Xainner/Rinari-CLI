@@ -91,7 +91,7 @@ def _create_chat(server, tmp_path):
 def _seed(services, session_id, roles):
     records = [
         SessionMessageRecord(
-            id=f"msg-{index}",
+            id=f"msg-{session_id}-{index}",
             session_id=session_id,
             seq=0,
             role=role,
@@ -143,6 +143,52 @@ def test_history_limit_returns_tail_window(server, services, tmp_path) -> None:
     assert result["has_more"] is True
 
 
+def test_history_pages_back_with_a_cursor(server, services, tmp_path) -> None:
+    """#70: one page at a time, reading only that page, with «load earlier»."""
+    session_id = _create_chat(server, tmp_path)
+    _seed(services, session_id, ["user"] * 7)
+    first = server.handle_line(_req("h6", "session.history", {"ref": session_id, "limit": 3}))
+    assert first is not None and first["ok"] is True
+    assert [m["seq"] for m in first["result"]["messages"]] == [5, 6, 7]
+    assert first["result"]["next_before_seq"] == 5
+    second = server.handle_line(
+        _req("h7", "session.history", {"ref": session_id, "limit": 3, "before_seq": 5})
+    )
+    assert second is not None and second["ok"] is True
+    assert [m["seq"] for m in second["result"]["messages"]] == [2, 3, 4]
+    last = server.handle_line(
+        _req("h8", "session.history", {"ref": session_id, "limit": 3, "before_seq": 2})
+    )
+    assert last is not None and last["ok"] is True
+    assert [m["seq"] for m in last["result"]["messages"]] == [1]
+    assert last["result"]["has_more"] is False
+    assert last["result"]["next_before_seq"] is None
+    assert last["result"]["total"] == 7
+
+
+def test_history_page_cost_does_not_grow_with_the_conversation(server, services, tmp_path) -> None:
+    """#70: 5000 messages open as fast as 100: only the page is read."""
+    small = _create_chat(server, tmp_path)
+    _seed(services, small, ["user"] * 100)
+    big = server.handle_line(_req("h-big", "session.create", {"cwd": str(tmp_path), "chat": True}))[
+        "result"
+    ]["session"]["id"]
+    _seed(services, big, ["user"] * 5000)
+
+    def timed(ref: str) -> float:
+        best = 1e9
+        for attempt in range(5):
+            start = time.perf_counter()
+            response = server.handle_line(
+                _req(f"h-t-{ref}-{attempt}", "session.history", {"ref": ref, "limit": 100})
+            )
+            best = min(best, time.perf_counter() - start)
+            assert response is not None and response["ok"] is True
+        return best
+
+    assert timed(big) < timed(small) * 4 + 0.05
+
+
 def test_history_unknown_session_is_not_found(server) -> None:
     response = server.handle_line(_req("h4", "session.history", {"ref": "ses-nope"}))
     assert response is not None and response["ok"] is False
@@ -186,3 +232,104 @@ def test_protocol_turn_persists_messages(server, tmp_path, monkeypatch) -> None:
     assert history[0]["content"] == "hi"
     assert history[-1]["role"] == "assistant"
     assert "hola" in (history[-1]["content"] or "")
+
+
+def test_timeline_page_reads_only_its_turns_and_stays_light(server, services, tmp_path) -> None:
+    """#91: a conversation of 10 000 events opens with a small, fast page.
+
+    Only the page's turns are read; the text the model saw (`observation`) and
+    the live chunks of a tool that ended stay out.
+    """
+    from rinari.storage.records import SessionEventRecord
+
+    session_id = _create_chat(server, tmp_path)
+    events = []
+    for index in range(400):
+        turn_id = f"turn-{index}"
+        kinds = [("turn.started", {"message": f"ask-{index}"})]
+        kinds += [
+            (
+                "tool.output.delta",
+                {"tool_call_id": f"call-{index}", "stream": "stdout", "delta": "z" * 200},
+            )
+            for _ in range(20)
+        ]
+        kinds += [
+            (
+                "tool.completed",
+                {
+                    "tool_call_id": f"call-{index}",
+                    "tool": "shell.exec",
+                    "observation": "o" * 20_000,
+                    "presentation": {"kind": "command", "stdout": "s" * 50_000},
+                },
+            ),
+            ("turn.completed", {}),
+        ]
+        events += [
+            SessionEventRecord(
+                id=f"evt-{index}-{position}",
+                session_id=session_id,
+                seq=0,
+                type=kind,
+                payload=payload,
+                created_at="2026-01-01T00:00:00Z",
+                turn_id=turn_id,
+            )
+            for position, (kind, payload) in enumerate(kinds)
+        ]
+    with services.ctx.db.transaction():
+        for record in events:
+            services.ctx.event_repo.insert(record)
+
+    start = time.perf_counter()
+    response = server.handle_line(
+        _req("tl-big", "session.timeline", {"ref": session_id, "limit": 30})
+    )
+    elapsed = time.perf_counter() - start
+    assert response is not None and response["ok"] is True
+    result = response["result"]
+    assert [turn["turn_index"] for turn in result["turns"]] == list(range(370, 400))
+    assert result["has_more"] is True and result["next_before_turn_index"] == 370
+    items = [item for turn in result["turns"] for item in turn["items"]]
+    assert not any(item["event"] == "tool.output.delta" for item in items)
+    completed = [item for item in items if item["event"] == "tool.completed"]
+    assert completed and all("observation" not in item for item in completed)
+    assert all(item["presentation"]["truncated"] is True for item in completed)
+    assert len(json.dumps(response)) < 1_000_000
+    assert elapsed < 1.0
+
+    earlier = server.handle_line(
+        _req(
+            "tl-earlier",
+            "session.timeline",
+            {"ref": session_id, "limit": 30, "before_turn_index": 370},
+        )
+    )
+    assert earlier is not None and earlier["ok"] is True
+    assert [turn["turn_index"] for turn in earlier["result"]["turns"]] == list(range(340, 370))
+
+
+def test_an_ended_tool_drops_its_live_chunks(server, services, tmp_path) -> None:
+    """#91: the terminal event carries the output; the chunks of another tool stay."""
+    from rinari.storage.records import SessionEventRecord
+
+    session_id = _create_chat(server, tmp_path)
+    repo = services.ctx.event_repo
+    for index, call in enumerate(["a", "a", "b"]):
+        repo.insert(
+            SessionEventRecord(
+                id=f"chunk-{index}",
+                session_id=session_id,
+                seq=0,
+                type="tool.output.delta",
+                payload={"tool_call_id": call, "delta": "x"},
+                created_at="2026-01-01T00:00:00Z",
+                turn_id="turn-1",
+            )
+        )
+    assert repo.compact_tool_output(session_id, "turn-1", "a") == 2
+    left = [
+        row.payload["tool_call_id"] for row in repo.list(session_id, types=["tool.output.delta"])
+    ]
+    assert left == ["b"]

@@ -164,6 +164,31 @@ def _runs_commands(root: Path) -> dict[str, bool]:
     return {"has_hooks": present(_HOOK_FILES), "has_mcp": present(_MCP_FILES)}
 
 
+#: How much of a command's output a timeline page carries per stream (#91).
+TIMELINE_STREAM_CHARS = 16_000
+
+
+def _lighten_for_timeline(payload: dict[str, Any]) -> None:
+    """What the desktop never reads from a stored turn stays out of the page.
+
+    `observation` is the text the model saw (the bulk of the database); the
+    desktop shows `result` and `presentation`. Command output is capped, and
+    the cut is flagged so the view says it.
+    """
+    payload.pop("observation", None)
+    presentation = payload.get("presentation")
+    if isinstance(presentation, dict):
+        for stream in ("stdout", "stderr"):
+            text = presentation.get(stream)
+            if isinstance(text, str) and len(text) > TIMELINE_STREAM_CHARS:
+                presentation = {
+                    **presentation,
+                    stream: text[:TIMELINE_STREAM_CHARS],
+                    "truncated": True,
+                }
+        payload["presentation"] = presentation
+
+
 class EngineServer:
     def __init__(self, services: ServiceContainer, user_home: Path | str | None = None) -> None:
         self._services = services
@@ -1013,19 +1038,40 @@ class EngineServer:
         limit = params.get("limit", 200)
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 500:
             raise EngineProtocolError(INVALID_PARAMS, "Param 'limit' must be an int in 1..500.")
+        before_seq = params.get("before_seq")
+        if before_seq is not None and (
+            not isinstance(before_seq, int) or isinstance(before_seq, bool) or before_seq < 1
+        ):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'before_seq' must be an int >= 1.")
         record = self._services.sessions.show(ref)
-        stored = self._services.ctx.message_repo.list(record.id)
-        total = len(stored)
-        stored, redacted = self._services.memory.redact_history(stored)
-        window = stored[-limit:] if total > limit else stored
+        repo = self._services.ctx.message_repo
+        # Only the page is read (#70): a long conversation no longer costs its
+        # whole history on every open.
+        total = repo.count(record.id)
+        window = repo.page(record.id, limit, before_seq)
+        # The page may start inside a turn whose user message was forgotten:
+        # that turn's first rows come along so the redaction sees them.
+        lead = []
+        if window and window[0].turn_id and window[0].role != "user":
+            lead = [
+                row
+                for row in repo.list_for_turns(record.id, [window[0].turn_id])
+                if row.seq < window[0].seq
+            ]
+        kept, redacted = self._services.memory.redact_history([*lead, *window])
+        first = window[0].seq if window else None
+        kept = [row for row in kept if first is None or row.seq >= first]
         # A page is bounded by bytes too: a few huge tool outputs must not
         # produce a line the desktop drops, taking the whole connection with it.
-        messages = newest_within([message_to_dict(item) for item in window])
+        messages = newest_within([message_to_dict(item) for item in kept])
+        oldest = messages[0]["seq"] if messages else None
+        has_more = bool(oldest) and repo.page(record.id, 1, oldest) != []
         return {
             "session_id": record.id,
             "messages": messages,
             "total": total,
-            "has_more": total > len(messages),
+            "has_more": has_more,
+            "next_before_seq": oldest if has_more else None,
             "redacted": redacted,
         }
 
@@ -1545,25 +1591,38 @@ class EngineServer:
         record = self._services.sessions.show(ref)
         self._turns.questions.list(record.id)  # Reconcile orphaned waits after restart.
         self._turns.reconcile_orphan_turns(record.id)
-        events = [row for row in self._services.ctx.event_repo.list(record.id) if row.turn_id]
-        messages = self._services.ctx.message_repo.list(record.id)
+        # Only the turns of the page are read (#91): the order comes from one
+        # grouped query, and the events and messages of the rest stay on disk.
+        order_all = self._services.ctx.event_repo.turn_order(record.id)
+        index_of = {turn_id: index for index, turn_id in enumerate(order_all)}
+        candidates = order_all if before is None else order_all[:before]
+        page_ids = candidates[-(limit + 1) :]
+        events = self._services.ctx.event_repo.list_for_turns(record.id, page_ids)
+        messages = self._services.ctx.message_repo.list_for_turns(record.id, page_ids)
+        suppressed = self._services.memory.repo.suppressed_message_ids(record.id)
+        redacted_turns = {row.turn_id for row in messages if row.id in suppressed and row.turn_id}
         messages, _redacted = self._services.memory.redact_history(messages)
-        redacted_turns = {
-            row.turn_id
-            for row in self._services.ctx.message_repo.list(record.id)
-            if row.id in self._services.memory.repo.suppressed_message_ids(record.id)
-            and row.turn_id
+        ended_tools = {
+            str((row.payload or {}).get("tool_call_id"))
+            for row in events
+            if row.type in {"tool.completed", "tool.failed", "tool.cancelled"}
         }
 
         by_turn: dict[str, dict[str, Any]] = {}
         order: list[str] = []
         for row in events:
             turn_id = str(row.turn_id)
+            if (
+                row.type == "tool.output.delta"
+                and str((row.payload or {}).get("tool_call_id")) in ended_tools
+            ):
+                # The ended tool carries its output; the chunks were for the live view.
+                continue
             if turn_id not in by_turn:
                 by_turn[turn_id] = {
                     "turn_id": turn_id,
                     "session_id": record.id,
-                    "turn_index": len(order),
+                    "turn_index": index_of.get(turn_id, len(order)),
                     "status": "running",
                     "started_at": row.created_at,
                     "completed_at": None,
@@ -1597,6 +1656,7 @@ class EngineServer:
                 continue
             payload["event"] = event_name
             payload["activity_seq"] = row.activity_seq or payload.get("activity_seq")
+            _lighten_for_timeline(payload)
             if turn_id in redacted_turns and event_name == "model.content.completed":
                 payload["content"] = "[contenido omitido por privacidad]"
             turn["items"].append(payload)
@@ -1615,9 +1675,7 @@ class EngineServer:
         for turn in selected:
             if turn["turn_id"] in redacted_turns:
                 turn["final_response"] = "[contenido omitido por privacidad]"
-        if before is not None:
-            selected = [item for item in selected if item["turn_index"] < before]
-        has_more = len(selected) > limit
+        has_more = len(candidates) > limit
         selected = selected[-limit:]
         bounded = newest_within(selected)
         has_more = has_more or len(bounded) < len(selected)

@@ -53,6 +53,7 @@ PREPARATION_POLL_S = 0.05
 MAX_DELTA_CHARS = 8000
 MAX_DETAIL_CHARS = 2000
 MAX_STREAM_CHARS = 64_000
+_TOOL_ENDS = frozenset({"tool.completed", "tool.failed", "tool.cancelled"})
 MAX_QUEUE_DEPTH = 20
 MAX_QUEUE_MESSAGE_CHARS = 32768
 # What the model reads before a message the owner sent mid-turn. The chat
@@ -2312,6 +2313,13 @@ class TurnManager:
                     activity_seq=int(payload["activity_seq"]),
                 )
             )
+            if event_name in _TOOL_ENDS and payload.get("tool_call_id"):
+                # The end carries the output: the live chunks go (#91).
+                self._services.ctx.event_repo.compact_tool_output(
+                    str(payload["session_id"]),
+                    str(payload["turn_id"]),
+                    str(payload["tool_call_id"]),
+                )
 
     def _cancel_running_activities(self, turn: _ActiveTurn) -> None:
         with self._lock:

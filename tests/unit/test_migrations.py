@@ -144,6 +144,7 @@ def test_migrate_fresh_database_applies_all(db):
         54,
         55,
         56,
+        57,
     ]
     assert _table_names(db) == TABLES_AFTER_MIGRATIONS
 
@@ -152,7 +153,7 @@ def test_migrate_is_idempotent(db):
     runner = MigrationRunner(db, FakeClock())
     runner.migrate()
     assert runner.migrate() == []
-    assert runner.current_version() == 56
+    assert runner.current_version() == 57
 
 
 def _previous_home_migrations(tmp_path: Path, upto: int) -> Path:
@@ -305,7 +306,28 @@ def test_a_home_migrated_by_the_voice_branch_gets_the_missing_migrations(db, tmp
     )
     MigrationRunner(db, FakeClock(), directory=voice).migrate()
     applied = MigrationRunner(db, FakeClock()).migrate()
-    assert applied == [38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56]
+    assert applied == [
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+    ]
     columns = {row["name"] for row in db.query("PRAGMA table_info(sessions)")}
     assert "pinned_at" in columns
     assert {"skill_records", "scheduled_tasks", "scheduled_runs"} <= _table_names(db)
@@ -323,7 +345,7 @@ def test_a_home_that_applied_the_old_numbers_is_not_migrated_twice(db, tmp_path)
     MigrationRunner(db, FakeClock(), directory=old).migrate()
     runner = MigrationRunner(db, FakeClock())
     # No duplicate pinned_at column and nothing re-run: only what came after.
-    assert runner.migrate() == [41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56]
+    assert runner.migrate() == [41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57]
     recorded = {row["version"]: row["name"] for row in db.query("SELECT * FROM schema_migrations")}
     assert recorded[38] == "0038_session_pins" and recorded[40] == "0040_scheduled_tasks"
     # The old numbers are free again for the migrations that own them.
@@ -380,6 +402,7 @@ def test_stored_runtime_notes_are_marked_as_harness_not_as_the_owner(db, tmp_pat
         54,
         55,
         56,
+        57,
     ]
     origins = {m.id: m.origin for m in SessionMessageRepository(db).list("ses_h")}
     assert origins == {
@@ -467,7 +490,7 @@ def test_lineage_is_filled_for_forks_notes_and_scheduled_runs(db, tmp_path):
         "VALUES ('run_1', 'tsk_1', 'done', 'schedule', 'ses_run')"
     )
 
-    assert MigrationRunner(db, FakeClock()).migrate() == [53, 54, 55, 56]
+    assert MigrationRunner(db, FakeClock()).migrate() == [53, 54, 55, 56, 57]
     repo = SessionRepository(db)
     fork, note, run, plain = (repo.get(i) for i in ("ses_fork", "ses_note", "ses_run", "ses_plain"))
     assert (fork.parent_session_id, fork.lineage_kind) == ("ses_mother", "fork")
@@ -476,3 +499,31 @@ def test_lineage_is_filled_for_forks_notes_and_scheduled_runs(db, tmp_path):
     assert (run.parent_session_id, run.lineage_kind) == (None, "schedule")
     assert run.brief["task_id"] == "tsk_1" and run.brief["title"] == "Resumen"
     assert (plain.parent_session_id, plain.lineage_kind, plain.brief) == (None, None, None)
+
+
+def test_0057_drops_the_chunks_of_ended_tools_only(db, tmp_path):
+    """#91: chunks of a tool that ended go; a tool cut mid-run keeps its own."""
+    import json as _json
+
+    custom = _previous_home_migrations(tmp_path, 56)
+    MigrationRunner(db, FakeClock(), directory=custom).migrate()
+    db.execute(
+        "INSERT INTO sessions (id, kind, created_cwd, current_cwd, provider_id, model_id, "
+        "state, created_at, updated_at, last_active_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("ses_d", "CHAT", "/w", "/w", "prov", "mdl", "active", "t0", "t0", "t0"),
+    )
+    rows = [
+        ("e1", 1, "tool.output.delta", {"tool_call_id": "done"}),
+        ("e2", 2, "tool.output.delta", {"tool_call_id": "done"}),
+        ("e3", 3, "tool.completed", {"tool_call_id": "done"}),
+        ("e4", 4, "tool.output.delta", {"tool_call_id": "cut"}),
+    ]
+    for event_id, seq, kind, payload in rows:
+        db.execute(
+            "INSERT INTO session_events (id, session_id, seq, type, payload_json, "
+            "created_at, turn_id) VALUES (?, 'ses_d', ?, ?, ?, 'x', 'turn-1')",
+            (event_id, seq, kind, _json.dumps(payload)),
+        )
+    MigrationRunner(db, FakeClock()).migrate()
+    left = [row["id"] for row in db.query("SELECT id FROM session_events ORDER BY seq")]
+    assert left == ["e3", "e4"]
