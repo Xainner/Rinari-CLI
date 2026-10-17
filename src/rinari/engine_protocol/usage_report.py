@@ -199,6 +199,10 @@ def build_report(
             )
     if loops:
         warnings.append({"kind": "loops", "count": loops})
+    if scope == "session" and sessions:
+        large = _large_outputs_in_context(services, sessions[0])
+        if large:
+            warnings.append({"kind": "large_outputs", "count": len(large), "max": max(large)})
 
     rows = sorted(models.values(), key=lambda entry: entry["calls"], reverse=True)
     totals = {
@@ -360,6 +364,26 @@ def _limits(
             }
         )
     return limits
+
+
+#: A tool output this long (characters, about 5k tokens) weighs on every call.
+LARGE_OUTPUT_CHARS = 20_000
+
+
+def _large_outputs_in_context(services: Any, session_id: str) -> list[int]:
+    """Sizes of the large tool outputs the model still carries: those after the
+    last compaction (#78). Compacting now drops them."""
+    last = services.ctx.db.query_one(
+        "SELECT MAX(seq) AS seq FROM session_events WHERE session_id = ? AND type = ?",
+        (session_id, "governor.compact"),
+    )
+    rows = services.ctx.db.query(
+        "SELECT length(json_extract(payload_json, '$.observation')) AS size "
+        "FROM session_events WHERE session_id = ? AND type = 'tool.completed' AND seq > ? "
+        "AND length(json_extract(payload_json, '$.observation')) > ?",
+        (session_id, (last["seq"] if last else None) or 0, LARGE_OUTPUT_CHARS),
+    )
+    return [int(row["size"]) for row in rows]
 
 
 def _name_model(services: Any, entry: dict[str, Any]) -> None:

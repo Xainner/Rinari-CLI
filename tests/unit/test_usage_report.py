@@ -226,3 +226,16 @@ def test_the_catalog_gives_prices_for_a_known_model() -> None:
     prices = catalog_prices(anthropic, "claude-sonnet-4-5")
     assert prices is not None and prices["input"] > 0 and prices["output"] > prices["input"]
     assert catalog_prices(anthropic, "no-such-model") is None
+
+
+def test_large_outputs_still_in_the_context_are_a_warning(server, tmp_path) -> None:
+    created = _call(server, "session.create", {"cwd": str(tmp_path), "chat": True})
+    sid = created["result"]["session"]["id"]
+    big = "x" * 30_000
+    _event(server, sid, "tool.completed", {"tool": "shell.exec", "observation": big})
+    _event(server, sid, "governor.compact", {})
+    # Before the compaction: gone from the context. After it: still there.
+    _event(server, sid, "tool.completed", {"tool": "fs.read", "observation": big + "yy"})
+    _event(server, sid, "tool.completed", {"tool": "fs.read", "observation": "small"})
+    report = _call(server, "usage.report", {"scope": "session", "ref": sid})["result"]["report"]
+    assert {"kind": "large_outputs", "count": 1, "max": 30_002} in report["warnings"]
