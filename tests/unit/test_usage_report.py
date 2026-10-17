@@ -120,3 +120,109 @@ def test_anthropic_reports_the_cache_it_writes() -> None:
     assert usage == Usage(
         input_tokens=22, output_tokens=2, cached_input_tokens=5, cache_write_tokens=7
     )
+
+
+def test_the_snapshot_keeps_who_the_context_and_every_providers_limits(server, tmp_path):
+    """#78: client, context and plan limits are taken when the report is made."""
+    created = _call(server, "session.create", {"cwd": str(tmp_path), "chat": True})
+    sid = created["result"]["session"]["id"]
+    services = server._services
+    services.providers.add(
+        AddProviderInput(
+            alias="otro",
+            provider_type="openai",
+            endpoint="http://127.0.0.1:9/v2",
+            secret="dummy-secret-not-real",
+        )
+    )
+    other = services.providers.get("otro")
+    asked: list[str] = []
+
+    def limits_of(provider_id):
+        asked.append(provider_id)
+        if provider_id == other.id:
+            return {
+                "status": "available",
+                "product_id": "opencode-go",
+                "windows": [{"id": "rolling", "used_percent": 40.0}],
+                "balances": [],
+            }
+        return {"status": "unsupported", "detail": "not exposed", "windows": [], "balances": []}
+
+    from rinari.engine_protocol.usage_report import usage_report
+
+    report = usage_report(
+        services,
+        {"scope": "session", "ref": sid, "app_version": "0.4.0-test"},
+        limits_of=limits_of,
+        context_of=lambda session_id: {
+            "window_tokens": 200_000,
+            "last_request": {"input_tokens": 50_000},
+            "compact_at_tokens": 160_000,
+        },
+    )["report"]
+    assert report["client"]["app_version"] == "0.4.0-test"
+    assert report["client"]["engine_version"]
+    assert (report["client"]["provider"], report["client"]["model"]) == ("fake", "fake-one")
+    assert report["context"] == {
+        "window_tokens": 200_000,
+        "used_tokens": 50_000,
+        "compact_at_tokens": 160_000,
+        "last_compaction_at": None,
+    }
+    # The conversation's provider always (with why it says nothing), then the
+    # others that report something.
+    assert [(item["provider_alias"], item["conversation"]) for item in report["limits"]] == [
+        ("fake", True),
+        ("otro", False),
+    ]
+    assert report["limits"][0]["detail"] == "not exposed"
+    assert len(asked) == len(set(asked))
+
+    from rinari.engine_protocol.usage_report import render_text
+
+    text = render_text(report)
+    assert "Rinari Agent 0.4.0-test · Engine" in text
+    assert "  fake: not reported (not exposed)" in text
+    assert "  otro · rolling: 40% used" in text
+    assert "  50,000 of 200,000 tokens (25%) · 0 compactions" in text
+
+
+def test_cost_uses_the_model_price_or_the_catalogs_with_the_cache_rates(monkeypatch):
+    from rinari.engine_protocol import usage_report as module
+    from rinari.providers import metadata
+
+    entry = {
+        "input_tokens": 1_000_000,
+        "cache_read_tokens": 600_000,
+        "cache_write_tokens": 100_000,
+        "output_tokens": 100_000,
+        "_settings": {"input_price_per_mtok": 3, "output_price_per_mtok": 15},
+    }
+    # Own prices without cache rates: the cache at the input rate (an upper bound).
+    assert module._cost(None, dict(entry)) == 3 + 1.5
+
+    monkeypatch.setattr(
+        metadata,
+        "catalog_prices",
+        lambda provider, model_id: {
+            "input": 3,
+            "output": 15,
+            "cache_read": 0.3,
+            "cache_write": 3.75,
+        },
+    )
+    from_catalog = {**entry, "_settings": {}, "_provider": object(), "_provider_model_id": "m"}
+    assert module._cost(None, from_catalog) == round(0.9 + 0.18 + 0.375 + 1.5, 4)
+    assert module._cost(None, {**entry, "_settings": {}}) is None
+
+
+def test_the_catalog_gives_prices_for_a_known_model() -> None:
+    from types import SimpleNamespace
+
+    from rinari.providers.metadata import catalog_prices
+
+    anthropic = SimpleNamespace(type="anthropic", endpoint=None, settings={}, auth_method="api-key")
+    prices = catalog_prices(anthropic, "claude-sonnet-4-5")
+    assert prices is not None and prices["input"] > 0 and prices["output"] > prices["input"]
+    assert catalog_prices(anthropic, "no-such-model") is None

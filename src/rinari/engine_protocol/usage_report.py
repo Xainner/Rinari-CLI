@@ -11,6 +11,7 @@ A report can be saved in its conversation as a snapshot
 
 from __future__ import annotations
 
+import contextlib
 import json
 from collections import Counter
 from datetime import UTC, datetime
@@ -28,7 +29,20 @@ _TERMINAL = ("turn.completed", "turn.failed", "turn.cancelled", "turn.stopped")
 
 
 def register_usage_report(dispatcher: Any, services: Any) -> None:
-    dispatcher.register("usage.report", lambda params: usage_report(services, params or {}))
+    from rinari.providers.usage import ProviderUsageService
+
+    usage_service = ProviderUsageService(services.providers)
+
+    def context_of(session_id: str) -> dict[str, Any] | None:
+        status = dispatcher.handler("context.status")
+        return status({"session_id": session_id}) if status else None
+
+    dispatcher.register(
+        "usage.report",
+        lambda params: usage_report(
+            services, params or {}, limits_of=usage_service.get, context_of=context_of
+        ),
+    )
     dispatcher.register("usage.report.list", lambda params: report_list(services, params or {}))
 
 
@@ -80,7 +94,15 @@ def _int(value: Any) -> int:
     return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
 
 
-def build_report(services: Any, scope: str, ref: str | None) -> dict[str, Any]:
+def build_report(
+    services: Any,
+    scope: str,
+    ref: str | None,
+    *,
+    limits_of: Any = None,
+    context_of: Any = None,
+    app_version: str | None = None,
+) -> dict[str, Any]:
     if scope not in SCOPES:
         raise EngineProtocolError(
             INVALID_PARAMS, f"Param 'scope' must be one of: {', '.join(SCOPES)}."
@@ -207,7 +229,137 @@ def build_report(services: Any, scope: str, ref: str | None) -> dict[str, Any]:
         "compactions": compactions,
         "warnings": warnings,
         "time": {"first_at": first_at, "last_at": last_at, "active_ms": active_ms},
+        **_snapshot_extras(
+            services,
+            scope,
+            ref,
+            rows,
+            limits_of=limits_of,
+            context_of=context_of,
+            app_version=app_version,
+        ),
     }
+
+
+def _snapshot_extras(
+    services: Any,
+    scope: str,
+    ref: str | None,
+    rows: list[dict[str, Any]],
+    *,
+    limits_of: Any,
+    context_of: Any,
+    app_version: str | None,
+) -> dict[str, Any]:
+    """What the report says besides the counts: who, the context and the plan's
+    limits, taken now so the saved snapshot keeps them (#78)."""
+    from rinari import __version__
+
+    record = None
+    if ref and scope in ("session", "project"):
+        try:
+            record = services.sessions.show(ref)
+        except Exception:
+            record = None
+    provider_id = getattr(record, "provider_id", None)
+    model_id = getattr(record, "model_id", None)
+    if record is None:
+        selection = services.providers.current()
+        provider_id = selection.provider.id if selection else None
+        model_id = selection.model.id if selection and selection.model else None
+    client = {
+        "app_version": app_version,
+        "engine_version": __version__,
+        "profile": _profile_name(services, getattr(record, "rinari_profile_id", None)),
+        "provider": _alias(services.ctx.provider_repo, provider_id),
+        "model": _alias(services.ctx.model_repo, model_id),
+    }
+    context = None
+    if record is not None and scope == "session" and context_of is not None:
+        try:
+            status = context_of(record.id) or {}
+        except Exception:
+            status = {}
+        if status.get("window_tokens"):
+            last = status.get("last_request") or {}
+            compaction = status.get("last_compaction") or {}
+            context = {
+                "window_tokens": status["window_tokens"],
+                "used_tokens": last.get("input_tokens"),
+                "compact_at_tokens": status.get("compact_at_tokens"),
+                "last_compaction_at": compaction.get("at"),
+            }
+    return {
+        "client": client,
+        "context": context,
+        "limits": _limits(services, provider_id, rows, limits_of),
+    }
+
+
+def _alias(repo: Any, item_id: str | None) -> str | None:
+    if not item_id:
+        return None
+    try:
+        item = repo.get(item_id)
+    except Exception:
+        return None
+    return getattr(item, "alias", None) or item_id
+
+
+def _profile_name(services: Any, profile_id: str | None) -> str | None:
+    profiles = getattr(services, "rinari_profiles", None)
+    if profiles is None:
+        return None
+    try:
+        bundle = profiles.store.get(profile_id or profiles.active_id())
+    except Exception:
+        return None
+    return getattr(bundle, "name", None)
+
+
+#: Statuses worth showing for a provider other than the conversation's.
+_TELLING = ("available", "stale", "needs_auth")
+
+
+def _limits(
+    services: Any, provider_id: str | None, rows: list[dict[str, Any]], limits_of: Any
+) -> list[dict[str, Any]]:
+    """The plan limits of the conversation's provider first, then of every other
+    connected one that reports them (#78). One failing does not hide the rest."""
+    if limits_of is None:
+        return []
+    used = [row.get("provider_id") for row in rows if row.get("provider_id")]
+    order: list[str] = [item for item in [provider_id, *used] if item]
+    for provider in services.providers.list():
+        if getattr(provider, "enabled", True):
+            order.append(provider.id)
+    seen: set[str] = set()
+    limits = []
+    for index, pid in enumerate(order):
+        if pid in seen:
+            continue
+        seen.add(pid)
+        try:
+            snapshot = limits_of(pid)
+        except Exception:
+            continue
+        own = index == 0 and pid == provider_id
+        if not own and snapshot.get("status") not in _TELLING:
+            continue
+        limits.append(
+            {
+                "provider_id": pid,
+                "provider_alias": _alias(services.ctx.provider_repo, pid),
+                "product_id": snapshot.get("product_id"),
+                "status": snapshot.get("status"),
+                "windows": snapshot.get("windows") or [],
+                "balances": snapshot.get("balances") or [],
+                "detail": snapshot.get("detail"),
+                "fetched_at": snapshot.get("fetched_at"),
+                "conversation": own,
+            }
+        )
+    return limits
 
 
 def _name_model(services: Any, entry: dict[str, Any]) -> None:
@@ -219,6 +371,7 @@ def _name_model(services: Any, entry: dict[str, Any]) -> None:
         getattr(model, "alias", None) or getattr(model, "model_name", None) or entry["model_id"]
     )
     entry["_settings"] = getattr(model, "settings", None) or {}
+    entry["_provider_model_id"] = getattr(model, "provider_model_id", None)
     provider = None
     if entry.get("provider_id"):
         try:
@@ -226,18 +379,54 @@ def _name_model(services: Any, entry: dict[str, Any]) -> None:
         except Exception:
             provider = None
     entry["provider_alias"] = getattr(provider, "alias", None)
+    entry["_provider"] = provider
+
+
+def _prices(entry: dict[str, Any]) -> dict[str, float] | None:
+    """USD per million tokens: the model's own prices, else the public
+    catalog's (models.dev, in model_metadata.json)."""
+    settings = entry.pop("_settings", {}) or {}
+    provider = entry.pop("_provider", None)
+    provider_model_id = entry.pop("_provider_model_id", None)
+    try:
+        own = {
+            "input": float(settings["input_price_per_mtok"]),
+            "output": float(settings["output_price_per_mtok"]),
+        }
+    except (KeyError, TypeError, ValueError):
+        own = None
+    if own is not None:
+        for key in ("cache_read", "cache_write"):
+            with contextlib.suppress(KeyError, TypeError, ValueError):
+                own[key] = float(settings[f"{key}_price_per_mtok"])
+        return own
+    if provider is None or not provider_model_id:
+        return None
+    from rinari.providers.metadata import catalog_prices
+
+    try:
+        return catalog_prices(provider, provider_model_id)
+    except Exception:
+        return None
 
 
 def _cost(services: Any, entry: dict[str, Any]) -> float | None:
-    """Cost only when the model has prices configured (USD per million tokens)."""
-    settings = entry.pop("_settings", {}) or {}
-    try:
-        price_in = float(settings["input_price_per_mtok"])
-        price_out = float(settings["output_price_per_mtok"])
-    except (KeyError, TypeError, ValueError):
+    """Cost when a price is known. Input counts everything the model read, so
+    the cached part is taken out and priced at the cache's rates (the input
+    rate when the cache's is not known: an upper bound)."""
+    prices = _prices(entry)
+    if prices is None:
         return None
-    billed_in = max(0, entry["input_tokens"] - entry["cache_read_tokens"])
-    return round((billed_in * price_in + entry["output_tokens"] * price_out) / 1_000_000, 4)
+    read = entry["cache_read_tokens"]
+    written = entry["cache_write_tokens"]
+    fresh = max(0, entry["input_tokens"] - read - written)
+    total = (
+        fresh * prices["input"]
+        + read * prices.get("cache_read", prices["input"])
+        + written * prices.get("cache_write", prices["input"])
+        + entry["output_tokens"] * prices["output"]
+    )
+    return round(total / 1_000_000, 4)
 
 
 def _ms_between(start: str, end: str) -> int:
@@ -249,12 +438,28 @@ def _ms_between(start: str, end: str) -> int:
     return max(0, int((b - a).total_seconds() * 1000))
 
 
-def usage_report(services: Any, params: dict[str, Any]) -> dict[str, Any]:
+def usage_report(
+    services: Any,
+    params: dict[str, Any],
+    *,
+    limits_of: Any = None,
+    context_of: Any = None,
+) -> dict[str, Any]:
     scope = params.get("scope", "session")
     ref = params.get("ref")
     if ref is not None and not isinstance(ref, str):
         raise EngineProtocolError(INVALID_PARAMS, "Param 'ref' must be a string.")
-    report = build_report(services, scope, ref)
+    app_version = params.get("app_version")
+    if app_version is not None and not isinstance(app_version, str):
+        raise EngineProtocolError(INVALID_PARAMS, "Param 'app_version' must be a string.")
+    report = build_report(
+        services,
+        scope,
+        ref,
+        limits_of=limits_of,
+        context_of=context_of,
+        app_version=app_version,
+    )
     if params.get("save"):
         # The snapshot stays in its conversation, never sent to the model.
         session_id = params.get("session_id") or ref
@@ -295,3 +500,84 @@ def report_list(services: Any, params: dict[str, Any]) -> dict[str, Any]:
     record = services.sessions.show(session_id)
     rows = services.ctx.event_repo.list(record.id, types=[REPORT_EVENT])
     return {"reports": [dict(row.payload.get("report") or {}) for row in rows]}
+
+
+def _n(value: Any) -> str:
+    return f"{_int(value):,}"
+
+
+def render_text(report: dict[str, Any]) -> str:
+    """The report as text: what `/usage` prints in the CLI and what the desktop
+    copies (`Plan limits:` / `Context:` / `Session:` ...)."""
+    client = report.get("client") or {}
+    lines = [f"Usage report · {report.get('scope')} · {report.get('generated_at')}"]
+    who = [
+        f"Rinari Agent {client['app_version']}" if client.get("app_version") else None,
+        f"Engine {client['engine_version']}" if client.get("engine_version") else None,
+        f"profile {client['profile']}" if client.get("profile") else None,
+        " / ".join(item for item in (client.get("provider"), client.get("model")) if item) or None,
+    ]
+    if any(who):
+        lines.append(" · ".join(item for item in who if item))
+    limits = report.get("limits") or []
+    if limits:
+        lines += ["", "Plan limits:"]
+        for item in limits:
+            name = item.get("provider_alias") or item.get("provider_id")
+            windows = item.get("windows") or []
+            balances = item.get("balances") or []
+            if not windows and not balances:
+                lines.append(f"  {name}: not reported ({item.get('detail') or item.get('status')})")
+                continue
+            for window in windows:
+                used = window.get("used_percent")
+                text = f"{round(used)}% used" if isinstance(used, (int, float)) else "unknown"
+                resets = f" · resets {window['resets_at']}" if window.get("resets_at") else ""
+                lines.append(
+                    f"  {name} · {window.get('label') or window.get('id')}: {text}{resets}"
+                )
+            for balance in balances:
+                remaining = "unlimited" if balance.get("unlimited") else balance.get("remaining")
+                currency = balance.get("currency") or ""
+                lines.append(f"  {name} · {balance.get('label')}: {remaining} {currency}".rstrip())
+    context = report.get("context")
+    if context and context.get("window_tokens"):
+        used = context.get("used_tokens")
+        share = f" ({round(100 * used / context['window_tokens'])}%)" if used else ""
+        lines += [
+            "",
+            "Context:",
+            f"  {_n(used) if used else '—'} of {_n(context['window_tokens'])} tokens{share}"
+            + f" · {report.get('compactions', 0)} compactions",
+        ]
+    lines += ["", "Session:"]
+    for row in report.get("models") or []:
+        cost = f" · ${row['cost']:.4f}" if row.get("cost") is not None else ""
+        reasoning = (
+            f" · {_n(row['reasoning_tokens'])} reasoning" if row.get("reasoning_tokens") else ""
+        )
+        lines.append(
+            f"  {row.get('model_name')}: {row.get('calls')} calls"
+            f" · {_n(row.get('input_tokens'))} input · {_n(row.get('output_tokens'))} output"
+            f" · {_n(row.get('cache_read_tokens'))} cache read"
+            f" · {_n(row.get('cache_write_tokens'))} cache write{reasoning}{cost}"
+        )
+    totals = report.get("totals") or {}
+    total_cost = f" · ${totals['cost']:.4f}" if totals.get("cost") is not None else ""
+    lines.append(
+        f"  Total: {totals.get('calls', 0)} calls · {_n(totals.get('input_tokens'))} input"
+        f" · {_n(totals.get('output_tokens'))} output{total_cost}"
+    )
+    tools = report.get("tools") or {}
+    top = ", ".join(f"{item['tool']} {item['count']}" for item in tools.get("top") or [])
+    lines += [
+        "",
+        f"Tools: {tools.get('total', 0)} ({tools.get('ok', 0)} ok, {tools.get('failed', 0)} failed)"
+        + (f" · {top}" if top else ""),
+        f"Compactions: {report.get('compactions', 0)}",
+        f"Active time: {round((report.get('time') or {}).get('active_ms', 0) / 1000)} s",
+    ]
+    warnings = report.get("warnings") or []
+    if warnings:
+        lines += ["", "Warnings:", *(f"  - {item['kind']}: {item['count']}" for item in warnings)]
+    return "\n".join(lines) + "\n"

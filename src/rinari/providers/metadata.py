@@ -96,10 +96,11 @@ def _public_entry(value: dict) -> dict:
     entry = {field: value[field] for field in PUBLIC_FIELDS if field in value}
     cost = entry.get("cost")
     if isinstance(cost, dict):
-        # Only whether input and output cost anything: enough to mark free models.
+        # USD per million tokens: whether a model is free, and the usage
+        # report's cost when the model has no price of its own (#78).
         entry["cost"] = {
             key: cost[key]
-            for key in ("input", "output")
+            for key in ("input", "output", "cache_read", "cache_write")
             if isinstance(cost.get(key), (int, float)) and not isinstance(cost.get(key), bool)
         }
     elif "cost" in entry:
@@ -119,6 +120,16 @@ def pricing(product: str | None, model_id: str, entry: dict) -> str | None:
     ):
         return "free"
     return None
+
+
+def catalog_prices(provider, model_id: str) -> dict[str, float] | None:
+    """The public catalog's prices of a model (USD per million tokens), with
+    `input` and `output` at least; None when it gives none (#78)."""
+    entry = catalog()["models"].get(product_for(provider), {}).get(model_id, {})
+    cost = entry.get("cost")
+    if not isinstance(cost, dict) or "input" not in cost or "output" not in cost:
+        return None
+    return {key: float(value) for key, value in cost.items()}
 
 
 def refresh_public_catalog(get) -> dict:

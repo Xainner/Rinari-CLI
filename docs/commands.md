@@ -3410,24 +3410,41 @@ completion       Completion Gate
 Interactive aliases:
 
 ```text
-/usage
+/usage [session|today|project|all]
 /tokens
 ```
 
-They display normalized current-context and cumulative session usage:
+`/usage` prints the same usage report the desktop paints in the chat
+(`usage.report`, plan 0.4.0 #78), built from what the Engine stored — no model
+call:
 
 ```text
-Usage
-  context      31,204 / 128,000   24.4%
-  turn         in 4,231  out 817  cached 2,044  reasoning 602
-  session      in 42,812 out 8,731 cached 18,304 reasoning 6,104
-  model calls  17
-  tool calls   38
-  elapsed      2m 17s
-  cost         ~$0.184
+Usage report · session · 2026-10-17T18:02:11Z
+Engine 0.4.0 · profile Default · anthropic / sonnet
+
+Plan limits:
+  claude-sub · 5 h: 42% used · resets 2026-10-17T20:00:00+00:00
+  openrouter · Credits: 12.40 USD
+
+Context:
+  31,204 of 200,000 tokens (16%) · 1 compactions
+
+Session:
+  sonnet: 17 calls · 412,812 input · 8,731 output · 318,304 cache read · 12,040 cache write · $0.4120
+  Total: 17 calls · 412,812 input · 8,731 output · $0.4120
+
+Tools: 38 (36 ok, 2 failed) · fs.read 14, shell.exec 9
+Compactions: 1
+Active time: 137 s
 ```
 
-Unsupported categories render as `—`.
+Plan limits come from the conversation's provider first (with why it reports
+nothing, when it does not) and then from every other connected provider that
+reports them; Claude Subscription's are the ones Claude Code gave with its last
+answer. Input counts everything the model read, cached tokens included. Cost
+uses the model's own prices, else the public catalog's (models.dev); a cache
+rate it does not know is charged at the input rate. `/tokens` shows the
+current context.
 
 ## `/model`
 

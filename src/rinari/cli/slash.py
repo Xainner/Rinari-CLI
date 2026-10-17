@@ -199,26 +199,26 @@ def handle(session: AgentSession, console: Console, message: str) -> SlashOutcom
         console.print(f"session {session.record.id} ({session.record.kind})")
         return _STAY
     if command == "/usage":
+        # The same report as the desktop's (#78), as text: `/usage [today|project|all]`.
+        from rinari.engine_protocol.usage_report import SCOPES, build_report, render_text
+        from rinari.providers.usage import ProviderUsageService
+
+        scope = arg or "session"
+        if scope not in SCOPES:
+            console.print(f"usage: /usage [{'|'.join(SCOPES)}]")
+            return _STAY
         snap = build_snapshot(session)
-        u = snap.usage
-        cost = f"${u.cost_usd:.4f}" if u.cost_usd is not None else "unknown"
-        for label, value in (
-            ("model calls", str(u.model_calls)),
-            ("tool calls", str(u.tool_calls)),
-            ("input tokens", str(u.input_tokens) if u.input_tokens is not None else "unknown"),
-            ("output tokens", str(u.output_tokens) if u.output_tokens is not None else "unknown"),
-            (
-                "cached tokens",
-                str(u.cached_input_tokens) if u.cached_input_tokens is not None else "n/a",
-            ),
-            (
-                "reasoning tokens",
-                str(u.reasoning_tokens) if u.reasoning_tokens is not None else "n/a",
-            ),
-            ("elapsed", f"{u.elapsed_s:.1f}s"),
-            ("cost", cost),
-        ):
-            console.print(f"  {label:<16} {value}")
+        report = build_report(
+            session.services,
+            scope,
+            session.record.id if scope in ("session", "project") else None,
+            limits_of=ProviderUsageService(session.services.providers).get,
+            context_of=lambda _session_id: {
+                "window_tokens": snap.context_window_tokens,
+                "last_request": {"input_tokens": snap.context_used_tokens},
+            },
+        )
+        console.print(render_text(report), markup=False, highlight=False)
         return _STAY
     if command == "/tokens":
         snap = build_snapshot(session)

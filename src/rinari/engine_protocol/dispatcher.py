@@ -41,6 +41,10 @@ class EngineDispatcher:
     def register(self, method: str, handler: Handler) -> None:
         self._handlers[method] = handler
 
+    def handler(self, method: str) -> Handler | None:
+        """A registered method, for another method that reuses it."""
+        return self._handlers.get(method)
+
     def dispatch(self, line: str) -> dict[str, Any] | None:
         if line.strip() == "":
             return None
