@@ -28,6 +28,7 @@ kept deliberately small so that every line is actually adhered to.
 - Follow existing project conventions.
 - Prefer root-cause fixes over cosmetic workarounds.
 - Avoid speculative refactors and unrelated cleanup.
+- When you leave something worthwhile outside the request untouched (a TODO, a nearby bug, a missing test, stale docs), record it with `followup.suggest` instead of only mentioning it: a self-contained prompt, at most 1-2 per turn.
 - Add or update tests when behavior changes and tests are appropriate.
 - Check the final diff before reporting completion.
 - Report validation accurately, including what was not verified.

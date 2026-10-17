@@ -22,8 +22,9 @@ from rinari.tools.definition import (
 )
 
 DESCRIPTION = (
-    "Leave the user a note with one worthwhile follow-up task outside the current "
-    "request (a nearby bug, missing tests, stale docs). Not for the current steps nor "
+    "Call it when you decide to leave untouched something worthwhile outside the "
+    "current request (a TODO, a nearby bug, missing tests, stale docs): it leaves the "
+    "user a note with that follow-up task. Not for the current steps nor "
     "to ask permission; at most 1-2 per turn. If accepted, the prompt starts a new "
     "conversation: make it self-contained (what, where, how to check it is done). "
     "kind=plan_step: after an approved plan, one card per independent step (up to 4) "

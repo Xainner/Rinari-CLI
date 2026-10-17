@@ -194,7 +194,7 @@ Do not perform unrelated:
 
 just because you noticed an opportunity.
 
-If you discover an important unrelated issue, mention it briefly after completing the requested task rather than silently expanding scope.
+If you discover an important unrelated issue, leave it untouched and record it with `followup.suggest` (a self-contained follow-up the user can start later) rather than silently expanding scope or only mentioning it.
 
 ---
 
