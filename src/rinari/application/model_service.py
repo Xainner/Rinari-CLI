@@ -9,6 +9,7 @@ them.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -68,6 +69,78 @@ class ModelService:
 
     def _now(self) -> str:
         return now_iso(self._ctx.clock)
+
+    # -- hidden models (plan 0.4.0 #93) -----------------------------------
+    # What a provider offers is saved on its own. «Quitar» hides a model so the
+    # next refresh does not bring it back; «Mostrar» saves it again.
+
+    @staticmethod
+    def _hidden_key(provider_id: str) -> str:
+        return f"models.hidden.{provider_id}"
+
+    def _hidden_ids(self, provider_id: str) -> list[str]:
+        raw = self._ctx.config_repo.get(self._hidden_key(provider_id))
+        try:
+            value = json.loads(raw) if raw else []
+        except ValueError:
+            return []
+        return [item for item in value if isinstance(item, str)] if isinstance(value, list) else []
+
+    def _set_hidden(self, provider_id: str, ids: list[str]) -> None:
+        key = self._hidden_key(provider_id)
+        if ids:
+            self._ctx.config_repo.set(
+                ConfigValue(key=key, value=json.dumps(sorted(set(ids))), updated_at=self._now())
+            )
+        else:
+            self._ctx.config_repo.delete(key)
+
+    def hidden(self, provider_ref: str) -> list[str]:
+        """The provider model IDs the owner removed (they stay out of refreshes)."""
+        return self._hidden_ids(self._providers.get(provider_ref).id)
+
+    def unhide(self, provider_ref: str, provider_model_id: str) -> ModelRecord:
+        """«Mostrar»: the hidden model is saved again under a free alias."""
+        provider = self._providers.get(provider_ref)
+        ids = self._hidden_ids(provider.id)
+        if provider_model_id not in ids:
+            raise NotFoundError(f"Model {provider_model_id!r} is not hidden on {provider.alias!r}")
+        self._set_hidden(provider.id, [item for item in ids if item != provider_model_id])
+        existing = self._ctx.model_repo.get_by_provider_model_id(provider.id, provider_model_id)
+        if existing is not None:
+            return existing
+        return self.add(
+            provider.id, provider_model_id, self._free_alias(provider.id, provider_model_id)
+        )
+
+    def save_discovered(self, found: dict[str, list[DiscoveredModel]]) -> dict[str, list[str]]:
+        """Save what each provider offers and is neither saved nor hidden (#93).
+
+        Returns the aliases added per provider alias. A turned-off provider
+        is left alone.
+        """
+        added: dict[str, list[str]] = {}
+        for provider_alias, models in found.items():
+            try:
+                provider = self._providers.get(provider_alias)
+            except NotFoundError:
+                continue
+            if not provider.enabled:
+                continue
+            hidden = set(self._hidden_ids(provider.id))
+            saved = {model.provider_model_id for model in self._ctx.model_repo.list(provider.id)}
+            for model in models:
+                if model.provider_model_id in saved or model.provider_model_id in hidden:
+                    continue
+                alias = self._free_alias(provider.id, model.provider_model_id)
+                record = self.add(
+                    provider.id, model.provider_model_id, alias, capabilities=model.capabilities
+                )
+                record.availability = "available"
+                self._ctx.model_repo.update(record)
+                saved.add(model.provider_model_id)
+                added.setdefault(provider.alias, []).append(alias)
+        return added
 
     # -- lookup ---------------------------------------------------------
 
@@ -242,6 +315,10 @@ class ModelService:
         provider = self._ctx.provider_repo.get(record.provider_id)
         with self._ctx.db.transaction():
             self._ctx.model_repo.delete(record.id)
+            # Hidden, not forgotten: a refresh does not bring it back (#93).
+            hidden = self._hidden_ids(record.provider_id)
+            if record.provider_model_id not in hidden:
+                self._set_hidden(record.provider_id, [*hidden, record.provider_model_id])
             if provider is not None and provider.default_model_id == record.id:
                 provider.default_model_id = None
                 provider.updated_at = self._now()
@@ -414,8 +491,9 @@ class ModelService:
             added: list[str] = []
             if add_new:
                 saved = {model.provider_model_id for model in models}
+                hidden = set(self._hidden_ids(rec.id))
                 for provider_model_id in discovered:
-                    if provider_model_id in saved:
+                    if provider_model_id in saved or provider_model_id in hidden:
                         continue
                     alias = self._free_alias(rec.id, provider_model_id)
                     models.append(self.add(rec.id, provider_model_id, alias))

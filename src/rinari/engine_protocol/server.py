@@ -527,6 +527,8 @@ class EngineServer:
         self._dispatcher.register("model.discover", self._model_discover)
         self._dispatcher.register("model.discovery.start", self._model_discovery_start)
         self._dispatcher.register("model.refresh", self._model_refresh)
+        self._dispatcher.register("model.hidden.list", self._model_hidden_list)
+        self._dispatcher.register("model.unhide", self._model_unhide)
         self._dispatcher.register("model.test", self._model_test)
         self._dispatcher.register("runtime.snapshot.get", self._snapshot_get)
 
@@ -4742,6 +4744,7 @@ class EngineServer:
             capabilities=dict(capabilities) if capabilities is not None else None,
             settings=self._opt_settings(params),
         )
+        self._models_changed("added", model.provider_id)
         return {"model": self._model_view(model)}
 
     def _model_alias(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -4750,13 +4753,33 @@ class EngineServer:
             self._need_str(params, "new_alias"),
             self._opt_str(params, "provider"),
         )
+        self._models_changed("renamed", model.provider_id)
         return {"model": self._model_view(model)}
 
     def _model_remove(self, params: dict[str, Any]) -> dict[str, Any]:
         model = self._services.models.remove(
             self._need_str(params, "ref"), self._opt_str(params, "provider")
         )
+        self._models_changed("hidden", model.provider_id)
         return {"removed": {"id": model.id, "alias": model.alias}}
+
+    def _model_hidden_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        return {"hidden": self._services.models.hidden(self._need_str(params, "provider"))}
+
+    def _model_unhide(self, params: dict[str, Any]) -> dict[str, Any]:
+        model = self._services.models.unhide(
+            self._need_str(params, "provider"), self._need_str(params, "provider_model_id")
+        )
+        self._models_changed("added", model.provider_id)
+        return {"model": self._model_view(model)}
+
+    def _models_changed(self, reason: str, provider_id: str | None = None, **extra: Any) -> None:
+        """Every list of models reloads itself (#93): Settings, the composer, Agents."""
+        payload: dict[str, Any] = {"reason": reason, **extra}
+        if provider_id is not None:
+            payload["provider_id"] = provider_id
+        with contextlib.suppress(Exception):
+            self._turns.emit_external(event("models.changed", payload))
 
     def _model_use(self, params: dict[str, Any]) -> dict[str, Any]:
         resolved = self._services.models.use(
@@ -4770,7 +4793,12 @@ class EngineServer:
 
     def _model_discover(self, params: dict[str, Any]) -> dict[str, Any]:
         found = self._services.models.available(self._opt_str(params, "provider"))
+        # What the provider offers is saved (#93): nothing stays «por guardar».
+        added = self._services.models.save_discovered(found)
+        if added:
+            self._models_changed("added", added=added)
         return {
+            "added": added,
             "providers": {
                 alias: [
                     {
@@ -4781,7 +4809,7 @@ class EngineServer:
                     for model in models
                 ]
                 for alias, models in found.items()
-            }
+            },
         }
 
     def _model_discovery_start(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -4832,6 +4860,7 @@ class EngineServer:
                     "job_id": job_id,
                     "provider": provider,
                     "providers": result["providers"],
+                    "added": result.get("added", {}),
                     "cached": False,
                 }
                 with self._model_jobs_lock:
@@ -4873,6 +4902,11 @@ class EngineServer:
         results = self._services.models.refresh(
             provider, add_new=add_new, public_catalog=provider is None
         )
+        if any(result.added or result.marked_unavailable for result in results.values()):
+            self._models_changed(
+                "refreshed",
+                added={alias: list(r.added) for alias, r in results.items() if r.added},
+            )
         providers: dict[str, Any] = {}
         for alias, result in results.items():
             providers[alias] = {
