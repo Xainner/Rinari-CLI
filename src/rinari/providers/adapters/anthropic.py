@@ -689,11 +689,29 @@ def _usage_from_anthropic(raw: Any) -> Usage:
     if not isinstance(raw, dict):
         return Usage()
     return Usage(
-        input_tokens=_optional_int(raw.get("input_tokens")),
+        input_tokens=anthropic_input_total(raw),
         output_tokens=_optional_int(raw.get("output_tokens")),
         cached_input_tokens=_optional_int(raw.get("cache_read_input_tokens")),
         cache_write_tokens=_optional_int(raw.get("cache_creation_input_tokens")),
     )
+
+
+def anthropic_input_total(raw: dict[str, Any]) -> int | None:
+    """Everything the model read, as the other providers count it (#78).
+
+    Anthropic's `input_tokens` leaves out what came from the prompt cache
+    (`cache_read_input_tokens`) and what was written to it
+    (`cache_creation_input_tokens`): with a warm cache it was a few hundred
+    tokens of a 100k context, and the context ring and the usage report read
+    that as the size of the request.
+    """
+    base = _optional_int(raw.get("input_tokens"))
+    if base is None:
+        return None
+    extra = (_optional_int(raw.get("cache_read_input_tokens")) or 0) + (
+        _optional_int(raw.get("cache_creation_input_tokens")) or 0
+    )
+    return base + extra
 
 
 def _stop_reason_from_anthropic(reason: Any) -> StopReason:

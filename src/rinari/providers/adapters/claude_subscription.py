@@ -29,6 +29,7 @@ from rinari.models.types import (
     ToolCall,
     Usage,
 )
+from rinari.providers.adapters.anthropic import anthropic_input_total
 from rinari.providers.adapters.base import (
     AuthStatus,
     DiscoveredModel,
@@ -468,7 +469,8 @@ def _usage(payload: dict[str, Any] | None) -> Usage:
         return Usage(source="unavailable")
     cache_read = payload.get("cache_read_input_tokens")
     return Usage(
-        input_tokens=_int(payload.get("input_tokens")),
+        # Cached tokens count as read, as with every provider (#78).
+        input_tokens=anthropic_input_total(payload),
         output_tokens=_int(payload.get("output_tokens")),
         cached_input_tokens=_int(cache_read),
         cache_write_tokens=_int(payload.get("cache_creation_input_tokens")),

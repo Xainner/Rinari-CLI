@@ -617,7 +617,8 @@ def test_invoke_builds_history_from_rinari_not_from_claude(tmp_path):
     assert not any("Sos Rinari." in text for text in texts)
     assert response.provider_state["transport"] == "claude-cli"
     assert response.provider_state["resolved_model"] == "claude-sonnet-4-6-20260219"
-    assert response.usage.input_tokens == 11
+    # 11 read plus 3 from the cache (#78).
+    assert response.usage.input_tokens == 14
 
 
 # -- razonamiento ----------------------------------------------------------

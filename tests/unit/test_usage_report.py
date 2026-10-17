@@ -116,6 +116,7 @@ def test_anthropic_reports_the_cache_it_writes() -> None:
             "cache_creation_input_tokens": 7,
         }
     )
+    # Input is everything the model read: 10 new, 5 from the cache, 7 written to it.
     assert usage == Usage(
-        input_tokens=10, output_tokens=2, cached_input_tokens=5, cache_write_tokens=7
+        input_tokens=22, output_tokens=2, cached_input_tokens=5, cache_write_tokens=7
     )

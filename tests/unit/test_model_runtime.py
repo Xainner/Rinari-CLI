@@ -381,7 +381,8 @@ def test_anthropic_invoke_normalizes() -> None:
     response = adapter.invoke(_request(), "key", None)
     assert response.content == "hola mundo"
     assert response.stop_reason is StopReason.END_TURN
-    assert response.usage.input_tokens == 8
+    # Input counts the cached tokens too, as other providers do (#78).
+    assert response.usage.input_tokens == 10
     assert response.usage.output_tokens == 12
     assert response.usage.cached_input_tokens == 2
 
@@ -547,7 +548,8 @@ def test_anthropic_stream() -> None:
     assert response.tool_calls[0].name == "fs.read"
     assert response.tool_calls[0].arguments == {"p": "x"}
     assert response.stop_reason is StopReason.TOOL_CALLS
-    assert response.usage.input_tokens == 5
+    # 5 read plus 1 from the cache (#78).
+    assert response.usage.input_tokens == 6
     assert response.usage.output_tokens == 7
     assert response.usage.cached_input_tokens == 1
 
