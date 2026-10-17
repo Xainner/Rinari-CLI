@@ -138,6 +138,8 @@ CAPABILITIES: dict[str, bool] = {
     # followup.suggest notes: followup.suggested/resolved on the turn,
     # followup.list/dismiss/accept (accept starts a new conversation).
     "followup_suggestions_v1": True,
+    # Plan 0.4.0 #40: sessions carry parent_session_id, lineage_kind and brief.
+    "session_lineage_v1": True,
     # Projects with several working folders: project.create,
     # project.folders.validate, project.folder.add/remove, projectSummary.folders;
     # trusted extra folders count as inside the project for the policy.

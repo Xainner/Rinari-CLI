@@ -138,6 +138,7 @@ def test_migrate_fresh_database_applies_all(db):
         50,
         51,
         52,
+        53,
     ]
     assert _table_names(db) == TABLES_AFTER_MIGRATIONS
 
@@ -146,7 +147,7 @@ def test_migrate_is_idempotent(db):
     runner = MigrationRunner(db, FakeClock())
     runner.migrate()
     assert runner.migrate() == []
-    assert runner.current_version() == 52
+    assert runner.current_version() == 53
 
 
 def _previous_home_migrations(tmp_path: Path, upto: int) -> Path:
@@ -299,7 +300,7 @@ def test_a_home_migrated_by_the_voice_branch_gets_the_missing_migrations(db, tmp
     )
     MigrationRunner(db, FakeClock(), directory=voice).migrate()
     applied = MigrationRunner(db, FakeClock()).migrate()
-    assert applied == [38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52]
+    assert applied == [38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53]
     columns = {row["name"] for row in db.query("PRAGMA table_info(sessions)")}
     assert "pinned_at" in columns
     assert {"skill_records", "scheduled_tasks", "scheduled_runs"} <= _table_names(db)
@@ -317,7 +318,7 @@ def test_a_home_that_applied_the_old_numbers_is_not_migrated_twice(db, tmp_path)
     MigrationRunner(db, FakeClock(), directory=old).migrate()
     runner = MigrationRunner(db, FakeClock())
     # No duplicate pinned_at column and nothing re-run: only what came after.
-    assert runner.migrate() == [41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52]
+    assert runner.migrate() == [41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53]
     recorded = {row["version"]: row["name"] for row in db.query("SELECT * FROM schema_migrations")}
     assert recorded[38] == "0038_session_pins" and recorded[40] == "0040_scheduled_tasks"
     # The old numbers are free again for the migrations that own them.
@@ -370,6 +371,7 @@ def test_stored_runtime_notes_are_marked_as_harness_not_as_the_owner(db, tmp_pat
         50,
         51,
         52,
+        53,
     ]
     origins = {m.id: m.origin for m in SessionMessageRepository(db).list("ses_h")}
     assert origins == {
@@ -421,3 +423,48 @@ def test_new_migrations_on_an_existing_home_back_it_up_first(db, tmp_path):
     again = MigrationRunner(db, FakeClock(), directory=custom, backup_root=backups)
     assert again.migrate() == []
     assert again.last_backup is None
+
+
+def test_lineage_is_filled_for_forks_notes_and_scheduled_runs(db, tmp_path):
+    """0053 (plan 0.4.0 #40): old forks, accepted notes and scheduled runs get their lineage."""
+    from rinari.storage.repositories.sessions import SessionRepository
+
+    MigrationRunner(db, FakeClock(), directory=_previous_home_migrations(tmp_path, 52)).migrate()
+    insert = (
+        "INSERT INTO sessions (id, kind, created_cwd, current_cwd, provider_id, model_id, "
+        "state, created_at, updated_at, last_active_at, forked_from) "
+        "VALUES (?, 'CHAT', '/w', '/w', 'prov', 'mdl', 'active', 't0', 't0', 't0', ?)"
+    )
+    for session_id, forked_from in (
+        ("ses_mother", None),
+        ("ses_fork", "ses_mother"),
+        ("ses_note", None),
+        ("ses_run", None),
+        ("ses_plain", None),
+    ):
+        db.execute(insert, (session_id, forked_from))
+    db.execute(
+        "INSERT INTO followup_suggestions (id, session_id, title, prompt, normalized_key, "
+        "status, accepted_session_id, created_at, resolved_at) "
+        "VALUES ('fs_1', 'ses_mother', 'Pruebas', 'Escribe pruebas', 'k', 'accepted', "
+        "'ses_note', 't0', 't1')"
+    )
+    db.execute(
+        "INSERT INTO scheduled_tasks (id, name, kind, schedule_json, prompt, mode, "
+        "skills_json, grants_json, enabled, created_at, updated_at) "
+        "VALUES ('tsk_1', 'Resumen', 'agent', '{}', 'Resume el día', 'build', '[]', '[]', 1, 0, 0)"
+    )
+    db.execute(
+        "INSERT INTO scheduled_runs (id, task_id, status, trigger, session_id) "
+        "VALUES ('run_1', 'tsk_1', 'done', 'schedule', 'ses_run')"
+    )
+
+    assert MigrationRunner(db, FakeClock()).migrate() == [53]
+    repo = SessionRepository(db)
+    fork, note, run, plain = (repo.get(i) for i in ("ses_fork", "ses_note", "ses_run", "ses_plain"))
+    assert (fork.parent_session_id, fork.lineage_kind) == ("ses_mother", "fork")
+    assert (note.parent_session_id, note.lineage_kind) == ("ses_mother", "note")
+    assert note.brief == {"title": "Pruebas", "request": "Escribe pruebas", "suggestion_id": "fs_1"}
+    assert (run.parent_session_id, run.lineage_kind) == (None, "schedule")
+    assert run.brief["task_id"] == "tsk_1" and run.brief["title"] == "Resumen"
+    assert (plain.parent_session_id, plain.lineage_kind, plain.brief) == (None, None, None)

@@ -24,8 +24,9 @@ class SessionRepository:
                 created_cwd, current_cwd, provider_id, model_id,
                 profile_id, mode, state, compact_state_json,
                 created_at, updated_at, last_active_at, git_branch, forked_from,
-                active_skills_json, permission_profile, soul_id, rinari_profile_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                active_skills_json, permission_profile, soul_id, rinari_profile_id,
+                parent_session_id, lineage_kind, brief_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 rec.id,
@@ -54,6 +55,9 @@ class SessionRepository:
                 rec.permission_profile,
                 rec.soul_id,
                 rec.rinari_profile_id,
+                rec.parent_session_id,
+                rec.lineage_kind,
+                json.dumps(rec.brief, sort_keys=True) if rec.brief else None,
             ),
         )
 
@@ -132,6 +136,25 @@ class SessionRepository:
             params.append(limit)
         return [_session_to_record(r) for r in self._db.query(sql, params)]
 
+    def set_lineage(
+        self,
+        session_id: str,
+        parent_session_id: str | None,
+        lineage_kind: str,
+        brief: dict | None = None,
+    ) -> None:
+        """Only writer of a conversation's lineage after insert (plan 0.4.0 #40)."""
+        self._db.execute(
+            "UPDATE sessions SET parent_session_id = ?, lineage_kind = ?, brief_json = ? "
+            "WHERE id = ?",
+            (
+                parent_session_id,
+                lineage_kind,
+                json.dumps(brief, sort_keys=True) if brief else None,
+                session_id,
+            ),
+        )
+
     def set_rinari_profile(self, session_ids: list[str], rinari_profile_id: str) -> None:
         """Only writer of a conversation's profile (see SessionRecord)."""
         for session_id in session_ids:
@@ -187,7 +210,28 @@ def _session_to_record(row: dict) -> SessionRecord:
         soul_id=row["soul_id"],
         pinned_at=row["pinned_at"],
         rinari_profile_id=row["rinari_profile_id"] or "default",
+        parent_session_id=_column(row, "parent_session_id"),
+        lineage_kind=_column(row, "lineage_kind"),
+        brief=_brief(_column(row, "brief_json")),
     )
+
+
+def _column(row, name: str):
+    """A column that older homes (before migration 0053) do not have yet."""
+    try:
+        return row[name]
+    except (IndexError, KeyError):
+        return None
+
+
+def _brief(raw: str | None) -> dict | None:
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
 
 
 class SessionEventRepository:

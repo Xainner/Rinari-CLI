@@ -187,3 +187,15 @@ def test_fork_unknown_ref_raises(env) -> None:
     _tmp_path, _user_home, s = env
     with pytest.raises(NotFoundError):
         s.sessions.fork("ses_doesnotexist")
+
+
+def test_a_fork_records_its_lineage(env) -> None:
+    """Plan 0.4.0 #40: the fork hangs from its mother in the sidebar."""
+    tmp_path, _user_home, s = env
+    cwd = tmp_path / "chatdir"
+    cwd.mkdir()
+    source = _start_chat(s, cwd)
+    forked = s.sessions.fork(source.id).session
+    assert (forked.parent_session_id, forked.lineage_kind) == (source.id, "fork")
+    stored = s.sessions.show(forked.id)
+    assert stored.parent_session_id == source.id and stored.brief["title"]

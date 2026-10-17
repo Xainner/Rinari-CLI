@@ -70,6 +70,10 @@ def session_dict(record: SessionRecord) -> dict[str, Any]:
         "state": record.state,
         "git_branch": record.git_branch,
         "forked_from": record.forked_from,
+        # Lineage (plan 0.4.0 #40): the mother conversation and the brief.
+        "parent_session_id": record.parent_session_id,
+        "lineage_kind": record.lineage_kind,
+        "brief": record.brief,
         "soul_id": record.soul_id,
         "pinned_at": record.pinned_at,
         "rinari_profile_id": record.rinari_profile_id,

@@ -234,6 +234,9 @@ def test_a_note_from_a_turn_is_accepted_into_a_new_conversation(
     accepted = _ok(_call(server, "followup.accept", {"suggestion_id": notes[0]["id"]}))
     new = accepted["session"]
     assert new["id"] != source_id
+    # The note's conversation hangs from the one that suggested it (#40).
+    assert (new["parent_session_id"], new["lineage_kind"]) == (source_id, "note")
+    assert new["brief"]["title"] == "Añadir pruebas"
     assert (new["project_id"], new["rinari_profile_id"]) == (
         opened["project"]["id"],
         "trabajo",

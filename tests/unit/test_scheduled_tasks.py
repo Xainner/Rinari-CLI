@@ -239,6 +239,9 @@ def test_an_agent_run_is_a_turn_in_its_own_session(server, monkeypatch) -> None:
     assert run["status"] == "completed" and run["summary"] == "Todo en orden."
     session = server._services.sessions.show(run["session_id"])
     assert session.title.startswith("⏰ Resumen diario · ")
+    # Its lineage (plan 0.4.0 #40): a scheduled run, briefed by its task.
+    assert (session.parent_session_id, session.lineage_kind) == (None, "schedule")
+    assert session.brief["run_id"] == run_id and session.brief["title"] == "Resumen diario"
     # The task's grants were seeded as session grants of the run's session.
     [grant] = server.turns.peers.session_grants(run["session_id"])
     assert grant.capability == "shell.exec" and grant.scope is GrantScope.SESSION

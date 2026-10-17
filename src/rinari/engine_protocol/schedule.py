@@ -178,6 +178,18 @@ class ScheduleRunner:
             }
         )
         session_id = created["session"]["id"]
+        # A scheduled run has no mother conversation; its brief is the task (#40).
+        self._services.ctx.session_repo.set_lineage(
+            session_id,
+            None,
+            "schedule",
+            {
+                "title": task["name"],
+                "request": task["prompt"],
+                "task_id": task["id"],
+                "run_id": run_id,
+            },
+        )
         if task["model"]:
             self._services.sessions.set_model(session_id, task["model"], None)
         # Approved when the task was created: the run does not ask again.

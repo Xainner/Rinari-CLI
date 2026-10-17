@@ -105,6 +105,12 @@ class SessionRecord:
     # conversations have the project's. Like pinned_at, update() never
     # writes it: SessionRepository.set_rinari_profile does.
     rinari_profile_id: str = "default"
+    # Where it came from (plan 0.4.0 #40): the mother conversation, how
+    # (note | fork | schedule) and the brief (title, request). Written at
+    # insert or by SessionRepository.set_lineage, never by update().
+    parent_session_id: str | None = None
+    lineage_kind: str | None = None
+    brief: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)

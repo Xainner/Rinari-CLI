@@ -943,6 +943,30 @@
         },
         "rinari_profile_id": {
           "type": "string"
+        },
+        "parent_session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lineage_kind": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "note",
+            "fork",
+            "schedule",
+            null
+          ]
+        },
+        "brief": {
+          "type": [
+            "object",
+            "null"
+          ]
         }
       },
       "additionalProperties": true

@@ -1694,6 +1694,17 @@ class EngineServer:
             if project is not None and record.kind != "PROJECT":
                 record = self._services.sessions.promote(record.id, cwd)
             accepted = self._followups().mark_accepted(suggestion.id, record.id)
+        # The note's conversation hangs from the one that suggested it (#40).
+        self._services.ctx.session_repo.set_lineage(
+            record.id,
+            source.id,
+            "note",
+            {
+                "title": suggestion.title,
+                "request": suggestion.prompt,
+                "suggestion_id": suggestion.id,
+            },
+        )
         turn = self._turns.start_turn(
             record.id,
             suggestion.prompt,
