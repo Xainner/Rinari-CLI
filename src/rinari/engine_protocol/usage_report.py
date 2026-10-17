@@ -593,13 +593,19 @@ def render_text(report: dict[str, Any]) -> str:
         f" · {_n(totals.get('output_tokens'))} output{total_cost}"
     )
     tools = report.get("tools") or {}
+    time_ = report.get("time") or {}
     top = ", ".join(f"{item['tool']} {item['count']}" for item in tools.get("top") or [])
     lines += [
         "",
         f"Tools: {tools.get('total', 0)} ({tools.get('ok', 0)} ok, {tools.get('failed', 0)} failed)"
         + (f" · {top}" if top else ""),
         f"Compactions: {report.get('compactions', 0)}",
-        f"Active time: {round((report.get('time') or {}).get('active_ms', 0) / 1000)} s",
+        f"Active time: {round(time_.get('active_ms', 0) / 1000)} s"
+        + (
+            f" · from {time_['first_at']} to {time_['last_at']}"
+            if time_.get("first_at") and time_.get("last_at")
+            else ""
+        ),
     ]
     warnings = report.get("warnings") or []
     if warnings:
