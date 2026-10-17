@@ -1136,6 +1136,12 @@ class AgentLoop:
                         if (message.origin or {}).get("source")
                         else {}
                     ),
+                    # A child's report read mid-turn: which children, and what each said (#100).
+                    **{
+                        key: (message.origin or {})[key]
+                        for key in ("children", "reports")
+                        if (message.origin or {}).get(key)
+                    },
                     # «Enviar ahora» (#31): the bubble says it cut the step.
                     **({"interrupted": True} if (message.origin or {}).get("interrupt") else {}),
                 },

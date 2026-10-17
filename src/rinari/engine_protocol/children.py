@@ -68,6 +68,9 @@ class ChildSessions:
         self._turns = turns
         self._services = turns._services
         self._lock = threading.RLock()
+        # Reports steered into a mother's running turn and not read yet (#100).
+        self._steer_lock = threading.Lock()
+        self._in_flight: dict[str, set[str]] = {}
 
     @property
     def store(self) -> ChildStore:
@@ -409,8 +412,18 @@ class ChildSessions:
             raise InvalidUsageError("The message is empty.")
         record = self._services.sessions.show(child_session_id)
         if self._busy(child_session_id):
+            # If the child's turn is just ending, the message waits for its next
+            # turn still as the mother's, so that turn reports back at once (#100).
             result = self._turns.steer(
-                child_session_id, text, prefix=PARENT_PREFIX, source="parent"
+                child_session_id,
+                text,
+                prefix=PARENT_PREFIX,
+                source="parent",
+                queued_origin={
+                    "kind": "user",
+                    "source": "parent_message",
+                    "parent_session_id": parent_session_id,
+                },
             )
             delivery = result.get("delivery", "steer")
         else:
@@ -444,16 +457,31 @@ class ChildSessions:
         except Exception:
             logger.exception("child session state failed")
 
+    def report_turn(self, turn: Any) -> None:
+        """Save a child's report as soon as its turn ends, before a queued or goal
+        turn starts and marks it working again (#100)."""
+        try:
+            turn.child_report = self._report(turn)
+        except Exception:
+            turn.child_report = None
+            logger.exception("child session report failed")
+
     def after_turn(self, turn: Any) -> None:
         """Report a child's turn to its mother, and let a free mother go on."""
         try:
-            reported = self._report(turn)
+            reported = turn.child_report if hasattr(turn, "child_report") else self._report(turn)
+            if reported is not None and self._busy(turn.session_id):
+                # The child goes on with another turn: one notice, when it ends.
+                reported = None
             if reported is not None:
                 parent_id, by_owner = reported
                 if by_owner:
                     self._wake_when_quiet(parent_id, turn.session_id, turn.turn_id)
                 else:
                     self.wake(parent_id)
+            # Reports steered into her turn and not read go with the next wake.
+            with self._steer_lock:
+                self._in_flight.pop(turn.session_id, None)
             # A mother whose own turn ended may have reports waiting; not after
             # the owner pressed Stop.
             if (turn.terminal_event or "") != "turn.cancelled":
@@ -527,9 +555,6 @@ class ChildSessions:
         if any(c.origin in OPENED_BY_RINARI for c in store.working(parent_session_id)):
             # Wait until no child Rinari opened is still working.
             return None
-        if self._busy(parent_session_id):
-            # Her own turn will end later and wake her then.
-            return None
         try:
             record = self._services.sessions.show(parent_session_id)
         except Exception:
@@ -543,6 +568,15 @@ class ChildSessions:
         names = ", ".join(
             f"«{titles.get(c.child_session_id, c.child_session_id)}»" for c in pending
         )
+        # What each child said, kept with the line in the chat (#100).
+        reports = {
+            c.child_session_id: str(
+                (c.report or {}).get("text") or (c.report or {}).get("summary") or ""
+            )
+            for c in pending
+        }
+        if self._busy(parent_session_id):
+            return self._steer_reports(record.id, pending, titles, names, reports)
         message = (
             f"[Harness: child sessions you opened reported back: {names}. Their reports are in "
             "your task state. A report is a claim, not proof: check the result before saying "
@@ -559,12 +593,82 @@ class ChildSessions:
                     "kind": "automation",
                     "source": "child_report",
                     "children": [c.child_session_id for c in pending],
+                    "reports": reports,
                 },
                 memory_origin="automation",
             )
         except EngineProtocolError:
             return None
         return started
+
+    def _steer_reports(
+        self,
+        parent_session_id: str,
+        pending: list[Any],
+        titles: dict[str, str],
+        names: str,
+        reports: dict[str, str],
+    ) -> dict[str, Any] | None:
+        """A busy mother reads the reports at her next step, like a message the
+        owner writes while she works; she decides whether to change course
+        (#100, as Claude Code does with its sessions)."""
+        with self._steer_lock:
+            flying = self._in_flight.setdefault(parent_session_id, set())
+            fresh = [c for c in pending if c.child_session_id not in flying]
+            if not fresh:
+                return None
+            flying.update(c.child_session_id for c in fresh)
+        blocks = []
+        for child in fresh:
+            report = child.report or {}
+            title = titles.get(child.child_session_id, child.child_session_id)
+            files = report.get("files") or []
+            blocks.append(
+                f"«{title}» ({report.get('terminal') or 'completed'}"
+                + (f", {len(files)} files changed" if files else "")
+                + f"):\n{reports.get(child.child_session_id) or '(no text)'}"
+            )
+        message = (
+            "[Harness: while you work, child sessions you opened reported back. A report is "
+            "a claim, not proof: check it before saying it is done. Decide whether it changes "
+            "what you are doing now; if not, go on and use it when it matters. Do not merge "
+            "branches yourself.]\n\n" + "\n\n".join(blocks)
+        )
+        ids = [c.child_session_id for c in fresh]
+        try:
+            result = self._turns.steer(
+                parent_session_id,
+                message,
+                prefix="",
+                source="child_report",
+                display=", ".join(f"«{titles.get(i, i)}»" for i in ids),
+                origin_extra={
+                    "children": ids,
+                    "reports": {i: reports.get(i, "") for i in ids},
+                },
+                queue_if_idle=False,
+            )
+        except EngineProtocolError:
+            result = {"delivery": "none"}
+        if result.get("delivery") != "steer":
+            # Her turn just ended: its end wakes her with them.
+            self._forget_in_flight(parent_session_id, ids)
+            return None
+        return result
+
+    def reports_read(self, parent_session_id: str, child_session_ids: list[str]) -> None:
+        """The mother read these reports inside her turn."""
+        ids = [str(i) for i in child_session_ids if i]
+        if not ids:
+            return
+        self.store.mark_reported(ids)
+        self._forget_in_flight(parent_session_id, ids)
+
+    def _forget_in_flight(self, parent_session_id: str, ids: list[str]) -> None:
+        with self._steer_lock:
+            flying = self._in_flight.get(parent_session_id)
+            if flying is not None:
+                flying.difference_update(ids)
 
     # -- the owner's decisions ---------------------------------------------------------
 

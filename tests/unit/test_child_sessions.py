@@ -41,8 +41,11 @@ class Routed:
                 with routed.lock:
                     routed.requests.setdefault(session_id, []).append(request)
                     script = routed.scripts.get(session_id) or []
-                    if script:
-                        return script.pop(0)
+                    item = script.pop(0) if script else None
+                if callable(item):
+                    return item(request)
+                if item is not None:
+                    return item
                 return ModelResponse(
                     content=f"hecho en {session_id}", stop_reason=StopReason.END_TURN
                 )
@@ -489,3 +492,72 @@ def test_the_owner_opens_a_child_by_hand(server, tmp_path, routed) -> None:
     # report turn there is a moment when neither runs (teardown raced it).
     assert _wait(lambda: routed.requests.get(mother))
     assert _wait(lambda: _idle(server, child) and _idle(server, mother))
+
+
+def test_a_busy_mother_reads_the_report_at_her_next_step(server, tmp_path, routed) -> None:
+    # Plan 0.4.0 #100: like a message the owner writes while she works, not a
+    # turn that waits for hers to end.
+    from rinari.models.types import ToolCall
+
+    mother = _create_chat(server, tmp_path, tag="m-busy")
+    server._services.sessions.set_permission(mother, "full-access")
+    gate, entered = threading.Event(), threading.Event()
+
+    def first(_request):
+        entered.set()
+        assert gate.wait(20)
+        return ModelResponse(
+            content="Miro la carpeta",
+            tool_calls=(ToolCall("busy-list", "fs.list", {"path": str(tmp_path)}),),
+        )
+
+    routed.scripts[mother] = [first, ModelResponse(content="sigo", stop_reason=StopReason.END_TURN)]
+    started = server.handle_line(
+        _req("mb", "session.turn.start", {"session_id": mother, "message": "trabaja"})
+    )
+    assert started["ok"], started
+    assert entered.wait(10)
+    children = server._turns.children
+    child = children.create(
+        mother,
+        title="Hija",
+        prompt="Revisa docs/ y lista lo que está desactualizado. Hecho cuando haya una lista.",
+        origin="start",
+    )["child_session_id"]
+    assert _wait(lambda: child in children._in_flight.get(mother, set()))
+    gate.set()
+    assert _wait(lambda: _idle(server, mother) and _idle(server, child))
+    second = _text(routed.requests[mother][1])
+    assert "while you work, child sessions you opened reported back" in second
+    assert f"hecho en {child}" in second
+    assert ChildStore(server._services.ctx.db).get(child).reported is True
+    time.sleep(0.5)
+    assert len(routed.requests[mother]) == 2, "no extra turn to tell her again"
+
+
+def test_a_mothers_message_that_waits_still_reports_back_at_once(server, tmp_path, routed) -> None:
+    # Plan 0.4.0 #100: queued, it stays the mother's; not «the owner wrote it»,
+    # which waited 30 s before telling her.
+    from rinari.engine_protocol.children import PARENT_PREFIX
+
+    mother = _create_chat(server, tmp_path, tag="m-queue")
+    children = server._turns.children
+    children.owner_quiet_s = 60.0
+    child = children.create(
+        mother,
+        title="Hija",
+        prompt="Revisa docs/ y lista lo que está desactualizado. Hecho cuando haya una lista.",
+        origin="start",
+    )["child_session_id"]
+    assert _wait(lambda: len(routed.requests.get(mother, [])) == 1)
+    assert _wait(lambda: _idle(server, mother) and _idle(server, child))
+    result = server._turns.steer(
+        child,
+        "y revisa también los tests",
+        prefix=PARENT_PREFIX,
+        source="parent",
+        queued_origin={"kind": "user", "source": "parent_message", "parent_session_id": mother},
+    )
+    assert result["delivery"] == "queued"
+    assert _wait(lambda: len(routed.requests.get(mother, [])) == 2, timeout=10)
+    assert "y revisa también los tests" in _text(routed.requests[child][-1])

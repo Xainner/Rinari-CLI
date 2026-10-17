@@ -1238,6 +1238,9 @@ class TurnManager:
             if watched is not None:
                 watched.on_exit = None
             self._trust_after_turn(record, trusted_before)
+            # The child's report first: a queued or goal turn that starts next
+            # must not be overwritten as finished (#100).
+            self.children.report_turn(turn)
             self._start_next_queued(turn.session_id)
             self._goal_after_turn(turn)
             self.children.after_turn(turn)
@@ -1454,10 +1457,18 @@ class TurnManager:
         now: bool = False,
         prefix: str | None = None,
         source: str | None = None,
+        display: str | None = None,
+        origin_extra: dict[str, Any] | None = None,
+        queued_origin: dict[str, Any] | None = None,
+        queue_if_idle: bool = True,
     ) -> dict[str, Any]:
         """`attachment_context`, `image_refs` and `attachment_metadata` come from
         the same preparation as a normal message (plan 0.4.0 #54): the files
-        reach the model with the text when it reads it."""
+        reach the model with the text when it reads it.
+
+        With no turn to steer, the message waits for the next turn with
+        `queued_origin` (a mother's message stays hers, #100); with
+        `queue_if_idle` false it is not queued at all."""
         record = self._services.sessions.show(session_id)
         text = (message or "").strip()
         if not text and attachment_metadata:
@@ -1502,7 +1513,7 @@ class TurnManager:
                             else (STEER_NOW_PREFIX if now else STEER_PREFIX)
                         )
                         + body,
-                        display_content=text,
+                        display_content=display or text,
                         images=self._steer_images(turn, record.id, image_refs),
                         attachments=tuple(attachment_metadata or ()),
                         origin={
@@ -1511,6 +1522,7 @@ class TurnManager:
                             **({"interrupt": True} if now else {}),
                             # `parent`: the mother conversation wrote it (child sessions).
                             **({"source": source} if source else {}),
+                            **(origin_extra or {}),
                         },
                     )
                 )
@@ -1529,7 +1541,17 @@ class TurnManager:
             return delivered
         # No turn to steer (it just ended, or is finishing): an ordinary
         # message for the next turn, started now when the session is idle.
-        queued = self.queue_add(record.id, text)
+        if not queue_if_idle:
+            return {"session_id": record.id, "delivery": "none"}
+        if queued_origin is not None:
+            queued = self.queue_add(
+                record.id,
+                (prefix or "") + text,
+                origin=queued_origin,
+                display_message=text if prefix else None,
+            )
+        else:
+            queued = self.queue_add(record.id, text)
         self._start_next_queued(record.id)
         return {"session_id": record.id, "delivery": "queued", "position": queued["position"]}
 
@@ -1649,14 +1671,39 @@ class TurnManager:
         return taken
 
     def _settle_steering(self, turn: _ActiveTurn, leftover: list[ChatMessage]) -> None:
+        # A child's report the mother did not read stays unreported: her turn's
+        # end wakes her with it (#100).
+        leftover = [m for m in leftover if (m.origin or {}).get("source") != "child_report"]
         if not leftover:
             return
         texts = [item.display_content or item.content for item in leftover]
         if turn.terminal_event == "turn.completed":
-            with self._lock:
-                self._queue.setdefault(turn.session_id, collections.deque()).appendleft(
-                    _QueuedPrompt(message="\n\n".join(texts), origin={"kind": "user"})
+            # A mother's message keeps its origin, so the child's turn reports
+            # back at once and not as if the owner had written it (#100).
+            parents = [m for m in leftover if (m.origin or {}).get("source") == "parent"]
+            owners = [m for m in leftover if (m.origin or {}).get("source") != "parent"]
+            queued = []
+            if owners:
+                queued.append(
+                    _QueuedPrompt(
+                        message="\n\n".join(m.display_content or m.content for m in owners),
+                        origin={"kind": "user"},
+                    )
                 )
+            if parents:
+                queued.append(
+                    _QueuedPrompt(
+                        message="\n\n".join(m.content for m in parents),
+                        display_message="\n\n".join(
+                            m.display_content or m.content for m in parents
+                        ),
+                        origin={"kind": "user", "source": "parent_message"},
+                    )
+                )
+            with self._lock:
+                pending = self._queue.setdefault(turn.session_id, collections.deque())
+                for item in reversed(queued):
+                    pending.appendleft(item)
             self._emit(
                 event(
                     "session.queue.updated",
@@ -1683,7 +1730,14 @@ class TurnManager:
     # Queued messages run FIFO after the live turn ends, preserving normal
     # turn boundaries and approvals. Bounded; engine-process memory only.
 
-    def queue_add(self, session_id: str, message: str) -> dict[str, Any]:
+    def queue_add(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        origin: dict[str, Any] | None = None,
+        display_message: str | None = None,
+    ) -> dict[str, Any]:
         record = self._services.sessions.show(session_id)
         text = (message or "").strip()
         if not text:
@@ -1700,7 +1754,13 @@ class TurnManager:
                     errors.INVALID_PARAMS,
                     f"Queue full ({MAX_QUEUE_DEPTH} pending).",
                 )
-            pending.append(_QueuedPrompt(message=text, origin={"kind": "user"}))
+            pending.append(
+                _QueuedPrompt(
+                    message=text,
+                    origin=origin or {"kind": "user"},
+                    display_message=display_message,
+                )
+            )
             position = len(pending)
         self._emit(
             event(
@@ -2002,6 +2062,9 @@ class TurnManager:
         def _on_activity(event_name: str, payload: dict[str, Any]) -> None:
             if turn.done.is_set():
                 return
+            if event_name == "steer.applied" and payload.get("source") == "child_report":
+                # The mother read the reports inside her turn (#100).
+                self.children.reports_read(turn.session_id, payload.get("children") or [])
             effective = (
                 payload.get("child_event", event_name)
                 if event_name == "agent.activity"
