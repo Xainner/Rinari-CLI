@@ -272,6 +272,10 @@ class EngineServer:
         self._dispatcher.register("session.delete", self._session_delete)
         self._dispatcher.register("session.branch", self._session_branch)
         self._dispatcher.register("session.fork", self._session_branch)
+        self._dispatcher.register("session.children.list", self._session_children_list)
+        self._dispatcher.register("session.child.integrate", self._session_child_integrate)
+        self._dispatcher.register("session.child.discard", self._session_child_discard)
+        self._dispatcher.register("session.children.isolation", self._session_children_isolation)
         self._dispatcher.register("session.history", self._session_history)
         self._dispatcher.register("session.timeline", self._session_timeline)
         self._dispatcher.register("session.mode.set", self._session_mode_set)
@@ -1684,49 +1688,29 @@ class EngineServer:
                 }
             if suggestion.status != "pending":
                 raise ConflictError(f"This suggestion is {suggestion.status}.")
-            source = self._services.sessions.show(suggestion.session_id)
-            project = self._services.projects.get(source.project_id) if source.project_id else None
-            if project is not None and project.archived:
-                raise ConflictError("Restore the project before starting this task.")
-            cwd = Path(project.canonical_root) if project is not None else Path(source.current_cwd)
-            record = self._services.sessions.new(
-                cwd=cwd,
+            # The card may change how the child opens before starting it.
+            spawn = suggestion.spawn
+            context = self._opt_str(params, "context") or spawn["context"]
+            isolation = self._opt_str(params, "isolation") or spawn["isolation"]
+            # A note opens a child of the conversation that left it
+            # (plan-sesiones-hijas 5.1): same project, its permissions, a report.
+            child = self._turns.children.create(
+                suggestion.session_id,
                 title=suggestion.title,
-                forced_chat=project is None,
-                mode="build",
-                permission_profile=source.permission_profile,
-                rinari_profile_id=None if project is not None else source.rinari_profile_id,
+                prompt=suggestion.prompt,
+                origin="plan_step" if suggestion.kind == "plan_step" else "note",
+                context=context,
+                isolation=isolation,
+                done_when=spawn["done_when"],
+                external_content=bool(suggestion.provenance.get("external_content")),
             )
-            if project is not None and record.kind != "PROJECT":
-                record = self._services.sessions.promote(record.id, cwd)
-            accepted = self._followups().mark_accepted(suggestion.id, record.id)
-        # The note's conversation hangs from the one that suggested it (#40).
-        self._services.ctx.session_repo.set_lineage(
-            record.id,
-            source.id,
-            "note",
-            {
-                "title": suggestion.title,
-                "request": suggestion.prompt,
-                "suggestion_id": suggestion.id,
-            },
-        )
-        turn = self._turns.start_turn(
-            record.id,
-            suggestion.prompt,
-            display_message=suggestion.prompt,
-            origin={
-                "kind": "user",
-                "source": "followup",
-                "suggestion_id": suggestion.id,
-                "source_session_id": source.id,
-            },
-        )
+            accepted = self._followups().mark_accepted(suggestion.id, child["child_session_id"])
         self._turns.emit_followup_resolution(accepted)
         return {
             "suggestion": accepted.as_dict(),
-            "session": session_to_dict(self._services.sessions.show(record.id)),
-            "turn": {"turn_id": turn.get("turn_id")},
+            "session": session_to_dict(self._services.sessions.show(child["child_session_id"])),
+            "turn": {"turn_id": child.get("turn_id")},
+            "child": child,
             "already_accepted": False,
         }
 
@@ -1950,6 +1934,30 @@ class EngineServer:
         if not moved:
             raise NotFoundError("That command is no longer running in the foreground.")
         return {"session_id": session_id, "tool_call_id": tool_call_id, "requested": True}
+
+    # -- child sessions (plan-sesiones-hijas 5) ---------------------------------------
+
+    def _session_children_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        session_id = self._need_str(params, "session_id")
+        return {"session_id": session_id, "children": self._turns.children.list(session_id)}
+
+    def _session_child_integrate(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Merge a child's branch into the project: the owner's button, never a tool."""
+        return self._turns.children.integrate(self._need_str(params, "child_session_id"))
+
+    def _session_child_discard(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._turns.children.discard(self._need_str(params, "child_session_id"))
+
+    def _session_children_isolation(self, params: dict[str, Any]) -> dict[str, Any]:
+        """«Use the same folder in this project» (or back to worktrees) from a child's card."""
+        session_id = self._need_str(params, "session_id")
+        isolation = self._need_str(params, "isolation")
+        record = self._services.sessions.show(session_id)
+        project = self._services.projects.get(record.project_id) if record.project_id else None
+        if project is None:
+            raise NotFoundError("That conversation has no project.")
+        self._turns.children.set_project_isolation(Path(project.canonical_root), isolation)
+        return {"session_id": session_id, "isolation": isolation}
 
     def _process_orphans_list(self, params: dict[str, Any]) -> dict[str, Any]:
         """Processes an earlier Engine started that are still running."""

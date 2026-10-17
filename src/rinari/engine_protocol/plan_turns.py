@@ -128,7 +128,12 @@ def checklist_items(steps: list[str]) -> list[dict[str, Any]]:
 def implement_message(plan: PlanTurn) -> str:
     return (
         "Implement the plan you proposed in the earlier PLAN turn. You are in BUILD mode now: "
-        "make the changes, keep the checklist up to date as you go and verify the result.\n\n"
+        "make the changes, keep the checklist up to date as you go and verify the result. "
+        "If two or more steps are real work that can each run on its own (none needs "
+        "another's result or touches the same files), leave one followup.suggest with "
+        "kind=plan_step per such step except the one you start with (up to 4), say so in "
+        "one line, and begin your step at once; a step the user starts as a session is "
+        "no longer yours.\n\n"
         "The plan:\n\n" + plan.content
     )
 

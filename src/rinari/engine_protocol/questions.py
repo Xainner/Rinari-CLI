@@ -28,6 +28,9 @@ class QuestionBroker:
             "questions": questions,
             "status": "pending",
         }
+        # Only the Engine sets it (child sessions): the app shows an offer card.
+        if isinstance(arguments.get("_host_offer"), dict):
+            request["offer"] = arguments["_host_offer"]
         wait = threading.Event()
         with self.lock:
             self.pending[request_id] = (request, wait, emit, turn)

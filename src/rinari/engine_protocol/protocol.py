@@ -140,6 +140,8 @@ CAPABILITIES: dict[str, bool] = {
     "followup_suggestions_v1": True,
     # Plan 0.4.0 #40: sessions carry parent_session_id, lineage_kind and brief.
     "session_lineage_v1": True,
+    # Child sessions: open, report, integrate (plan-sesiones-hijas 5).
+    "child_sessions_v1": True,
     # Projects with several working folders: project.create,
     # project.folders.validate, project.folder.add/remove, projectSummary.folders;
     # trusted extra folders count as inside the project for the policy.

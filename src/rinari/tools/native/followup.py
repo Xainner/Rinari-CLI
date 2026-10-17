@@ -25,7 +25,10 @@ DESCRIPTION = (
     "Leave the user a note with one worthwhile follow-up task outside the current "
     "request (a nearby bug, missing tests, stale docs). Not for the current steps nor "
     "to ask permission; at most 1-2 per turn. If accepted, the prompt starts a new "
-    "conversation: make it self-contained (what, where, how to check it is done)."
+    "conversation: make it self-contained (what, where, how to check it is done). "
+    "kind=plan_step: after an approved plan, one card per independent step (up to 4) "
+    "that the user may start in parallel; do the remaining step here. context and "
+    "isolation say how the child would open (see session.start)."
 )
 
 INPUT_SCHEMA: dict[str, Any] = {
@@ -36,6 +39,10 @@ INPUT_SCHEMA: dict[str, Any] = {
         "title": {"type": "string", "minLength": 3, "maxLength": 80},
         "prompt": {"type": "string", "minLength": 10, "maxLength": 2000},
         "rationale": {"type": "string", "maxLength": 200},
+        "kind": {"type": "string", "enum": ["note", "plan_step"]},
+        "done_when": {"type": "string", "maxLength": 500},
+        "context": {"type": "string", "enum": ["brief", "fork"]},
+        "isolation": {"type": "string", "enum": ["auto", "worktree", "same"]},
     },
 }
 
@@ -43,6 +50,7 @@ _CODES = {
     "LIMIT": ToolErrorCode.RESOURCE_EXHAUSTED,
     "DUPLICATE": ToolErrorCode.ALREADY_EXISTS,
     "NOT_FOUND": ToolErrorCode.NOT_FOUND,
+    "INVALID": ToolErrorCode.INVALID_ARGUMENT,
 }
 
 
@@ -62,6 +70,12 @@ def _suggest(arguments: dict, ctx: ToolContext) -> ToolResult:
             prompt=(arguments or {}).get("prompt"),
             rationale=(arguments or {}).get("rationale", ""),
             provenance=provenance,
+            kind=str((arguments or {}).get("kind") or "note"),
+            spawn={
+                key: (arguments or {}).get(key)
+                for key in ("context", "isolation", "done_when")
+                if (arguments or {}).get(key)
+            },
         )
     except FollowupError as exc:
         return _fail(_CODES.get(exc.code, ToolErrorCode.INVALID_ARGUMENT), str(exc))

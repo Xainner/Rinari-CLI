@@ -108,6 +108,8 @@ class _ActiveTurn:
     continue_after: bool = False
     # Slash command that started the turn (`learn`…); becomes turn_command.
     command: str = ""
+    # Paths the turn changed, for a child's report to its mother.
+    changed_paths: list[str] = field(default_factory=list)
     # Checklist the turn starts with: the steps of the plan it implements (#55).
     seed_checklist: list[dict[str, Any]] | None = None
     # `/init` (#81): this turn alone is read-only, whatever the session's
@@ -273,6 +275,10 @@ class TurnManager:
 
         self.channels = ChannelBroker()
         self.peers = PeerBroker(self)
+        # Child sessions a conversation opens for a separate piece of work.
+        from rinari.engine_protocol.children import ChildSessions
+
+        self.children = ChildSessions(self)
         # A new engine process never replays deliveries accepted by an older one.
         self.peers.on_engine_start()
         # Nor leaves its turns open: one that died mid-turn is closed now.
@@ -1033,6 +1039,11 @@ class TurnManager:
             changeset = tracker.finalize()
             if changeset is not None:
                 turn.files_changed = len(changeset.get("files") or [])
+                turn.changed_paths = [
+                    str(row.get("path"))
+                    for row in changeset.get("files") or []
+                    if isinstance(row, dict) and row.get("path")
+                ]
                 self._activity_cb(turn)("turn.changes.completed", changeset)
 
         trusted_before = self._trusted_folders(record)
@@ -1227,6 +1238,7 @@ class TurnManager:
             self._trust_after_turn(record, trusted_before)
             self._start_next_queued(turn.session_id)
             self._goal_after_turn(turn)
+            self.children.after_turn(turn)
 
     def _watch_processes(self, turn: _ActiveTurn, context: Any, processes: Any) -> None:
         """Tell the model what it has running, and what ends during the turn (#90)."""
@@ -1323,7 +1335,12 @@ class TurnManager:
                     ),
                     approval_prompt=self._prompt_for_current_turn,
                     question_prompt=lambda args, token, deadline: self.questions.ask(
-                        turn, self._activity_cb(turn), args, token, deadline
+                        turn,
+                        self._activity_cb(turn),
+                        # A model cannot dress a question up as an offer.
+                        {key: value for key, value in args.items() if key != "_host_offer"},
+                        token,
+                        deadline,
                     ),
                     activity_sink=self._activity_cb(turn),
                     reasoning_effort=reasoning_effort,
@@ -1341,6 +1358,15 @@ class TurnManager:
                     ),
                     **(
                         {
+                            "children_host": lambda tool, args, ctx: self.children.call(
+                                turn, tool, args, ctx
+                            )
+                        }
+                        if not turn.remote_target and not turn.channel
+                        else {}
+                    ),
+                    **(
+                        {
                             "channel_host": lambda tool, args, ctx: self.channels.call(
                                 turn, self._activity_cb(turn), tool, args, ctx
                             )
@@ -1350,6 +1376,9 @@ class TurnManager:
                     ),
                 )
                 session.next_turn_command = turn.command
+                # A child born after its mother read external content keeps the
+                # guard on for its first turn (plan-sesiones-hijas 5.2).
+                session.next_turn_external = bool((turn.origin or {}).get("external_content"))
                 if abandoned.is_set():
                     session.end()
                     return
@@ -1421,6 +1450,8 @@ class TurnManager:
         image_refs: list | None = None,
         attachment_metadata: list | None = None,
         now: bool = False,
+        prefix: str | None = None,
+        source: str | None = None,
     ) -> dict[str, Any]:
         """`attachment_context`, `image_refs` and `attachment_metadata` come from
         the same preparation as a normal message (plan 0.4.0 #54): the files
@@ -1463,7 +1494,12 @@ class TurnManager:
                 turn.steering.append(
                     ChatMessage(
                         role="user",
-                        content=(STEER_NOW_PREFIX if now else STEER_PREFIX) + body,
+                        content=(
+                            prefix
+                            if prefix is not None
+                            else (STEER_NOW_PREFIX if now else STEER_PREFIX)
+                        )
+                        + body,
                         display_content=text,
                         images=self._steer_images(turn, record.id, image_refs),
                         attachments=tuple(attachment_metadata or ()),
@@ -1471,6 +1507,8 @@ class TurnManager:
                             "kind": "user",
                             "steer_id": steer_id,
                             **({"interrupt": True} if now else {}),
+                            # `parent`: the mother conversation wrote it (child sessions).
+                            **({"source": source} if source else {}),
                         },
                     )
                 )

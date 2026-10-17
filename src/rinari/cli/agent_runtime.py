@@ -87,6 +87,9 @@ class AgentSession:
     pending_attachments: list[str | dict] = field(default_factory=list)
     # Slash command for the next turn only (`/learn`); consumed when it runs.
     next_turn_command: str = ""
+    # The next turn starts with the external-content guard on: a child born
+    # after its mother read the web (plan-sesiones-hijas 5.2).
+    next_turn_external: bool = False
     activity_sink: object = field(default=None, repr=False)
     # Bound by build_agent_session; the host calls it exactly once when the
     # session ends (emits the SessionEnd lifecycle hook).
@@ -267,6 +270,9 @@ def build_assembler_context(
     goal = _goal_text(services, record.id)
     if goal:
         task_state = f"{goal}\n\n{task_state}" if task_state else goal
+    children = _children_text(services, record.id)
+    if children:
+        task_state = f"{children}\n\n{task_state}" if task_state else children
     from rinari.prompts.modes import mode_instructions
 
     skills_tuple, catalog = _skill_prompt_parts(services, root, record)
@@ -292,6 +298,10 @@ def build_assembler_context(
             "not browser interaction or visual correctness. After reconnecting, obtain a "
             "fresh snapshot; never blindly replay a click or other state-changing action "
             "whose result is uncertain."
+            "\nA separate conversation for a separate piece of work (a child session) opens "
+            "with session.start, found via capability.search 'child session', ONLY when the "
+            "user asked for it; when the user's request would fit better apart, ask with "
+            "session.offer; for your own ideas leave followup.suggest. "
             "\nFor long-running servers and watchers, use shell.exec with background=true "
             "or process.start, then inspect the returned handle with process.output. "
             "Use managed handles rather than detached shell commands so the user can "
@@ -432,6 +442,31 @@ def _checklist_text(services: ServiceContainer, session_id: str) -> str | None:
         return None
     try:
         return service.render_for_prompt(session_id)
+    except Exception:  # context is best effort, never a failed turn
+        return None
+
+
+def _children_text(services: ServiceContainer, session_id: str) -> str | None:
+    """The child sessions this conversation opened, and their new reports.
+
+    Rendering them is how the mother sees a report: it is marked seen, so a
+    free mother is not woken again for it (plan-sesiones-hijas 5.3).
+    """
+    try:
+        from rinari.children import ChildStore
+
+        store = ChildStore(services.ctx.db)
+        children = store.of(session_id)
+        if not children:
+            return None
+        titles = {}
+        for child in children:
+            record = services.ctx.session_repo.get(child.child_session_id)
+            if record is not None:
+                titles[child.child_session_id] = record.title or child.child_session_id
+        text = store.render_for_prompt(session_id, titles)
+        store.mark_reported([c.child_session_id for c in children if not c.reported])
+        return text
     except Exception:  # context is best effort, never a failed turn
         return None
 
@@ -722,6 +757,7 @@ def build_agent_session(
     remote_target: dict | None = None,
     channel_host=None,
     peer_host=None,
+    children_host=None,
     origin_kind: str = "user",
     session_grants: list | None = None,
 ) -> AgentSession:
@@ -835,6 +871,7 @@ def build_agent_session(
         remote_target=remote_target,
         channel_host=channel_host,
         peer_host=peer_host,
+        children_host=children_host,
         session_grants=session_grants,
         network_policy=network_policy,
         root=root,
@@ -1150,6 +1187,7 @@ def _build_tools(
     remote_target: dict | None = None,
     channel_host=None,
     peer_host=None,
+    children_host=None,
     session_grants: list | None = None,
 ) -> ToolRuntime:
     from rinari.application.ssh_targets import TargetStore
@@ -1197,6 +1235,13 @@ def _build_tools(
                 from rinari.agents.tools import AgentToolHost, agent_tools
 
                 registry.register_all(agent_tools(AgentToolHost(orchestrator=orchestrator)))
+        if children_host is not None:
+            # On demand: found with capability.search when a separate session
+            # is wanted (plan-sesiones-hijas 5.6).
+            with registry.loading("children"):
+                from rinari.tools.native.children import child_tools
+
+                registry.register_all(child_tools(children_host))
         if peer_host is not None:
             # Deferred exposure: only sessions bound to an enabled peer group
             # can even discover `session.peers` / `session.send`.
@@ -2287,12 +2332,16 @@ def _run_turn_unlocked(
     from rinari.tools.definition import TurnState
 
     # A fresh TurnState per turn: the untrusted-content guard starts clean.
+    turn_state = TurnState()
+    if session.next_turn_external:
+        turn_state.mark_external("mother conversation")
     session.context.tool_ctx = replace(
         session.context.tool_ctx,
         turn_command=session.next_turn_command,
-        turn_state=TurnState(),
+        turn_state=turn_state,
     )
     session.next_turn_command = ""
+    session.next_turn_external = False
     exposure = getattr(session.context.tool_ctx, "exposure", None)
     if exposure is not None:
         for past in refreshed_history:

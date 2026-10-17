@@ -26,6 +26,11 @@ from typing import Any
 from rinari.shared.clock import iso_utc, now_iso
 
 MAX_PER_TURN = 2
+# One card per independent step of an approved plan (plan-sesiones-hijas 5.1).
+MAX_PLAN_STEPS_PER_TURN = 4
+KINDS = ("note", "plan_step")
+CONTEXTS = ("brief", "fork")
+ISOLATIONS = ("auto", "worktree", "same")
 MAX_PENDING_PER_SESSION = 3
 MAX_PENDING_PER_PROJECT = 5
 DUPLICATE_WINDOW = timedelta(days=30)
@@ -53,6 +58,18 @@ class Suggestion:
     accepted_session_id: str | None
     created_at: str
     resolved_at: str | None
+    kind: str = "note"
+
+    @property
+    def spawn(self) -> dict[str, str]:
+        """How the child opens if the owner starts the card."""
+        raw = self.provenance.get("spawn") if isinstance(self.provenance, dict) else None
+        raw = raw if isinstance(raw, dict) else {}
+        return {
+            "context": raw.get("context") if raw.get("context") in CONTEXTS else "brief",
+            "isolation": raw.get("isolation") if raw.get("isolation") in ISOLATIONS else "auto",
+            "done_when": str(raw.get("done_when") or "")[:500],
+        }
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -69,6 +86,8 @@ class Suggestion:
             "accepted_session_id": self.accepted_session_id,
             "created_at": self.created_at,
             "resolved_at": self.resolved_at,
+            "kind": self.kind,
+            **self.spawn,
         }
 
 
@@ -117,11 +136,23 @@ class FollowupService:
         prompt: Any,
         rationale: Any = "",
         provenance: dict[str, Any] | None = None,
+        kind: str = "note",
+        spawn: dict[str, Any] | None = None,
     ) -> tuple[Suggestion, list[Suggestion]]:
         """Store a note; returns it and the ones it superseded."""
         clean_title = _clean(title, 3, 80, "title")
         clean_prompt = _clean(prompt, 10, 2000, "prompt")
         clean_rationale = rationale.strip()[:200] if isinstance(rationale, str) else ""
+        if kind not in KINDS:
+            raise FollowupError("INVALID", f"kind must be one of {', '.join(KINDS)}")
+        provenance = dict(provenance or {})
+        if spawn:
+            provenance["spawn"] = {
+                key: str(value)[:500]
+                for key, value in spawn.items()
+                if key in ("context", "isolation", "done_when") and value
+            }
+        limit = MAX_PLAN_STEPS_PER_TURN if kind == "plan_step" else MAX_PER_TURN
         record = self._ctx.session_repo.get(session_id)
         if record is None:
             raise FollowupError("NOT_FOUND", "unknown conversation")
@@ -129,9 +160,10 @@ class FollowupService:
         now = now_iso(self._ctx.clock)
         with self._lock:
             turn_id = self._current_turn.get(session_id)
-            if turn_id is not None and self._per_turn.get(turn_id, 0) >= MAX_PER_TURN:
+            counter = (turn_id, kind)
+            if turn_id is not None and self._per_turn.get(counter, 0) >= limit:
                 raise FollowupError(
-                    "LIMIT", f"at most {MAX_PER_TURN} suggestions per turn; keep the best ones"
+                    "LIMIT", f"at most {limit} {kind}s per turn; keep the best ones"
                 )
             if self._duplicate(record, key, now):
                 raise FollowupError(
@@ -142,7 +174,7 @@ class FollowupService:
                 self._ctx.db.execute(
                     "INSERT INTO followup_suggestions (id, session_id, turn_id, project_id, "
                     "title, prompt, rationale, normalized_key, status, provenance_json, "
-                    "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
+                    "created_at, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
                     (
                         suggestion_id,
                         record.id,
@@ -152,13 +184,15 @@ class FollowupService:
                         clean_prompt,
                         clean_rationale,
                         key,
-                        json.dumps(provenance or {}, ensure_ascii=False),
+                        json.dumps(provenance, ensure_ascii=False),
                         now,
+                        kind,
                     ),
                 )
-                superseded = self._supersede(record, now)
+                # A plan's steps never push the owner's notes out.
+                superseded = self._supersede(record, now) if kind == "note" else []
             if turn_id is not None:
-                self._per_turn[turn_id] = self._per_turn.get(turn_id, 0) + 1
+                self._per_turn[counter] = self._per_turn.get(counter, 0) + 1
         return self.get(suggestion_id), superseded
 
     def _duplicate(self, record, key: str, now: str) -> bool:
@@ -186,7 +220,7 @@ class FollowupService:
         for column, value, cap in scopes:
             rows = self._ctx.db.query(
                 f"SELECT id FROM followup_suggestions WHERE {column} = ? "
-                "AND status = 'pending' ORDER BY created_at DESC, rowid DESC",
+                "AND status = 'pending' AND kind = 'note' ORDER BY created_at DESC, rowid DESC",
                 (value,),
             )
             for row in rows[cap:]:
@@ -293,4 +327,5 @@ def _from_row(row) -> Suggestion:
         accepted_session_id=row["accepted_session_id"],
         created_at=str(row["created_at"]),
         resolved_at=row["resolved_at"],
+        kind=str(row["kind"] or "note"),
     )
