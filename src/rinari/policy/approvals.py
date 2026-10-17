@@ -123,9 +123,13 @@ class ApprovalEngine:
         # exact-bound request (peer messaging) is honored only for the choices
         # it offered: hiding a button in a client is not a security boundary.
         wide_ok = request.binding_mode != "exact"
-        if answer in ("p", "project", "always-project") and (
-            "allow_project" in request.choices
-            or (wide_ok and request.reusable and self._project_store is None)
+        if (
+            answer in ("p", "project", "always-project")
+            and _has_project(request)
+            and (
+                "allow_project" in request.choices
+                or (wide_ok and request.reusable and self._project_store is None)
+            )
         ):
             return self._record(
                 self._issue(request, GrantScope.PROJECT, reason="approved for project")
@@ -141,8 +145,9 @@ class ApprovalEngine:
         return outcome
 
     def _find_grant(self, request: ApprovalRequest) -> ApprovalGrant | None:
-        project_grants = list(self._project_grants)
-        if self._project_store is not None and request.project_id:
+        # Old «always in chats» grants no longer apply (#56).
+        project_grants = list(self._project_grants) if _has_project(request) else []
+        if self._project_store is not None and _has_project(request):
             project_grants.extend(self._project_store.grants_for(request.project_id))
         for store, scope_filter in (
             (self._store.values() if self._store else [], GrantScope.PERSISTENT),
@@ -225,6 +230,11 @@ class ApprovalEngine:
             *self._project_grants,
             *(self._store.values() if self._store else []),
         ]
+
+
+def _has_project(request: ApprovalRequest) -> bool:
+    """A loose chat (key "chats") has no project to keep an «always» grant in."""
+    return bool(request.project_id) and request.project_id != "chats"
 
 
 def _inside(child: str, parent: str) -> bool:

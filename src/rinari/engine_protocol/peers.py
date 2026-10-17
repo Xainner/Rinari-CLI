@@ -20,6 +20,7 @@ from typing import Any
 
 from rinari.engine_protocol.errors import INVALID_PARAMS, EngineProtocolError
 from rinari.engine_protocol.messages import event
+from rinari.policy.session_grants import SessionGrants, drop_peer_grants
 from rinari.tools.definition import ToolErrorCode, ToolErrorInfo, ToolResult
 
 MAX_PEER_SENDS_PER_TURN = 5
@@ -77,8 +78,9 @@ class PeerBroker:
         self._services = turns._services
         self._operations = turns.operations
         self._lock = threading.RLock()
-        # Grants for `session.message` live per session while the engine runs;
-        # a revocation, a session close or a restart empties them.
+        # Approval grants per session, kept with the conversation (#56). The
+        # `session.message` ones of a peer group go with a revocation or when
+        # the session leaves the group.
         self._grants: dict[str, list] = {}
         self._grants_epoch: dict[str, int] = {}
 
@@ -174,16 +176,20 @@ class PeerBroker:
             if group is None:
                 raise EngineProtocolError("NOT_FOUND", f"Peer group not found: {group_id}")
             for member in group["members"]:
-                self._grants.pop(member["session_id"], None)
+                self._drop_peer_grants(member["session_id"])
         payload = self._group_payload(group)
         self._turns.emit_external(event("session.peer.group.updated", payload))
         return payload
 
     def on_session_gone(self, session_id: str) -> None:
-        """Closed/archived/deleted sessions leave every group and lose their grants."""
+        """Closed/archived/deleted sessions leave every group and its grants.
+
+        Their own «in this chat» grants stay with the conversation (#56): a
+        deleted one takes them along by cascade.
+        """
         with self._lock:
             groups = self._operations.group_drop_session(session_id)
-            self._grants.pop(session_id, None)
+            self._drop_peer_grants(session_id)
         for group_id in groups:
             group = self._operations.group_get(group_id)
             if group:
@@ -207,22 +213,32 @@ class PeerBroker:
         return {"group": group, "member": member}
 
     def session_grants(self, session_id: str) -> list:
-        """Session-bound grant store injected into the turn's ApprovalEngine."""
+        """Session-bound grant store injected into the turn's ApprovalEngine.
+
+        Kept with the conversation (#56), so it survives a restart.
+        """
         with self._lock:
-            return self._grants.setdefault(session_id, [])
+            grants = self._grants.get(session_id)
+            if grants is None:
+                grants = self._grants[session_id] = SessionGrants(self._services.ctx.db, session_id)
+            return grants
+
+    def _drop_peer_grants(self, session_id: str) -> None:
+        self._grants.pop(session_id, None)
+        drop_peer_grants(self._services.ctx.db, session_id)
 
     def _invalidate_grants_for(self, group: dict[str, Any], before: dict[str, Any] | None) -> None:
         if before is not None and before["authorization_epoch"] == group["authorization_epoch"]:
             return
         for member in group["members"]:
-            self._grants.pop(member["session_id"], None)
+            self._drop_peer_grants(member["session_id"])
         if before:
             for member in before["members"]:
-                self._grants.pop(member["session_id"], None)
+                self._drop_peer_grants(member["session_id"])
 
     def invalidate_grants(self, session_id: str) -> None:
         with self._lock:
-            self._grants.pop(session_id, None)
+            self._drop_peer_grants(session_id)
 
     # -- tool host -----------------------------------------------------------------
 

@@ -1248,7 +1248,9 @@ def _build_tools(
             from rinari.cli import render
 
             render.render_approval(Console(), request)
-        options = "[y] once · [s] session · [p] project · [a] always · [n] no"
+        # A loose chat has no «always in the project» (#56).
+        project = "" if request.project_id in (None, "chats") else " · [p] project"
+        options = f"[y] once · [s] session{project} · [a] always · [n] no"
         question = f"Approve {request.capability}{target}? {options}"
         answer = typer.prompt(question, default="n").lower()
         return answer if answer else "n"

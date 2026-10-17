@@ -166,6 +166,8 @@ def test_grants_protocol_lists_and_revokes(tmp_path) -> None:
         listed = server.handle_line(json.dumps({"id": "1", "method": "permission.grants.list"}))
         [grant] = listed["result"]["grants"]
         assert grant["scope_kind"] == "chats" and grant["target"] == "api.example.com"
+        # «Always in chats» no longer applies: listed as old, to remove (#56).
+        assert grant["legacy"] is True
         revoked = server.handle_line(
             json.dumps(
                 {"id": "2", "method": "permission.grants.revoke", "params": {"id": grant["id"]}}

@@ -3344,6 +3344,8 @@ class EngineServer:
                     "id": row["id"],
                     "scope": scope,
                     "scope_kind": "chats" if scope == "chats" else "project",
+                    # «Always in chats» no longer applies (#56): listed to remove.
+                    "legacy": scope == "chats",
                     "scope_label": "" if scope == "chats" else names.get(scope, Path(scope).name),
                     "capability": row.get("capability"),
                     "rule_id": row.get("rule_id"),

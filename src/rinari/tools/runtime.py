@@ -84,11 +84,17 @@ PEER_ORIGIN_DENIED_TOOLS = frozenset(
 )
 
 
+# Key of the old «always in chats» grants. A loose chat no longer offers it
+# and the ones already stored no longer apply (#56): Settings lists them as
+# old so the owner can remove them.
+LOOSE_CHATS = "chats"
+
+
 def grant_scope_key(ctx: ToolContext) -> str:
-    """Where an "always" grant lives: the project root, or all loose chats."""
+    """Where an "always" grant lives: the project root (a loose chat has none)."""
     if ctx.kind == "PROJECT" and ctx.project_root is not None:
         return str(Path(ctx.project_root).resolve())
-    return "chats"
+    return LOOSE_CHATS
 
 
 def scope_from_context(ctx: ToolContext) -> SessionScope:
@@ -698,16 +704,23 @@ class ToolRuntime:
         ctx: ToolContext,
         tool_call_id: str,
     ) -> tuple[bool, ToolContext]:
+        scope_key = grant_scope_key(ctx)
         request = ApprovalRequest(
             capability=decision.capability,
             description=f"{tool.name}: {decision.reason}",
             target=decision.target,
             risk=decision.risk,
             session_id=ctx.session_id,
-            project_id=grant_scope_key(ctx),
+            project_id=scope_key,
             rule_id=decision.rule_id,
             reusable=decision.reusable,
-            choices=decision.choices,
+            # A loose chat has no «always»: what is allowed in one chat does
+            # not reach the others (#56).
+            choices=(
+                decision.choices
+                if scope_key != LOOSE_CHATS
+                else tuple(c for c in decision.choices if c != "allow_project")
+            ),
             binding_mode=decision.binding_mode,
         )
         outcome = self.approvals.check(request)
