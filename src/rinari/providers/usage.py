@@ -81,6 +81,43 @@ def window_reset_passed(snapshot, now: float, fetched: float) -> bool:
     return False
 
 
+#: Claude Code's window names -> the ids the desktop already labels.
+CLAUDE_WINDOWS = {
+    "five_hour": ("rolling", "5 h"),
+    "seven_day": ("weekly", "7 days"),
+    "seven_day_opus": ("weekly:opus", "7 days · Opus"),
+    "seven_day_sonnet": ("weekly:sonnet", "7 days · Sonnet"),
+    "seven_day_overage_included": ("weekly:overage", "7 days · with extra usage"),
+    "overage": ("overage", "Extra usage"),
+}
+CLAUDE_USAGE_KEY = "provider.usage.claude-subscription"
+
+
+def claude_windows(observed: dict) -> list[dict]:
+    rows = []
+    for name, value in (observed.get("windows") or {}).items():
+        key, label = CLAUDE_WINDOWS.get(name, (name, name))
+        utilization = value.get("utilization")
+        used = None
+        if type(utilization) in (int, float) and math.isfinite(utilization):
+            # A fraction; past 1 when usage runs over the cap.
+            used = max(0.0, min(100.0, round(utilization * 100, 1)))
+        rows.append(
+            {
+                **window(
+                    key, {"used_percent": used, "resetsAt": value.get("resetsAt")}, label=label
+                ),
+            }
+        )
+    order = list(CLAUDE_WINDOWS)
+    return sorted(
+        rows,
+        key=lambda row: next(
+            (i for i, name in enumerate(order) if CLAUDE_WINDOWS[name][0] == row["id"]), 99
+        ),
+    )
+
+
 class ProviderUsageService:
     def __init__(self, providers, *, clock=time.time):
         self.providers = providers
@@ -114,6 +151,35 @@ class ProviderUsageService:
             snapshot["dashboard_url"] = DASHBOARDS.get(snapshot["product_id"])
             return snapshot
 
+    def _claude_subscription(self, base):
+        """The plan's windows as Claude Code last reported them (#78).
+
+        Seen in this Engine's runs, kept in the home so a restart still shows
+        them; until the first answer, «not reported yet».
+        """
+        from rinari.providers.claude_cli import latest_rate_limit
+
+        repository = self.providers._ctx.config_repo
+        saved = repository.get_json(CLAUDE_USAGE_KEY) or None
+        live = latest_rate_limit()
+        if live and (not saved or live["observed_at"] > saved.get("observed_at", 0)):
+            repository.set_json(CLAUDE_USAGE_KEY, live, updated_at=timestamp(live["observed_at"]))
+            saved = live
+        if not saved or not saved.get("windows"):
+            return {
+                **base,
+                "detail": "Claude Code reports the plan limits with its answers: "
+                "they show after the next one.",
+            }
+        return {
+            **base,
+            "status": "available",
+            "windows": claude_windows(saved),
+            "fetched_at": timestamp(saved.get("observed_at")),
+            "source": "claude-cli",
+            "detail": "As Claude Code reported them in its last answer.",
+        }
+
     def _get(self, ref, *, refresh):
         provider = self.providers.get(ref)
         product = product_for(provider)
@@ -132,6 +198,8 @@ class ProviderUsageService:
         if not getattr(provider, "enabled", True):
             # Turned off (#97): its account is not read.
             return {**base, "status": "disabled", "detail": "This provider is turned off."}
+        if product == "claude-subscription":
+            return self._claude_subscription(base)
         if product in ("ollama", "lmstudio"):
             return {**base, "detail": "Remote quotas do not apply to local providers."}
         if product not in ("opencode-go", "openrouter", "deepseek", "chatgpt"):

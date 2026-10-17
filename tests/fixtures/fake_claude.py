@@ -25,6 +25,7 @@ ENV_RECORD = "FAKE_CLAUDE_RECORD"  # path: dump argv + env + stdin for assertion
 ENV_VERSION = "FAKE_CLAUDE_VERSION"
 ENV_THINKING = "FAKE_CLAUDE_THINKING"
 ENV_ECHO = "FAKE_CLAUDE_ECHO"  # reply names the line it answers
+ENV_RATE_LIMIT = "FAKE_CLAUDE_RATE_LIMIT"  # JSON rate_limit_info emitted after init
 
 
 def _emit(payload: dict) -> None:
@@ -237,6 +238,13 @@ def _print_mode(argv: list[str]) -> int:
             ),
         }
     )
+    if os.environ.get(ENV_RATE_LIMIT):
+        _emit(
+            {
+                "type": "rate_limit_event",
+                "rate_limit_info": json.loads(os.environ[ENV_RATE_LIMIT]),
+            }
+        )
     if mode == "tool":
         return _tool_generation(argv)
     turns = _user_turns(stdin_text) or [""]

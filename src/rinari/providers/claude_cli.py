@@ -27,6 +27,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -75,6 +76,54 @@ _RATE_LIMITED = re.compile(r"\brate[ _-]?limit|\btoo many requests\b|\b429\b")
 
 #: Bytes of stderr kept for error mapping; the rest is read and dropped.
 _STDERR_TAIL_CHARS = 16_000
+
+# -- the subscription's limits (plan 0.4.0 #78) ------------------------------
+#
+# Claude Code reports the plan's rate limits as `rate_limit_event` lines in its
+# stream-json output: the window that limits now (`rateLimitType`, its
+# `utilization` 0..1 and `resetsAt` in epoch seconds) and, on newer versions,
+# every window in `unifiedWindows`. Nothing else exposes them without the
+# interactive `/usage`, so the latest one seen is kept for the usage panel.
+_RATE_LIMIT_LOCK = threading.Lock()
+_RATE_LIMIT: dict[str, Any] = {}
+
+
+def record_rate_limit(info: Any, *, now: float | None = None) -> None:
+    """Merge one `rate_limit_info` into the latest known windows."""
+    if not isinstance(info, dict):
+        return
+    windows: dict[str, dict[str, Any]] = {}
+    kind = info.get("rateLimitType")
+    if isinstance(kind, str) and kind:
+        windows[kind] = {"utilization": info.get("utilization"), "resetsAt": info.get("resetsAt")}
+    for name, value in (info.get("unifiedWindows") or {}).items():
+        if isinstance(name, str) and isinstance(value, dict):
+            windows[name] = {
+                "utilization": value.get("utilization"),
+                "resetsAt": value.get("resetsAt"),
+            }
+    with _RATE_LIMIT_LOCK:
+        merged = dict(_RATE_LIMIT.get("windows") or {})
+        merged.update(windows)
+        _RATE_LIMIT.clear()
+        _RATE_LIMIT.update(
+            {
+                "status": info.get("status") if isinstance(info.get("status"), str) else None,
+                "windows": merged,
+                "observed_at": time.time() if now is None else now,
+            }
+        )
+
+
+def latest_rate_limit() -> dict[str, Any] | None:
+    with _RATE_LIMIT_LOCK:
+        return json.loads(json.dumps(_RATE_LIMIT)) if _RATE_LIMIT else None
+
+
+def forget_rate_limit() -> None:
+    with _RATE_LIMIT_LOCK:
+        _RATE_LIMIT.clear()
+
 
 #: File names a saved override may point at. The override is stored in
 #: provider settings, which the desktop can write, so without this a renderer
@@ -916,6 +965,9 @@ class ClaudeCliStream:
 
         for event in _pumped_events(process.stdout, run, cancellation, hard_deadline, text_parts):
             kind = event.get("type")
+            if kind == "rate_limit_event":
+                record_rate_limit(event.get("rate_limit_info"))
+                continue
             if kind == "system" and event.get("subtype") == "init":
                 resolved_model = event.get("model") or resolved_model
                 _require_subscription_source(event, run, binary_path)

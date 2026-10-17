@@ -539,3 +539,43 @@ def test_switching_it_off_stops_saved_providers_before_any_process(services, tmp
         router.invoke(provider, model.id, request)
     assert exc.value.error_code == ProviderErrorCode.AUTH
     assert not record.exists(), "no claude process may start while it is off"
+
+
+def test_usage_shows_the_windows_claude_code_reported(services, tmp_path, monkeypatch):
+    """Plan 0.4.0 #78: the limits come from Claude Code's own answers."""
+    from rinari.providers.claude_cli import forget_rate_limit, record_rate_limit
+    from rinari.providers.usage import ProviderUsageService
+
+    monkeypatch.setenv("RINARI_CLAUDE_COMMAND", str(fake_cli(tmp_path)))
+    saved = services.providers.add(
+        AddProviderInput(
+            alias="claude-sub",
+            provider_type="custom",
+            auth_method="external-cli",
+            endpoint=CLAUDE_CLI_ENDPOINT,
+            settings=dict(SETTINGS),
+        )
+    )
+    forget_rate_limit()
+    before = ProviderUsageService(services.providers).get(saved.id)
+    assert before["windows"] == [] and "next one" in before["detail"]
+
+    record_rate_limit(
+        {"rateLimitType": "seven_day", "utilization": 1.3, "resetsAt": 1_790_400_000},
+        now=1_789_000_000,
+    )
+    record_rate_limit(
+        {"rateLimitType": "five_hour", "utilization": 0.25, "resetsAt": 1_790_000_000},
+        now=1_789_000_100,
+    )
+    snapshot = ProviderUsageService(services.providers).get(saved.id)
+    assert snapshot["status"] == "available" and snapshot["source"] == "claude-cli"
+    assert [(w["id"], w["used_percent"]) for w in snapshot["windows"]] == [
+        ("rolling", 25.0),
+        ("weekly", 100.0),
+    ]
+    assert snapshot["windows"][0]["resets_at"].startswith("2026-09-21")
+    # Kept in the home: a restarted Engine still shows them.
+    forget_rate_limit()
+    again = ProviderUsageService(services.providers).get(saved.id)
+    assert [w["id"] for w in again["windows"]] == ["rolling", "weekly"]
