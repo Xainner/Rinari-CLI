@@ -251,6 +251,7 @@ class AnthropicAdapter(ProviderAdapter):
                             input_tokens=usage.input_tokens,
                             output_tokens=output_tokens,
                             cached_input_tokens=usage.cached_input_tokens,
+                            cache_write_tokens=usage.cache_write_tokens,
                         )
                 if not terminal_seen:
                     raise NetworkError(
@@ -691,6 +692,7 @@ def _usage_from_anthropic(raw: Any) -> Usage:
         input_tokens=_optional_int(raw.get("input_tokens")),
         output_tokens=_optional_int(raw.get("output_tokens")),
         cached_input_tokens=_optional_int(raw.get("cache_read_input_tokens")),
+        cache_write_tokens=_optional_int(raw.get("cache_creation_input_tokens")),
     )
 
 

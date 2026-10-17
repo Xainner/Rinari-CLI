@@ -114,6 +114,9 @@ class Usage:
     # Provenance of the numbers (§6.2): "complete" (authoritative payload),
     # "partial" (accumulated deltas), "unavailable" (endpoint sent nothing).
     source: str = "complete"
+    # Tokens written to the provider's prompt cache (Anthropic
+    # cache_creation_input_tokens); None where the provider does not say (#78).
+    cache_write_tokens: int | None = None
 
     @property
     def total_tokens(self) -> int | None:

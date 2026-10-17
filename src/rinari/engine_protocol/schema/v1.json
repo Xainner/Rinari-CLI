@@ -566,6 +566,8 @@
         "memory.move",
         "memory.about.get",
         "memory.about.set",
+        "usage.report",
+        "usage.report.list",
         "storage.usage",
         "session.child.start",
         "process.orphans.list",

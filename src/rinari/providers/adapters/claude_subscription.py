@@ -471,6 +471,7 @@ def _usage(payload: dict[str, Any] | None) -> Usage:
         input_tokens=_int(payload.get("input_tokens")),
         output_tokens=_int(payload.get("output_tokens")),
         cached_input_tokens=_int(cache_read),
+        cache_write_tokens=_int(payload.get("cache_creation_input_tokens")),
         source="complete",
     )
 

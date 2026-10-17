@@ -1787,6 +1787,7 @@ def _merge_usage(prev: Usage | None, new: Usage | None) -> Usage | None:
         output_tokens=_sum(prev.output_tokens, new.output_tokens),
         cached_input_tokens=_sum(prev.cached_input_tokens, new.cached_input_tokens),
         reasoning_tokens=_sum(prev.reasoning_tokens, new.reasoning_tokens),
+        cache_write_tokens=_sum(prev.cache_write_tokens, new.cache_write_tokens),
     )
 
 
@@ -1799,6 +1800,7 @@ def _usage_dict(usage: Usage | None) -> dict | None:
         "total_tokens": usage.total_tokens,
         "cached_input_tokens": usage.cached_input_tokens,
         "reasoning_tokens": usage.reasoning_tokens,
+        "cache_write_tokens": usage.cache_write_tokens,
         "source": usage.source,
     }
 

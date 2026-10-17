@@ -123,7 +123,7 @@ COMMANDS: tuple[CommandSpec, ...] = (
     CommandSpec("tasks", "ui", "This project's task tree", "[id]"),
     CommandSpec("fork", "ui", "Continue this conversation in a copy", clients=("desktop",)),
     CommandSpec("rename", "ui", "Rename this conversation", "<title>", clients=("desktop",)),
-    CommandSpec("usage", "ui", "Model and tool calls, tokens, cost", clients=("cli",)),
+    CommandSpec("usage", "ui", "Usage report: plan limits, context, tokens by model, tools"),
     CommandSpec("status", "ui", "Full runtime snapshot", clients=("cli",)),
     CommandSpec("provider", "ui", "List providers or switch", "[alias]", clients=("cli",)),
     CommandSpec("session", "ui", "Show this session", clients=("cli",)),
