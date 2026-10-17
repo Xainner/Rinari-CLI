@@ -339,6 +339,9 @@ class ToolContext:
     # Mutable session-scoped process registry for process.* tools (None = disabled).
     ask_user: Any = None
     read_profile: PermissionProfile | None = None
+    # Full access asks before sending to a new destination after external
+    # content (Ajustes → Permisos, off by default; plan-permisos-v4).
+    ask_new_destinations: bool = False
     processes: Any = None
     # TurnState of the running turn (untrusted-content guard); None outside a
     # turn, which the policy reads as "nothing external seen".

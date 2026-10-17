@@ -807,6 +807,7 @@ def build_agent_session(
         observation_budget_bytes=services.ctx.config.config.runtime.tools.observation_bytes,
         round_observation_bytes=services.ctx.config.config.runtime.tools.round_observation_bytes,
         max_concurrency=services.ctx.config.config.runtime.tools.max_concurrency,
+        ask_new_destinations=services.ctx.config.config.permissions.ask_new_destinations,
         session_id=record.id,
         kind=record.kind,
         cwd=root if root is not None else cwd,

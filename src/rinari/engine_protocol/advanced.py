@@ -41,6 +41,9 @@ LIMITS: tuple[tuple[str, str, float | None, float | None], ...] = (
     ("agents.max_concurrent", "int", 1, 64),
     ("agents.max_depth", "int", 0, 8),
     ("agents.max_total", "int", 1, 128),
+    # Ajustes → Permisos: full access asks before sending to a new destination
+    # after external content (plan-permisos-v4, off by default).
+    ("permissions.ask_new_destinations", "bool", None, None),
 )
 LIMIT_KEYS = {key for key, *_ in LIMITS}
 

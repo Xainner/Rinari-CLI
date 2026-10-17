@@ -108,6 +108,7 @@ def scope_from_context(ctx: ToolContext) -> SessionScope:
         private_roots=ctx.private_roots,
         read_profile=ctx.read_profile,
         external_content=bool(getattr(ctx.turn_state, "external_content", False)),
+        ask_new_destinations=bool(getattr(ctx, "ask_new_destinations", False)),
         extra_roots=tuple(getattr(ctx, "extra_project_roots", ()) or ()),
     )
 

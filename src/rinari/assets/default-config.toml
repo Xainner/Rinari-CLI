@@ -33,6 +33,9 @@ max_total = 12
 
 [permissions]
 profile = "workspace"
+# Full access asks before sending data to a new destination after reading
+# external content (off: full access asks nothing).
+ask_new_destinations = false
 
 [network]
 # auto: the permission profile decides (read free, sending asks per profile).

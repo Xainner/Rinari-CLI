@@ -68,6 +68,9 @@ class AgentsSettings:
 @dataclass(frozen=True, slots=True)
 class PermissionsSettings:
     profile: str = "workspace"
+    # Full access asks before sending data to a new destination after reading
+    # external content (plan-permisos-v4, off by default).
+    ask_new_destinations: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,6 +190,7 @@ class Config:
             ),
             permissions=PermissionsSettings(
                 profile=_enum(data, "permissions.profile", PROFILE_NAMES, "str"),
+                ask_new_destinations=_bool(data, "permissions", "ask_new_destinations"),
             ),
             network=NetworkSettings(mode=_enum(data, "network.mode", NETWORK_MODES, "str")),
         )
@@ -227,6 +231,7 @@ class Config:
             },
             "permissions": {
                 "profile": self.permissions.profile,
+                "ask_new_destinations": self.permissions.ask_new_destinations,
             },
             "network": {"mode": self.network.mode},
         }
@@ -243,7 +248,7 @@ def _section_keys(section: str) -> list[str]:
         "runtime": ["safeguards", "emergency", "cost", "tools"],
         "context": ["compact_at_percent", "artifact_output_threshold_kb"],
         "agents": ["enabled", "max_concurrent", "max_depth", "max_total"],
-        "permissions": ["profile"],
+        "permissions": ["profile", "ask_new_destinations"],
         "network": ["mode"],
     }[section]
 
@@ -320,6 +325,7 @@ def key_type(dotted: str) -> str:
         ("agents", "max_depth"): "int",
         ("agents", "max_total"): "int",
         ("permissions", "profile"): "str",
+        ("permissions", "ask_new_destinations"): "bool",
         ("network", "mode"): "str",
     }
     return types[(section, key)]

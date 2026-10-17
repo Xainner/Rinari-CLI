@@ -218,16 +218,19 @@ def test_reading_outside_the_project_needs_no_approval(project) -> None:
     assert "outside" in str(result.data)
 
 
-def test_system_secrets_still_ask(project) -> None:
+def test_system_secrets_ask_in_project_mode(project) -> None:
     tmp_path, root, _ = project
     key = tmp_path / ".ssh" / "id_ed25519"
     key.parent.mkdir()
     key.write_text("synthetic", encoding="utf-8")
-    ctx = _free_reads(_ctx(tmp_path, root, profile="full-access"))
+    ctx = _free_reads(_ctx(tmp_path, root))
     denied, _ = _runtime(ctx, tmp_path, answer="n")
     assert not denied.execute("fs.read", {"path": str(key)}, ctx).ok
     approved, _ = _runtime(ctx, tmp_path, answer="y")
     assert approved.execute("fs.read", {"path": str(key)}, ctx).ok
+    full = _free_reads(_ctx(tmp_path, root, profile="full-access"))
+    silent, _ = _runtime(full, tmp_path, answer="n")
+    assert silent.execute("fs.read", {"path": str(key)}, full).ok
 
 
 def test_approved_external_directory_can_be_listed(project) -> None:

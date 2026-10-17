@@ -5,25 +5,29 @@ It is separated from the sandbox (what can technically execute) and from
 approvals (what requires consent). Locked system rules are applied first
 and can never be relaxed by a profile.
 
-Permissions v3 (2026-09-25). The profiles are cut by what cannot be undone,
-measured on the owner's history (92 prompts in two weeks, 92 approved):
+Permissions v4 (2026-10-12, plan-permisos-v4.md). Three modes:
 
     read-only    reads anything (local and internet) except system secrets;
                  never writes, runs commands or sends data out
-    workspace    free inside the project/chat, on localhost/LAN and reading
-                 the internet; asks once (or always, per project) to act
+    workspace    («Proyecto») free inside the project/chat, on localhost/LAN,
+                 reading the internet and with the owner's registered tools
+                 (MCP servers); asks once (or always, per project) to act
                  outside: writes/commands outside, sending to internet hosts,
-                 external tools (MCP), git push
-    full-access  asks for nothing but the hard list
+                 git push. Force push, deleting outside the project and
+                 system secrets ask every time.
+    full-access  asks for nothing, like Claude Code's or Codex's full access
+                 and Hermes' YOLO.
 
-Always asked, in every profile: force push, deleting outside the project,
-and system secrets (SSH keys, OS/browser credential stores). Hard-list asks
-cannot be granted "always".
+The catastrophic list is refused in every mode, with no way to allow it:
+wiping the system root or a whole disk, formatting, writing straight to a
+physical disk, fork bombs.
 
-Untrusted-content guard: once a turn has read external content (a web page,
-an internet API, an MCP result), the next action that sends data out (POST,
-MCP call, git push, curl with a body, browser upload) asks even in
-full-access. A prompt injection can read; it cannot quietly exfiltrate.
+Untrusted-content guard. In workspace, once a turn has read external content
+(a web page, an internet API, an MCP result), sending data to the internet
+asks for this session at most. In full-access it is the owner's switch «Ask
+before sending data to new destinations» (off by default): on, it asks only
+to send to a destination that is not trusted (registered MCP servers, the
+project's git remote, localhost and the LAN are).
 """
 
 from __future__ import annotations
@@ -102,6 +106,9 @@ class SessionScope:
     # This turn already read external (untrusted) content: sending data out
     # asks even in full-access (module docstring).
     external_content: bool = False
+    # Full access asks before sending to a new destination after external
+    # content (the owner's switch, off by default).
+    ask_new_destinations: bool = False
     # Folder a shell-like command runs in when the call names its own `cwd`;
     # None means it runs in the session's cwd.
     command_cwd: Path | None = None
@@ -149,10 +156,57 @@ SENSITIVE_FILE = re.compile(
 
 SYSTEM_RULES: tuple[str, ...] = (
     "$HOME is never an implicit writable project root",
-    "system secrets (SSH/GPG/cloud keys, credential stores) always require approval",
-    "force push and deleting outside the project always require approval",
-    "after reading external content, sending data out requires approval",
+    "the catastrophic list (wiping the system or a disk, formatting, raw disk writes, "
+    "fork bombs) is refused in every mode",
+    "in project mode, system secrets, force push and deleting outside the project ask every time",
+    "in project mode, sending data to the internet after reading external content asks",
 )
+
+# The catastrophic list (plan-permisos-v4): refused in every mode, never asked.
+_ROOT_TARGET = r"""(?:/|/\*|~/?|\$HOME/?|[A-Za-z]:[\\/]?\*?|[A-Za-z]:[\\/]\.?)"""
+CATASTROPHIC: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(
+            r"\brm\s+(?:-[A-Za-z]*\s+)*-[A-Za-z]*[rR][A-Za-z]*\s+(?:-[A-Za-z-]+\s+)*"
+            rf"""["']?{_ROOT_TARGET}["']?(?:\s|$)"""
+        ),
+        "deletes the system root or the home folder",
+    ),
+    (
+        re.compile(
+            r"\b(?:Remove-Item|rm|del|rd|rmdir|ri)\b[^|;&\n]*(?:-Recurse|/s)[^|;&\n]*"
+            r"""\s["']?[A-Za-z]:[\\/]?\*?["']?(?:\s|$)""",
+            re.IGNORECASE,
+        ),
+        "deletes a whole drive",
+    ),
+    (re.compile(r"\bmkfs(?:\.\w+)?\b"), "formats a disk"),
+    (re.compile(r"(?:^|[;&|]\s*)format(?:\.com)?\s+[A-Za-z]:", re.IGNORECASE), "formats a drive"),
+    (
+        re.compile(r"\bFormat-Volume\b|\bClear-Disk\b|\bInitialize-Disk\b", re.IGNORECASE),
+        "formats or wipes a disk",
+    ),
+    (re.compile(r"\bdiskpart\b", re.IGNORECASE), "repartitions disks"),
+    (
+        re.compile(r"\bdd\b[^|;&\n]*\bof=/dev/(?:sd|hd|nvme|disk|rdisk|mmcblk|xvd|vd)\w*"),
+        "writes straight to a physical disk",
+    ),
+    (
+        re.compile(r">\s*/dev/(?:sd|hd|nvme|disk|rdisk|mmcblk)\w*"),
+        "writes straight to a physical disk",
+    ),
+    (re.compile(r"\\\\\.\\PhysicalDrive\d", re.IGNORECASE), "writes straight to a physical disk"),
+    (re.compile(r":\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:"), "is a fork bomb"),
+)
+
+
+def catastrophic(command: str) -> str | None:
+    """Why `command` is on the catastrophic list, or None."""
+    for pattern, why in CATASTROPHIC:
+        if pattern.search(command or ""):
+            return why
+    return None
+
 
 # Choices: hard-list asks never offer a lasting grant.
 CHOICES_HARD = ("deny", "allow_once")
@@ -527,13 +581,10 @@ class PolicyEngine:
                     risk=risk,
                     risk_class=risk_class,
                 )
-            return self._outbound(
-                scope,
-                capability,
-                "external MCP call can cause side effects",
-                risk=risk,
-                risk_class=risk_class,
-                rule_id="mcp_call",
+            # The owner registered the server: a trusted destination in every
+            # writing mode (plan-permisos-v4), also after external content.
+            return self._allow(
+                capability, "a tool from an MCP server the owner registered", risk, risk_class
             )
         if capability == "project.instructions.propose":
             # /init (#81) runs read-only and ends by proposing RINARI.md. Proposing
@@ -632,8 +683,12 @@ class PolicyEngine:
             binding_mode=binding_mode,
         )
 
-    def _hard(self, capability, reason, *, target, rule_id, risk="critical", risk_class="none"):
-        """Hard list: asked in every profile, never granted for good."""
+    def _hard(
+        self, scope, capability, reason, *, target, rule_id, risk="critical", risk_class="none"
+    ):
+        """Hard list: asked every time in project mode; full access does not ask."""
+        if scope.profile is PermissionProfile.FULL_ACCESS:
+            return self._allow(capability, f"full-access: {reason}", risk, risk_class, target)
         return self._ask(
             capability,
             reason,
@@ -644,7 +699,15 @@ class PolicyEngine:
             choices=CHOICES_HARD,
         )
 
-    def _secret(self, capability, resolved, *, write: bool) -> PolicyDecision:
+    def _secret(self, scope, capability, resolved, *, write: bool) -> PolicyDecision:
+        if scope.profile is PermissionProfile.FULL_ACCESS:
+            return self._allow(
+                capability,
+                "full-access: a system secret",
+                "critical" if write else "high",
+                "credential",
+                str(resolved),
+            )
         return self._ask(
             capability,
             "system secret (SSH/GPG/cloud keys or a credential store)",
@@ -667,9 +730,18 @@ class PolicyEngine:
         risk_class="none",
         rule_id: str,
         binding_mode="capability",
+        trusted: bool = False,
     ) -> PolicyDecision:
-        """An action that sends data or acts outside this machine."""
-        if scope.external_content:
+        """An action that sends data or acts outside this machine.
+
+        `trusted`: the destination is one the owner set up (the project's git
+        remote); full access never asks for it.
+        """
+        full = scope.profile is PermissionProfile.FULL_ACCESS
+        guard = scope.external_content and (
+            not full or (scope.ask_new_destinations and not trusted)
+        )
+        if guard:
             return self._ask(
                 capability,
                 f"{reason}, after reading external content in this turn",
@@ -680,7 +752,7 @@ class PolicyEngine:
                 choices=CHOICES_SESSION,
                 binding_mode=binding_mode,
             )
-        if scope.profile is PermissionProfile.FULL_ACCESS:
+        if full:
             return self._allow(capability, f"full-access: {reason}", risk, risk_class, target)
         return self._ask(
             capability,
@@ -806,7 +878,7 @@ class PolicyEngine:
                 choices=("deny",),
             )
         if is_system_secret(resolved):
-            return self._secret(CAPABILITY_FS_READ, resolved, write=False)
+            return self._secret(scope, CAPABILITY_FS_READ, resolved, write=False)
         return self._allow(
             CAPABILITY_FS_READ,
             f"inside the {scope.kind} session root"
@@ -844,7 +916,7 @@ class PolicyEngine:
                 choices=("deny",),
             )
         if is_system_secret(resolved):
-            return self._secret(CAPABILITY_FS_WRITE, resolved, write=True)
+            return self._secret(scope, CAPABILITY_FS_WRITE, resolved, write=True)
         if scope.profile is PermissionProfile.READ_ONLY:
             return self._deny(
                 CAPABILITY_FS_WRITE, "read-only profile cannot write", target=str(resolved)
@@ -913,9 +985,20 @@ class PolicyEngine:
         risk: str,
         risk_class: str,
     ) -> PolicyDecision:
+        why = catastrophic(command or "")
+        if why is not None:
+            return self._deny(
+                CAPABILITY_SHELL,
+                f"on the catastrophic list: the command {why}; Rinari never runs it",
+                target=command,
+                risk="critical",
+                risk_class="local-destructive",
+                rule_id="catastrophic",
+            )
         remote = classify_git_remote(command or "")
         if remote == "force":
             return self._hard(
+                scope,
                 CAPABILITY_SHELL,
                 "force push rewrites remote history",
                 target=command,
@@ -932,7 +1015,7 @@ class PolicyEngine:
                 risk_class="private-runtime-state",
                 rule_id="private_change_snapshot",
             )
-        if shell_risk.sensitive_target:
+        if shell_risk.sensitive_target and scope.profile is not PermissionProfile.FULL_ACCESS:
             return self._ask(
                 CAPABILITY_SHELL,
                 "command targets a system secret",
@@ -949,6 +1032,7 @@ class PolicyEngine:
             )
         if shell_risk.destructive and shell_risk.external_path_targets:
             return self._hard(
+                scope,
                 CAPABILITY_SHELL,
                 "deletes outside the project: " + ", ".join(shell_risk.external_path_targets[:3]),
                 target=command,
@@ -964,6 +1048,7 @@ class PolicyEngine:
                 risk="high",
                 risk_class="remote-reversible",
                 rule_id="git_remote_mutation",
+                trusted=True,
             )
         if scope.external_content and shell_sends_data(command or ""):
             return self._outbound(
