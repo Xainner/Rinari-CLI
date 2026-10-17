@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from pathlib import Path
 from typing import Any
 
 from rinari.application.config.loader import load_defaults, load_effective_config
@@ -53,6 +54,7 @@ def register_advanced(dispatcher: Any, services: Any) -> None:
     dispatcher.register("execution.settings.set", lambda params: execution_set(services, params))
     dispatcher.register("advanced.settings.get", lambda params: limits_get(services))
     dispatcher.register("advanced.settings.set", lambda params: limits_set(services, params))
+    dispatcher.register("storage.usage", lambda params: storage_usage(services))
 
 
 # -- model execution ----------------------------------------------------------------
@@ -126,6 +128,75 @@ def limits_set(services: Any, params: dict[str, Any]) -> dict[str, Any]:
     project = [layer for layer in ctx.config.layers if layer.name == "project"]
     ctx.config = EffectiveConfig([*load_effective_config(ctx.layout).layers, *project])
     return limits_get(services)
+
+
+# -- storage ------------------------------------------------------------------------
+
+# What each part of ~/.rinari holds, by entry name. Anything else is «other».
+STORAGE_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("conversations", ("state.db", "state.db-wal", "state.db-shm", "history.sqlite", "sessions")),
+    ("workspaces", ("workspaces",)),
+    ("artifacts", ("artifacts", "change-blobs")),
+    ("browser", ("browser",)),
+    ("cache", ("cache", "scratch")),
+    ("logs", ("logs",)),
+    ("backups", ("backups",)),
+)
+
+
+def storage_usage(services: Any) -> dict[str, Any]:
+    """How much each part of Rinari's folder takes (Ajustes → Avanzado)."""
+    home = Path(services.ctx.home)
+    named = {name: section for section, names in STORAGE_SECTIONS for name in names}
+    totals: dict[str, dict[str, int]] = {
+        section: {"bytes": 0, "files": 0} for section, _ in STORAGE_SECTIONS
+    }
+    totals["other"] = {"bytes": 0, "files": 0}
+    try:
+        entries = list(os.scandir(home))
+    except OSError:
+        entries = []
+    for entry in entries:
+        section = named.get(entry.name)
+        if section is None and entry.name.startswith(("context-discovery-", "context-window-")):
+            section = "cache"
+        size, files = _size(entry)
+        bucket = totals[section or "other"]
+        bucket["bytes"] += size
+        bucket["files"] += files
+    rows = [{"id": key, **value} for key, value in totals.items()]
+    return {"home": str(home), "sections": rows, "total": sum(r["bytes"] for r in rows)}
+
+
+def _size(entry: os.DirEntry[str]) -> tuple[int, int]:
+    try:
+        if entry.is_symlink():
+            return 0, 0
+        if entry.is_file():
+            return entry.stat().st_size, 1
+        if not entry.is_dir():
+            return 0, 0
+    except OSError:
+        return 0, 0
+    size = files = 0
+    stack = [entry.path]
+    while stack:
+        try:
+            children = list(os.scandir(stack.pop()))
+        except OSError:
+            continue
+        for child in children:
+            try:
+                if child.is_symlink():
+                    continue
+                if child.is_dir():
+                    stack.append(child.path)
+                elif child.is_file():
+                    size += child.stat().st_size
+                    files += 1
+            except OSError:
+                continue
+    return size, files
 
 
 def _write_json(home: Any, name: str, value: dict[str, Any]) -> None:

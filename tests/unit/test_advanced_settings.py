@@ -83,3 +83,19 @@ def test_a_bad_limit_is_refused_and_nothing_is_written(server) -> None:
     other = _call(server, "advanced.settings.set", {"values": {"model": "x"}})
     assert not other["ok"] and "Not a limit setting" in other["error"]["message"]
     assert server._services.ctx.config.config.agents.max_depth == 2
+
+
+def test_storage_usage_measures_each_part_of_the_home(server) -> None:
+    home = server._services.ctx.home
+    (home / "workspaces" / "chat_1").mkdir(parents=True, exist_ok=True)
+    (home / "workspaces" / "chat_1" / "a.txt").write_bytes(b"x" * 1000)
+    (home / "logs").mkdir(exist_ok=True)
+    (home / "logs" / "engine.log").write_bytes(b"y" * 300)
+    (home / "context-window-abc.json").write_text("{}", encoding="utf-8")
+    got = _call(server, "storage.usage")
+    assert got["ok"], got
+    sections = {row["id"]: row for row in got["result"]["sections"]}
+    assert sections["workspaces"]["bytes"] >= 1000 and sections["workspaces"]["files"] >= 1
+    assert sections["logs"]["bytes"] >= 300
+    assert sections["cache"]["files"] >= 1
+    assert got["result"]["total"] == sum(row["bytes"] for row in got["result"]["sections"])
