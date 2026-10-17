@@ -204,6 +204,29 @@
           "additionalProperties": {
             "type": "string"
           }
+        },
+        "offer": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "prompt": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "context": {
+              "type": "string"
+            },
+            "isolation": {
+              "type": "string"
+            },
+            "done_when": {
+              "type": "string"
+            }
+          }
         }
       }
     },
@@ -528,6 +551,7 @@
         "session.child.integrate",
         "session.child.discard",
         "session.children.isolation",
+        "session.child.start",
         "process.orphans.list",
         "process.orphan.stop",
         "process.persistent.list",
@@ -2276,6 +2300,27 @@
             "null"
           ],
           "description": "What the owner asked to change in a plan_adjust turn."
+        },
+        "parent_session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "child_origin": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "children": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
         }
       }
     },
@@ -4380,6 +4425,31 @@
             "string",
             "null"
           ]
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "note",
+            "plan_step"
+          ]
+        },
+        "context": {
+          "type": "string",
+          "enum": [
+            "brief",
+            "fork"
+          ]
+        },
+        "isolation": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "worktree",
+            "same"
+          ]
+        },
+        "done_when": {
+          "type": "string"
         }
       },
       "additionalProperties": false

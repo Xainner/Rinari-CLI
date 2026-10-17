@@ -273,6 +273,7 @@ class EngineServer:
         self._dispatcher.register("session.branch", self._session_branch)
         self._dispatcher.register("session.fork", self._session_branch)
         self._dispatcher.register("session.children.list", self._session_children_list)
+        self._dispatcher.register("session.child.start", self._session_child_start)
         self._dispatcher.register("session.child.integrate", self._session_child_integrate)
         self._dispatcher.register("session.child.discard", self._session_child_discard)
         self._dispatcher.register("session.children.isolation", self._session_children_isolation)
@@ -1940,6 +1941,20 @@ class EngineServer:
     def _session_children_list(self, params: dict[str, Any]) -> dict[str, Any]:
         session_id = self._need_str(params, "session_id")
         return {"session_id": session_id, "children": self._turns.children.list(session_id)}
+
+    def _session_child_start(self, params: dict[str, Any]) -> dict[str, Any]:
+        """The owner opens a child by hand (a message's menu, /child): it starts now."""
+        session_id = self._need_str(params, "session_id")
+        prompt = self._need_str(params, "prompt").strip()
+        title = self._opt_str(params, "title") or " ".join(prompt.split())[:80]
+        return self._turns.children.create(
+            session_id,
+            title=title,
+            prompt=prompt,
+            origin="start",
+            context=self._opt_str(params, "context") or "brief",
+            isolation=self._opt_str(params, "isolation") or "auto",
+        )
 
     def _session_child_integrate(self, params: dict[str, Any]) -> dict[str, Any]:
         """Merge a child's branch into the project: the owner's button, never a tool."""

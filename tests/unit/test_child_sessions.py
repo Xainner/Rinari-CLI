@@ -423,3 +423,19 @@ def test_plan_steps_have_their_own_cap_and_never_push_notes_out(server, tmp_path
     assert all(followups.get(n.id).status == "pending" for n in notes)
     assert {s.kind for s in steps} == {"plan_step"}
     followups.end_turn(mother)
+
+
+def test_the_owner_opens_a_child_by_hand(server, tmp_path, routed) -> None:
+    mother = _create_chat(server, tmp_path, tag="hand")
+    opened = server.handle_line(
+        _req(
+            "h",
+            "session.child.start",
+            {"session_id": mother, "prompt": "Revisa los enlaces rotos del README y arréglalos."},
+        )
+    )
+    assert opened["ok"], opened
+    child = opened["result"]["child_session_id"]
+    assert opened["result"]["title"].startswith("Revisa los enlaces rotos")
+    assert opened["result"]["origin"] == "start"
+    assert _wait(lambda: _idle(server, child) and _idle(server, mother))

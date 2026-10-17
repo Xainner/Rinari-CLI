@@ -110,6 +110,13 @@ COMMANDS: tuple[CommandSpec, ...] = (
     CommandSpec(
         "init", "ui", "Get to know the project and propose its RINARI.md", clients=("desktop",)
     ),
+    CommandSpec(
+        "child",
+        "ui",
+        "Do a task in a child session that reports back here",
+        "<task>",
+        clients=("desktop",),
+    ),
     CommandSpec("context", "ui", "Context usage and what fills it"),
     CommandSpec("model", "ui", "Change the model of this conversation", "[alias]"),
     CommandSpec("diff", "ui", "Changes in the workspace"),
