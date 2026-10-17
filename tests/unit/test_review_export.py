@@ -67,3 +67,28 @@ def test_review_from_a_message_on(server, tmp_path) -> None:
     assert got["ok"], got
     files = got["result"]["files"]
     assert "hola" not in files["messages.jsonl"] and "Entrega ya" in files["messages.jsonl"]
+
+
+def test_review_from_the_turn_still_running(server, tmp_path) -> None:
+    """#79: a message of the running turn has no stored number; its turn starts it."""
+    from rinari.storage.records import SessionEventRecord
+
+    sid = _seed(server, tmp_path)
+    repo = server._services.ctx.event_repo
+    repo.insert(
+        SessionEventRecord(
+            id="evt-live-start",
+            session_id=sid,
+            seq=repo.next_seq(sid),
+            type="turn.started",
+            payload={"message": "Entrega ya"},
+            created_at="2026-10-17T10:02:00Z",
+            turn_id="turn-live",
+        )
+    )
+    got = _call(server, "session.review.export", {"session_id": sid, "from_turn_id": "turn-live"})
+    assert got["ok"], got
+    files = got["result"]["files"]
+    assert "hola" not in files["messages.jsonl"] and "Entrega ya" in files["messages.jsonl"]
+    bad = _call(server, "session.review.export", {"session_id": sid, "from_turn_id": 3})
+    assert bad["error"]["code"] == "INVALID_PARAMS"

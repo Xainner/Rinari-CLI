@@ -54,6 +54,11 @@ def review_files(services: Any, params: dict[str, Any]) -> dict[str, str]:
         not isinstance(from_seq, int) or isinstance(from_seq, bool) or from_seq < 0
     ):
         raise EngineProtocolError(INVALID_PARAMS, "Param 'from_seq' must be an int >= 0.")
+    # A message of the turn still running has no stored number yet: its turn
+    # says where to start (#79).
+    from_turn_id = params.get("from_turn_id")
+    if from_turn_id is not None and (not isinstance(from_turn_id, str) or not from_turn_id):
+        raise EngineProtocolError(INVALID_PARAMS, "Param 'from_turn_id' must be a string.")
     include_messages = params.get("include_messages", True)
     if not isinstance(include_messages, bool):
         raise EngineProtocolError(INVALID_PARAMS, "Param 'include_messages' must be a boolean.")
@@ -68,6 +73,14 @@ def review_files(services: Any, params: dict[str, Any]) -> dict[str, str]:
         start = next((message for message in messages if message.seq >= from_seq), None)
         since = start.created_at if start else None
         messages = [message for message in messages if message.seq >= from_seq]
+    elif from_turn_id is not None:
+        started = [
+            str(event.created_at)
+            for event in services.ctx.event_repo.list_for_turns(record.id, [from_turn_id])
+        ]
+        since = min(started) if started else None
+        if since is not None:
+            messages = [message for message in messages if str(message.created_at) >= since]
     events = [
         event
         for event in services.ctx.event_repo.list(record.id)
