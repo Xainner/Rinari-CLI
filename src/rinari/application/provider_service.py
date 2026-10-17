@@ -829,5 +829,7 @@ class ProviderService:
 
     def _http(self) -> httpx.Client:
         if self._client is None:
-            self._client = httpx.Client(timeout=10.0)
+            from rinari.net import client as net_client
+
+            self._client = net_client(self._ctx.home, timeout=10.0)
         return self._client

@@ -66,6 +66,10 @@
     "mcpServer",
     "mcpTestResult",
     "soulSettings",
+    "networkSettings",
+    "networkEffective",
+    "networkTestResult",
+    "networkTest",
     "rinariProfileCounts",
     "rinariProfile",
     "checklistItem",
@@ -567,6 +571,9 @@
         "provider.runtime.probe",
         "provider.settings.get",
         "provider.settings.set",
+        "network.settings.get",
+        "network.settings.set",
+        "network.test",
         "provider.auth.start",
         "provider.auth.get",
         "provider.auth.cancel",
@@ -4106,6 +4113,245 @@
       "required": [
         "ok",
         "tools"
+      ]
+    },
+    "networkSettings": {
+      "type": "object",
+      "description": "network.settings.get/set (plan 0.4.0 #96, «Red»): proxy and certificates of every outgoing HTTP client, saved in ~/.rinari/network.json. set takes `proxy` and/or `certificates` (each replaces its saved object; a missing one is kept) and returns the same shape as get.",
+      "properties": {
+        "proxy": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "system",
+                "manual",
+                "none"
+              ],
+              "description": "system: environment variables and the OS proxy (default); manual: `url`; none: direct."
+            },
+            "url": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "http(s)://host:port; required for manual."
+            },
+            "bypass": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Hosts that skip a manual proxy (localhost is always direct)."
+            }
+          },
+          "required": [
+            "mode",
+            "url",
+            "bypass"
+          ]
+        },
+        "certificates": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "system",
+                "certifi",
+                "file"
+              ],
+              "description": "system: the OS store via truststore (default); certifi: the bundled store; file: only the PEM at `path`."
+            },
+            "path": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "mode",
+            "path"
+          ]
+        },
+        "effective": {
+          "$ref": "#/$defs/networkEffective"
+        }
+      },
+      "required": [
+        "proxy",
+        "certificates"
+      ]
+    },
+    "networkTestResult": {
+      "type": "object",
+      "description": "One row of network.test: one GET without credentials to an enabled provider's base URL through the network settings. Any answer below 500 (except 407) is ok; the whole test ends within ~10 s.",
+      "properties": {
+        "provider_id": {
+          "type": "string"
+        },
+        "alias": {
+          "type": "string"
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "status": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "latency_ms": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error_kind": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "proxy",
+            "tls",
+            "timeout",
+            "connect",
+            "network",
+            "http",
+            "config",
+            null
+          ]
+        }
+      },
+      "required": [
+        "provider_id",
+        "alias",
+        "ok",
+        "status",
+        "latency_ms",
+        "error"
+      ]
+    },
+    "networkEffective": {
+      "type": "object",
+      "description": "What the clients use now. Proxy credentials are redacted. `error`: why a broken network.json fell back to the defaults.",
+      "properties": {
+        "proxy": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string"
+            },
+            "http": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "https": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "source": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "environment",
+                "os",
+                "settings",
+                null
+              ]
+            },
+            "bypass": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "mode",
+            "http",
+            "https",
+            "source",
+            "bypass"
+          ]
+        },
+        "certificates": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string"
+            },
+            "source": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "extra": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "SSL_CERT_FILE/SSL_CERT_DIR also trusted with the system store."
+            }
+          },
+          "required": [
+            "mode",
+            "source"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "proxy",
+        "certificates",
+        "error"
+      ]
+    },
+    "networkTest": {
+      "type": "object",
+      "description": "network.test result: one row per enabled provider with an HTTP endpoint (params: optional `provider_ids`), and the network settings in use.",
+      "properties": {
+        "results": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/networkTestResult"
+          }
+        },
+        "effective": {
+          "$ref": "#/$defs/networkEffective"
+        }
+      },
+      "required": [
+        "results",
+        "effective"
       ]
     },
     "soulSettings": {

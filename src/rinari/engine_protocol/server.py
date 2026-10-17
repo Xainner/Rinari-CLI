@@ -497,6 +497,20 @@ class EngineServer:
         self._dispatcher.register("provider.runtime.probe", self._provider_runtime_probe)
         self._dispatcher.register("provider.settings.get", self._provider_settings_get)
         self._dispatcher.register("provider.settings.set", self._provider_settings_set)
+        # Network (plan 0.4.0 #96, «Red»): proxy, certificates, «Probar conexión».
+        from rinari.engine_protocol import network as network_methods
+
+        self._dispatcher.register(
+            "network.settings.get",
+            lambda params: network_methods.settings_get(self._services, params),
+        )
+        self._dispatcher.register(
+            "network.settings.set",
+            lambda params: network_methods.settings_set(self._services, params),
+        )
+        self._dispatcher.register(
+            "network.test", lambda params: network_methods.run_test(self._services, params)
+        )
         self._dispatcher.register("provider.create", self._provider_create)
         self._dispatcher.register("provider.get", self._provider_get)
         self._dispatcher.register("provider.update", self._provider_update)

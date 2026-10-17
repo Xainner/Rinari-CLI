@@ -112,7 +112,7 @@ class SkillService:
         self._ctx = ctx
         self._trust = trust
         self._user_home = Path(user_home) if user_home is not None else Path.home()
-        self._fetcher = fetcher or SkillFetcher()
+        self._fetcher = fetcher or SkillFetcher(home=ctx.home)
         # Set by the Engine server: a learned skill becomes a `skill.learned` event.
         self.on_learned = None
         from rinari.skills.learning import SkillLearning

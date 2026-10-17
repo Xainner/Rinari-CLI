@@ -226,7 +226,13 @@ class SpeechService:
             return self._client_factory()
         import httpx
 
-        return httpx.Client(follow_redirects=True, timeout=httpx.Timeout(60.0, connect=20.0))
+        from rinari.net import client as net_client
+
+        return net_client(
+            self._ctx.layout.root,
+            follow_redirects=True,
+            timeout=httpx.Timeout(60.0, connect=20.0),
+        )
 
     # -- transcription ---------------------------------------------------------------
 

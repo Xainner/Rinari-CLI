@@ -53,7 +53,10 @@ class ProviderAdapter:
 
     def client(self) -> httpx.Client:
         if self._client is None:
-            self._client = httpx.Client(timeout=10.0)
+            from rinari.net import client as net_client
+
+            # Only without the services' shared client: the default home.
+            self._client = net_client(None, timeout=10.0)
         return self._client
 
     def auth_methods(self) -> tuple[str, ...]:

@@ -22,6 +22,7 @@ file: installing copies text the owner reviewed.
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 import shlex
@@ -176,12 +177,12 @@ def _parse_url(raw: str) -> SkillSource:
     return SkillSource("url", clean, url=clean)
 
 
-def default_http_get(url: str, limit: int = DOWNLOAD_MAX_BYTES) -> bytes:
-    import httpx
+def default_http_get(url: str, limit: int = DOWNLOAD_MAX_BYTES, *, home=None) -> bytes:
+    from rinari.net import client as net_client
 
     with (
-        httpx.Client(
-            timeout=30.0, follow_redirects=True, headers={"User-Agent": "rinari-skills"}
+        net_client(
+            home, timeout=30.0, follow_redirects=True, headers={"User-Agent": "rinari-skills"}
         ) as client,
         client.stream("GET", url) as response,
     ):
@@ -210,8 +211,8 @@ class Materialized:
 class SkillFetcher:
     """Turns a source into a local folder that contains one or more skills."""
 
-    def __init__(self, http_get: Callable[[str], bytes] | None = None) -> None:
-        self._get = http_get or default_http_get
+    def __init__(self, http_get: Callable[[str], bytes] | None = None, *, home=None) -> None:
+        self._get = http_get or functools.partial(default_http_get, home=home)
 
     def materialize(self, source: SkillSource, work: Path) -> Path:
         return self.fetch(source, work).root

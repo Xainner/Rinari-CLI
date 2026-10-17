@@ -14,6 +14,7 @@ from email.utils import parsedate_to_datetime
 
 import httpx
 
+from rinari.net import client as net_client
 from rinari.providers.catalog import product_for
 
 
@@ -179,7 +180,9 @@ class ProviderUsageService:
                 if age > 300 and snapshot.get("fetched_at") and snapshot["status"] != "needs_auth"
                 else snapshot["status"],
             }
-        client = self.providers._client or httpx.Client(timeout=10, follow_redirects=False)
+        client = self.providers._client or net_client(
+            self.providers._ctx.home, timeout=10, follow_redirects=False
+        )
         headers = {"Authorization": f"Bearer {secret}", "User-Agent": "Rinari/1"}
         if product == "chatgpt":
             from rinari.providers.adapters.subscriptions import chatgpt_headers

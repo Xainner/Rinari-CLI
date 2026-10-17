@@ -101,8 +101,12 @@ def looks_binary(body: bytes) -> bool:
     return controls / len(head) > 0.1
 
 
-def default_client_factory(timeout_s: float) -> httpx.Client:
-    return httpx.Client(
+def default_client_factory(timeout_s: float, home=None) -> httpx.Client:
+    from rinari.net import client as net_client
+
+    # Tools carry no Rinari home: the default one (RINARI_HOME or ~/.rinari).
+    return net_client(
+        home,
         timeout=httpx.Timeout(timeout_s),
         follow_redirects=True,
         headers={"User-Agent": USER_AGENT},

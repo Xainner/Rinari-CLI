@@ -7,12 +7,12 @@ release of Xainner/Rinari-Agent and plans both pieces (see `rinari.update`).
 
 from __future__ import annotations
 
-import httpx
 import typer
 
 from rinari import __version__
 from rinari.cli.deps import is_json
 from rinari.cli.output import emit_json, success_envelope
+from rinari.net import client as net_client
 from rinari.shared.paths import resolve_home
 from rinari.update.apply import reinstall_cli, update_desktop
 from rinari.update.inventory import detect_cli, detect_desktop
@@ -41,7 +41,7 @@ def update(
     """Update Rinari Agent and this CLI to the latest published release."""
     cli = detect_cli()
     desktop = None if cli_only else detect_desktop()
-    client = httpx.Client()
+    client = net_client(None)  # no app context here: the default home
     try:
         try:
             release = fetch_latest(client)

@@ -28,6 +28,7 @@ import ssl
 import threading
 import time
 from collections.abc import Iterator, Mapping
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -85,13 +86,16 @@ class StreamableHttpTransport(McpTransport):
         *,
         headers: Mapping[str, str] | None = None,
         timeout_s: float = 30.0,
-        verify: bool | ssl.SSLContext = True,
+        verify: bool | ssl.SSLContext | None = None,
         client: httpx.Client | None = None,
+        home: Path | str | None = None,
     ) -> None:
         self._url = url
         self._headers = dict(headers or {})
         self._timeout_s = timeout_s
+        # None: the certificates of the owner's network settings (network.json).
         self._verify = verify
+        self._home = home
         self._client = client
         self._owns_client = client is None
         self._session_id: str | None = None
@@ -133,8 +137,12 @@ class StreamableHttpTransport(McpTransport):
     def start(self) -> None:
         if self._client is not None:
             return
-        self._client = httpx.Client(
-            verify=self._verify,
+        from rinari.net import client as net_client
+
+        options: dict = {} if self._verify is None else {"verify": self._verify}
+        self._client = net_client(
+            self._home,
+            **options,
             follow_redirects=True,
             event_hooks={"request": [self._same_origin_only]},
             timeout=httpx.Timeout(

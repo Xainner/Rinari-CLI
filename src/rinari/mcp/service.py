@@ -298,7 +298,9 @@ class McpService:
             if draft.auth_kind == AUTH_BEARER:
                 token = self._resolve(draft.auth_token, "auth.token")
                 headers["Authorization"] = f"Bearer {token}"
-            return StreamableHttpTransport(draft.url, headers=headers, timeout_s=timeout)
+            return StreamableHttpTransport(
+                draft.url, headers=headers, timeout_s=timeout, home=self._ctx.home
+            )
         raise McpError(
             "MCP_TRANSPORT_UNSUPPORTED",
             f"unsupported transport: {draft.transport}",
