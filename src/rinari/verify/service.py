@@ -119,10 +119,16 @@ class VerificationService:
             else []
         )
         instructions = self.project_instructions(root) if trusted else []
+        from rinari.verify.instruction_commands import instruction_commands, merge_commands
+
+        # What RINARI.md says under «Cómo probar» goes first (#81).
+        discovered = merge_commands(
+            instruction_commands(instructions), self._discovered_commands(root)
+        )
         return plan_verification(
             changed_files,
             test_map=self._test_map(project_root),
-            discovered=self._discovered_commands(root),
+            discovered=discovered,
             user_constraints=constraints,
             project_instructions=instructions,
             exists=lambda rel: (root / rel).is_file(),

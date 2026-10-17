@@ -1053,3 +1053,125 @@ def test_a_turn_that_leaves_the_folder_alone_says_nothing(server, tmp_path, mode
     _start(server, session, "hola")
     _wait_terminal(server, session)
     assert not _seen(server, "project.trust.changed")
+
+
+# -- /init (plan 0.4.0 #81) -------------------------------------------------------
+
+_PROPOSAL = (
+    "# Tienda\n\nUna tienda en Python.\n\n## Cómo probar\n\n- `pytest -q`\n- `ruff check src`\n"
+)
+
+
+def _sent_text(model) -> str:
+    """Everything the model received in its first request."""
+    return "\n".join(str(message.content) for message in model.requests[0].messages)
+
+
+def _init_turn(server, tmp_path, models, name, script):
+    folder, session = _trusted_project(server, tmp_path, name)
+    models[session] = ScriptedModel(script)
+    _ok(server, "project.init.start", {"session_id": session})
+    _wait_terminal(server, session)
+    return folder, session
+
+
+def test_init_explores_read_only_and_proposes_without_writing(server, tmp_path, models):
+    folder, session = _init_turn(
+        server,
+        tmp_path,
+        models,
+        "tienda",
+        [
+            _tool("w", "fs.write", {"path": "notes.txt", "content": "x"}),
+            _tool("p", "project.instructions.propose", {"content": _PROPOSAL, "summary": "Tienda"}),
+            _answer("listo"),
+        ],
+    )
+    # Read-only for this turn: the write was refused, the session mode is unchanged.
+    assert not (folder / "notes.txt").exists()
+    assert _ok(server, "session.get", {"ref": session})["session"]["mode"] == "build"
+    proposed = _wait_event(server, "instructions.proposed", session_id=session)["payload"]
+    assert proposed["content"].startswith("# Tienda")
+    assert proposed["previous"] is None
+    assert not (folder / "RINARI.md").exists()
+    # The model saw the harness request, the bubble shows /init.
+    started = server._services.ctx.event_repo.list(session, types=["turn.started"])[-1].payload
+    assert started["message"] == "/init"
+    assert started["origin"]["command"] == "init"
+    assert "[/init]" in _sent_text(models[session])
+
+
+def test_saving_writes_rinari_md_and_the_card_resolves(server, tmp_path, models):
+    folder, session = _init_turn(
+        server,
+        tmp_path,
+        models,
+        "guardar",
+        [_tool("p", "project.instructions.propose", {"content": _PROPOSAL}), _answer()],
+    )
+    proposal = _wait_event(server, "instructions.proposed", session_id=session)["payload"]
+    saved = _ok(
+        server,
+        "project.instructions.resolve",
+        {"session_id": session, "proposal_id": proposal["proposal_id"], "decision": "save"},
+    )
+    assert saved["status"] == "saved" and saved["edited"] is False
+    assert (folder / "RINARI.md").read_text(encoding="utf-8").startswith("# Tienda")
+    resolved = _wait_event(server, "instructions.proposal.resolved", session_id=session)
+    assert resolved["payload"]["status"] == "saved"
+
+
+def test_editing_saves_the_owner_text_and_discarding_writes_nothing(server, tmp_path, models):
+    folder, session = _init_turn(
+        server,
+        tmp_path,
+        models,
+        "editar",
+        [_tool("p", "project.instructions.propose", {"content": _PROPOSAL}), _answer()],
+    )
+    proposal = _wait_event(server, "instructions.proposed", session_id=session)["payload"]
+    ref = {"session_id": session, "proposal_id": proposal["proposal_id"]}
+    assert (
+        _ok(server, "project.instructions.resolve", {**ref, "decision": "discard"})["status"]
+        == "discarded"
+    )
+    assert not (folder / "RINARI.md").exists()
+    saved = _ok(
+        server,
+        "project.instructions.resolve",
+        {**ref, "decision": "save", "content": "# Mía\n"},
+    )
+    assert saved["edited"] is True
+    assert (folder / "RINARI.md").read_text(encoding="utf-8") == "# Mía\n"
+
+
+def test_init_again_carries_the_current_file_and_offers_to_reuse_agents_md(
+    server, tmp_path, models
+):
+    folder, session = _trusted_project(server, tmp_path, "otra-vez")
+    (folder / "RINARI.md").write_text("# Viejo\n", encoding="utf-8")
+    (folder / "AGENTS.md").write_text("# Agentes\n", encoding="utf-8")
+    models[session] = ScriptedModel(
+        [
+            _tool(
+                "p",
+                "project.instructions.propose",
+                {"content": "# Nuevo\n", "reuses": ["AGENTS.md"]},
+            ),
+            _answer(),
+        ]
+    )
+    _ok(server, "project.init.start", {"session_id": session})
+    _wait_terminal(server, session)
+    proposed = _wait_event(server, "instructions.proposed", session_id=session)["payload"]
+    assert proposed["previous"] == "# Viejo\n"
+    assert proposed["reuses"] == ["AGENTS.md"]
+    request = _sent_text(models[session])
+    assert "already has a RINARI.md" in request and "AGENTS.md" in request
+
+
+def test_init_needs_a_project(server, tmp_path, models):
+    chat = _create_chat(server, tmp_path, "suelto")
+    response = _call(server, "project.init.start", {"session_id": chat})
+    assert response["ok"] is False
+    assert response["error"]["code"] == "INVALID_PARAMS"

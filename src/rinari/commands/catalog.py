@@ -107,6 +107,9 @@ COMMANDS: tuple[CommandSpec, ...] = (
         "[objective | pause | resume | clear]",
     ),
     CommandSpec("compact", "ui", "Compact the context now"),
+    CommandSpec(
+        "init", "ui", "Get to know the project and propose its RINARI.md", clients=("desktop",)
+    ),
     CommandSpec("context", "ui", "Context usage and what fills it"),
     CommandSpec("model", "ui", "Change the model of this conversation", "[alias]"),
     CommandSpec("diff", "ui", "Changes in the workspace"),

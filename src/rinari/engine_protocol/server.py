@@ -315,6 +315,10 @@ class EngineServer:
         self._dispatcher.register("channel.resolve", self._turns.channels.resolve)
         self._dispatcher.register("channel.pending", lambda params: self._turns.channels.list())
         self._dispatcher.register("flow.get", self._flow_get)
+        self._dispatcher.register("project.init.start", self._project_init_start)
+        self._dispatcher.register(
+            "project.instructions.resolve", self._project_instructions_resolve
+        )
         self._dispatcher.register("task.tree", self._task_tree)
         self._dispatcher.register("task.get", self._task_get)
         self._dispatcher.register("verification.latest", self._verification_latest)
@@ -1916,6 +1920,55 @@ class EngineServer:
         return {"session": view}
 
     # -- flow (project_flow_v1) ----------------------------------------------------
+
+    def _project_init_start(self, params: dict[str, Any]) -> dict[str, Any]:
+        """`/init` (#81): a read-only turn that proposes the project's RINARI.md."""
+        return self._turns.start_init_turn(self._need_str(params, "session_id"))
+
+    def _project_instructions_resolve(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Save (as proposed or edited) or discard a /init proposal (#81).
+
+        Only «Guardar» writes, and only the RINARI.md of the conversation's
+        project, whatever path the proposal event carries.
+        """
+        from rinari.tools.native.instructions import INSTRUCTIONS_FILE, MAX_CONTENT_CHARS
+
+        session_id = self._need_str(params, "session_id")
+        proposal_id = self._need_str(params, "proposal_id")
+        decision = self._need_str(params, "decision")
+        if decision not in {"save", "discard"}:
+            raise EngineProtocolError(
+                INVALID_PARAMS, "Param 'decision' must be 'save' or 'discard'."
+            )
+        proposal = self._turns.instructions_proposal(session_id, proposal_id)
+        if proposal is None:
+            raise NotFoundError(f"No /init proposal {proposal_id} in this conversation.")
+        record = self._services.sessions.show(session_id)
+        root = Path(record.project_root_snapshot) if record.project_root_snapshot else None
+        if root is None or not root.is_dir():
+            raise EngineProtocolError(INVALID_PARAMS, "This conversation has no project folder.")
+        path = root / INSTRUCTIONS_FILE
+        result: dict[str, Any] = {
+            "proposal_id": proposal_id,
+            "status": "discarded",
+            "path": str(path),
+        }
+        if decision == "save":
+            content = params.get("content")
+            if content is None:
+                content = proposal.get("content") or ""
+            if not isinstance(content, str) or not content.strip():
+                raise EngineProtocolError(INVALID_PARAMS, "Param 'content' must be the whole file.")
+            if len(content) > MAX_CONTENT_CHARS:
+                raise EngineProtocolError(
+                    INVALID_PARAMS, f"RINARI.md is read up to {MAX_CONTENT_CHARS} characters."
+                )
+            path.write_text(content.rstrip() + "\n", encoding="utf-8")
+            result.update(
+                status="saved", edited=content.strip() != str(proposal.get("content") or "").strip()
+            )
+        self._turns.emit_instructions_resolution(session_id, proposal.get("turn_id"), result)
+        return result
 
     def _flow_get(self, params: dict[str, Any]) -> dict[str, Any]:
         """Stages of a project or of a lone chat, derived from persisted facts."""

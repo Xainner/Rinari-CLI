@@ -531,6 +531,12 @@ class PolicyEngine:
                 risk_class=risk_class,
                 rule_id="mcp_call",
             )
+        if capability == "project.instructions.propose":
+            # /init (#81) runs read-only and ends by proposing RINARI.md. Proposing
+            # writes nothing: only the owner's «Guardar» does, outside the turn.
+            return self._allow(
+                capability, "a proposal the owner saves or discards", risk, risk_class
+            )
         if capability == "file.present":
             # Presenting a result only shows it to the owner in the chat: no
             # side effects and nothing leaves the machine. It asked for

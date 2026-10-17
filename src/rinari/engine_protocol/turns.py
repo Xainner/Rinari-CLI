@@ -38,6 +38,7 @@ from rinari.engine_protocol.peers import PeerBroker
 from rinari.engine_protocol.token_usage import TurnTokenTracker
 from rinari.models.types import ChatMessage
 from rinari.policy.approvals import ApprovalRequest
+from rinari.policy.engine import PermissionProfile
 from rinari.shared.clock import now_iso
 from rinari.shared.errors import CancelledError, RinariError
 from rinari.shared.redaction import redact_value
@@ -105,6 +106,10 @@ class _ActiveTurn:
     command: str = ""
     # Checklist the turn starts with: the steps of the plan it implements (#55).
     seed_checklist: list[dict[str, Any]] | None = None
+    # `/init` (#81): this turn alone is read-only, whatever the session's
+    # mode, and starts with these tools already loaded.
+    read_only: bool = False
+    activate_tools: tuple[str, ...] = ()
     activity_lock: Any = field(default_factory=threading.RLock)
     # The first visible text of the turn decides `model.changed`, once.
     model_notice_checked: bool = False
@@ -554,6 +559,84 @@ class TurnManager:
             )
         return True
 
+    def start_init_turn(self, session_id: str) -> dict[str, Any]:
+        """`/init` (#81): explore the project read-only and propose its RINARI.md."""
+        from rinari.tools.native.instructions import (
+            INSTRUCTIONS_FILE,
+            REUSABLE,
+            current_instructions,
+        )
+
+        record = self._services.sessions.show(session_id)
+        root = Path(record.project_root_snapshot) if record.project_root_snapshot else None
+        if record.kind != "PROJECT" or root is None or not root.is_dir():
+            raise EngineProtocolError(
+                errors.INVALID_PARAMS,
+                "/init needs a conversation in a project: RINARI.md belongs to a project folder.",
+                details={"session_id": session_id},
+            )
+        existing = current_instructions(root)
+        reusable = [name for name in REUSABLE if (root / name).is_file()]
+        lines = [
+            "[/init] Get to know this project and propose its RINARI.md.",
+            "This turn is read-only: explore with reads, searches and listings; do not write, "
+            "install or run anything that changes the project.",
+            "Find out what the project is and its stack; how it is installed, tested, built and "
+            "run (the real commands from its manifests, scripts and CI); its conventions, "
+            "important folders and what must not be touched.",
+            "Then call project.instructions.propose once with the whole file. Put the commands "
+            "under a «## Cómo probar» (or «## How to test») section, one per line in backticks. "
+            "Write it in the user's language and keep it short and factual.",
+        ]
+        if existing is not None:
+            lines.append(
+                f"The project already has a {INSTRUCTIONS_FILE}: propose the updated whole file, "
+                "keeping what is still true. The user sees the difference before saving."
+            )
+        if reusable:
+            lines.append(
+                "It also has " + " and ".join(reusable) + ": reuse them (summarize what matters or "
+                "point to them) instead of duplicating, and list them in reuses."
+            )
+        lines.append("Finish with a two-line summary of what you proposed.")
+        return self.start_turn(
+            session_id,
+            "\n".join(lines),
+            display_message="/init",
+            origin={"kind": "user", "command": "init", "command_kind": "ui"},
+            command="init",
+            read_only=True,
+            activate_tools=("project.instructions.propose",),
+        )
+
+    def instructions_proposal(self, session_id: str, proposal_id: str) -> dict[str, Any] | None:
+        """The `instructions.proposed` event of a /init card, with its turn."""
+        for row in self._services.ctx.db.query(
+            "SELECT turn_id, payload_json FROM session_events "
+            "WHERE session_id = ? AND type = 'instructions.proposed' ORDER BY seq DESC",
+            (session_id,),
+        ):
+            payload = _json_payload(row["payload_json"])
+            if payload.get("proposal_id") == proposal_id:
+                return {**payload, "turn_id": row["turn_id"]}
+        return None
+
+    def emit_instructions_resolution(
+        self, session_id: str, turn_id: str | None, payload: dict[str, Any]
+    ) -> None:
+        """`instructions.proposal.resolved` on the turn whose card showed it."""
+        with self._lock:
+            live = self._turns.get(turn_id or "")
+        if live is not None and not live.done.is_set():
+            self._activity_cb(live)("instructions.proposal.resolved", payload)
+        elif turn_id:
+            self.emit_persisted_activity(
+                "instructions.proposal.resolved",
+                session_id=session_id,
+                turn_id=turn_id,
+                payload=payload,
+            )
+
     def runtime_state(self) -> dict[str, Any]:
         """Presentation-safe live state used to recover after a UI reload."""
         with self._lock:
@@ -619,6 +702,8 @@ class TurnManager:
         command: str = "",
         continue_after: bool = False,
         seed_checklist: list[dict[str, Any]] | None = None,
+        read_only: bool = False,
+        activate_tools: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         record = self._services.sessions.show(session_id)
         if record.state in {SESSION_STATE_CLOSED, SESSION_STATE_ARCHIVED}:
@@ -653,6 +738,8 @@ class TurnManager:
             continue_after=continue_after and compaction_only,
             command=command,
             seed_checklist=seed_checklist,
+            read_only=read_only,
+            activate_tools=tuple(activate_tools),
         )
         with self._lock:
             record = self._services.sessions.show(session_id)
@@ -941,6 +1028,10 @@ class TurnManager:
             self._checklist_begin(turn)
             agent_session = self._prepare_session(turn, record, reasoning_effort)
             context = agent_session.context
+            if turn.activate_tools:
+                exposure = getattr(context.tool_ctx, "exposure", None)
+                if exposure is not None:
+                    exposure.activate(list(turn.activate_tools), reason="turn", scope="session")
             with self._lock:
                 processes = self._desktop_processes.setdefault(
                     turn.session_id, context.tool_ctx.processes
@@ -1187,7 +1278,11 @@ class TurnManager:
                     record,
                     interactive=False,
                     user_home=self._user_home,
-                    profile=profile_for_session(record),
+                    profile=(
+                        PermissionProfile.READ_ONLY
+                        if turn.read_only
+                        else profile_for_session(record)
+                    ),
                     approval_prompt=self._prompt_for_current_turn,
                     question_prompt=lambda args, token, deadline: self.questions.ask(
                         turn, self._activity_cb(turn), args, token, deadline
