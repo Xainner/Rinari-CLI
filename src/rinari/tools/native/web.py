@@ -211,6 +211,10 @@ def web_search(input: dict, ctx: ToolContext) -> ToolResult:
         queries = input["queries"]
         if not isinstance(queries, list) or not 1 <= len(queries) <= 4:
             return _fail(ToolErrorCode.INVALID_ARGUMENT, "queries must contain 1 to 4 strings")
+        # Models often send both; the lone query joins the list when it fits.
+        extra = input.get("query")
+        if isinstance(extra, str) and extra.strip() and extra not in queries and len(queries) < 4:
+            queries = [extra, *queries]
         rows = []
         for query in queries:
             if ctx.cancellation:
@@ -587,7 +591,10 @@ def web_tools() -> list[ToolDefinition]:
     return [
         ToolDefinition(
             name="web.search",
-            description="Search the web (keyless DuckDuckGo HTML endpoint).",
+            description=(
+                "Search the web (keyless DuckDuckGo HTML endpoint). "
+                "Pass query for one search or queries for up to 4."
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -600,7 +607,7 @@ def web_tools() -> list[ToolDefinition]:
                     },
                     "max_results": {"type": "integer", "minimum": 1, "maximum": 50},
                 },
-                "oneOf": [{"required": ["query"]}, {"required": ["queries"]}],
+                "anyOf": [{"required": ["query"]}, {"required": ["queries"]}],
             },
             risk=RISK_LOW,
             side_effects=SIDE_EFFECT_NONE,

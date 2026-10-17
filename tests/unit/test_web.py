@@ -383,6 +383,32 @@ def test_web_search_tool_keyless_ddg(tmp_path) -> None:
     assert results[1]["url"] == "https://direct.com/doc"
 
 
+def test_web_search_accepts_query_and_queries_together(tmp_path) -> None:
+    """Models send both; that was three failed calls in a row on real sessions."""
+    import urllib.parse as _up
+
+    from rinari.tools.schema import validate_against
+
+    tool = _tool("web.search")
+    both = {"query": "gta 6 fecha", "queries": ["gta 6 release date"], "max_results": 3}
+    assert validate_against(tool.input_schema, both) == []
+    assert validate_against(tool.input_schema, {"max_results": 3}) != []
+    urls = {
+        "https://html.duckduckgo.com/html/?" + _up.urlencode({"q": q}): httpx.Response(
+            200, text=DDG_HTML
+        )
+        for q in ("gta 6 fecha", "gta 6 release date")
+    }
+    ctx = _ctx(tmp_path, web=_factory(_handler(urls)))
+    result = tool.handler(both, ctx)
+    assert result.ok, result.error
+    assert [row["query"] for row in result.data["searches"]] == [
+        "gta 6 fecha",
+        "gta 6 release date",
+    ]
+    assert all(row["ok"] for row in result.data["searches"])
+
+
 def test_search_client_parses_and_bounds() -> None:
     import urllib.parse as _up
 

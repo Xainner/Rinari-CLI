@@ -427,6 +427,18 @@ class ChildSessions:
 
     # -- after a turn ----------------------------------------------------------------
 
+    def before_turn(self, turn: Any) -> None:
+        """A child the owner writes in shows as working on its mother's card too."""
+        try:
+            child = self.store.get(turn.session_id)
+            if child is None or child.state == "working":
+                return
+            updated = self.store.set_state(child.child_session_id, "working")
+            if updated is not None:
+                self._emit(updated, self._services.sessions.show(child.child_session_id).title)
+        except Exception:
+            logger.exception("child session state failed")
+
     def after_turn(self, turn: Any) -> None:
         """Report a child's turn to its mother, and let a free mother go on."""
         try:
@@ -447,9 +459,9 @@ class ChildSessions:
         if child is None:
             return None
         origin = turn.origin or {}
-        if origin.get("source") not in REPORTING_SOURCES:
-            # The owner drives the child by hand: the mother is not told.
-            return None
+        # A turn the owner wrote in the child still reports, without waking the
+        # mother: she reads it on her next turn (the owner was in the child).
+        by_owner = origin.get("source") not in REPORTING_SOURCES
         terminal = (turn.terminal_event or "turn.completed").removeprefix("turn.")
         state = {"completed": "completed", "failed": "failed", "cancelled": "cancelled"}.get(
             terminal, "completed"
@@ -463,18 +475,24 @@ class ChildSessions:
             "terminal": terminal,
             "turn_id": turn.turn_id,
         }
+        if by_owner:
+            report["by_owner"] = True
         if getattr(turn, "goal_error", (None, None))[1]:
             report["error"] = str(turn.goal_error[1])[:500]
         updated = store.set_state(child.child_session_id, state, report)
         if updated is not None:
             record = self._services.sessions.show(child.child_session_id)
             self._emit(updated, record.title)
-        return child.parent_session_id
+        return None if by_owner else child.parent_session_id
 
     def wake(self, parent_session_id: str) -> dict[str, Any] | None:
         """A free mother goes on once with the reports of children Rinari opened (A-8)."""
         store = self.store
-        pending = [c for c in store.unreported(parent_session_id) if c.origin in OPENED_BY_RINARI]
+        pending = [
+            c
+            for c in store.unreported(parent_session_id)
+            if c.origin in OPENED_BY_RINARI and not (c.report or {}).get("by_owner")
+        ]
         if not pending:
             return None
         if any(c.origin in OPENED_BY_RINARI for c in store.working(parent_session_id)):

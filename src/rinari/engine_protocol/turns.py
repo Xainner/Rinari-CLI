@@ -780,6 +780,7 @@ class TurnManager:
                 **({"origin": origin} if origin else {}),
             },
         )
+        self.children.before_turn(turn)
         thread = threading.Thread(
             target=self._run_turn,
             args=(turn_id, record, message, reasoning_effort),
