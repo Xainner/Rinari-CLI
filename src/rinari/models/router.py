@@ -29,6 +29,7 @@ from rinari.providers.adapters.http import (
 from rinari.providers.catalog import OPENCODE_RESPONSES_MODELS
 from rinari.providers.errors import invoke_with_retry
 from rinari.providers.metadata import effective_metadata
+from rinari.providers.opencode_routes import call_on_route
 from rinari.providers.registry import adapter_for
 from rinari.shared.errors import InvalidUsageError, ProviderModelError
 
@@ -620,8 +621,10 @@ class ModelRouter:
                 adapter, wire = self._transport_adapter(provider, candidate)
                 self._authenticated_call(
                     provider,
-                    lambda secret, adapter=adapter, wire=wire: adapter.invoke(
-                        probe, secret, provider.endpoint, transport=wire
+                    lambda secret, adapter=adapter, wire=wire, candidate=candidate: call_on_route(
+                        provider.endpoint,
+                        candidate,
+                        lambda endpoint: adapter.invoke(probe, secret, endpoint, transport=wire),
                     ),
                 )
             except Exception:
@@ -788,13 +791,17 @@ class ModelRouter:
                 )
                 return self._authenticated_call(
                     provider,
-                    lambda secret: stream_adapter.invoke_stream(
-                        current,
-                        secret,
+                    lambda secret: call_on_route(
                         provider.endpoint,
-                        deliver,
-                        transport=wire,
-                        tool_aliases=real_by_alias,
+                        chosen,
+                        lambda endpoint: stream_adapter.invoke_stream(
+                            current,
+                            secret,
+                            endpoint,
+                            deliver,
+                            transport=wire,
+                            tool_aliases=real_by_alias,
+                        ),
                     ),
                     output_started=lambda: emitted,
                 )
@@ -829,6 +836,7 @@ class ModelRouter:
         transport: str = "chat",
         tool_aliases: dict[str, str] | None = None,
     ) -> ModelResponse:
+        route = transport
         adapter, transport = self._transport_adapter(provider, transport)
         # §6.4: transient model-call failures retry with backoff. Streaming
         # deliberately does NOT retry: partial deltas already delivered make
@@ -836,12 +844,16 @@ class ModelRouter:
         response = self._authenticated_call(
             provider,
             lambda secret: invoke_with_retry(
-                lambda: adapter.invoke(
-                    request,
-                    secret,
+                lambda: call_on_route(
                     provider.endpoint,
-                    transport=transport,
-                    tool_aliases=tool_aliases,
+                    route,
+                    lambda endpoint: adapter.invoke(
+                        request,
+                        secret,
+                        endpoint,
+                        transport=transport,
+                        tool_aliases=tool_aliases,
+                    ),
                 ),
                 attempts=1 if any(message.images for message in request.messages) else 3,
             ),

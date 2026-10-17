@@ -1655,3 +1655,58 @@ def test_a_refused_protocol_is_learned_kept_and_the_call_goes_on(monkeypatch, tm
         assert all("/google/" in url for url in seen)
     finally:
         ctx.close()
+
+
+def test_opencode_calls_go_to_the_documented_address_per_protocol() -> None:
+    # Plan 0.4.0 #94 point 2: one address per protocol; custom ones are left alone.
+    from rinari.providers.opencode_routes import documented_route
+
+    go, zen = OPENCODE_GO_URL, "https://opencode.ai/zen/v1/"
+    assert documented_route(go, "chat") == "https://opencode.ai/inference/go/openai/v1"
+    assert documented_route(go, "responses") == "https://opencode.ai/inference/go/openai/v1"
+    assert documented_route(go, "anthropic") == "https://opencode.ai/inference/go/anthropic/v1"
+    assert documented_route(zen, "chat") == "https://opencode.ai/inference/zen/openai/v1"
+    assert documented_route(go, "google") is None
+    assert documented_route("https://api.test/v1", "chat") is None
+    assert documented_route("https://opencode.ai/inference/go/openai/v1", "chat") is None
+
+
+def test_opencode_new_address_404_falls_back_to_the_saved_one_and_remembers(
+    monkeypatch, tmp_path
+) -> None:
+    from rinari.providers.opencode_routes import forget
+
+    forget()
+    seen: list[str] = []
+    new_works = {"value": True}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        seen.append(url)
+        if "/inference/" in url and not new_works["value"]:
+            return httpx.Response(404, json={"error": {"message": "Not Found"}})
+        return httpx.Response(200, json=_chat_ok())
+
+    ctx, services = _app_and_services(handler, monkeypatch, tmp_path)
+    try:
+        provider = services.providers.add(_add_custom_input("go", OPENCODE_GO_URL))
+        model = services.models.add(provider.alias, "m-x", "mx")
+        router = ModelRouter(services.providers, services.models, http_client=_client(handler))
+        assert router.invoke(provider, model.id, _request()).content == "hola"
+        assert seen == ["https://opencode.ai/inference/go/openai/v1/chat/completions"]
+
+        forget()
+        seen.clear()
+        new_works["value"] = False
+        assert router.invoke(provider, model.id, _request()).content == "hola"
+        assert seen == [
+            "https://opencode.ai/inference/go/openai/v1/chat/completions",
+            "https://opencode.ai/zen/go/v1/chat/completions",
+        ]
+        # Remembered: the next call goes straight to the saved address.
+        seen.clear()
+        router.invoke(provider, model.id, _request())
+        assert seen == ["https://opencode.ai/zen/go/v1/chat/completions"]
+    finally:
+        forget()
+        ctx.close()
