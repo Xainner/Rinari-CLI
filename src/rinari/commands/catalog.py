@@ -41,7 +41,7 @@ LESSON_PROMPT = (
     "of the owner's skills, propose an update of it with skills.propose and "
     'update_of: add the rules under a "## Lecciones" section (create it if '
     "missing, in the skill's language), raise the version, keep the rest intact. "
-    "If the job has no skill of the owner's, or only one of Rinari's own, save "
+    "If the job has no skill of the owner's, or only one of your built-in ones, save "
     "each rule with memory.propose (kind workflow) instead. Never create a new "
     "skill for a lesson. Then say in one line where it was saved."
 )

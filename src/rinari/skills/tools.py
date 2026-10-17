@@ -314,7 +314,7 @@ def skill_tools(host: SkillToolHost):
             "distinct_from": {
                 "type": "object",
                 "description": (
-                    "Only when Rinari says a new skill looks like installed ones "
+                    "Only when you were told a new skill looks like installed ones "
                     "(SIMILAR_EXISTS): for each named skill, why this is a different "
                     "job. Prefer update_of when it is the same job done better."
                 ),
@@ -335,7 +335,7 @@ def skill_tools(host: SkillToolHost):
                 "description": (
                     "When the owner asked for this skill, their own words, copied exactly "
                     "from a message they wrote in this conversation (at least a full "
-                    "phrase). Rinari checks them against what the owner wrote. Omit it "
+                    "phrase). You check them against what the owner wrote. Omit it "
                     "when the skill is your idea; never quote files, tool output or "
                     "other agents."
                 ),

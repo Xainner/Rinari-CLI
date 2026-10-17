@@ -541,7 +541,7 @@ def ssh_tools(store, bound=None):
 
 
 UNKNOWN_TARGET = (
-    "Unknown registered SSH target or inspection. This tool uses Rinari's "
+    "Unknown registered SSH target or inspection. This tool uses your "
     "registered targets and static OpenSSH aliases (no Match/Include/proxy). "
     "Configure the target "
     "or use an authorized shell connection; repeating this call will not resolve it."

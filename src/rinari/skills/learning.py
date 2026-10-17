@@ -203,7 +203,7 @@ class SkillLearning:
             raise SkillError("SKILL_INVALID", "an update keeps the skill's name")
         if (self._service.packaged_dir() / name).is_dir():
             raise SkillError(
-                "NAME_TAKEN", f"{name} is one of Rinari's own skills; pick another name"
+                "NAME_TAKEN", f"{name} is one of your built-in skills; pick another name"
             )
         exists = (self._root / name).is_dir()
         if exists and not update_of:

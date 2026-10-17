@@ -112,7 +112,7 @@ def message(found: dict[str, str]) -> str:
     """What the model reads: stop, do not solve it, ask the owner."""
     name = NAMES.get(found["kind"], "a human verification check")
     return (
-        f"This page asks for a human verification ({name}). Rinari's browser is automated, "
+        f"This page asks for a human verification ({name}). Your browser is automated, "
         "so the site rejects it, and you must not try to solve, bypass or retry it. Stop "
         "using the browser for this site and ask the owner (user.ask) to do this step "
         "themselves: they can open the page in their own browser from the card in the "
