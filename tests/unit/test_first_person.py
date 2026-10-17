@@ -49,3 +49,18 @@ def test_what_the_model_reads_about_itself_is_in_second_person() -> None:
 def test_the_rule_is_in_the_constitution_whatever_the_soul() -> None:
     constitution = (ROOT / "assets" / "constitution.md").read_text(encoding="utf-8")
     assert "The app (Rinari Agent), the Engine and the CLI are you" in constitution
+
+
+def test_memories_about_herself_are_written_in_first_person() -> None:
+    """#95.3: the memory tools tell the model how to write about itself."""
+    tools = {tool.name: tool.description for tool in all_native_tools()}
+    for name in ("memory.remember", "memory.propose"):
+        assert "first person" in tools[name], name
+
+
+def test_rinaris_soul_shows_how_she_speaks_of_her_things() -> None:
+    """#95.4: next to the level examples, how she talks about her own things."""
+    soul = (ROOT / "assets" / "souls" / "rinari-default" / "identity.md").read_text(
+        encoding="utf-8"
+    )
+    assert "mis conversaciones" in soul and "My engine restarted" in soul

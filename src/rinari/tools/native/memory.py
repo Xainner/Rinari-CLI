@@ -643,7 +643,9 @@ def memory_tools() -> list[ToolDefinition]:
                 "scope=pattern: a reusable procedure. "
                 "A re-statement with the same kind+topic refreshes the record; "
                 "a conflicting statement supersedes the old one. Secrets are rejected. "
-                "A refusal that says 'Do not retry' will fail again: tell the owner."
+                "A refusal that says 'Do not retry' will fail again: tell the owner. "
+                "What is about yourself (the app, the Engine, the CLI) is written in "
+                "first person ('my built-in browser'), never as a third party."
             ),
             input_schema={
                 "type": "object",
@@ -679,7 +681,8 @@ def memory_tools() -> list[ToolDefinition]:
                 "call, in your own words. Not for one-off details of this task, guesses, or "
                 "secrets (name where a secret lives, never its value). Depending on the "
                 "owner's setting it is saved at once or proposed for approval; the result "
-                "says which. scope=project only in a session with a project."
+                "says which. scope=project only in a session with a project. About "
+                "yourself, first person: 'my environment (Windows)'."
             ),
             input_schema={
                 "type": "object",
