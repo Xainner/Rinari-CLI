@@ -471,3 +471,10 @@ def test_the_owner_marks_a_list_left_open_as_done(server, tmp_path, monkeypatch)
     done = _call(server, "session.checklist.complete", {"session_id": session_id})["result"]
     assert done["checklist"]["state"] == "completed"
     assert [item["status"] for item in done["checklist"]["items"]] == ["completed", "completed"]
+
+
+def test_the_checklist_is_closed_before_the_final_summary() -> None:
+    # Plan 0.4.0 extras, E4: a summary and then checklist.update split the answer.
+    from rinari.tools.native.checklist import DESCRIPTION
+
+    assert "before your final summary" in DESCRIPTION
