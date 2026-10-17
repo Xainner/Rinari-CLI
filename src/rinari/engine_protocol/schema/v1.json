@@ -568,6 +568,7 @@
         "memory.about.set",
         "usage.report",
         "usage.report.list",
+        "session.review.export",
         "storage.usage",
         "session.child.start",
         "process.orphans.list",

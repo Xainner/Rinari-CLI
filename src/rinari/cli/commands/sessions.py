@@ -241,8 +241,18 @@ def session_export(
     ctx: typer.Context,
     ref: str = typer.Argument(None),
     out: str = typer.Option(None, "--out", help="Output file (default: stdout)."),
+    review: bool = typer.Option(
+        False, "--review", help="A .zip to analyze it: events, usage, environment, no secrets."
+    ),
+    from_seq: int = typer.Option(None, "--from", help="With --review: from this message on."),
+    no_messages: bool = typer.Option(
+        False, "--no-messages", help="With --review: leave out what was said."
+    ),
 ) -> None:
     """Export a session (record + messages + events) as a JSON document."""
+    if review:
+        _export_review(ctx, ref, out, from_seq, not no_messages)
+        return
     with services(ctx) as s:
         from rinari.cli.session_export import export_session
 
@@ -257,6 +267,28 @@ def session_export(
                 typer.echo(f"exported -> {out}")
             return
         typer.echo(_json(document))
+
+
+def _export_review(
+    ctx: typer.Context, ref: str | None, out: str | None, from_seq: int | None, messages: bool
+) -> None:
+    """«Exportar para revisión» from the terminal (plan 0.4.0 #79)."""
+    from pathlib import Path
+
+    from rinari.engine_protocol.review_export import review_files, zip_files
+
+    with services(ctx) as s:
+        record = s.sessions.show(ref) if ref else s.ctx.session_repo.list(limit=1)[0]
+        params = {"session_id": record.id, "include_messages": messages}
+        if from_seq is not None:
+            params["from_seq"] = from_seq
+        files = review_files(s, params)
+    target = Path(out or f"rinari-revision-{record.id}.zip")
+    target.write_bytes(zip_files(files))
+    if is_json(ctx):
+        emit_json(success_envelope("session.export", {"session": record.id, "path": str(target)}))
+    else:
+        typer.echo(f"exported for review -> {target}")
 
 
 @session_app.command("import")

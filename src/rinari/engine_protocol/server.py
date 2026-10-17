@@ -459,6 +459,9 @@ class EngineServer:
         from rinari.engine_protocol.usage_report import register_usage_report
 
         register_usage_report(self._dispatcher, self._services)
+        from rinari.engine_protocol.review_export import register_review_export
+
+        register_review_export(self._dispatcher, self._services)
         from rinari.engine_protocol.workspace_tree import register_workspace_tree
 
         register_workspace_tree(self._dispatcher, self._services)
