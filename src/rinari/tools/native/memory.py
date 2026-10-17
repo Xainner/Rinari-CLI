@@ -130,19 +130,21 @@ def _emit(ctx: ToolContext, event_name: str, payload: dict) -> None:
 
 
 def emit_candidate_created(ctx: ToolContext, candidate: dict) -> None:
-    _emit(
-        ctx,
-        "memory.candidate.created",
-        {
-            "candidate_id": candidate["id"],
-            "topic": candidate["topic"],
-            "text": candidate["text"],
-            "kind": candidate["kind"],
-            "scope": candidate.get("scope") or "user",
-            "reason": candidate.get("reason") or "",
-            "sensitive": bool(candidate.get("sensitive")),
-        },
-    )
+    payload = {
+        "candidate_id": candidate["id"],
+        "topic": candidate["topic"],
+        "text": candidate["text"],
+        "kind": candidate["kind"],
+        "scope": candidate.get("scope") or "user",
+        "reason": candidate.get("reason") or "",
+        "sensitive": bool(candidate.get("sensitive")),
+    }
+    # Where the model chose to keep it (#75); the card lets the owner change it.
+    if candidate.get("place") and candidate.get("place") != "general":
+        payload["place"] = candidate["place"]
+    if candidate.get("project_root"):
+        payload["project_root"] = candidate["project_root"]
+    _emit(ctx, "memory.candidate.created", payload)
 
 
 def emit_remembered(ctx: ToolContext, record: dict | None) -> None:
