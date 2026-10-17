@@ -36,7 +36,9 @@ logger = logging.getLogger(__name__)
 
 _USER_KINDS = ["preference", "rule", "fact", "environment", "workflow"]
 _PROJECT_KINDS = ["fact", "rule", "convention", "environment", "workflow"]
-_SCOPES = ["user", "project", "pattern"]
+_SCOPES = ["user", "profile", "project", "chat", "pattern"]
+#: Personal places (#75): user = general, everywhere.
+_PERSONAL = {"user": "general", "profile": "profile", "chat": "chat"}
 _RECALL_SCOPES = ["user", "project", "pattern", "episodic"]
 
 
@@ -160,7 +162,13 @@ def emit_remembered(ctx: ToolContext, record: dict | None) -> None:
 
 
 def _remember_for_owner(
-    service, input: dict, ctx: ToolContext, topic: str, text: str
+    service,
+    input: dict,
+    ctx: ToolContext,
+    topic: str,
+    text: str,
+    place: str = "general",
+    place_ref: str | None = None,
 ) -> ToolResult:
     """Personal memory, written by the model in the owner's turn.
 
@@ -199,6 +207,8 @@ def _remember_for_owner(
             topic=topic,
             kind=kind,
             confidence=float(confidence),
+            place=place,
+            place_ref=place_ref,
         )
     except Exception as exc:
         message = getattr(exc, "message", str(exc))
@@ -231,13 +241,22 @@ def memory_remember(input: dict, ctx: ToolContext) -> ToolResult:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "text is required")
     if len(text.strip()) > 4096:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "text exceeds 4096 characters")
-    if scope == "user" and not service.extraction_allowed(ctx.session_id):
+    if scope in _PERSONAL and not service.extraction_allowed(ctx.session_id):
         return _fail(
             ToolErrorCode.PERMISSION_DENIED,
             "memory is excluded for this conversation; the owner must re-enable it. Do not retry.",
         )
-    if scope == "user":
-        return _remember_for_owner(service, input, ctx, topic.strip(), text.strip())
+    if scope in _PERSONAL:
+        place = _PERSONAL[scope]
+        return _remember_for_owner(
+            service,
+            input,
+            ctx,
+            topic.strip(),
+            text.strip(),
+            place,
+            service.place_ref_for(place, ctx.session_id),
+        )
     provenance = input.get("provenance")
     if provenance is not None and not isinstance(provenance, str):
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "provenance must be a string")
@@ -347,8 +366,11 @@ def memory_propose(input: dict, ctx: ToolContext) -> ToolResult:
             ToolErrorCode.INVALID_ARGUMENT, f"kind must be one of: {', '.join(LEARNED_KINDS)}"
         )
     scope = input.get("scope", "user")
-    if scope not in ("user", "project"):
-        return _fail(ToolErrorCode.INVALID_ARGUMENT, "scope must be user or project")
+    if scope not in ("user", "profile", "project", "chat"):
+        return _fail(ToolErrorCode.INVALID_ARGUMENT, "scope must be user, profile, project or chat")
+    place = _PERSONAL.get(scope, "general")
+    if scope in ("profile", "chat"):
+        scope = "user"
     if not service.session_exists(ctx.session_id):
         # A subagent runs under a child id with no conversation behind it.
         return _fail(
@@ -388,6 +410,8 @@ def memory_propose(input: dict, ctx: ToolContext) -> ToolResult:
             project_root=str(root) if root is not None else None,
             trusted=trusted,
             untrusted_reason=untrusted_reason,
+            place=place,
+            place_ref=service.place_ref_for(place, ctx.session_id),
         )
     except Exception as exc:
         message = getattr(exc, "message", str(exc))
@@ -593,6 +617,14 @@ def memory_episodic(input: dict, ctx: ToolContext) -> ToolResult:
     return _ok(record)
 
 
+#: Where to keep it (#75): the model chooses, the owner can change it on the card.
+_SCOPE_GUIDE = (
+    "Where it applies: user = about the owner, everywhere (preferences, who they are); "
+    "profile = only for the active Rinari profile's role; project = this project; "
+    "chat = only this conversation (details of this one piece of work)."
+)
+
+
 def memory_tools() -> list[ToolDefinition]:
     return [
         ToolDefinition(
@@ -614,7 +646,7 @@ def memory_tools() -> list[ToolDefinition]:
             input_schema={
                 "type": "object",
                 "properties": {
-                    "scope": {"type": "string", "enum": _SCOPES},
+                    "scope": {"type": "string", "enum": _SCOPES, "description": _SCOPE_GUIDE},
                     "kind": {
                         "type": "string",
                         "enum": list(dict.fromkeys([*_USER_KINDS, *_PROJECT_KINDS])),
@@ -657,7 +689,12 @@ def memory_tools() -> list[ToolDefinition]:
                         "description": "short label, e.g. 'saturno ssh' or 'dev server'",
                     },
                     "kind": {"type": "string", "enum": list(LEARNED_KINDS), "default": "fact"},
-                    "scope": {"type": "string", "enum": ["user", "project"], "default": "user"},
+                    "scope": {
+                        "type": "string",
+                        "enum": ["user", "profile", "project", "chat"],
+                        "default": "user",
+                        "description": _SCOPE_GUIDE,
+                    },
                 },
                 "required": ["text", "topic"],
             },

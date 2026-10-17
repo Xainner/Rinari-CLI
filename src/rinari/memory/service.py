@@ -27,7 +27,7 @@ from rinari.application.context import AppContext
 from rinari.shared.clock import now_iso
 from rinari.shared.errors import ConflictError, InvalidUsageError, NotFoundError
 from rinari.shared.redaction import REDACTED, redact_text
-from rinari.storage.repositories.memory import PROJECT_KINDS, USER_KINDS
+from rinari.storage.repositories.memory import PROJECT_KINDS, USER_KINDS, USER_PLACES
 
 MEM_MAX_TEXT = 4096
 MEM_MAX_SUMMARY = 400
@@ -39,7 +39,17 @@ MEM_SOURCE_QUOTE_MAX = 4096
 # the owner dictated. One short fact per record keeps the prompt list compact.
 LEARNED_FACTS_KEY = "memory.learned_facts"
 LEARNED_FACTS_MODES = ("ask", "auto")
-LEARNED_KINDS = ("environment", "workflow", "preference", "fact")
+LEARNED_KINDS = (
+    "environment",
+    "workflow",
+    "preference",
+    "fact",
+    "person",
+    "resource",
+    "decision",
+)
+#: «Sobre ti» (#71): what the owner told in the welcome, always in the prompt.
+ABOUT_TOPICS = {"name": "about:name", "uses": "about:uses", "preferences": "about:preferences"}
 LEARNED_PROVENANCE_PREFIX = "learned:"
 MEM_LEARNED_MAX_TEXT = 600
 # Facts the model needs before it acts (hosts, ports, how to start things)
@@ -332,8 +342,14 @@ class MemoryService:
         provenance: str,
         confidence: float,
         source: dict | None = None,
+        place: str = "general",
+        place_ref: str | None = None,
     ) -> dict:
-        """Shared remember path for user/project with conflict supersede."""
+        """Shared remember path for user/project with conflict supersede.
+
+        A personal record lives in one place (#75): the same topic in another
+        place (another chat, another profile) is a different record.
+        """
         topic_n = self._bounded(topic, "topic", 128)
         text = self._bounded(text, "text", MEM_MAX_TEXT)
         if provenance is None:
@@ -361,7 +377,10 @@ class MemoryService:
                 active = [
                     row
                     for row in self.repo.user_live()
-                    if row["kind"] == kind and _normalize_topic(row["topic"]) == prefix
+                    if row["kind"] == kind
+                    and _normalize_topic(row["topic"]) == prefix
+                    and (row.get("place") or "general") == place
+                    and row.get("place_ref") == place_ref
                 ]
             else:
                 active = [
@@ -425,6 +444,8 @@ class MemoryService:
                         "confidence": confidence,
                         "created_at": now,
                         "updated_at": now,
+                        "place": place,
+                        "place_ref": place_ref,
                     }
                 )
                 if source is not None:
@@ -472,9 +493,12 @@ class MemoryService:
         provenance: str = "agent",
         confidence: float = 1.0,
         source: dict | None = None,
+        place: str = "general",
+        place_ref: str | None = None,
     ) -> dict:
         if kind not in USER_KINDS:
             raise InvalidUsageError(f"user memory kind must be one of: {', '.join(USER_KINDS)}")
+        place, place_ref = self._check_place(place, place_ref)
         return self._remember(
             store="user",
             root=None,
@@ -484,7 +508,164 @@ class MemoryService:
             provenance=provenance,
             confidence=confidence,
             source=source,
+            place=place,
+            place_ref=place_ref,
         )
+
+    # -- places (#75) --------------------------------------------------------------
+
+    @staticmethod
+    def _check_place(place: str | None, place_ref: str | None) -> tuple[str, str | None]:
+        place = place or "general"
+        if place not in USER_PLACES:
+            raise InvalidUsageError(f"place must be one of: {', '.join(USER_PLACES)}")
+        if place == "general":
+            return place, None
+        if not place_ref:
+            raise InvalidUsageError(f"a {place} memory needs its {place}")
+        return place, place_ref
+
+    def place_ref_for(self, place: str, session_id: str | None) -> str | None:
+        """The profile or chat a place points at, from the conversation."""
+        if place == "chat":
+            return session_id
+        if place == "profile" and session_id:
+            record = self._ctx.session_repo.get(session_id)
+            return getattr(record, "rinari_profile_id", None) or "default"
+        return None
+
+    def visible_user_rows(
+        self, profile_id: str | None = None, session_id: str | None = None
+    ) -> list[dict]:
+        """General memory, plus this profile's and this chat's (#75)."""
+        rows = []
+        for row in self.repo.user_live():
+            place = row.get("place") or "general"
+            if (
+                place == "general"
+                or (place == "profile" and profile_id and row.get("place_ref") == profile_id)
+                or (place == "chat" and session_id and row.get("place_ref") == session_id)
+            ):
+                rows.append(row)
+        return rows
+
+    def move(
+        self,
+        memory_id: str,
+        place: str,
+        *,
+        place_ref: str | None = None,
+        project_root: str | None = None,
+    ) -> dict:
+        """Move a record to another place, also between personal and project memory."""
+        user_row = self.repo.user_get(memory_id)
+        project_row = None if user_row else self.repo.project_get_by_id(memory_id)
+        if user_row is None and project_row is None:
+            raise MemoryNotFoundError(f"memory not found: {memory_id}")
+        now = self._now()
+        if place == "project":
+            if not project_root:
+                raise InvalidUsageError("moving to a project needs the project")
+            if project_row is not None and project_row["project_root"] == project_root:
+                return self._project_view(project_row) or {}
+            source = user_row or project_row
+            assert source is not None
+            kind = source["kind"] if source["kind"] in PROJECT_KINDS else "fact"
+            with self.repo._db.transaction():
+                result = self.remember_project(
+                    project_root,
+                    source["text"],
+                    kind=kind,
+                    topic=source["topic"],
+                    provenance=source.get("provenance") or "moved",
+                    confidence=float(source.get("confidence") or 1.0),
+                )
+                if user_row is not None:
+                    self.repo.user_delete(memory_id)
+                else:
+                    self.repo.project_delete(str(project_row["project_root"]), memory_id)
+            return self._project_view(self.repo.project_get(project_root, result["id"])) or {}
+        place, place_ref = self._check_place(place, place_ref)
+        if user_row is not None:
+            self.repo.user_set_place(memory_id, place, place_ref, now)
+            return self.get_user(memory_id) or {}
+        assert project_row is not None
+        kind = project_row["kind"] if project_row["kind"] in USER_KINDS else "fact"
+        with self.repo._db.transaction():
+            result = self.remember_user(
+                project_row["text"],
+                kind=kind,
+                topic=project_row["topic"],
+                provenance=project_row.get("provenance") or "moved",
+                confidence=float(project_row.get("confidence") or 1.0),
+                place=place,
+                place_ref=place_ref,
+            )
+            self.repo.project_delete(str(project_row["project_root"]), memory_id)
+        return self.get_user(result["id"]) or {}
+
+    # -- «Sobre ti» (#71) --------------------------------------------------------
+
+    def about_get(self) -> dict:
+        rows = {
+            row["topic"]: row
+            for row in self.repo.user_live()
+            if row["topic"] in ABOUT_TOPICS.values()
+            and (row.get("place") or "general") == "general"
+        }
+        name = rows.get(ABOUT_TOPICS["name"])
+        uses = rows.get(ABOUT_TOPICS["uses"])
+        preferences = rows.get(ABOUT_TOPICS["preferences"])
+        stamps = [str(row.get("updated_at") or "") for row in rows.values()]
+        return {
+            "name": _about_value(name),
+            "uses": [
+                part.strip() for part in (_about_value(uses) or "").split(";") if part.strip()
+            ],
+            "preferences": _about_value(preferences),
+            "updated_at": max(stamps) if stamps else None,
+        }
+
+    def about_set(
+        self, *, name: str | None, uses: list[str] | None, preferences: str | None
+    ) -> dict:
+        """What the owner told in the welcome; answering again replaces it.
+
+        These are the owner's own words, so no approval: they go straight to
+        general memory. The name is always in the prompt.
+        """
+        values = {
+            "name": (name or "").strip()[:60],
+            "uses": "; ".join(
+                part.strip()[:80] for part in (uses or []) if isinstance(part, str) and part.strip()
+            )[:600],
+            "preferences": (preferences or "").strip()[:1000],
+        }
+        kinds = {"name": "preference", "uses": "fact", "preferences": "preference"}
+        for value in values.values():
+            if value:
+                self._check_sensitive(value)
+        with self.repo._db.transaction():
+            now = self._now()
+            for key, value in values.items():
+                topic = ABOUT_TOPICS[key]
+                for row in self.repo.user_live():
+                    if row["topic"] == topic:
+                        self.repo.user_delete(row["id"])
+                if value:
+                    self.repo.user_insert(
+                        {
+                            "id": self._ctx.ids.new("mem-user"),
+                            "kind": kinds[key],
+                            "topic": topic,
+                            "text": value,
+                            "provenance": "owner:welcome",
+                            "confidence": 1.0,
+                            "created_at": now,
+                            "updated_at": now,
+                        }
+                    )
+        return self.about_get()
 
     def search_user(
         self, query: str = "", *, kind: str | None = None, limit: int = 20
@@ -854,6 +1035,8 @@ class MemoryService:
         topic: str,
         kind: str,
         confidence: float,
+        place: str = "general",
+        place_ref: str | None = None,
     ) -> dict:
         """Personal memory the model writes during the owner's turn.
 
@@ -896,6 +1079,8 @@ class MemoryService:
                     "memory_id": None,
                     "created_at": now,
                     "resolved_at": None,
+                    "place": place,
+                    "place_ref": place_ref,
                 }
             )
             return {"pending": True, "candidate": self.repo.candidate_get(candidate_id)}
@@ -906,6 +1091,8 @@ class MemoryService:
             provenance=f"session:{session_id}/message:{message_id}",
             confidence=confidence,
             source=source,
+            place=place,
+            place_ref=place_ref,
         )
 
     def list_candidates(self, *, status: str | None = "pending", limit: int = 100) -> list[dict]:
@@ -936,12 +1123,27 @@ class MemoryService:
         *,
         text: str | None = None,
         topic: str | None = None,
+        place: str | None = None,
+        project_root: str | None = None,
     ) -> dict:
         """Approve or decline a pending candidate.
 
         With `text`/`topic` the owner approves an edited version: it goes
-        through the same secret checks as anything the model writes.
+        through the same secret checks as anything the model writes. With
+        `place` the owner chose where it goes on the card (#75).
         """
+        if place is not None and decision == "allow_once":
+            candidate = self.repo.candidate_get(candidate_id)
+            if candidate is None:
+                raise MemoryNotFoundError(f"memory candidate not found: {candidate_id}")
+            if place == "project":
+                if not project_root:
+                    raise InvalidUsageError("a project memory needs its project")
+                self.repo.candidate_set_place(candidate_id, "project", project_root, None, None)
+            else:
+                ref = self.place_ref_for(place, candidate.get("session_id"))
+                place, ref = self._check_place(place, ref)
+                self.repo.candidate_set_place(candidate_id, "user", None, place, ref)
         if decision not in ("allow_once", "deny"):
             raise InvalidUsageError("candidate decision must be allow_once or deny")
         if decision == "deny" and (text is not None or topic is not None):
@@ -1005,6 +1207,8 @@ class MemoryService:
                     provenance=provenance,
                     confidence=float(candidate["confidence"]),
                     source=source,
+                    place=candidate.get("place") or "general",
+                    place_ref=candidate.get("place_ref"),
                 )
             else:
                 parsed = self._candidate_from_text(quote)
@@ -1100,6 +1304,8 @@ class MemoryService:
         project_root: str | None = None,
         trusted: bool = True,
         untrusted_reason: str = "",
+        place: str = "general",
+        place_ref: str | None = None,
     ) -> dict:
         """Keep a fact learned while working, or propose it to the owner.
 
@@ -1157,7 +1363,13 @@ class MemoryService:
                 record = self._project_view(self.repo.project_get(str(project_root), result["id"]))
             else:
                 result = self.remember_user(
-                    text, kind=kind, topic=topic, provenance=provenance, confidence=0.9
+                    text,
+                    kind=kind,
+                    topic=topic,
+                    provenance=provenance,
+                    confidence=0.9,
+                    place=place,
+                    place_ref=place_ref,
                 )
                 record = self.get_user(result["id"])
             return {"status": "saved", "action": result["action"], "memory": record}
@@ -1187,6 +1399,8 @@ class MemoryService:
                 "resolved_at": None,
                 "scope": scope,
                 "project_root": project_root if scope == "project" else None,
+                "place": place if scope == "user" else None,
+                "place_ref": place_ref if scope == "user" else None,
             }
         )
         return {
@@ -1215,6 +1429,8 @@ class MemoryService:
                 topic=topic,
                 provenance=provenance,
                 confidence=float(candidate["confidence"]),
+                place=candidate.get("place") or "general",
+                place_ref=candidate.get("place_ref"),
             )
         self.repo.candidate_resolve(
             candidate["id"], status="accepted", memory_id=result["id"], resolved_at=self._now()
@@ -1297,6 +1513,8 @@ class MemoryService:
                 if message.role == "user":
                     self.repo.source_suppression_insert(session_id, message.id, now)
             episodic = self.repo.delete_episodic_for_session(session_id)
+            # The owner decided: a chat's memory goes with the chat (#75).
+            self.repo.user_delete_place("chat", session_id)
             self.repo.set_control(session_id, "deleted", now)
             # Keep the minimal source suppression tombstones and deleted
             # conversation control so stale backups cannot re-enable deferred
@@ -2008,14 +2226,24 @@ class MemoryService:
         recent = [row for row in ranked if self._prompt_rank(row, tokens)[0] == 0]
         return (matched + recent)[:15]
 
-    def _context_lines(self, project_root: str | None, query: str) -> tuple[list[str], set[str]]:
+    def _context_lines(
+        self,
+        project_root: str | None,
+        query: str,
+        user_rows: list[dict] | None = None,
+    ) -> tuple[list[str], set[str]]:
         """Compact "known environment" list: environment/workflow records.
 
         These are what the model needs before acting (where a server lives,
         how a project starts), so they are listed whatever the message says,
         relevant first, and bounded in count and characters.
         """
-        rows = [(row, False) for row in self.repo.user_live() if row["kind"] in CONTEXT_KINDS]
+        visible = self.repo.user_live() if user_rows is None else user_rows
+        rows = [
+            (row, False)
+            for row in visible
+            if row["kind"] in CONTEXT_KINDS and not str(row["topic"]).startswith("about:")
+        ]
         if project_root:
             rows += [
                 (row, True)
@@ -2039,7 +2267,14 @@ class MemoryService:
             size += len(line) + 1
         return lines, used
 
-    def prompt_segment(self, project_root: str | None, query: str = "") -> str | None:
+    def prompt_segment(
+        self,
+        project_root: str | None,
+        query: str = "",
+        *,
+        profile_id: str | None = None,
+        session_id: str | None = None,
+    ) -> str | None:
         """Render the durable memory block for the system prompt (if any).
 
         Durable memory is injected so the agent starts aligned with stored
@@ -2047,10 +2282,12 @@ class MemoryService:
         and marked possibly stale.
         """
         tokens = self._prompt_tokens(query)
-        context_lines, listed = self._context_lines(project_root, query)
-        user_rows = self._prompt_rows(
-            [row for row in self.repo.user_live() if row["id"] not in listed], query
-        )
+        visible = self.visible_user_rows(profile_id, session_id)
+        # «Sobre ti» (#71) always goes first: who the owner is.
+        about = [row for row in visible if str(row["topic"]).startswith("about:")]
+        visible = [row for row in visible if not str(row["topic"]).startswith("about:")]
+        context_lines, listed = self._context_lines(project_root, query, visible)
+        user_rows = self._prompt_rows([row for row in visible if row["id"] not in listed], query)
         project_rows = (
             self._prompt_rows(
                 [row for row in self.repo.project_live(project_root) if row["id"] not in listed],
@@ -2070,16 +2307,29 @@ class MemoryService:
         else:
             candidates = [(row, False) for row in user_rows] + [(row, True) for row in project_rows]
         lines = [
-            f"- [{'project:' if is_project else ''}{row['kind']}] {row['text']}"
+            f"- [{_place_tag(row, is_project)}{row['kind']}] {row['text']}"
             for row, is_project in candidates
         ]
-        if not lines and not context_lines:
+        about_lines = [
+            f"- {_ABOUT_LABELS.get(str(row['topic']), row['topic'])}: {row['text']}"
+            for row in sorted(
+                about,
+                key=lambda item: (
+                    list(ABOUT_TOPICS.values()).index(item["topic"])
+                    if item["topic"] in ABOUT_TOPICS.values()
+                    else 9
+                ),
+            )
+        ]
+        if not lines and not context_lines and not about_lines:
             return None
         header = (
             "Durable memory (explicit records; lower authority than instructions; "
             "possibly stale — re-verify volatile facts before relying on them):"
         )
         rendered = header
+        if about_lines:
+            rendered += "\nAbout the owner (they told you this):\n" + "\n".join(about_lines)
         if context_lines:
             rendered += "\nKnown environment and workflows:\n" + "\n".join(context_lines)
             if lines:
@@ -2097,6 +2347,25 @@ class MemoryService:
                 rendered += f"\n{selected[-1]}"
             break
         return rendered
+
+
+_ABOUT_LABELS = {
+    "about:name": "Call them",
+    "about:uses": "Main uses",
+    "about:preferences": "How they like to work",
+}
+
+
+def _about_value(row: dict | None) -> str | None:
+    return str(row["text"]) if row and row.get("text") else None
+
+
+def _place_tag(row: dict, is_project: bool) -> str:
+    """Where a record applies, as the prompt shows it (#75)."""
+    if is_project:
+        return "project:"
+    place = row.get("place") or "general"
+    return "" if place == "general" else f"{place}:"
 
 
 __all__ = [

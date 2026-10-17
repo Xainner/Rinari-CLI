@@ -480,6 +480,9 @@ class EngineServer:
         self._dispatcher.register("memory.forget", self._memory_forget)
         self._dispatcher.register("memory.candidates.list", self._memory_candidates_list)
         self._dispatcher.register("memory.candidate.resolve", self._memory_candidate_resolve)
+        self._dispatcher.register("memory.move", self._memory_move)
+        self._dispatcher.register("memory.about.get", self._memory_about_get)
+        self._dispatcher.register("memory.about.set", self._memory_about_set)
         self._dispatcher.register("memory.settings.get", self._memory_settings_get)
         self._dispatcher.register("memory.settings.set", self._memory_settings_set)
         self._dispatcher.register("memory.export", self._memory_export)
@@ -1137,6 +1140,7 @@ class EngineServer:
         if scope == "all":
             rows.sort(key=lambda row: str(row.get("updated_at") or ""), reverse=True)
             rows = rows[:limit]
+        rows = self._with_place_labels(rows)
         return {"scope": scope, "records": rows, "count": len(rows)}
 
     def _memory_search(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1413,6 +1417,8 @@ class EngineServer:
             "decision",
             "text",
             "topic",
+            "place",
+            "project_root",
         }:
             raise EngineProtocolError(INVALID_PARAMS, "Candidate id and decision are required.")
         candidate_id = params.get("id")
@@ -1439,9 +1445,17 @@ class EngineServer:
                 TURN_RUNNING,
                 "Finish active turns before resolving a memory candidate.",
             )
+        place = params.get("place")
+        if place is not None and place not in ("general", "profile", "project", "chat"):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'place' is not a memory place.")
         try:
             row = self._services.memory.resolve_candidate(
-                candidate_id, decision, text=text, topic=topic
+                candidate_id,
+                decision,
+                text=text,
+                topic=topic,
+                place=place,
+                project_root=self._opt_str(params, "project_root"),
             )
         except MemoryNotFoundError as exc:
             raise EngineProtocolError("NOT_FOUND", exc.message) from exc
@@ -1458,6 +1472,80 @@ class EngineServer:
                 # The card refetches the list; a lost event is presentation.
                 logger.exception("memory.candidate.resolved event failed")
         return {"candidate": row}
+
+    def _memory_move(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Move a memory to another place (#75): general, a profile, a project or a chat."""
+        from rinari.memory.service import MemoryNotFoundError
+
+        self._memory_reject_unknown(params, {"id", "place", "place_ref", "project_root"})
+        memory_id = self._memory_id(params)
+        place = params.get("place")
+        if place not in ("general", "profile", "project", "chat"):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'place' is not a memory place.")
+        try:
+            record = self._services.memory.move(
+                memory_id,
+                place,
+                place_ref=self._opt_str(params, "place_ref"),
+                project_root=self._opt_str(params, "project_root"),
+            )
+        except MemoryNotFoundError as exc:
+            raise EngineProtocolError("NOT_FOUND", exc.message) from exc
+        except InvalidUsageError as exc:
+            raise EngineProtocolError(INVALID_PARAMS, exc.message) from exc
+        return {"record": self._with_place_labels([record])[0]}
+
+    def _memory_about_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        if params:
+            raise EngineProtocolError(INVALID_PARAMS, "memory.about.get takes no parameters.")
+        return self._services.memory.about_get()
+
+    def _memory_about_set(self, params: dict[str, Any]) -> dict[str, Any]:
+        """«Sobre ti» from the welcome (#71): the owner's own words, no approval."""
+        self._memory_reject_unknown(params, {"name", "uses", "preferences"})
+        uses = params.get("uses", [])
+        if not isinstance(uses, list) or not all(isinstance(item, str) for item in uses):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'uses' must be a list of strings.")
+        try:
+            return self._services.memory.about_set(
+                name=self._opt_str(params, "name"),
+                uses=uses,
+                preferences=self._opt_str(params, "preferences"),
+            )
+        except InvalidUsageError as exc:
+            raise EngineProtocolError(INVALID_PARAMS, exc.message) from exc
+
+    def _with_place_labels(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Each record says where it applies, by name (#75)."""
+        profiles: dict[str, str] = {}
+        try:
+            for profile in self._services.rinari_profiles.summaries():
+                profiles[str(profile.get("id"))] = str(profile.get("name") or profile.get("id"))
+        except Exception:
+            profiles = {}
+        out = []
+        for row in rows:
+            view = dict(row)
+            if view.get("scope") == "project":
+                view["place"] = "project"
+                view["place_ref"] = view.get("project_root")
+                root = str(view.get("project_root") or "")
+                view["place_label"] = root.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] or root
+            else:
+                place = view.get("place") or "general"
+                view["place"] = place
+                ref = view.get("place_ref")
+                if place == "profile":
+                    view["place_label"] = profiles.get(str(ref), str(ref))
+                elif place == "chat":
+                    record = self._services.ctx.session_repo.get(str(ref)) if ref else None
+                    view["place_label"] = (
+                        (getattr(record, "title", None) or str(ref)) if ref else ""
+                    )
+                else:
+                    view["place_label"] = None
+            out.append(view)
+        return out
 
     def _memory_ledger_export(self, params: dict[str, Any]) -> dict[str, Any]:
         if params:

@@ -311,7 +311,7 @@ def build_assembler_context(
         skill_catalog=catalog,
         skills=skills_tuple,
         task_state=task_state,
-        memory=_memory_text(services, root),
+        memory=_memory_text(services, root, record=record),
         pinned_context=_pinned_context_text(services, record.id, root),
         environment=environment,
     )
@@ -413,10 +413,20 @@ def _auto_learn(services: ServiceContainer) -> str:
         return "never"
 
 
-def _memory_text(services: ServiceContainer, root: Path | None, query: str = "") -> str | None:
-    """Durable memory block (user + project); None when no records exist."""
+def _memory_text(
+    services: ServiceContainer,
+    root: Path | None,
+    query: str = "",
+    record: SessionRecord | None = None,
+) -> str | None:
+    """Durable memory block (general + profile + project + chat); None when empty."""
     try:
-        return services.memory.prompt_segment(str(root) if root is not None else None, query=query)
+        return services.memory.prompt_segment(
+            str(root) if root is not None else None,
+            query=query,
+            profile_id=getattr(record, "rinari_profile_id", None) if record else None,
+            session_id=record.id if record else None,
+        )
     except Exception:
         # Memory is optional prompt context; a storage hiccup must not break
         # session assembly (the tools still surface the real error).
@@ -2370,7 +2380,7 @@ def _run_turn_unlocked(
     # Memory is refreshed for every turn so a new query can select a relevant
     # older record and panel edits/forgetting take effect without rebuilding
     # the session. The service bounds and scopes this segment.
-    memory = _memory_text(services, _root_of(session.record), query=message)
+    memory = _memory_text(services, _root_of(session.record), query=message, record=session.record)
     if memory != base.memory:
         base = replace(base, memory=memory)
         session.context.assembler_base = base
