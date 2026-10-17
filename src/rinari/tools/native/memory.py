@@ -159,6 +159,10 @@ def emit_remembered(ctx: ToolContext, record: dict | None) -> None:
             "text": record["text"],
             "kind": record["kind"],
             "scope": record.get("scope") or "user",
+            # Where it went (#75): the notice says it and offers «Mover».
+            "place": record.get("place")
+            or ("project" if record.get("scope") == "project" else "general"),
+            "place_ref": record.get("place_ref") or record.get("project_root"),
         },
     )
 
