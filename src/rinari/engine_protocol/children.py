@@ -42,6 +42,9 @@ PARENT_PREFIX = (
     "user's behalf), not typed by the user. Take it into account in this task.]\n\n"
 )
 REPORT_TEXT_CHARS = 4000
+# A turn the owner wrote in a child reaches its mother once the child has been
+# quiet this long: a quick back-and-forth in the child does not wake her each time.
+OWNER_QUIET_S = 30.0
 
 
 def isolation_key(root: Path) -> str:
@@ -59,6 +62,8 @@ def _git(root: Path, *args: str) -> tuple[int, str]:
 
 
 class ChildSessions:
+    owner_quiet_s = OWNER_QUIET_S
+
     def __init__(self, turns: Any) -> None:
         self._turns = turns
         self._services = turns._services
@@ -442,9 +447,13 @@ class ChildSessions:
     def after_turn(self, turn: Any) -> None:
         """Report a child's turn to its mother, and let a free mother go on."""
         try:
-            parent_id = self._report(turn)
-            if parent_id is not None:
-                self.wake(parent_id)
+            reported = self._report(turn)
+            if reported is not None:
+                parent_id, by_owner = reported
+                if by_owner:
+                    self._wake_when_quiet(parent_id, turn.session_id, turn.turn_id)
+                else:
+                    self.wake(parent_id)
             # A mother whose own turn ended may have reports waiting; not after
             # the owner pressed Stop.
             if (turn.terminal_event or "") != "turn.cancelled":
@@ -452,15 +461,34 @@ class ChildSessions:
         except Exception:
             logger.exception("child session report failed")
 
-    def _report(self, turn: Any) -> str | None:
-        """The child's report to its mother; returns the mother's id."""
+    def _wake_when_quiet(self, parent_id: str, child_id: str, turn_id: str) -> None:
+        """The owner's turn in a child reaches a free mother once the child stays quiet."""
+
+        def check() -> None:
+            try:
+                child = self.store.get(child_id)
+                if child is None or child.reported or self._busy(child_id):
+                    return
+                if (child.report or {}).get("turn_id") != turn_id:
+                    return  # a later turn will schedule its own
+                self.wake(parent_id, include_owner=True)
+            except Exception:
+                logger.exception("child session report failed")
+
+        timer = threading.Timer(self.owner_quiet_s, check)
+        timer.daemon = True
+        timer.start()
+
+    def _report(self, turn: Any) -> tuple[str, bool] | None:
+        """The child's report to its mother; returns the mother's id and whether
+        the owner wrote the turn."""
         store = self.store
         child = store.get(turn.session_id)
         if child is None:
             return None
         origin = turn.origin or {}
-        # A turn the owner wrote in the child still reports, without waking the
-        # mother: she reads it on her next turn (the owner was in the child).
+        # A turn the owner wrote in the child reports too; the mother is woken
+        # only once the child stays quiet (_wake_when_quiet).
         by_owner = origin.get("source") not in REPORTING_SOURCES
         terminal = (turn.terminal_event or "turn.completed").removeprefix("turn.")
         state = {"completed": "completed", "failed": "failed", "cancelled": "cancelled"}.get(
@@ -483,15 +511,16 @@ class ChildSessions:
         if updated is not None:
             record = self._services.sessions.show(child.child_session_id)
             self._emit(updated, record.title)
-        return None if by_owner else child.parent_session_id
+        return child.parent_session_id, by_owner
 
-    def wake(self, parent_session_id: str) -> dict[str, Any] | None:
+    def wake(self, parent_session_id: str, *, include_owner: bool = False) -> dict[str, Any] | None:
         """A free mother goes on once with the reports of children Rinari opened (A-8)."""
         store = self.store
         pending = [
             c
             for c in store.unreported(parent_session_id)
-            if c.origin in OPENED_BY_RINARI and not (c.report or {}).get("by_owner")
+            if c.origin in OPENED_BY_RINARI
+            and (include_owner or not (c.report or {}).get("by_owner"))
         ]
         if not pending:
             return None

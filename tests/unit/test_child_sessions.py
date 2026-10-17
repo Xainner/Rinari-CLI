@@ -109,11 +109,13 @@ def test_a_child_reports_and_a_free_mother_goes_on_once(server, tmp_path, routed
     assert listed["ok"] and listed["result"]["children"][0]["title"] == "Revisar la documentación"
 
 
-def test_the_owner_driving_a_child_reports_without_waking_the_mother(
+def test_the_owner_driving_a_child_reaches_the_mother_once_it_is_quiet(
     server, tmp_path, routed
 ) -> None:
     mother = _create_chat(server, tmp_path, tag="m2")
-    child = server._turns.children.create(
+    children = server._turns.children
+    children.owner_quiet_s = 0.6
+    child = children.create(
         mother, title="Búsquedas", prompt="Pregúntale qué quiere buscar.", origin="start"
     )["child_session_id"]
     # The brief reports and wakes the free mother once.
@@ -121,30 +123,31 @@ def test_the_owner_driving_a_child_reports_without_waking_the_mother(
     assert _wait(lambda: _idle(server, mother) and _idle(server, child))
     store = ChildStore(server._services.ctx.db)
     assert store.get(child).reported is True
-    # The owner writes in the child: the card shows it working, and its answer
-    # reaches the mother as a report, but she does not write on her own.
+    # The owner writes twice in the child, quickly: no wake in between.
     routed.scripts[child] = [
+        ModelResponse(content="¿Qué saga?", stop_reason=StopReason.END_TURN),
         ModelResponse(
-            content="Phoenix Wright es el abogado de Ace Attorney.", stop_reason=StopReason.END_TURN
-        )
+            content="Phoenix Wright es el abogado de Ace Attorney.",
+            stop_reason=StopReason.END_TURN,
+        ),
     ]
-    started = server.handle_line(
-        _req("o", "session.turn.start", {"session_id": child, "message": "busca phoenix wright"})
-    )
-    assert started["ok"], started
-    _collect_until(server, child)
-    assert _wait(lambda: _idle(server, child))
+    for n, text in enumerate(("busca phoenix wright", "ace attorney")):
+        started = server.handle_line(
+            _req(f"o{n}", "session.turn.start", {"session_id": child, "message": text})
+        )
+        assert started["ok"], started
+        _collect_until(server, child)
+        assert _wait(lambda: _idle(server, child))
     stored = store.get(child)
-    assert stored.state == "completed" and stored.reported is False
-    assert stored.report["by_owner"] is True
-    assert stored.report["summary"].startswith("Phoenix Wright")
-    time.sleep(0.5)
-    assert len(routed.requests[mother]) == 1, "the owner's turn does not wake the mother"
-    # Her next turn reads it.
-    server.handle_line(_req("t", "session.turn.start", {"session_id": mother, "message": "¿y?"}))
-    _collect_until(server, mother)
+    assert stored.state == "completed" and stored.report["by_owner"] is True
+    assert len(routed.requests[mother]) == 1, "not while the owner is still in the child"
+    # Once the child is quiet, the free mother tells the owner, once.
+    assert _wait(lambda: len(routed.requests[mother]) == 2)
     assert "Phoenix Wright" in _text(routed.requests[mother][-1])
+    assert _wait(lambda: _idle(server, mother))
     assert store.get(child).reported is True
+    time.sleep(1.0)
+    assert len(routed.requests[mother]) == 2
 
 
 def test_the_mother_writes_only_to_her_own_children(server, tmp_path, routed) -> None:

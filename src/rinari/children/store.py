@@ -22,6 +22,7 @@ ACTIVE_LIMIT = 4
 DEPTH_LIMIT = 2
 STATES = ("working", "completed", "failed", "cancelled", "waiting")
 SUMMARY_CHARS = 400
+PROMPT_REPORT_CHARS = 1500
 
 
 @dataclass(slots=True)
@@ -197,7 +198,13 @@ class ChildStore:
             report = child.report or {}
             files = report.get("files") or []
             shown = ", ".join(files[:6]) + (f" (+{len(files) - 6})" if len(files) > 6 else "")
-            summary = " ".join(str(report.get("summary") or "").split())[:SUMMARY_CHARS]
+            # A report not seen yet goes in longer: the mother tells the owner from it.
+            full = report.get("text") if not child.reported else None
+            summary = (
+                str(full).strip()[:PROMPT_REPORT_CHARS]
+                if full
+                else " ".join(str(report.get("summary") or "").split())[:SUMMARY_CHARS]
+            )
             lines.append(
                 f"- «{title}» ({child.child_session_id}): {child.state}{where}"
                 + (f" · files: {shown}" if shown else "")
