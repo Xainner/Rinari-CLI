@@ -1628,8 +1628,32 @@ class EngineServer:
                     )
                 else:
                     view["place_label"] = None
+            view["origin"] = self._memory_origin(view)
             out.append(view)
         return out
+
+    def _memory_origin(self, view: dict[str, Any]) -> dict[str, Any] | None:
+        """The conversation a memory came from, by name (#75): the one that saved
+        it, else the one its provenance names (facts learned before 0.4.0)."""
+        import re
+
+        session_id = view.get("source_session_id")
+        if not session_id:
+            sources = view.get("sources") or []
+            session_id = next((item.get("session_id") for item in sources if item), None)
+        if not session_id:
+            match = re.search(
+                r"(?:session[:/])(ses_[A-Za-z0-9]+)", str(view.get("provenance") or "")
+            )
+            session_id = match.group(1) if match else None
+        if not session_id:
+            return None
+        record = self._services.ctx.session_repo.get(str(session_id))
+        return {
+            "session_id": str(session_id),
+            "title": getattr(record, "title", None),
+            "exists": record is not None,
+        }
 
     def _memory_ledger_export(self, params: dict[str, Any]) -> dict[str, Any]:
         if params:

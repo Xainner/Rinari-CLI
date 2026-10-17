@@ -142,3 +142,62 @@ def test_protocol_about_move_and_place_labels(app_ctx, tmp_path) -> None:
         assert bad["error"]["code"] == "INVALID_PARAMS"
     finally:
         server.close()
+
+
+def test_a_memory_says_where_it_came_from_and_when_it_was_last_used(app_ctx) -> None:
+    """#75: the manager shows the origin conversation and what has not been used."""
+    from rinari.memory.service import LEARNED_PROVENANCE_PREFIX
+
+    memory = MemoryService(app_ctx)
+    _session(app_ctx, "ses_origin")
+    saved = memory.remember_user(
+        "Deploys go through Saturno",
+        kind="environment",
+        topic="deploy",
+        origin_session_id="ses_origin",
+    )
+    learned = memory.remember_user(
+        "Old learned fact",
+        kind="fact",
+        topic="old",
+        provenance=f"{LEARNED_PROVENANCE_PREFIX}session/ses_origin",
+    )
+    row = memory.get_user(saved["id"])
+    assert row["source_session_id"] == "ses_origin" and row["last_used_at"] is None
+    assert memory.get_user(learned["id"])["source_session_id"] is None
+
+    # Going into a prompt counts as a use.
+    assert "Saturno" in (memory.prompt_segment(None, "deploy") or "")
+    assert memory.get_user(saved["id"])["last_used_at"] is not None
+
+
+def test_the_list_names_the_origin_conversation(app_ctx, tmp_path) -> None:
+    import json
+
+    from rinari.application.services import build_services
+    from rinari.engine_protocol.server import EngineServer
+    from rinari.memory.service import LEARNED_PROVENANCE_PREFIX
+
+    services = build_services(app_ctx, user_home=tmp_path)
+    _session(app_ctx, "ses_origin")
+    services.memory.remember_user(
+        "Saved here", kind="fact", topic="a", origin_session_id="ses_origin"
+    )
+    services.memory.remember_user(
+        "Learned before 0.4.0",
+        kind="fact",
+        topic="b",
+        provenance=f"{LEARNED_PROVENANCE_PREFIX}session/ses_origin",
+    )
+    services.memory.remember_user("No origin", kind="fact", topic="c")
+    server = EngineServer(services, user_home=tmp_path)
+    try:
+        response = server.handle_line(
+            json.dumps({"id": "l", "method": "memory.list", "params": {"scope": "user"}})
+        )
+    finally:
+        server.close()
+    origins = {row["text"]: row["origin"] for row in response["result"]["records"]}
+    assert origins["Saved here"] == {"session_id": "ses_origin", "title": "t", "exists": True}
+    assert origins["Learned before 0.4.0"]["session_id"] == "ses_origin"
+    assert origins["No origin"] is None

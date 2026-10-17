@@ -16,6 +16,7 @@ Design rules (AGENTS.md 21, harness.md section 69):
 
 from __future__ import annotations
 
+import contextlib
 import difflib
 import hashlib
 import json
@@ -344,6 +345,7 @@ class MemoryService:
         source: dict | None = None,
         place: str = "general",
         place_ref: str | None = None,
+        origin_session_id: str | None = None,
     ) -> dict:
         """Shared remember path for user/project with conflict supersede.
 
@@ -446,6 +448,7 @@ class MemoryService:
                         "updated_at": now,
                         "place": place,
                         "place_ref": place_ref,
+                        "source_session_id": origin_session_id or (source or {}).get("session_id"),
                     }
                 )
                 if source is not None:
@@ -472,6 +475,7 @@ class MemoryService:
                         "confidence": confidence,
                         "created_at": now,
                         "updated_at": now,
+                        "source_session_id": origin_session_id,
                     }
                 )
             return {
@@ -495,6 +499,7 @@ class MemoryService:
         source: dict | None = None,
         place: str = "general",
         place_ref: str | None = None,
+        origin_session_id: str | None = None,
     ) -> dict:
         if kind not in USER_KINDS:
             raise InvalidUsageError(f"user memory kind must be one of: {', '.join(USER_KINDS)}")
@@ -510,6 +515,7 @@ class MemoryService:
             source=source,
             place=place,
             place_ref=place_ref,
+            origin_session_id=origin_session_id,
         )
 
     # -- places (#75) --------------------------------------------------------------
@@ -1421,6 +1427,7 @@ class MemoryService:
                 topic=topic,
                 provenance=provenance,
                 confidence=float(candidate["confidence"]),
+                origin_session_id=candidate.get("session_id"),
             )
         else:
             result = self.remember_user(
@@ -1431,6 +1438,7 @@ class MemoryService:
                 confidence=float(candidate["confidence"]),
                 place=candidate.get("place") or "general",
                 place_ref=candidate.get("place_ref"),
+                origin_session_id=candidate.get("session_id"),
             )
         self.repo.candidate_resolve(
             candidate["id"], status="accepted", memory_id=result["id"], resolved_at=self._now()
@@ -1983,6 +1991,7 @@ class MemoryService:
         topic: str,
         provenance: str = "agent",
         confidence: float = 1.0,
+        origin_session_id: str | None = None,
     ) -> dict:
         if kind not in PROJECT_KINDS:
             raise InvalidUsageError(
@@ -1997,6 +2006,7 @@ class MemoryService:
             text=text,
             provenance=provenance,
             confidence=confidence,
+            origin_session_id=origin_session_id,
         )
 
     def search_project(
@@ -2310,6 +2320,7 @@ class MemoryService:
             f"- [{_place_tag(row, is_project)}{row['kind']}] {row['text']}"
             for row, is_project in candidates
         ]
+        line_ids = [str(row["id"]) for row, _ in candidates]
         about_lines = [
             f"- {_ABOUT_LABELS.get(str(row['topic']), row['topic'])}: {row['text']}"
             for row in sorted(
@@ -2335,17 +2346,23 @@ class MemoryService:
             if lines:
                 rendered += "\nOther records:"
         selected: list[str] = []
-        for line in lines:
+        used = [str(row["id"]) for row in about] + [str(item) for item in listed]
+        for index, line in enumerate(lines):
             addition = f"\n{line}"
             if len(rendered) + len(addition) <= MEM_PROMPT_MAX_CHARS:
                 selected.append(line)
+                used.append(line_ids[index])
                 rendered += addition
                 continue
             remaining = MEM_PROMPT_MAX_CHARS - len(rendered) - 1
             if remaining > 3 and not selected:
                 selected.append(f"{line[: remaining - 1]}…")
+                used.append(line_ids[index])
                 rendered += f"\n{selected[-1]}"
             break
+        # What went in counts as used (#75: «sin usar hace tiempo»).
+        with contextlib.suppress(Exception):
+            self.repo.mark_used(used, self._now())
         return rendered
 
 

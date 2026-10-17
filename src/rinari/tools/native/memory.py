@@ -298,6 +298,7 @@ def memory_remember(input: dict, ctx: ToolContext) -> ToolResult:
                 topic=topic,
                 provenance=provenance or "agent",
                 confidence=float(confidence),
+                origin_session_id=ctx.session_id,
             )
         elif scope == "project":
             result = service.remember_project(
@@ -307,6 +308,7 @@ def memory_remember(input: dict, ctx: ToolContext) -> ToolResult:
                 topic=topic,
                 provenance=provenance or "agent",
                 confidence=float(confidence),
+                origin_session_id=ctx.session_id,
             )
         else:
             p_scope = input.get("pattern_scope", "global")

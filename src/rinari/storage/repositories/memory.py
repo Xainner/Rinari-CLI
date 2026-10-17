@@ -48,8 +48,9 @@ class MemoryRepository:
             """
             INSERT INTO user_memory (
                 id, kind, topic, text, provenance, confidence,
-                superseded_by, created_at, updated_at, revision, place, place_ref
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                superseded_by, created_at, updated_at, revision, place, place_ref,
+                source_session_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 row["id"],
@@ -64,8 +65,20 @@ class MemoryRepository:
                 row.get("revision", 1),
                 row.get("place") or "general",
                 row.get("place_ref"),
+                row.get("source_session_id"),
             ),
         )
+
+    def mark_used(self, memory_ids: list[str], used_at: str) -> None:
+        """These records just went into a prompt (#75: «sin usar hace tiempo»)."""
+        ids = sorted({str(item) for item in memory_ids if item})
+        if not ids:
+            return
+        marks = ", ".join("?" for _ in ids)
+        for table in ("user_memory", "project_memory"):
+            self._db.execute(
+                f"UPDATE {table} SET last_used_at = ? WHERE id IN ({marks})", (used_at, *ids)
+            )
 
     def user_set_place(
         self, memory_id: str, place: str, place_ref: str | None, updated_at: str
@@ -402,8 +415,8 @@ class MemoryRepository:
             """
             INSERT INTO project_memory (
                 id, project_root, kind, topic, text, provenance, confidence,
-                superseded_by, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                superseded_by, created_at, updated_at, source_session_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 row["id"],
@@ -416,6 +429,7 @@ class MemoryRepository:
                 row.get("superseded_by"),
                 row["created_at"],
                 row["updated_at"],
+                row.get("source_session_id"),
             ),
         )
 
