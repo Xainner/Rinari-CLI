@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from rinari.application.context import AppContext
-from rinari.application.project_service import ProjectService
+from rinari.application.project_service import ProjectService, default_permission
 from rinari.application.provider_service import ProviderService
 from rinari.application.reconcile import Finding, ResumeReconciler, trust_warning
 from rinari.policy.engine import PermissionProfile, normalize_profile
@@ -318,7 +318,7 @@ class SessionService:
         forced_chat: bool = False,
         *,
         mode: str | None = None,
-        permission_profile: str = "workspace",
+        permission_profile: str | None = None,
         rinari_profile_id: str | None = None,
         default_mode: str = "ask",
     ) -> SessionRecord:
@@ -339,6 +339,7 @@ class SessionService:
         now = self._now()
         project_id = None
         project_root_snapshot = None
+        project = None
         if project_root is not None:
             project = self._projects.upsert(project_root, rinari_profile_id=rinari_profile_id)
             project_id = project.id
@@ -349,7 +350,10 @@ class SessionService:
         normalized_mode = (mode or default_mode).strip().lower()
         if normalized_mode not in (*SESSION_MODES, "ask"):
             raise InvalidUsageError(f"Unknown session mode: {mode!r}.")
-        normalized_profile = normalize_profile(permission_profile).value
+        # Not asked for: the project's default mode, else Proyecto (P-5).
+        normalized_profile = normalize_profile(
+            permission_profile or default_permission(project) or "workspace"
+        ).value
         record = SessionRecord(
             id=self._ctx.ids.new("ses"),
             kind=kind,

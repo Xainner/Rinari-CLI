@@ -22,6 +22,8 @@ MAX_COMMAND = 4000
 DEFAULT_COMMAND_TIMEOUT_S = 600
 MAX_COMMAND_TIMEOUT_S = 3600
 MODES = ("plan", "build", "review")
+# None: the project's default permission mode (plan permisos v4 P-5).
+PERMISSION_PROFILES = ("read-only", "workspace", "full-access")
 MAX_NAME = 80
 MAX_PROMPT = 8000
 MAX_GRANTS = 50
@@ -136,6 +138,9 @@ class ScheduleService:
         mode = merged.get("mode") or "build"
         if mode not in MODES:
             raise ScheduledTaskError("Mode must be plan, build or review.")
+        permission_profile = merged.get("permission_profile") or None
+        if permission_profile is not None and permission_profile not in PERMISSION_PROFILES:
+            raise ScheduledTaskError("Permission mode must be read-only, workspace or full-access.")
         model = merged.get("model") or None
         if model is not None and (not isinstance(model, str) or not self._model_exists(model)):
             raise ScheduledTaskError(f"Unknown model: {model}")
@@ -162,6 +167,7 @@ class ScheduleService:
             "prompt": prompt.strip(),
             "project_id": project_id,
             "mode": mode,
+            "permission_profile": permission_profile,
             "model": model,
             "skills": list(dict.fromkeys(skills)),
             "grants": grants,

@@ -1098,6 +1098,19 @@
           "items": {
             "$ref": "#/$defs/projectFolder"
           }
+        },
+        "permission_profile": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "read-only",
+            "workspace",
+            "full-access",
+            null
+          ],
+          "description": "Plan permisos v4 P-5: the mode a new conversation of the project starts in (null: Proyecto/workspace). Set with project.update permission_profile ('' clears it)."
         }
       },
       "additionalProperties": true

@@ -2168,7 +2168,12 @@ rinari project current
 rinari project instructions
 rinari project instructions --show
 rinari project instructions --explain
+rinari project permission [read-only|workspace|full-access|none] [--path DIR]
 ```
+
+`project permission` shows or sets the mode new conversations of the project
+start in (none: Proyecto/workspace). A conversation keeps the mode it has;
+asking for one when creating it wins over the default.
 
 Instruction chain example:
 
@@ -2742,7 +2747,8 @@ skill; an installed skill is never removed by it. Secrets are refused.
 ```bash
 rinari schedule list
 rinari schedule add NAME --prompt TEXT (--at YYYY-MM-DDTHH:MM | --every MIN | --daily HH:MM | --weekly DAYS@HH:MM)
-                    [--reminder] [--project ID] [--mode plan|build|review] [--model ALIAS] [--allow CAPABILITY]...
+                    [--reminder] [--project ID] [--mode plan|build|review]
+                    [--permission read-only|workspace|full-access] [--model ALIAS] [--allow CAPABILITY]...
 rinari schedule enable|disable|remove ID
 rinari schedule runs ID [--limit N]
 ```
@@ -2751,6 +2757,7 @@ Tasks run in the desktop app's Engine (open or in the system tray), not in
 this command. `--allow` approves a capability in advance for every run;
 anything else a run needs asks in the app. Days of `--weekly` are 0 (Monday)
 to 6. Switching a task back on counts from now: missed runs are not caught up.
+Without `--permission` a run starts in its project's default mode.
 
 ---
 

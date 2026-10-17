@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from rinari.application.project_service import default_permission
 from rinari.application.provider_service import AddProviderInput
 from rinari.application.services import ServiceContainer
 from rinari.application.session_service import (
@@ -977,9 +978,10 @@ class EngineServer:
         # No mode given: the profile's, else BUILD (a desktop session is
         # born in a real mode).
         mode = params.get("mode")
-        permission_profile = params.get("permission_profile", "workspace")
-        if (mode is not None and not isinstance(mode, str)) or not isinstance(
-            permission_profile, str
+        # No permission_profile: the project's default mode, else Proyecto (P-5).
+        permission_profile = params.get("permission_profile")
+        if (mode is not None and not isinstance(mode, str)) or (
+            permission_profile is not None and not isinstance(permission_profile, str)
         ):
             raise EngineProtocolError(
                 INVALID_PARAMS,
@@ -2438,6 +2440,7 @@ class EngineServer:
             "pinned": project.pinned,
             "archived": project.archived,
             "rinari_profile_id": project.rinari_profile_id,
+            "permission_profile": default_permission(project),
             "created_at": project.created_at,
             "updated_at": project.updated_at,
             "last_opened_at": project.last_opened_at or project.updated_at,
@@ -2502,6 +2505,11 @@ class EngineServer:
         description = params.get("description")
         pinned = params.get("pinned")
         archived = params.get("archived")
+        permission_profile = params.get("permission_profile")
+        if permission_profile is not None and not isinstance(permission_profile, str):
+            raise EngineProtocolError(
+                INVALID_PARAMS, "Param 'permission_profile' must be a string ('' clears it)."
+            )
         if name is not None and not isinstance(name, str):
             raise EngineProtocolError(INVALID_PARAMS, "Param 'name' must be a string.")
         if description is not None and not isinstance(description, str):
@@ -2516,6 +2524,7 @@ class EngineServer:
             description=description,
             pinned=pinned,
             archived=archived,
+            permission_profile=permission_profile,
         )
         return {"project": self._project_view(project)}
 

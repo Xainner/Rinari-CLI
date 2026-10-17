@@ -236,6 +236,12 @@ class ScheduleRunner:
                 **({"project_id": task["project_id"]} if task["project_id"] else {}),
                 "title": f"⏰ {task['name']} · {stamp}",
                 "mode": task["mode"],
+                # None: the project's default mode decides (P-5).
+                **(
+                    {"permission_profile": task["permission_profile"]}
+                    if task.get("permission_profile")
+                    else {}
+                ),
             }
         )
         session_id = created["session"]["id"]

@@ -127,6 +127,37 @@ def add(ctx: typer.Context, path: str = typer.Argument(".")) -> None:
         typer.echo(f"added {record.canonical_root} ({record.id})")
 
 
+@app.command("permission")
+@with_error_handling("project.permission")
+def permission(
+    ctx: typer.Context,
+    profile: str | None = typer.Argument(
+        None, help="read-only, workspace, full-access, or none to clear it."
+    ),
+    path: str = typer.Option(".", "--path", help="A folder of the project."),
+) -> None:
+    """Show or set the mode new conversations of the project start in."""
+    from rinari.application.project_service import default_permission
+    from rinari.shared.errors import InvalidUsageError
+
+    with services(ctx) as s:
+        det = _detect(Path(path).resolve(), Path.home())
+        if det.project_root is None:
+            raise InvalidUsageError("No project here: pass --path to one of its folders.")
+        record = s.projects.upsert(det.project_root)
+        if profile is not None:
+            record = s.projects.update(
+                record.id, permission_profile="" if profile == "none" else profile
+            )
+        data = {"id": record.id, "permission_profile": default_permission(record)}
+        if is_json(ctx):
+            emit_json(success_envelope("project.permission", data))
+            return
+        typer.echo(
+            f"{record.canonical_root}: {data['permission_profile'] or 'workspace (default)'}"
+        )
+
+
 @app.command("remove")
 @with_error_handling("project.remove")
 def remove(ctx: typer.Context, path: str = typer.Argument(".")) -> None:

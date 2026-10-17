@@ -46,6 +46,18 @@ class ProjectFolderError(InvalidUsageError):
         self.checks = checks
 
 
+# Plan permisos v4 P-5: the mode a new conversation of the project starts in.
+DEFAULT_PERMISSION_KEY = "permission_profile"
+PROJECT_PERMISSION_PROFILES = ("read-only", "workspace", "full-access")
+
+
+def default_permission(project: ProjectRecord | None) -> str | None:
+    if project is None:
+        return None
+    value = (project.metadata or {}).get(DEFAULT_PERMISSION_KEY)
+    return value if value in PROJECT_PERMISSION_PROFILES else None
+
+
 class ProjectService:
     def __init__(self, ctx: AppContext) -> None:
         self._ctx = ctx
@@ -217,6 +229,7 @@ class ProjectService:
         description: str | None = None,
         pinned: bool | None = None,
         archived: bool | None = None,
+        permission_profile: str | None = None,
     ) -> ProjectRecord:
         record = self.get(project_id)
         if name is not None:
@@ -230,6 +243,17 @@ class ProjectService:
             record.pinned = pinned
         if archived is not None:
             record.archived = archived
+        if permission_profile is not None:
+            # "" clears it: new conversations go back to Proyecto (P-5).
+            if permission_profile == "":
+                record.metadata.pop(DEFAULT_PERMISSION_KEY, None)
+            elif permission_profile in PROJECT_PERMISSION_PROFILES:
+                record.metadata[DEFAULT_PERMISSION_KEY] = permission_profile
+            else:
+                raise InvalidUsageError(
+                    f"Unknown permission profile: {permission_profile!r}. "
+                    "Valid profiles: read-only, workspace, full-access."
+                )
         record.updated_at = self._now()
         self._ctx.project_repo.update(record)
         return record
