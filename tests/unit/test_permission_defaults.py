@@ -84,6 +84,8 @@ def test_a_new_conversation_starts_in_the_projects_default(server, tmp_path) -> 
         )
     )["project"]
     assert updated["permission_profile"] == "read-only"
+    recents = _ok(_call(server, "project.list_recent", {}))["projects"]
+    assert [item["permission_profile"] for item in recents] == ["read-only"]
     reader = _ok(_call(server, "session.create", {"project_id": project["id"]}))["session"]
     assert reader["permission_profile"] == "read-only"
     # Asking for a mode wins over the default, and older conversations keep theirs.

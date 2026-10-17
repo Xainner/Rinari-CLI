@@ -390,6 +390,7 @@ class ProjectService:
                 ),
                 "active_session_id": bound.get(project.canonical_root),
                 "rinari_profile_id": project.rinari_profile_id,
+                "permission_profile": default_permission(project),
                 "git_head": HEADS.get(project.canonical_root).as_dict(),
             }
             for project in ranked[:limit]
