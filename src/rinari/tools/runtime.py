@@ -182,6 +182,9 @@ class ToolRuntime:
         self._network_event_log = network_event_log
         self._receipts = OrderedDict()
         self._receipt_lock = threading.RLock()
+        # ToolRequested / ToolCompleted / ToolFailed. The Engine stores the
+        # activity events instead and turns these off (#91); the CLI keeps them.
+        self.legacy_events = True
 
     # ------------------------------------------------------------------
 
@@ -205,7 +208,8 @@ class ToolRuntime:
         if tool_call_id:
             requested["tool_call_id"] = tool_call_id
         requested.update(trace or {})
-        self._event("ToolRequested", requested)
+        if self.legacy_events:
+            self._event("ToolRequested", requested)
         request_id = arguments.get("request_id")
         tool = self.registry.get(tool_name) or self.registry.get(
             resolve_tool_name(tool_name, self.registry.names()) or ""
@@ -255,7 +259,8 @@ class ToolRuntime:
         if tool_call_id:
             completed["tool_call_id"] = tool_call_id
         completed.update(trace or {})
-        self._event("ToolCompleted" if result.ok else "ToolFailed", completed)
+        if self.legacy_events:
+            self._event("ToolCompleted" if result.ok else "ToolFailed", completed)
         return dataclasses.replace(
             result,
             tool_call_id=tool_call_id or result.tool_call_id,
@@ -973,6 +978,11 @@ class ToolRuntime:
             # hide credentials recognizable by shape (a password typed into a
             # command). The call itself already ran with the real arguments.
             self._emit(type_, redact_value(payload, self._redactor.secrets))
+
+    def redact_arguments(self, arguments):
+        """Arguments as the stored record keeps them: known secrets and
+        credential-shaped values hidden."""
+        return redact_value(self._redact_payload(arguments), self._redactor.secrets)
 
     def _redact_payload(self, payload):
         if isinstance(payload, str):

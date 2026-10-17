@@ -10,6 +10,7 @@ from datetime import datetime
 import typer
 
 from rinari.cli.deps import is_json, services, with_error_handling
+from rinari.runtime import tool_events
 
 from ..output import emit_json, success_envelope
 
@@ -82,11 +83,8 @@ def _tool_metrics(events):
     total_ok = 0
     total_err = 0
     durations: list[float] = []
-    for e in events:
-        if e.type not in ("ToolCompleted", "ToolFailed") or "tool_call_id" not in (e.payload or {}):
-            continue
-        payload = e.payload or {}
-        name = payload.get("name", "?")
+    for payload in tool_events.ends(events):
+        name = payload.get("tool") or "?"
         ok = bool(payload.get("ok"))
         entry = by_name.setdefault(name, {"calls": 0, "errors": 0, "duration_ms_sum": 0.0})
         entry["calls"] += 1
@@ -211,18 +209,18 @@ def _latency_metrics(events):
     tool_durations: list[float] = []
     turn_durations: list[float] = []
     started: list[str] = []
+    events = list(events)
+    for end in tool_events.ends(events):
+        d = end.get("duration_ms")
+        if isinstance(d, (int, float)):
+            tool_durations.append(d)
     for e in events:
-        if e.type in ("ToolCompleted", "ToolFailed") and "tool_call_id" in (e.payload or {}):
-            d = (e.payload or {}).get("duration_ms")
-            if isinstance(d, (int, float)):
-                tool_durations.append(d)
-        elif e.type == "AgentTurnStarted":
+        if e.type == "AgentTurnStarted":
             started.append(e.created_at)
-        elif e.type == "AgentTurnCompleted":
-            if started:
-                a, b = _parse_ts(started.pop(0)), _parse_ts(e.created_at)
-                if a is not None and b is not None:
-                    turn_durations.append((b - a).total_seconds())
+        elif e.type == "AgentTurnCompleted" and started:
+            a, b = _parse_ts(started.pop(0)), _parse_ts(e.created_at)
+            if a is not None and b is not None:
+                turn_durations.append((b - a).total_seconds())
     return {
         "tools_ms": {
             "count": len(tool_durations),

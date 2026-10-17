@@ -153,12 +153,17 @@ def build_report(
         )
         entry["cost"] = _cost(services, entry)
 
+    from rinari.runtime import tool_events
+
     tools: Counter[str] = Counter()
     failed = 0
-    for _row, payload in _events(services, ("ToolCompleted", "ToolFailed"), sessions, since):
-        name = str(payload.get("tool") or payload.get("name") or "tool")
-        tools[name] += 1
-        if payload.get("ok") is False:
+    ended = [
+        (row["type"], payload)
+        for row, payload in _events(services, tool_events.ENDED, sessions, since)
+    ]
+    for end in tool_events.ends(ended):
+        tools[str(end["tool"])] += 1
+        if not end["ok"]:
             failed += 1
     total_tools = sum(tools.values())
 

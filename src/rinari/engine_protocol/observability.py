@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from rinari.context.compact_state import CompactState
+from rinari.runtime import tool_events
 
 DEFAULT_READ_BYTES = 64 * 1024
 MAX_READ_BYTES = 1024 * 1024
@@ -21,6 +22,13 @@ def usage_from_events(events: list[Any]) -> dict[str, Any]:
     tool_calls = 0
     tool_ok = 0
     tool_err = 0
+    events = list(events)
+    for end in tool_events.ends(events):
+        tool_calls += 1
+        if end["ok"]:
+            tool_ok += 1
+        else:
+            tool_err += 1
     for event in events:
         payload = event.payload or {}
         if event.type == "ModelInvoked":
@@ -30,12 +38,6 @@ def usage_from_events(events: list[Any]) -> dict[str, Any]:
             tokens["output"] += usage.get("output_tokens") or 0
             tokens["cached"] += usage.get("cached_input_tokens") or 0
             tokens["reasoning"] += usage.get("reasoning_tokens") or 0
-        elif event.type in ("ToolCompleted", "ToolFailed") and "tool_call_id" in payload:
-            tool_calls += 1
-            if payload.get("ok"):
-                tool_ok += 1
-            else:
-                tool_err += 1
     return {
         "model_calls": model_calls,
         "tokens": tokens,

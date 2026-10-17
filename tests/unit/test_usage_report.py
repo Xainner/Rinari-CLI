@@ -70,9 +70,11 @@ def test_report_groups_by_model_and_warns(server, tmp_path) -> None:
     _event(server, sid, "ModelInvoked", _invoked("m-main", 30_000, 500, cached=20_000, write=900))
     _event(server, sid, "ModelInvoked", _invoked("m-main", 1_000, 0))
     _event(server, sid, "ModelInvoked", _invoked("m-sub", 2_000, 100, tools=[{"id": "x"}]))
-    _event(server, sid, "ToolCompleted", {"tool": "fs.read", "ok": True})
-    _event(server, sid, "ToolCompleted", {"tool": "fs.read", "ok": True})
-    _event(server, sid, "ToolFailed", {"tool": "shell.exec", "ok": False})
+    # An old session stored each call twice (#91): it still counts once.
+    _event(server, sid, "ToolCompleted", {"tool": "fs.read", "ok": True, "tool_call_id": "c1"})
+    _event(server, sid, "tool.completed", {"tool": "fs.read", "ok": True, "tool_call_id": "c1"})
+    _event(server, sid, "tool.completed", {"tool": "fs.read", "ok": True, "tool_call_id": "c2"})
+    _event(server, sid, "tool.failed", {"tool": "shell.exec", "ok": False, "tool_call_id": "c3"})
     for _ in range(3):
         _event(server, sid, "VisualPixelsDelivered", {"sources": [{"images": [{"sha256": "abc"}]}]})
     _event(server, sid, "governor.compact", {})

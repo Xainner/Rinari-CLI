@@ -723,15 +723,21 @@ class AgentLoop:
             ):
                 nonlocal tool_calls_requested, tool_calls_executed, tool_calls_rejected
                 cancel.throw_if_cancelled()
-                self._emit_activity(
-                    "tool.requested",
-                    {
-                        "tool_call_id": call.id,
-                        "tool": call.name,
-                        "arguments": call.arguments,
-                        "model_call_id": model_call_id,
-                    },
-                )
+                requested_payload: dict = {
+                    "tool_call_id": call.id,
+                    "tool": call.name,
+                    "arguments": call.arguments,
+                    "model_call_id": model_call_id,
+                }
+                if not self._tools.legacy_events:
+                    # The only stored record of the call (#91): the display
+                    # copy of `arguments` is cut, these stay whole (redacted).
+                    requested_payload["full_arguments"] = self._tools.redact_arguments(
+                        call.arguments
+                    )
+                    if turn_index is not None:
+                        requested_payload["turn_index"] = turn_index
+                self._emit_activity("tool.requested", requested_payload)
                 tool_calls_requested += 1
                 network = self._call_is_network(call.name, call.arguments)
                 if budget is not None:
@@ -953,7 +959,8 @@ class AgentLoop:
                         }
                         if turn_index is not None:
                             tool_completed_payload["turn_index"] = turn_index
-                        self._emit(ctx.session_id, EVENT_TOOL_COMPLETED, tool_completed_payload)
+                        if self._tools.legacy_events:
+                            self._emit(ctx.session_id, EVENT_TOOL_COMPLETED, tool_completed_payload)
                     loop.record_tool(
                         call.name,
                         call.arguments,

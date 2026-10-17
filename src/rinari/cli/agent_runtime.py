@@ -32,6 +32,7 @@ from rinari.projects.git import git_state
 from rinari.projects.worktree import WorktreeGuard, snapshot_worktree
 from rinari.prompts.assembler import AssemblerContext, ProjectInstruction, PromptAssembler
 from rinari.prompts.soul_sections import split_soul
+from rinari.runtime import tool_events
 from rinari.runtime.agent import AgentContext, AgentLoop, TurnResult
 from rinari.runtime.budget import BudgetMeter, TurnBudgetLimits
 from rinari.runtime.cancellation import CancellationToken
@@ -893,6 +894,9 @@ def build_agent_session(
         policy=policy,
         orchestrator=orchestrator,
     )
+    # The Engine stores the activity events of every call; the runtime's own
+    # would be a second copy (#91). The CLI stores no activity: it keeps them.
+    tools.legacy_events = activity_sink is None
     parent_runtime.append(tools)
     preparing("tools")
 
@@ -2067,9 +2071,8 @@ def _turn_requested_mutation(session: AgentSession, turn_index: int) -> bool:
         events = session.services.ctx.event_repo.list(session.record.id)
     except Exception:
         return False
-    for event in events:
-        payload = event.payload or {}
-        if event.type != "ToolRequested" or payload.get("turn_index") != turn_index:
+    for payload in tool_events.requests(events):
+        if payload.get("turn_index") != turn_index:
             continue
         name = str(payload.get("tool") or "")
         if name.split(".", 1)[0] in _BOOKKEEPING_NAMESPACES:
@@ -2141,9 +2144,8 @@ def _required_evidence(session: AgentSession, turn_index: int) -> tuple[str, ...
         events = session.services.ctx.event_repo.list(session.record.id)
     except Exception:
         return ("test",)
-    for event in events:
-        payload = event.payload or {}
-        if event.type != "ToolRequested" or payload.get("turn_index") != turn_index:
+    for payload in tool_events.requests(events):
+        if payload.get("turn_index") != turn_index:
             continue
         if payload.get("tool") not in ("fs.write", "fs.patch"):
             continue
