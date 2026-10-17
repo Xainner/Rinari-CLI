@@ -401,6 +401,8 @@
         "soul.update",
         "soul.remove",
         "soul.activate",
+        "soul.export",
+        "soul.import",
         "soul.get_effective",
         "soul.settings.get",
         "soul.settings.set",

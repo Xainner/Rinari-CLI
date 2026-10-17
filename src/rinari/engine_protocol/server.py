@@ -399,6 +399,8 @@ class EngineServer:
         self._dispatcher.register("soul.update", self._soul_update)
         self._dispatcher.register("soul.remove", self._soul_remove)
         self._dispatcher.register("soul.activate", self._soul_activate)
+        self._dispatcher.register("soul.export", self._soul_export)
+        self._dispatcher.register("soul.import", self._soul_import)
         self._dispatcher.register("soul.get_effective", self._soul_get_effective)
         self._dispatcher.register("soul.settings.get", self._soul_settings_get)
         self._dispatcher.register("soul.settings.set", self._soul_settings_set)
@@ -3238,10 +3240,9 @@ class EngineServer:
             raise EngineProtocolError(INVALID_PARAMS, "Param 'id' must be a non-empty string.")
         if not isinstance(name, str) or not name:
             raise EngineProtocolError(INVALID_PARAMS, "Param 'name' must be a non-empty string.")
-        if not isinstance(identity, str) or not identity:
-            raise EngineProtocolError(
-                INVALID_PARAMS, "Param 'identity' must be a non-empty string."
-            )
+        # Empty text is allowed: the soul speaks only with the level (#87).
+        if not isinstance(identity, str):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'identity' must be a string.")
         description = params.get("description") or ""
         version = params.get("version") or "1.0"
         if not isinstance(description, str) or not isinstance(version, str):
@@ -3251,6 +3252,25 @@ class EngineServer:
         definition = self._soul_store().create(
             soul_id, name=name, identity=identity, description=description, version=version
         )
+        return {"soul": {**self._soul_view(definition), "identity": definition.identity}}
+
+    def _soul_export(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Plan 0.4.0 #87: a soul into a folder the owner picked."""
+        soul_id = self._need_str(params, "id")
+        folder = self._need_str(params, "folder")
+        target = self._soul_store().export(soul_id, Path(folder))
+        return {"path": str(target), "files": ["soul.toml", "identity.md"]}
+
+    def _soul_import(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Plan 0.4.0 #87: a soul from files the owner picked (folder, or .toml + .md)."""
+        paths = params.get("paths")
+        if (
+            not isinstance(paths, list)
+            or not 1 <= len(paths) <= 4
+            or not all(isinstance(path, str) and path for path in paths)
+        ):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'paths' must list 1..4 paths.")
+        definition = self._soul_store().import_files([Path(path) for path in paths])
         return {"soul": {**self._soul_view(definition), "identity": definition.identity}}
 
     def _soul_update(self, params: dict[str, Any]) -> dict[str, Any]:

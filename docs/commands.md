@@ -923,6 +923,11 @@ the active soul; subagents stay functional. `soul.settings.get` →
 {character_intensity: "minimal" | "balanced" | "full"}` (same result;
 anything else is `INVALID_PARAMS`; capability `soul_character_intensity_v1`)
 scale how much of whichever Soul is in effect shows; default `balanced`.
+Plan 0.4.0 #87: `soul.export {id, folder}` writes `<folder>/<id>/{soul.toml,identity.md}`
+(`<id>-2`… never over an existing folder) and `soul.import {paths}` takes that
+folder, or the `.toml` and its `.md` (a lone `.toml` finds `identity.md` or
+`<name>.md` beside it), saved as a new custom soul with a free id. A soul's
+text may be empty: it then speaks only with the character level.
 Slice 9 adds the ecosystem surface: `mcp.list/get/create/remove/enable/disable/test`
 (remote servers, `mcp.update` and `mcp.probe`: see `mcp_remote_v1` below)
 (plain secrets rejected, test failures reported not raised), `plugin.list/get/enable/disable/diagnostics`
