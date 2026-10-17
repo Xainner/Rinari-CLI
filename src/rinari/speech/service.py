@@ -157,6 +157,9 @@ class SpeechService:
         return {
             **settings,
             "binary_found": binary is not None,
+            # Un build desde fuente no trae whisper.cpp: la app explica cómo
+            # configurarlo en vez de pedir que se reinstale.
+            "from_source": _from_source(),
             "model_installed": installed,
             "ready": binary is not None and installed,
             "models": models,
@@ -493,3 +496,9 @@ def _quiet() -> dict[str, Any]:
 
 
 __all__ = ["SpeechError", "SpeechService"]
+
+
+def _from_source() -> bool:
+    """The Engine runs from a checkout (src layout next to pyproject.toml)."""
+    package = Path(__file__).resolve().parents[1]
+    return (package.parent.parent / "pyproject.toml").is_file() and package.parent.name == "src"

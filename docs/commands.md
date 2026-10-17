@@ -4670,6 +4670,13 @@ the machine.
 - The CLI binary ships with the packaged Engine (`<engine>/speech/whisper-cli`,
   pinned in the Agent repo's `speech-manifest.json`, ~12 MB). `RINARI_WHISPER_BIN`
   overrides it with an absolute path to a file named `whisper-cli(.exe)`.
+  Without either, the first `whisper-cli(.exe)` in an absolute `PATH` entry is
+  used (never the current directory or a relative entry).
+- A build from source has no bundled binary: set `RINARI_WHISPER_BIN`, put
+  `whisper-cli` on the `PATH`, or run the Agent repo's
+  `python scripts/package-speech.py` and point `RINARI_WHISPER_BIN` at
+  `engine-dist\speech\whisper-cli.exe`. `speech.status` reports
+  `binary_found: false` until one is found.
 - Models are downloaded on first use into `~/.rinari/models/speech/`, checked
   against a pinned size and SHA-256 (`rinari.speech.catalog`): `base` (~60 MB),
   `small` (default, ~190 MB), `large-v3-turbo` (~575 MB).

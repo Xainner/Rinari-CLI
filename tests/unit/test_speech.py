@@ -86,6 +86,8 @@ def test_status_says_what_is_missing(services, fake_binary):
     assert status["binary_found"] is True
     assert status["model"] == "small" and status["model_installed"] is False
     assert status["ready"] is False
+    # The tests run from the checkout: the app shows how to set it up.
+    assert status["from_source"] is True
     assert status["language"] == ""  # never chosen: the client passes its UI language
     install(service)
     assert service.status()["ready"] is True
