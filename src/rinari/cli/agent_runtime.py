@@ -1011,7 +1011,14 @@ def _build_orchestrator(
     from rinari.agents.worktree_manager import WorktreeManager
     from rinari.policy.sandbox import FilesystemSandbox
 
-    worktrees = WorktreeManager(root) if (root is not None and (root / ".git").exists()) else None
+    # A read-only session (PLAN/REVIEW) delegates read-only reviewers; a
+    # worktree is a write, so it never gets one (#5).
+    writable = tool_ctx.profile is not PermissionProfile.READ_ONLY
+    worktrees = (
+        WorktreeManager(root)
+        if (writable and root is not None and (root / ".git").exists())
+        else None
+    )
 
     def sandbox_factory(profile: PermissionProfile, cwd: Path, write_roots) -> FilesystemSandbox:
         read_root = root if root is not None else tool_ctx.user_home
@@ -1046,6 +1053,11 @@ def _build_orchestrator(
     )
 
     def orchestrator_event(session_id: str, event: str, payload: dict) -> None:
+        if event == "agent.activity":
+            # A follow-up instruction (#25): turn activity, persisted by the sink.
+            if activity_sink is not None:
+                activity_sink("agent.activity", dict(payload))
+            return
         _persist_event(services, record.id, event, payload)
         if activity_sink is None:
             return
@@ -1069,6 +1081,12 @@ def _build_orchestrator(
         event_sink=orchestrator_event,
     )
     orchestrator.bind_session(record.id)
+    # The orchestrator is built per turn: nicknames of earlier turns stay taken (#73).
+    with contextlib.suppress(Exception):
+        orchestrator.seed_nicknames(
+            (event.payload or {}).get("nickname")
+            for event in services.ctx.event_repo.list(record.id, types=["agent.started"])
+        )
     orchestrator.set_project_root(root)
     return orchestrator
 

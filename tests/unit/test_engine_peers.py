@@ -1175,3 +1175,48 @@ def test_init_needs_a_project(server, tmp_path, models):
     response = _call(server, "project.init.start", {"session_id": chat})
     assert response["ok"] is False
     assert response["error"]["code"] == "INVALID_PARAMS"
+
+
+# -- subagents in a read-only session (plan 0.4.0 #5) ---------------------------
+
+
+def test_a_read_only_session_delegates_without_worktrees(server, tmp_path, models):
+    import subprocess
+
+    from rinari.cli.agent_runtime import build_agent_session
+    from rinari.policy.engine import PermissionProfile
+
+    folder, session = _trusted_project(server, tmp_path, "repo")
+    subprocess.run(["git", "init", "-q"], cwd=folder, check=True)
+    services = server._services
+    record = services.sessions.show(session)
+    models[session] = ScriptedModel([_answer()])
+    for profile, expect_worktrees in (
+        (PermissionProfile.READ_ONLY, False),
+        (PermissionProfile.WORKSPACE, True),
+    ):
+        built = build_agent_session(
+            services, record, interactive=False, user_home=tmp_path / "home", profile=profile
+        )
+        try:
+            assert (built.orchestrator._worktrees is not None) is expect_worktrees, profile
+        finally:
+            built.end()
+
+
+def test_review_spawns_reviewers_that_cannot_write(server, tmp_path, models):
+    """In REVIEW the owner's «two reviewers in parallel» works; they stay read-only."""
+    folder, session = _trusted_project(server, tmp_path, "review")
+    _ok(server, "session.mode.set", {"ref": session, "mode": "review"})
+    models[session] = ScriptedModel(
+        [
+            _tool("a", "agent.spawn", {"agent": "reviewer", "objective": "revisa la api"}),
+            _tool("b", "agent.spawn", {"agent": "reviewer", "objective": "revisa la ui"}),
+            _answer("lanzados"),
+        ]
+    )
+    _start(server, session, "dos revisores en paralelo")
+    _wait_terminal(server, session)
+    outputs = [json.loads(output) for output in _tool_results(models[session])[:2]]
+    assert all(output["ok"] for output in outputs), outputs
+    assert not any((folder / name).exists() for name in (".rinari-worktrees", "worktrees"))

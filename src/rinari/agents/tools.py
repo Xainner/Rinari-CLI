@@ -11,10 +11,12 @@ Tool semantics (TODO.md "Agent Orchestrator"):
     agent.synthesize merge several results: duplicate work, contradictions,
                      task-graph join
 
-Spawning is classified `state.write`: allowed in workspace profiles, denied
-in read-only ones (a review-only session cannot spawn writers or readers).
-The orchestrator itself is the source of truth for limits; these tools only
-delegate.
+Spawning, messaging and cancelling are classified `agent.delegate` (plan
+0.4.0 #5): allowed in every profile, because a child inherits the parent's
+profile and can only narrow it. A read-only (PLAN/REVIEW) session gets
+read-only reviewers, and its spawns never create a worktree. `state.write`
+keeps guarding validation records. The orchestrator itself is the source of
+truth for limits; these tools only delegate.
 """
 
 from __future__ import annotations
@@ -154,7 +156,10 @@ def _agent_tools(host: AgentToolHost):
             return _err(None, "agent_id and text required")
         try:
             delivery = orch.deliver(
-                agent_id, text, parent_budget=getattr(ctx, "parent_budget", None)
+                agent_id,
+                text,
+                parent_budget=getattr(ctx, "parent_budget", None),
+                steer_id=getattr(ctx, "tool_call_id", "") or None,
             )
         except Exception as exc:
             return _err(getattr(exc, "code", ""), str(exc))
@@ -210,7 +215,7 @@ def _agent_tools(host: AgentToolHost):
         return ToolResult(ok=True, data=report, origin="agents")
 
     read = ("state.read",)
-    write = ("state.write",)
+    write = ("agent.delegate",)
     return [
         ToolDefinition(
             name="agent.spawn",
@@ -233,7 +238,7 @@ def _agent_tools(host: AgentToolHost):
             capabilities=write,
             side_effects="local_reversible",
             idempotent=False,
-            classify=lambda _i: ClassifiedAction("state.write"),
+            classify=lambda _i: ClassifiedAction("agent.delegate"),
             handler=spawn,
         ),
         ToolDefinition(
@@ -287,7 +292,7 @@ def _agent_tools(host: AgentToolHost):
             capabilities=write,
             side_effects="local_reversible",
             idempotent=False,
-            classify=lambda _i: ClassifiedAction("state.write"),
+            classify=lambda _i: ClassifiedAction("agent.delegate"),
             handler=message,
         ),
         ToolDefinition(
@@ -301,7 +306,7 @@ def _agent_tools(host: AgentToolHost):
             capabilities=write,
             side_effects="local_reversible",
             idempotent=False,
-            classify=lambda _i: ClassifiedAction("state.write"),
+            classify=lambda _i: ClassifiedAction("agent.delegate"),
             handler=cancel,
         ),
         ToolDefinition(

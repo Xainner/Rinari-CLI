@@ -318,8 +318,10 @@ def test_message_queue_feeds_spec():
         def run(self, spec):
             import queue as _q
 
+            from rinari.agents.orchestrator import message_text
+
             try:
-                text = spec.messages.get(timeout=5)
+                text = message_text(spec.messages.get(timeout=5))
             except _q.Empty:
                 text = None
             return AgentResult(
@@ -471,9 +473,10 @@ def test_agent_tools_registered_and_classified():
         "agent.result",
         "agent.synthesize",
     }
-    # spawn is a session mutation: state.write (denied in read-only).
+    # Delegating has its own capability (plan 0.4.0 #5), allowed in every
+    # profile: the child inherits the parent's profile and only narrows it.
     action = tools["agent.spawn"].classify_action({})
-    assert action.capability == "state.write"
+    assert action.capability == "agent.delegate"
     assert tools["agent.wait"].classify_action({}).capability == "state.read"
 
     registry = ToolRegistry()
@@ -496,10 +499,12 @@ def test_agent_tools_registered_and_classified():
         artifact_root=Path("/tmp/artifacts"),
         clock=FakeClock(),
     )
-    result = runtime.execute("agent.spawn", {"agent": "explore", "objective": "x"}, scope_ro_ctx)
-    assert result.ok is False  # read-only: cannot spawn
-    assert result.error is not None
-    assert "POLICY_DENIED" in str(result.error.code)
+    # REVIEW/PLAN (read-only) spawn read-only reviewers in parallel (#5).
+    for objective in ("review the api", "review the ui"):
+        result = runtime.execute(
+            "agent.spawn", {"agent": "reviewer", "objective": objective}, scope_ro_ctx
+        )
+        assert result.ok is True, result.error
 
     scope_w_ctx = ToolContext(
         session_id="s1",
@@ -1408,3 +1413,103 @@ def test_coordinator_messages_reach_a_running_subagent_loop():
     assert messages[0].content.endswith("check the tests too")
     assert messages[0].display_content == "check the tests too"
     assert _coordinator_messages(spec) == []
+
+
+# -- instructions to subagents keep their own id (plan 0.4.0 #25) ---------------
+
+
+def test_each_instruction_to_a_running_agent_has_its_own_steer_id():
+    import queue as _q
+
+    from rinari.agents.orchestrator import CoordinatorMessage
+    from rinari.agents.runtime import _coordinator_messages
+
+    started, release = threading.Event(), threading.Event()
+    seen: list = []
+
+    class SlowRunner(FakeRunner):
+        def run(self, spec):
+            started.set()
+            release.wait(5)
+            seen.extend(_coordinator_messages(spec))
+            return super().run(spec)
+
+    orch = _orchestrator(SlowRunner())
+    agent_id = orch.spawn("explore", "task")
+    assert started.wait(5)
+    orch.deliver(agent_id, "uno", steer_id="call_1")
+    orch.deliver(agent_id, "dos")
+    orch.deliver(agent_id, "tres")
+    release.set()
+    orch.wait(agent_id)
+    ids = [message.origin["steer_id"] for message in seen]
+    assert ids[0] == "call_1"
+    assert len(set(ids)) == 3
+    assert all(message.origin["source"] == "coordinator" for message in seen)
+    assert [message.display_content for message in seen] == ["uno", "dos", "tres"]
+    assert isinstance(CoordinatorMessage("x", "y"), CoordinatorMessage)
+    assert _q  # imported for symmetry with the runner tests
+
+
+def test_a_follow_up_to_a_finished_agent_is_shown_as_an_instruction_first():
+    orch = _orchestrator(FakeRunner())
+    agent_id = orch.spawn("explore", "map the auth module")
+    orch.wait(agent_id)
+    orch.deliver(agent_id, "now list its tests", steer_id="call_9")
+    orch.wait(agent_id)
+    names = [event for event, _ in orch.events]
+    activity = next(payload for event, payload in orch.events if event == "agent.activity")
+    assert names.index("agent.activity") < len(names) - 1 - names[::-1].index("SubagentStart")
+    assert activity.pop("nickname")  # every agent has one (#73)
+    assert activity == {
+        "agent_id": agent_id,
+        "agent": "explore",
+        "child_event": "steer.applied",
+        "steer_id": "call_9",
+        "content": "now list its tests",
+        "source": "coordinator",
+        "follow_up": True,
+    }
+
+
+# -- nicknames (plan 0.4.0 #73) -----------------------------------------------------
+
+
+def test_subagents_get_distinct_star_nicknames_that_survive_a_follow_up():
+    from rinari.agents.nicknames import STAR_NAMES
+
+    orch = _orchestrator(FakeRunner())
+    orch.bind_session("ses_a")
+    first = orch.spawn("explore", "a")
+    second = orch.spawn("explore", "b")
+    names = {item["id"]: item["nickname"] for item in orch.list()}
+    assert names[first] != names[second]
+    assert {names[first], names[second]} <= set(STAR_NAMES)
+    orch.wait(first)
+    orch.deliver(first, "again")
+    orch.wait(first)
+    assert {item["id"]: item["nickname"] for item in orch.list()}[first] == names[first]
+    started = [payload for event, payload in orch.events if event == "SubagentStart"]
+    assert started[0]["nickname"] == names[first]
+
+
+def test_the_same_conversation_shuffles_the_same_way_and_never_repeats():
+    from rinari.agents.nicknames import STAR_NAMES, next_nickname
+
+    assert next_nickname("ses_x", set()) == next_nickname("ses_x", set())
+    used: set[str] = set()
+    for _ in range(len(STAR_NAMES) + 3):
+        used.add(next_nickname("ses_x", used))
+    assert len(used) == len(STAR_NAMES) + 3
+    assert any(name.endswith(" II") for name in used)
+
+
+def test_nicknames_of_earlier_turns_stay_taken():
+    from rinari.agents.nicknames import next_nickname
+
+    taken = next_nickname("ses_b", set())
+    orch = _orchestrator(FakeRunner())
+    orch.bind_session("ses_b")
+    orch.seed_nicknames([taken, None, ""])
+    agent_id = orch.spawn("explore", "a")
+    assert {item["id"]: item["nickname"] for item in orch.list()}[agent_id] != taken

@@ -467,6 +467,10 @@ class PolicyEngine:
             # Managing an approved process, reading harness state, or loading
             # tools into this session's exposure: no outside effect.
             return self._allow(capability, "local harness bookkeeping", risk, risk_class)
+        if capability == "agent.delegate":
+            # Subagents (#5): the child inherits this profile and can only
+            # narrow it, so a read-only session spawns read-only reviewers.
+            return self._allow(capability, "delegating within this profile", risk, risk_class)
         if capability == CAPABILITY_STATE_WRITE:
             if read_only:
                 return self._deny(

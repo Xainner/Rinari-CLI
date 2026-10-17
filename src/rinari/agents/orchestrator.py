@@ -16,6 +16,7 @@ import itertools
 import queue
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -28,6 +29,7 @@ from rinari.agents.definition import (
     AgentBudget,
     AgentDefinition,
 )
+from rinari.agents.nicknames import next_nickname
 from rinari.runtime.cancellation import CancellationToken
 
 _terminal_states = ("completed", "failed", "cancelled", "budget")
@@ -81,7 +83,9 @@ class SubagentRunSpec:
     budget: AgentBudget = field(default_factory=AgentBudget)
     token: CancellationToken = field(default_factory=CancellationToken)
     worktree: Any | None = None  # WorktreeInfo | None (writers only)
-    messages: queue.Queue[str] = field(default_factory=queue.Queue)
+    messages: queue.Queue[Any] = field(default_factory=queue.Queue)
+    # Display name (#73): «Vega». The id stays the key for the tools.
+    nickname: str = ""
     # Spawning turn's BudgetMeter for the hierarchical ledger (P0.10);
     # None keeps the legacy standalone meter.
     parent_budget: Any | None = None
@@ -91,11 +95,23 @@ class SubagentRunner(Protocol):
     def run(self, spec: SubagentRunSpec) -> AgentResult: ...
 
 
-def _drain(messages: queue.Queue[str]) -> list[str]:
+@dataclass(frozen=True, slots=True)
+class CoordinatorMessage:
+    """An `agent.message` for a running agent, with the id the desktop shows it by (#25)."""
+
+    text: str
+    steer_id: str
+
+
+def message_text(item: Any) -> str:
+    return item.text if isinstance(item, CoordinatorMessage) else str(item)
+
+
+def _drain(messages: queue.Queue[Any]) -> list[str]:
     drained: list[str] = []
     while True:
         try:
-            drained.append(messages.get_nowait())
+            drained.append(message_text(messages.get_nowait()))
         except queue.Empty:
             return drained
 
@@ -181,6 +197,8 @@ class AgentOrchestrator:
         self.max_depth = max_depth
         self.max_total = max_total
         self._event_sink = event_sink
+        # Nicknames already given in this conversation, earlier turns included (#73).
+        self._nicknames: set[str] = set()
         self._clock = clock
         self._agents: dict[str, dict] = {}
         self._spawned_total = 0
@@ -190,6 +208,11 @@ class AgentOrchestrator:
         self._project_root_value: Path | None = None
         self._collected_results: set[str] = set()
         self._announced: set[tuple[str, int]] = set()
+
+    def seed_nicknames(self, names) -> None:
+        """Nicknames given in earlier turns of this conversation: never repeated (#73)."""
+        with self._lock:
+            self._nicknames.update(str(name) for name in names if name)
 
     def bind_session(self, session_id: str) -> None:
         self._session_id = session_id
@@ -230,6 +253,9 @@ class AgentOrchestrator:
             raise OrchestratorError("AGENT_DEFINITION", "empty objective")
 
         agent_id = f"agt_{next(self._ids):03d}"
+        with self._lock:
+            nickname = next_nickname(self._session_id or "", self._nicknames)
+            self._nicknames.add(nickname)
         token = CancellationToken()
         spec = SubagentRunSpec(
             agent_id=agent_id,
@@ -243,9 +269,11 @@ class AgentOrchestrator:
             token=token,
             worktree=self._prepare_worktree(definition, agent_id, use_worktree),
             parent_budget=parent_budget,
+            nickname=nickname,
         )
         state = {
             "id": agent_id,
+            "nickname": nickname,
             "agent": agent,
             "objective": objective,
             "state": "spawning",
@@ -370,7 +398,14 @@ class AgentOrchestrator:
     def message(self, agent_id: str, text: str, *, parent_budget: Any | None = None) -> bool:
         return self.deliver(agent_id, text, parent_budget=parent_budget) in ("queued", "resumed")
 
-    def deliver(self, agent_id: str, text: str, *, parent_budget: Any | None = None) -> str:
+    def deliver(
+        self,
+        agent_id: str,
+        text: str,
+        *,
+        parent_budget: Any | None = None,
+        steer_id: str | None = None,
+    ) -> str:
         """Hand a follow-up instruction to an agent; say how it gets it.
 
         `queued`: the running agent reads it before its next step.
@@ -380,9 +415,12 @@ class AgentOrchestrator:
         here used to drop the instruction.
         """
         state = self._state(agent_id)
+        # Each instruction has its own id: the desktop showed only the last
+        # one, because they all shared `steer:undefined` (#25).
+        steer_id = steer_id or f"steer_{uuid.uuid4().hex[:12]}"
         with self._lock:
             if state["state"] == "running":
-                state["messages"].put(str(text))
+                state["messages"].put(CoordinatorMessage(str(text), steer_id))
                 return "queued"
             if state["state"] not in _terminal_states:
                 raise OrchestratorError(
@@ -414,6 +452,21 @@ class AgentOrchestrator:
                 follow_ups=state.get("follow_ups", 0) + 1,
             )
             self._collected_results.discard(agent_id)
+        # The follow-up is shown as an instruction of the coordinator before
+        # the agent runs again on it; it used to show only the first objective.
+        self._emit_hook(
+            "agent.activity",
+            {
+                "agent_id": agent_id,
+                "nickname": state.get("nickname", ""),
+                "agent": state["definition"].name,
+                "child_event": "steer.applied",
+                "steer_id": steer_id,
+                "content": str(text),
+                "source": "coordinator",
+                "follow_up": True,
+            },
+        )
         self._emit_hook("SubagentStart", self._hook_payload(state))
         thread.start()
         return "resumed"
@@ -579,6 +632,7 @@ class AgentOrchestrator:
         result = state["result"]
         return {
             "id": state["id"],
+            "nickname": state.get("nickname", ""),
             "agent": state["agent"],
             "objective": state["objective"],
             "state": state["state"],
@@ -594,6 +648,7 @@ class AgentOrchestrator:
         result = state["result"]
         return {
             "agent_id": state["id"],
+            "nickname": state.get("nickname", ""),
             "agent": state["agent"],
             "objective": state["objective"][:200],
             "session_id": self._session_id,

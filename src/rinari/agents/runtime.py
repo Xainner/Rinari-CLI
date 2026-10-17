@@ -514,6 +514,7 @@ class _SubagentRunner:
                 {
                     **payload,
                     "agent_id": spec.agent_id,
+                    "nickname": spec.nickname,
                     "agent": spec.definition.name,
                     "child_event": event,
                     "objective": spec.objective,
@@ -580,19 +581,24 @@ __all__ = ["SubagentRuntimeConfig", "_LinkedToken", "make_subagent_runner"]
 def _coordinator_messages(spec: SubagentRunSpec) -> list:
     import queue
 
+    from rinari.agents.orchestrator import CoordinatorMessage
     from rinari.models.types import ChatMessage
 
     messages = []
     while True:
         try:
-            text = spec.messages.get_nowait()
+            item = spec.messages.get_nowait()
         except queue.Empty:
             return messages
+        text = item.text if isinstance(item, CoordinatorMessage) else str(item)
+        origin: dict = {"kind": "coordinator", "source": "coordinator"}
+        if isinstance(item, CoordinatorMessage):
+            origin["steer_id"] = item.steer_id
         messages.append(
             ChatMessage(
                 role="user",
                 content=f"Instruction from the main agent (coordinator):\n{text}",
                 display_content=text,
-                origin={"kind": "coordinator"},
+                origin=origin,
             )
         )

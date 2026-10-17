@@ -1103,6 +1103,11 @@ class AgentLoop:
                 {
                     "steer_id": (message.origin or {}).get("steer_id"),
                     "content": message.display_content or message.content,
+                    **(
+                        {"source": (message.origin or {}).get("source")}
+                        if (message.origin or {}).get("source")
+                        else {}
+                    ),
                 },
             )
 

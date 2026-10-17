@@ -73,6 +73,7 @@ PEER_ORIGIN_DENIED_CAPABILITIES = frozenset(
         "network.outbound",
         "mcp.call",
         "state.write",
+        "agent.delegate",
         "git.local",
     }
 )
