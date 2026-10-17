@@ -562,6 +562,7 @@
         "execution.settings.set",
         "advanced.settings.get",
         "advanced.settings.set",
+        "storage.clean",
         "storage.usage",
         "session.child.start",
         "process.orphans.list",

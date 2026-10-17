@@ -99,3 +99,45 @@ def test_storage_usage_measures_each_part_of_the_home(server) -> None:
     assert sections["logs"]["bytes"] >= 300
     assert sections["cache"]["files"] >= 1
     assert got["result"]["total"] == sum(row["bytes"] for row in got["result"]["sections"])
+
+
+def test_storage_clean_removes_only_what_is_safe(server) -> None:
+    """#91: «Limpiar» per section; a chat folder still used and the newest backup stay."""
+    import os
+    import time
+
+    home = server._services.ctx.home
+    created = _call(server, "session.create", {"chat": True})
+    assert created["ok"], created
+    used = created["result"]["session"]["current_cwd"]
+    orphan = home / "workspaces" / "chat_gone"
+    orphan.mkdir(parents=True)
+    (orphan / "big.bin").write_bytes(b"z" * 5000)
+    (home / "cache").mkdir(exist_ok=True)
+    (home / "cache" / "x.json").write_text("{}", encoding="utf-8")
+    old_log = home / "logs" / "old.log"
+    old_log.parent.mkdir(exist_ok=True)
+    old_log.write_bytes(b"l" * 100)
+    stale = time.time() - 30 * 86_400
+    os.utime(old_log, (stale, stale))
+    (home / "logs" / "today.log").write_bytes(b"t")
+    backups = home / "backups"
+    for index, name in enumerate(("antes-1", "antes-2")):
+        (backups / name).mkdir(parents=True)
+        os.utime(backups / name, (stale + index, stale + index))
+
+    usage = _call(server, "storage.usage")["result"]
+    sections = {row["id"]: row for row in usage["sections"]}
+    assert sections["workspaces"]["cleanable"] and sections["workspaces"]["reclaimable"] >= 5000
+    assert not sections["conversations"]["cleanable"]
+
+    for section in ("workspaces", "cache", "logs", "backups"):
+        done = _call(server, "storage.clean", {"section": section})
+        assert done["ok"], done
+    assert not orphan.exists()
+    assert os.path.isdir(used)
+    assert not (home / "cache" / "x.json").exists()
+    assert not old_log.exists() and (home / "logs" / "today.log").exists()
+    assert [path.name for path in backups.iterdir()] == ["antes-2"]
+    refused = _call(server, "storage.clean", {"section": "conversations"})
+    assert not refused["ok"] and refused["error"]["code"] == "INVALID_PARAMS"

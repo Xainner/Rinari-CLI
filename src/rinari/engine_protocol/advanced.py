@@ -55,6 +55,7 @@ def register_advanced(dispatcher: Any, services: Any) -> None:
     dispatcher.register("advanced.settings.get", lambda params: limits_get(services))
     dispatcher.register("advanced.settings.set", lambda params: limits_set(services, params))
     dispatcher.register("storage.usage", lambda params: storage_usage(services))
+    dispatcher.register("storage.clean", lambda params: storage_clean(services, params))
 
 
 # -- model execution ----------------------------------------------------------------
@@ -164,8 +165,133 @@ def storage_usage(services: Any) -> dict[str, Any]:
         bucket = totals[section or "other"]
         bucket["bytes"] += size
         bucket["files"] += files
-    rows = [{"id": key, **value} for key, value in totals.items()]
+    reclaimable = {
+        section: sum(_size_of(path) for path in _cleanable(services, section))
+        for section in CLEANABLE
+    }
+    rows = [
+        {
+            "id": key,
+            **value,
+            "cleanable": key in CLEANABLE,
+            "reclaimable": reclaimable.get(key, 0),
+        }
+        for key, value in totals.items()
+    ]
     return {"home": str(home), "sections": rows, "total": sum(r["bytes"] for r in rows)}
+
+
+#: What «Limpiar» may remove in each section (plan 0.4.0 #91). Nothing is
+#: removed by itself: the owner asks from Ajustes → Avanzado → Almacenamiento.
+#: Conversations, artifacts (old messages point at them) and the browser
+#: profile (it holds sign-ins) are never cleaned here.
+CLEANABLE = ("workspaces", "cache", "logs", "backups")
+#: Logs younger than this stay: they are what a diagnostic needs.
+LOG_KEEP_DAYS = 7
+
+
+def _cleanable(services: Any, section: str) -> list[Path]:
+    """The paths «Limpiar» would remove in `section`, never anything in use."""
+    import time
+
+    home = Path(services.ctx.home)
+    if section == "workspaces":
+        # A loose chat's folder whose conversation no longer exists (deleted).
+        used: set[str] = set()
+        for row in services.ctx.db.query("SELECT created_cwd, current_cwd FROM sessions"):
+            for value in (row["created_cwd"], row["current_cwd"]):
+                if value:
+                    used.add(os.path.normcase(str(Path(value).resolve())))
+        root = home / "workspaces"
+        if not root.is_dir():
+            return []
+        return [
+            path
+            for path in root.iterdir()
+            if path.is_dir()
+            and not path.is_symlink()
+            and os.path.normcase(str(path.resolve())) not in used
+        ]
+    if section == "cache":
+        paths = (
+            [
+                entry
+                for entry in home.iterdir()
+                if entry.name.startswith(("context-discovery-", "context-window-"))
+            ]
+            if home.is_dir()
+            else []
+        )
+        for name in ("cache", "scratch"):
+            folder = home / name
+            if folder.is_dir():
+                paths.extend(folder.iterdir())
+        return paths
+    if section == "logs":
+        folder = home / "logs"
+        if not folder.is_dir():
+            return []
+        cutoff = time.time() - LOG_KEEP_DAYS * 86_400
+        return [
+            path for path in folder.iterdir() if path.is_file() and path.stat().st_mtime < cutoff
+        ]
+    if section == "backups":
+        # The newest copy stays: it is the way back after a migration.
+        folder = home / "backups"
+        if not folder.is_dir():
+            return []
+        copies = sorted(folder.iterdir(), key=lambda path: path.stat().st_mtime)
+        return copies[:-1]
+    return []
+
+
+def _size_of(path: Path) -> int:
+    try:
+        if path.is_symlink():
+            return 0
+        if path.is_file():
+            return path.stat().st_size
+    except OSError:
+        return 0
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += (Path(root) / name).stat().st_size
+            except OSError:
+                continue
+    return total
+
+
+def storage_clean(services: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """«Limpiar» one section; a file in use stays and is counted as kept."""
+    import shutil
+
+    section = params.get("section")
+    if section not in CLEANABLE:
+        raise EngineProtocolError(
+            INVALID_PARAMS, f"Param 'section' must be one of: {', '.join(CLEANABLE)}."
+        )
+    freed = removed = kept = 0
+    for path in _cleanable(services, section):
+        size = _size_of(path)
+        try:
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        except OSError:
+            kept += 1
+            continue
+        freed += size
+        removed += 1
+    return {
+        "section": section,
+        "freed": freed,
+        "removed": removed,
+        "kept": kept,
+        "usage": storage_usage(services),
+    }
 
 
 def _size(entry: os.DirEntry[str]) -> tuple[int, int]:
