@@ -18,8 +18,6 @@ import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-import typer
-
 from rinari import __version__
 from rinari.agents.config import AgentAssignment, coerce_assignment
 from rinari.application.services import ServiceContainer
@@ -1300,6 +1298,8 @@ def _build_tools(
         project = "" if request.project_id in (None, "chats") else " · [p] project"
         options = f"[y] once · [s] session{project} · [a] always · [n] no"
         question = f"Approve {request.capability}{target}? {options}"
+        import typer  # Only the terminal asks; the Engine loads no CLI (#91).
+
         answer = typer.prompt(question, default="n").lower()
         return answer if answer else "n"
 
