@@ -295,8 +295,23 @@ def test_timeline_page_reads_only_its_turns_and_stays_light(server, services, tm
     assert not any(item["event"] == "tool.output.delta" for item in items)
     completed = [item for item in items if item["event"] == "tool.completed"]
     assert completed and all("observation" not in item for item in completed)
-    assert all(item["presentation"]["truncated"] is True for item in completed)
-    assert len(json.dumps(response)) < 1_000_000
+    # The page's cut, not the tool's: the whole output is one call away.
+    assert all(item["presentation"]["page_truncated"] is True for item in completed)
+    assert all("truncated" not in item["presentation"] for item in completed)
+    whole = server.handle_line(
+        _req(
+            "tl-full",
+            "session.tool.output",
+            {"ref": session_id, "tool_call_id": completed[0]["tool_call_id"]},
+        )
+    )
+    assert whole is not None and whole["ok"] is True
+    assert len(whole["result"]["stdout"]) == 50_000
+    missing = server.handle_line(
+        _req("tl-none", "session.tool.output", {"ref": session_id, "tool_call_id": "nope"})
+    )
+    assert missing is not None and missing["error"]["code"] == "NOT_FOUND"
+    assert len(json.dumps(response)) < 500_000
     assert elapsed < 1.0
 
     earlier = server.handle_line(
@@ -333,3 +348,81 @@ def test_an_ended_tool_drops_its_live_chunks(server, services, tmp_path) -> None
         row.payload["tool_call_id"] for row in repo.list(session_id, types=["tool.output.delta"])
     ]
     assert left == ["b"]
+
+
+def test_a_busy_page_stays_light_and_its_newest_turn_comes_whole(server, services, tmp_path):
+    """#91: a turn of 30 commands each weighed megabytes per page. The page
+    keeps under 500 KB with older turns behind «Cargar anteriores», the
+    newest turn always comes whole, and what was cut is one call away."""
+    from rinari.storage.records import SessionEventRecord
+
+    session_id = _create_chat(server, tmp_path)
+    final = "fin " * 5_000  # 20 000 characters: never cut, it is the answer
+    events = []
+    seq = 0
+    for index in range(6):
+        turn_id = f"busy-{index}"
+        rows = [("turn.started", {"message": f"ask-{index}"})]
+        for call in range(40):
+            call_id = f"c-{index}-{call}"
+            rows += [
+                (
+                    "tool.requested",
+                    {
+                        "tool_call_id": call_id,
+                        "tool": "fs.write",
+                        "arguments": json.dumps({"path": "src/a.py", "content": "x" * 5_000}),
+                    },
+                ),
+                ("tool.started", {"tool_call_id": call_id, "arguments": "{" + "y" * 5_000}),
+                (
+                    "tool.completed",
+                    {
+                        "tool_call_id": call_id,
+                        "tool": "fs.write",
+                        "presentation": {"kind": "tool", "data": {"content": "z" * 9_000}},
+                    },
+                ),
+            ]
+        rows.append(("model.content.completed", {"content": final, "output_kind": "final"}))
+        rows.append(("turn.completed", {}))
+        for kind, payload in rows:
+            seq += 1
+            events.append(
+                SessionEventRecord(
+                    id=f"busy-{seq}",
+                    session_id=session_id,
+                    seq=seq + 100,
+                    type=kind,
+                    payload=payload,
+                    created_at="2026-01-01T00:00:00Z",
+                    turn_id=turn_id,
+                )
+            )
+    with services.ctx.db.transaction():
+        for record in events:
+            services.ctx.event_repo.insert(record)
+
+    response = server.handle_line(_req("busy", "session.timeline", {"ref": session_id}))
+    assert response is not None and response["ok"] is True
+    result = response["result"]
+    assert len(json.dumps(result)) < 500_000
+    assert result["has_more"] is True and result["turns"][-1]["turn_id"] == "busy-5"
+    newest = result["turns"][-1]
+    assert newest["final_response"] == final
+    items = newest["items"]
+    requested = next(item for item in items if item["event"] == "tool.requested")
+    # Still JSON: the path stays whole for the row's label, the content is cut.
+    arguments = json.loads(requested["arguments"])
+    assert arguments["path"] == "src/a.py" and len(arguments["content"]) < 400
+    assert all("arguments" not in item for item in items if item["event"] == "tool.started")
+    completed = next(item for item in items if item["event"] == "tool.completed")
+    assert completed["presentation"]["page_truncated"] is True
+    whole = server.handle_line(
+        _req(
+            "busy-whole",
+            "session.tool.output",
+            {"ref": session_id, "tool_call_id": completed["tool_call_id"]},
+        )
+    )
+    assert whole is not None and len(whole["result"]["data"]["content"]) == 9_000

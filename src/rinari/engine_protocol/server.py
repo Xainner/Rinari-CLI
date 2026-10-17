@@ -8,6 +8,7 @@ roundtrips, provider/model reads. Envelope contract is unchanged.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import secrets
 import threading
@@ -36,7 +37,7 @@ from rinari.engine_protocol.errors import (
     EngineProtocolError,
 )
 from rinari.engine_protocol.flow import collect_flow
-from rinari.engine_protocol.frames import newest_within
+from rinari.engine_protocol.frames import PAGE_BUDGET_BYTES, newest_within
 from rinari.engine_protocol.messages import event, hello
 from rinari.engine_protocol.observability import (
     clamp_read_bytes,
@@ -165,18 +166,86 @@ def _runs_commands(root: Path) -> dict[str, bool]:
     return {"has_hooks": present(_HOOK_FILES), "has_mcp": present(_MCP_FILES)}
 
 
-#: How much of a command's output a timeline page carries per stream (#91).
-TIMELINE_STREAM_CHARS = 16_000
+#: How much of a command's output a timeline page carries per stream (#91);
+#: the rest is one click away (`session.tool.output`, «Ver completo»).
+TIMELINE_STREAM_CHARS = 1_000
+#: What a page of persisted turns weighs at most, besides its newest turn.
+TIMELINE_PAGE_BYTES = 500_000
+#: Each long text inside a call's arguments, as the page shows them: the
+#: path or the command stay whole, a file's content is cut.
+TIMELINE_ARGUMENT_CHARS = 300
+
+
+def _shorten(value: Any, limit: int, depth: int = 0) -> tuple[Any, bool]:
+    """`value` with every string longer than `limit` cut; and whether any was."""
+    if isinstance(value, str):
+        return (value[:limit] + "…", True) if len(value) > limit else (value, False)
+    if depth > 6:
+        return value, False
+    if isinstance(value, dict):
+        cut = False
+        result = {}
+        for key, item in value.items():
+            result[key], was = _shorten(item, limit, depth + 1)
+            cut = cut or was
+        return result, cut
+    if isinstance(value, list):
+        pairs = [_shorten(item, limit, depth + 1) for item in value]
+        return [item for item, _ in pairs], any(was for _, was in pairs)
+    return value, False
+
+
+def _shorten_arguments(text: Any) -> Any:
+    """The display copy of a call's arguments (a JSON string) with long texts cut."""
+    if not isinstance(text, str) or len(text) <= TIMELINE_ARGUMENT_CHARS:
+        return text
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return text[: TIMELINE_ARGUMENT_CHARS * 2] + "…"
+    shortened, _ = _shorten(parsed, TIMELINE_ARGUMENT_CHARS)
+    return json.dumps(shortened, ensure_ascii=False)
 
 
 def _lighten_for_timeline(payload: dict[str, Any]) -> None:
     """What the desktop never reads from a stored turn stays out of the page.
 
     `observation` is the text the model saw (the bulk of the database); the
-    desktop shows `result` and `presentation`. Command output is capped, and
-    the cut is flagged so the view says it.
+    desktop shows `result` and `presentation`. Command output and long tool
+    data are capped and the cut is flagged (`page_truncated`, not the tool's
+    own `truncated`), so the view offers them whole through
+    `session.tool.output`. What is said elsewhere in the page (ids, the
+    arguments of a call, a subagent's objective) is said once.
     """
     payload.pop("observation", None)
+    # The whole arguments are the record's (#91); the page shows `arguments`.
+    payload.pop("full_arguments", None)
+    # Said once per turn, not per item: the turn carries its ids, and nothing
+    # reads the folder of each event nor the id of the model's result.
+    for key in ("session_id", "turn_id", "workspace_root", "result_id"):
+        payload.pop(key, None)
+    event = payload.get("event")
+    if event == "agent.activity":
+        # A subagent's objective is in its `agent.started`; its events are its work.
+        payload.pop("objective", None)
+        event = payload.get("child_event")
+    if event in ("tool.started", "tool.completed", "tool.failed", "tool.cancelled"):
+        # The arguments are said once, in `tool.requested`.
+        payload.pop("arguments", None)
+    elif "arguments" in payload:
+        payload["arguments"] = _shorten_arguments(payload["arguments"])
+    if isinstance(event, str) and event.startswith("governor.") and event != "governor.compact":
+        # The view shows the governor's action and reason, not its counters.
+        payload.pop("governor", None)
+        payload.pop("usage", None)
+    if event == "turn.changes.completed" and isinstance(payload.get("files"), list):
+        # The diff comes whole from `turn.changes.review` when it is opened.
+        payload["files"] = [
+            {key: value for key, value in item.items() if key != "diff"}
+            if isinstance(item, dict)
+            else item
+            for item in payload["files"]
+        ]
     presentation = payload.get("presentation")
     if isinstance(presentation, dict):
         for stream in ("stdout", "stderr"):
@@ -185,8 +254,12 @@ def _lighten_for_timeline(payload: dict[str, Any]) -> None:
                 presentation = {
                     **presentation,
                     stream: text[:TIMELINE_STREAM_CHARS],
-                    "truncated": True,
+                    "page_truncated": True,
                 }
+        if "data" in presentation:
+            data, cut = _shorten(presentation["data"], TIMELINE_STREAM_CHARS)
+            if cut:
+                presentation = {**presentation, "data": data, "page_truncated": True}
         payload["presentation"] = presentation
 
 
@@ -305,6 +378,7 @@ class EngineServer:
         self._dispatcher.register("session.children.isolation", self._session_children_isolation)
         self._dispatcher.register("session.history", self._session_history)
         self._dispatcher.register("session.timeline", self._session_timeline)
+        self._dispatcher.register("session.tool.output", self._session_tool_output)
         self._dispatcher.register("session.mode.set", self._session_mode_set)
         self._dispatcher.register("session.model.set", self._session_model_set)
         self._dispatcher.register("session.permission.get", self._session_permission_get)
@@ -1705,6 +1779,17 @@ class EngineServer:
             for row in events
             if row.type in {"tool.completed", "tool.failed", "tool.cancelled"}
         }
+        # A subagent's live chunks were for watching it; once it ended, its
+        # completed messages and tools say the same (#91).
+        ended_agents = {
+            str((row.payload or {}).get("agent_id"))
+            for row in events
+            if row.type in {"agent.completed", "agent.failed"}
+            or (
+                row.type == "agent.activity"
+                and (row.payload or {}).get("child_event") in {"agent.completed", "agent.failed"}
+            )
+        }
 
         by_turn: dict[str, dict[str, Any]] = {}
         order: list[str] = []
@@ -1715,6 +1800,12 @@ class EngineServer:
                 and str((row.payload or {}).get("tool_call_id")) in ended_tools
             ):
                 # The ended tool carries its output; the chunks were for the live view.
+                continue
+            if (
+                row.type == "agent.activity"
+                and str((row.payload or {}).get("child_event") or "").endswith(".delta")
+                and str((row.payload or {}).get("agent_id")) in ended_agents
+            ):
                 continue
             if turn_id not in by_turn:
                 by_turn[turn_id] = {
@@ -1775,7 +1866,10 @@ class EngineServer:
                 turn["final_response"] = "[contenido omitido por privacidad]"
         has_more = len(candidates) > limit
         selected = selected[-limit:]
-        bounded = newest_within(selected)
+        # A page of busy turns (30 commands each) weighed megabytes: the last
+        # turn comes whole and older ones join while the page stays light;
+        # «Cargar anteriores» brings the rest (#91).
+        bounded = newest_within(selected, TIMELINE_PAGE_BYTES, first_budget=PAGE_BUDGET_BYTES)
         has_more = has_more or len(bounded) < len(selected)
         selected = bounded
         return {
@@ -1783,6 +1877,29 @@ class EngineServer:
             "turns": selected,
             "has_more": has_more,
             "next_before_turn_index": selected[0]["turn_index"] if has_more and selected else None,
+        }
+
+    def _session_tool_output(self, params: dict[str, Any]) -> dict[str, Any]:
+        """The whole stored output of one command the timeline cut (#91)."""
+        record = self._services.sessions.show(self._need_str(params, "ref"))
+        call = self._need_str(params, "tool_call_id")
+        rows = self._services.ctx.db.query(
+            "SELECT payload_json FROM session_events WHERE session_id = ? "
+            "AND type IN ('tool.completed', 'tool.failed', 'tool.cancelled') "
+            "AND json_extract(payload_json, '$.tool_call_id') = ? ORDER BY seq DESC LIMIT 1",
+            (record.id, call),
+        )
+        if not rows:
+            from rinari.shared.errors import NotFoundError
+
+            raise NotFoundError(f"No stored output for tool call {call}.")
+        presentation = (json.loads(rows[0]["payload_json"]) or {}).get("presentation") or {}
+        whole = presentation if isinstance(presentation, dict) else {}
+        return {
+            "tool_call_id": call,
+            "stdout": whole.get("stdout"),
+            "stderr": whole.get("stderr"),
+            "data": whole.get("data"),
         }
 
     def _session_mode_set(self, params: dict[str, Any]) -> dict[str, Any]:

@@ -353,6 +353,7 @@
         "session.turn.steer",
         "session.events",
         "session.timeline",
+        "session.tool.output",
         "approval.resolve",
         "turn.changes.get",
         "turn.changes.review",

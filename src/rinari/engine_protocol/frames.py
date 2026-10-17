@@ -54,17 +54,19 @@ def fit(value: Any, budget: int) -> Any:
     return candidate
 
 
-def newest_within(items: list[Any], budget: int = PAGE_BUDGET_BYTES) -> list[Any]:
+def newest_within(
+    items: list[Any], budget: int = PAGE_BUDGET_BYTES, *, first_budget: int | None = None
+) -> list[Any]:
     """The newest items whose total size fits `budget`, in their original order.
 
-    The newest item is always kept (shrunk if it alone exceeds the budget), so
-    a session always opens on its latest turn.
+    The newest item is always kept (shrunk only past `first_budget`, `budget`
+    by default), so a session always opens on its latest turn, whole.
     """
     kept: list[Any] = []
     used = 0
     for item in reversed(items):
         if not kept:
-            item = fit(item, budget)
+            item = fit(item, first_budget or budget)
         size = encoded_size(item) + 1
         if kept and used + size > budget:
             break
