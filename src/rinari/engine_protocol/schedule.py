@@ -15,6 +15,7 @@ it needed as its reason — never a silent failure.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 from datetime import datetime
@@ -155,6 +156,15 @@ class ScheduleRunner:
         if task["kind"] == "reminder":
             self._finish(task, run_id, "completed", summary=task["prompt"])
             return run_id
+        if task["kind"] == "command":
+            threading.Thread(
+                target=self._run_command,
+                args=(task, run_id, started),
+                name="rinari-scheduled-command",
+                daemon=True,
+            ).start()
+            self._emit("schedule.run.started", task, run_id)
+            return run_id
         try:
             session_id, turn_id = self._start_agent_run(task, run_id, started)
         except Exception as exc:
@@ -164,6 +174,57 @@ class ScheduleRunner:
         self._repo.save_run(run_id, session_id=session_id, turn_id=turn_id)
         self._emit("schedule.run.started", task, run_id, session_id=session_id)
         return run_id
+
+    def _run_command(self, task: dict[str, Any], run_id: str, started: float) -> None:
+        """A «command» task (#50): run it without the model and keep what it said.
+
+        The output is kept (its end), with the exit code and how long it took.
+        «notify_failure» only tells the owner when it fails; «agent» hands the
+        output to a turn of Rinari, with the task's prompt as the question.
+        """
+        spec = task.get("command") or {}
+        try:
+            outcome = run_scheduled_command(spec, self._command_cwd(task, spec))
+        except Exception as exc:  # never a silent failure
+            outcome = {"exit_code": None, "output": "", "error": str(exc)[:500], "duration_s": 0.0}
+        failed = outcome["exit_code"] != 0
+        summary = (outcome["output"] or "")[-SUMMARY_CHARS * 4 :]
+        reason = (
+            outcome.get("error") or (f"exit code {outcome['exit_code']}" if failed else "") or None
+        )
+        if spec.get("on_result") == "agent":
+            prompt = command_agent_prompt(task, spec, outcome)
+            try:
+                session_id, turn_id = self._start_agent_run(
+                    {**task, "kind": "agent", "prompt": prompt}, run_id, started
+                )
+            except Exception as exc:
+                message = getattr(exc, "message", None) or str(exc)
+                self._finish(task, run_id, "failed", summary=summary, reason=message[:500])
+                return
+            self._repo.save_run(run_id, session_id=session_id, turn_id=turn_id, summary=summary)
+            self._emit("schedule.run.started", task, run_id, session_id=session_id)
+            return
+        quiet = spec.get("on_result") == "nothing" or not failed
+        self._finish(
+            task,
+            run_id,
+            "failed" if failed else "completed",
+            summary=summary,
+            reason=reason,
+            quiet=True if quiet else None,
+        )
+
+    def _command_cwd(self, task: dict[str, Any], spec: dict[str, Any]) -> str:
+        if spec.get("cwd"):
+            return str(spec["cwd"])
+        if task.get("project_id"):
+            with contextlib.suppress(Exception):
+                project = self._services.projects.get(task["project_id"])
+                root = getattr(project, "canonical_root", None) or getattr(project, "root", None)
+                if root:
+                    return str(root)
+        return str(Path.home())
 
     def _start_agent_run(
         self, task: dict[str, Any], run_id: str, started: float
@@ -222,7 +283,14 @@ class ScheduleRunner:
             raise
         return session_id, started_turn["turn_id"]
 
-    def _finish(self, task: dict[str, Any], run_id: str, status: str, **fields: Any) -> None:
+    def _finish(
+        self,
+        task: dict[str, Any],
+        run_id: str,
+        status: str,
+        quiet: bool | None = None,
+        **fields: Any,
+    ) -> None:
         self._repo.save_run(run_id, status=status, finished_at=self._clock.now(), **fields)
         run = self._repo.run(run_id) or {}
         self._emit(
@@ -233,6 +301,8 @@ class ScheduleRunner:
             session_id=run.get("session_id"),
             summary=run.get("summary"),
             reason=run.get("reason"),
+            # A command task that went well (or never tells) is not announced (#50).
+            quiet=quiet,
         )
 
     # -- following the turn ----------------------------------------------------
@@ -390,3 +460,86 @@ def _wanted(payload: dict[str, Any]) -> str:
     capability = payload.get("capability") or payload.get("tool") or "approval"
     target = payload.get("target")
     return f"{capability}: {target}" if target else str(capability)
+
+
+# -- «command» tasks (plan 0.4.0 #50) ------------------------------------------------
+
+#: The end of a command's output that is kept and handed to the agent.
+COMMAND_OUTPUT_CHARS = 20_000
+
+
+def run_scheduled_command(spec: dict[str, Any], cwd: str) -> dict[str, Any]:
+    """Run a scheduled command in a Job Object and keep the end of its output."""
+    import os
+    import subprocess
+    import sys
+    import time
+
+    from rinari.tools.native.jobs import popen_in_job
+    from rinari.tools.native.shell import resolve_argv, shell_argv
+
+    command = shell_argv(spec["command"], spec.get("shell") or "default")
+    env = {**os.environ, **(spec.get("env") or {})}
+    kwargs: dict[str, Any] = {
+        "shell": isinstance(command, str),
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.STDOUT,
+        "cwd": cwd,
+        "env": env,
+    }
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+    else:
+        kwargs["start_new_session"] = True
+    started = time.monotonic()
+    process, job = popen_in_job(resolve_argv(command, env), **kwargs)
+    chunks: list[bytes] = []
+    size = 0
+
+    def pump() -> None:
+        nonlocal size
+        assert process.stdout is not None
+        for chunk in iter(lambda: process.stdout.read1(65536), b""):  # type: ignore[union-attr]
+            chunks.append(chunk)
+            size += len(chunk)
+            while size > COMMAND_OUTPUT_CHARS * 4 and len(chunks) > 1:
+                size -= len(chunks.pop(0))
+
+    reader = threading.Thread(target=pump, daemon=True)
+    reader.start()
+    error = None
+    try:
+        process.wait(timeout=float(spec.get("timeout_s") or 600))
+    except subprocess.TimeoutExpired:
+        error = f"timed out after {spec.get('timeout_s')}s"
+        if job is None or not job.terminate():
+            process.kill()
+        process.wait(timeout=10)
+    reader.join(timeout=5)
+    if job is not None:
+        job.close()
+    output = b"".join(chunks).decode("utf-8", errors="replace")[-COMMAND_OUTPUT_CHARS:]
+    return {
+        "exit_code": None if error else process.returncode,
+        "output": output,
+        "error": error,
+        "duration_s": round(time.monotonic() - started, 1),
+    }
+
+
+def command_agent_prompt(
+    task: dict[str, Any], spec: dict[str, Any], outcome: dict[str, Any]
+) -> str:
+    """The turn that reviews a command's output (on_result = agent)."""
+    ask = (task.get("prompt") or "").strip() or (
+        "Review the output of this scheduled command. If it failed, say why and what to do; "
+        "if it went well, summarize it in a few lines."
+    )
+    code = outcome.get("error") or f"exit code {outcome.get('exit_code')}"
+    return (
+        f"{ask}\n\n"
+        f"Scheduled command «{task['name']}»: `{spec['command']}`\n"
+        f"Result: {code}, {outcome.get('duration_s')}s\n\n"
+        f"Output (its end):\n```\n{outcome.get('output') or '(no output)'}\n```"
+    )

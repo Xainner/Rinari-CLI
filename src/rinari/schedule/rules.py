@@ -7,6 +7,7 @@ on this machine, so its clock and daylight-saving rules are the right ones):
     {"kind": "interval", "minutes": 30}
     {"kind": "daily", "time": "08:30"}
     {"kind": "weekly", "days": [0, 2, 4], "time": "08:30"}   # 0 = Monday
+    {"kind": "cron", "expr": "*/15 9-18 * * 1-5"}            # minute hour day month weekday
 
 Times are epoch seconds everywhere else; only these rules know about local
 dates. Pure functions: the scheduler passes its clock in.
@@ -26,7 +27,9 @@ MAX_INTERVAL_MINUTES = 7 * 24 * 60
 CATCH_UP_WINDOW_S = 12 * 3600
 
 _TIME = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
-KINDS = ("once", "interval", "daily", "weekly")
+KINDS = ("once", "interval", "daily", "weekly", "cron")
+# How far ahead a cron expression is searched for its next match.
+_CRON_HORIZON_DAYS = 366 * 4
 
 
 class ScheduleError(ValueError):
@@ -41,6 +44,7 @@ class Schedule:
     hour: int = 0
     minute: int = 0
     days: tuple[int, ...] = ()  # weekly, 0 = Monday
+    expr: str = ""  # cron: the five fields, as written (plan 0.4.0 #50)
 
     def to_dict(self) -> dict[str, Any]:
         if self.kind == "once":
@@ -48,6 +52,8 @@ class Schedule:
             return {"kind": "once", "at": self.at.strftime("%Y-%m-%dT%H:%M")}
         if self.kind == "interval":
             return {"kind": "interval", "minutes": self.minutes}
+        if self.kind == "cron":
+            return {"kind": "cron", "expr": self.expr}
         time = f"{self.hour:02d}:{self.minute:02d}"
         if self.kind == "daily":
             return {"kind": "daily", "time": time}
@@ -60,6 +66,10 @@ def parse_schedule(raw: Any) -> Schedule:
     kind = raw.get("kind")
     if kind not in KINDS:
         raise ScheduleError(f"Schedule kind must be one of {', '.join(KINDS)}.")
+    if kind == "cron":
+        expr = " ".join(str(raw.get("expr") or "").split())
+        _cron_fields(expr)
+        return Schedule("cron", expr=expr)
     if kind == "once":
         at = raw.get("at")
         if not isinstance(at, str):
@@ -119,6 +129,8 @@ def next_run(schedule: Schedule, after: float) -> float | None:
         return due if due > after else None
     if schedule.kind == "interval":
         return after + schedule.minutes * 60
+    if schedule.kind == "cron":
+        return _cron_next(schedule.expr, after)
     base = _local(after)
     for offset in range(0, 8):
         day = (base + timedelta(days=offset)).replace(
@@ -139,8 +151,85 @@ def describe(schedule: Schedule) -> str:
         return f"once at {schedule.at.strftime('%Y-%m-%d %H:%M')}"
     if schedule.kind == "interval":
         return f"every {schedule.minutes} min"
+    if schedule.kind == "cron":
+        return f"cron {schedule.expr}"
     time = f"{schedule.hour:02d}:{schedule.minute:02d}"
     if schedule.kind == "daily":
         return f"daily at {time}"
     names = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
     return f"{', '.join(names[day] for day in schedule.days)} at {time}"
+
+
+# -- cron (plan 0.4.0 #50) -----------------------------------------------------------
+
+_CRON_RANGES = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))
+_CRON_NAMES = ("minute", "hour", "day of month", "month", "day of week")
+
+
+def _cron_field(text: str, low: int, high: int, name: str) -> frozenset[int]:
+    values: set[int] = set()
+    for part in text.split(","):
+        step = 1
+        if "/" in part:
+            part, raw_step = part.split("/", 1)
+            if not raw_step.isdigit() or int(raw_step) < 1:
+                raise ScheduleError(f"Invalid step in the {name} field of the cron expression.")
+            step = int(raw_step)
+        if part == "*":
+            start, end = low, high
+        elif "-" in part:
+            first, last = part.split("-", 1)
+            if not (first.isdigit() and last.isdigit()):
+                raise ScheduleError(f"Invalid range in the {name} field of the cron expression.")
+            start, end = int(first), int(last)
+        elif part.isdigit():
+            start = end = int(part)
+            if "/" in text and step > 1:
+                end = high
+        else:
+            raise ScheduleError(f"Invalid {name} field in the cron expression: {part!r}.")
+        if not (low <= start <= high and low <= end <= high and start <= end):
+            raise ScheduleError(f"The {name} field must be within {low}-{high}.")
+        values.update(range(start, end + 1, step))
+    return frozenset(values)
+
+
+def _cron_fields(expr: str) -> tuple[frozenset[int], ...]:
+    parts = expr.split()
+    if len(parts) != 5:
+        raise ScheduleError(
+            "A cron expression has five fields: minute hour day month weekday "
+            "(for example */15 9-18 * * 1-5)."
+        )
+    fields = tuple(
+        _cron_field(part, low, high, name)
+        for part, (low, high), name in zip(parts, _CRON_RANGES, _CRON_NAMES, strict=True)
+    )
+    # 7 is Sunday too.
+    weekdays = frozenset(0 if day == 7 else day for day in fields[4])
+    return (*fields[:4], weekdays)
+
+
+def _cron_next(expr: str, after: float) -> float | None:
+    minutes, hours, days, months, weekdays = _cron_fields(expr)
+    restricted_day = expr.split()[2] != "*"
+    restricted_weekday = expr.split()[4] != "*"
+    start = _local(after).replace(second=0, microsecond=0) + timedelta(minutes=1)
+    day = start.replace(hour=0, minute=0)
+    for _ in range(_CRON_HORIZON_DAYS):
+        if day.month in months:
+            in_month = day.day in days
+            in_week = (day.weekday() + 1) % 7 in weekdays
+            # Classic cron: with both restricted, either one matches.
+            if restricted_day and restricted_weekday:
+                matches = in_month or in_week
+            else:
+                matches = in_month and in_week
+            if matches:
+                for hour in sorted(hours):
+                    for minute in sorted(minutes):
+                        moment = day.replace(hour=hour, minute=minute)
+                        if moment >= start:
+                            return _epoch(moment)
+        day = day + timedelta(days=1)
+    return None

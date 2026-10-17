@@ -358,3 +358,122 @@ def test_a_request_from_elsewhere_is_only_proposed(services, origin) -> None:
     result = tool.handler(_task(), SimpleNamespace(session_id="ses_2", origin_kind=origin))
     assert result.ok is True and result.data["status"] == "proposed"
     assert services.schedules.list() == []
+
+
+# -- cron and «command» tasks (plan 0.4.0 #50) -------------------------------------------
+
+
+def test_cron_expressions() -> None:
+    weekdays = parse_schedule({"kind": "cron", "expr": "*/15  9-18 * * 1-5"})
+    assert weekdays.to_dict() == {"kind": "cron", "expr": "*/15 9-18 * * 1-5"}
+    # 2026-10-17 is a Saturday: next is Monday 09:00.
+    assert next_run(weekdays, _epoch("2026-10-17T18:50")) == _epoch("2026-10-19T09:00")
+    assert next_run(weekdays, _epoch("2026-10-19T09:07")) == _epoch("2026-10-19T09:15")
+    monthly = parse_schedule({"kind": "cron", "expr": "0 8 1 * *"})
+    assert next_run(monthly, _epoch("2026-10-19T09:07")) == _epoch("2026-11-01T08:00")
+    # Day of month and weekday both given: either one matches (classic cron).
+    either = parse_schedule({"kind": "cron", "expr": "30 6 13 * 5"})
+    assert next_run(either, _epoch("2026-10-17T00:00")) == _epoch("2026-10-23T06:30")
+    assert describe(weekdays) == "cron */15 9-18 * * 1-5"
+    for bad in ("* * *", "61 * * * *", "* 25 * * *", "a b c d e", "*/0 * * * *"):
+        with pytest.raises(ScheduleError):
+            parse_schedule({"kind": "cron", "expr": bad})
+
+
+def _command_task(command: str, **spec):
+    return _task(
+        name="Copia",
+        kind="command",
+        prompt="",
+        command={"command": command, **spec},
+    )
+
+
+def _finished(server, run_id):
+    events = _events(
+        server,
+        {"schedule.run.completed"},
+        lambda seen: any(e["payload"]["run_id"] == run_id for e in seen),
+    )
+    return next(e for e in events if e["payload"]["run_id"] == run_id)["payload"]
+
+
+def test_a_command_task_runs_without_the_model_and_keeps_its_output(server, tmp_path) -> None:
+    import sys
+
+    script = tmp_path / "backup.py"
+    script.write_text("print('copiados 12 archivos')\n", encoding="utf-8")
+    task = _ok(
+        _call(
+            server,
+            "schedule.create",
+            {"task": _command_task(f'"{sys.executable}" "{script}"', cwd=str(tmp_path))},
+        )
+    )["task"]
+    assert task["command"]["on_result"] == "notify_failure"
+    run = _ok(_call(server, "schedule.run_now", {"task_id": task["id"]}))["run"]
+    payload = _finished(server, run["id"])
+    assert payload["status"] == "completed"
+    # It went well and only failures are told: the desktop stays quiet.
+    assert payload["quiet"] is True
+    stored = server._services.ctx.schedule_repo.run(run["id"])
+    assert "copiados 12 archivos" in stored["summary"]
+    assert stored["session_id"] is None
+
+
+def test_a_failing_command_is_told(server, tmp_path) -> None:
+    import sys
+
+    task = _ok(
+        _call(
+            server,
+            "schedule.create",
+            {"task": _command_task(f'"{sys.executable}" -c "raise SystemExit(3)"')},
+        )
+    )["task"]
+    run = _ok(_call(server, "schedule.run_now", {"task_id": task["id"]}))["run"]
+    payload = _finished(server, run["id"])
+    assert payload["status"] == "failed" and "quiet" not in payload
+    assert payload["reason"] == "exit code 3"
+
+
+def test_on_result_agent_hands_the_output_to_a_turn(server, tmp_path, monkeypatch) -> None:
+    import sys
+
+    seen: list[ModelRequest] = []
+
+    class Reviewer:
+        def capabilities(self):
+            return ProviderCapabilities(streaming=False, tool_calls=True, structured_output=True)
+
+        def invoke(self, request):
+            seen.append(request)
+            return ModelResponse(content="Todo bien.", stop_reason=StopReason.END_TURN)
+
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda services, record: Reviewer())
+    task = _ok(
+        _call(
+            server,
+            "schedule.create",
+            {
+                "task": {
+                    **_command_task(f'"{sys.executable}" -c "print(42)"', on_result="agent"),
+                    "prompt": "¿Salió bien?",
+                }
+            },
+        )
+    )["task"]
+    run = _ok(_call(server, "schedule.run_now", {"task_id": task["id"]}))["run"]
+    payload = _finished(server, run["id"])
+    assert payload["status"] == "completed" and payload.get("session_id")
+    text = "\n".join(str(m.content) for m in seen[0].messages)
+    assert "¿Salió bien?" in text and "exit code 0" in text and "42" in text
+
+
+def test_command_tasks_are_validated(server) -> None:
+    bad = _call(server, "schedule.create", {"task": _command_task("")})
+    assert bad["ok"] is False
+    bad = _call(server, "schedule.create", {"task": _command_task("echo", on_result="sms")})
+    assert bad["ok"] is False
+    bad = _call(server, "schedule.create", {"task": _command_task("echo", timeout_s=99999)})
+    assert bad["ok"] is False

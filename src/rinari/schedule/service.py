@@ -14,7 +14,13 @@ from typing import Any
 
 from rinari.schedule.rules import Schedule, ScheduleError, describe, next_run, parse_schedule
 
-KINDS = ("agent", "reminder")
+KINDS = ("agent", "reminder", "command")
+# A «command» task (plan 0.4.0 #50) runs without the model: zero tokens.
+SHELLS = ("default", "cmd", "powershell", "bash")
+ON_RESULT = ("nothing", "notify_failure", "agent")
+MAX_COMMAND = 4000
+DEFAULT_COMMAND_TIMEOUT_S = 600
+MAX_COMMAND_TIMEOUT_S = 3600
 MODES = ("plan", "build", "review")
 MAX_NAME = 80
 MAX_PROMPT = 8000
@@ -25,6 +31,44 @@ RUN_STATUSES = ("running", "needs_you", "completed", "failed", "cancelled", "blo
 
 class ScheduledTaskError(ValueError):
     """Invalid input for a task; the message is safe to show."""
+
+
+def _command(raw: Any) -> dict[str, Any]:
+    """What a «command» task runs, and what happens with its output (#50)."""
+    if not isinstance(raw, dict):
+        raise ScheduledTaskError("A command task needs its command.")
+    command = raw.get("command")
+    if not isinstance(command, str) or not command.strip() or len(command) > MAX_COMMAND:
+        raise ScheduledTaskError(f"The command must be 1..{MAX_COMMAND} characters.")
+    shell = raw.get("shell") or "default"
+    if shell not in SHELLS:
+        raise ScheduledTaskError(f"Shell must be one of {', '.join(SHELLS)}.")
+    cwd = raw.get("cwd") or None
+    if cwd is not None and (not isinstance(cwd, str) or len(cwd) > 1000):
+        raise ScheduledTaskError("The folder must be a path.")
+    timeout = raw.get("timeout_s", DEFAULT_COMMAND_TIMEOUT_S)
+    if (
+        not isinstance(timeout, int)
+        or isinstance(timeout, bool)
+        or not 1 <= timeout <= MAX_COMMAND_TIMEOUT_S
+    ):
+        raise ScheduledTaskError(f"The time limit must be 1..{MAX_COMMAND_TIMEOUT_S} seconds.")
+    env = raw.get("env") or {}
+    if not isinstance(env, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in env.items()
+    ):
+        raise ScheduledTaskError("Environment variables must be text.")
+    on_result = raw.get("on_result") or "notify_failure"
+    if on_result not in ON_RESULT:
+        raise ScheduledTaskError(f"on_result must be one of {', '.join(ON_RESULT)}.")
+    return {
+        "command": command.strip(),
+        "shell": shell,
+        "cwd": cwd,
+        "timeout_s": timeout,
+        "env": dict(env),
+        "on_result": on_result,
+    }
 
 
 def _grant(raw: Any) -> dict[str, Any]:
@@ -71,7 +115,7 @@ class ScheduleService:
             raise ScheduledTaskError(f"The name must be 1..{MAX_NAME} characters.")
         kind = merged.get("kind", "agent")
         if kind not in KINDS:
-            raise ScheduledTaskError("Kind must be agent or reminder.")
+            raise ScheduledTaskError("Kind must be agent, reminder or command.")
         try:
             schedule = parse_schedule(merged.get("schedule"))
         except ScheduleError as exc:
@@ -79,7 +123,10 @@ class ScheduleService:
         prompt = merged.get("prompt") or ""
         if not isinstance(prompt, str) or len(prompt) > MAX_PROMPT:
             raise ScheduledTaskError(f"The prompt must be text up to {MAX_PROMPT} characters.")
-        if not prompt.strip():
+        command = _command(merged.get("command")) if kind == "command" else None
+        # A command task needs no prompt; with on_result=agent the prompt is
+        # what to ask about the output.
+        if not prompt.strip() and kind != "command":
             raise ScheduledTaskError("Say what to do (agent) or what to remind (reminder).")
         project_id = merged.get("project_id") or None
         if project_id is not None and (
@@ -118,6 +165,7 @@ class ScheduleService:
             "model": model,
             "skills": list(dict.fromkeys(skills)),
             "grants": grants,
+            "command": command,
             "enabled": enabled,
         }
 
