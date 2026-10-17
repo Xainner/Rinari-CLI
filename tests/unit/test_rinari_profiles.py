@@ -107,13 +107,24 @@ def test_a_project_conversation_always_has_the_projects_profile(services, profil
         services.sessions.new(repo, rinari_profile_id="otro")
 
 
-def test_a_new_conversation_takes_its_profiles_soul_and_mode(services, profiles, tmp_path):
+def test_a_new_conversation_takes_its_profiles_soul(services, profiles, tmp_path):
     profiles.store.create("seria", name="Seria", soul_id="profesional", mode="plan")
     profiles.activate("seria")
     record = services.sessions.new(tmp_path, forced_chat=True)
-    assert (record.soul_id, record.mode) == ("profesional", "plan")
+    # The profile's mode is gone (#86): the conversation keeps its own default.
+    assert record.soul_id == "profesional" and record.mode != "plan"
     explicit = services.sessions.new(tmp_path, forced_chat=True, mode="review")
     assert explicit.mode == "review"
+
+
+def test_a_new_profile_gets_an_id_from_its_name_and_rinaris_soul(profiles):
+    first = profiles.store.create(None, name="Trabajo")
+    second = profiles.store.create(None, name="Trabajo")
+    odd = profiles.store.create(None, name="★★★")
+    assert (first.id, second.id) == ("trabajo", "trabajo-2")
+    assert odd.id.startswith("perfil-") and first.soul_id == "rinari-default"
+    renamed = profiles.store.update("trabajo", name="Oficina")
+    assert renamed.id == "trabajo"
 
 
 def test_forks_keep_profile_and_soul(services, profiles, tmp_path):

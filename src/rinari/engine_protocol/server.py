@@ -3794,7 +3794,7 @@ class EngineServer:
         params = params or {}
         self._check_bundle_agents(params.get("agents"))
         bundle = self._bundles().create(
-            params.get("id", ""),
+            params.get("id") or None,
             name=params.get("name", ""),
             description=params.get("description") or "",
             soul_id=params.get("soul_id"),
@@ -3809,7 +3809,7 @@ class EngineServer:
         bundle_id = self._need_str(params, "id")
         changes = {
             key: params[key]
-            for key in ("name", "description", "soul_id", "mode", "agents")
+            for key in ("name", "description", "soul_id", "agents")
             if key in params
         }
         self._check_bundle_agents(changes.get("agents"))
@@ -4036,38 +4036,20 @@ class EngineServer:
         return {"session": session_to_dict(self._services.sessions.show(session_id))}
 
     def _bundle_apply(self, params: dict[str, Any]) -> dict[str, Any]:
-        from rinari.soul.store import SoulStore
+        """«Usar este perfil» (#86): the same as activating it.
 
+        It used to write the profile's models into the global agent
+        configuration and activate its soul globally, although nothing
+        global should change: the models and the soul are read per
+        conversation from its own profile.
+        """
         params = params or {}
-        bundle = self._bundles().get(params.get("id", ""))
-        applied: dict[str, Any] = {"profile_id": bundle.id}
-        if bundle.soul_id:
-            SoulStore(self._services.ctx.home).activate(bundle.soul_id)
-            applied["soul_id"] = bundle.soul_id
-        if bundle.agents:
-            definitions = self._services.agents.list()
-            for agent, assignment in bundle.agents.items():
-                if agent not in definitions:
-                    raise NotFoundError(f"Unknown agent: {agent}.")
-                model = (assignment or {}).get("model")
-                fallback = (assignment or {}).get("fallback")
-                if model:
-                    self._check_agent_model(model)
-                if fallback:
-                    self._check_agent_model(fallback)
-                self._services.agent_configs.set(
-                    agent, model=model or None, fallback=fallback or None
-                )
-            applied["agents"] = sorted(bundle.agents)
-        session_ref = params.get("session_ref")
-        if bundle.mode and session_ref:
-            record = self._services.sessions.set_mode(session_ref, bundle.mode)
-            applied["mode"] = record.mode
-            applied["session_id"] = record.id
-        elif bundle.mode:
-            applied["mode"] = bundle.mode
-            applied["session_id"] = None
-        return {"applied": applied}
+        bundle_id = self._need_str(params, "id")
+        previous, bundle = self._services.rinari_profiles.activate(bundle_id)
+        self._turns.emit_external(
+            event("profile_bundle.activated", {"id": bundle.id, "previous_id": previous})
+        )
+        return {"applied": {"profile_id": bundle.id, "previous_id": previous}}
 
     # -- turns ------------------------------------------------------------
 

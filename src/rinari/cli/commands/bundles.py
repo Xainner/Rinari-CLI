@@ -70,7 +70,6 @@ def _row(summary: dict) -> dict:
         "projects": summary["counts"]["projects"],
         "sessions": summary["counts"]["sessions"],
         "soul_id": summary["soul_id"],
-        "mode": summary["mode"],
         "agents": summary["agents"],
     }
 
@@ -119,11 +118,12 @@ def bundles_activate(ctx: typer.Context, profile_id: str = typer.Argument(...)) 
 @with_error_handling("bundles.create")
 def bundles_create(
     ctx: typer.Context,
-    profile_id: str = typer.Argument(..., help="Id: a-z, 0-9 and dashes."),
     name: str = typer.Option(..., "--name", help="Display name."),
+    profile_id: str = typer.Option(
+        None, "--id", help="Advanced: a fixed id (a-z, 0-9, dashes); made from the name otherwise."
+    ),
     description: str = typer.Option("", "--description"),
-    soul: str = typer.Option(None, "--soul", help="Soul id for its new conversations."),
-    mode: str = typer.Option(None, "--mode", help="Mode for its new conversations."),
+    soul: str = typer.Option(None, "--soul", help="Soul id (Rinari's by default)."),
     agent: list[str] = typer.Option(
         [], "--agent", help="Per-agent model: NAME=MODEL[,FALLBACK]. Repeatable."
     ),
@@ -136,7 +136,6 @@ def bundles_create(
             name=name,
             description=description,
             soul_id=soul,
-            mode=mode,
             agents=_agents(s, agent),
         )
         if activate:
