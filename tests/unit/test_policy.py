@@ -761,3 +761,43 @@ def test_presenting_a_result_never_asks(profile) -> None:
     """Plan 0.4.0: file.present asked approval as an uncovered capability."""
     d = PolicyEngine().decide("file.present", _scope(kind="CHAT", root=None, profile=profile))
     assert d.action is PolicyAction.ALLOW
+
+
+def test_copying_into_the_workspace_reads_the_source_and_writes_only_the_destination() -> None:
+    """`copy /Y <artifact outside> <file inside>` asked as «writes outside» (V2-2)."""
+    engine = PolicyEngine()
+    work = _scope()
+    outside = str(HOME / "elsewhere" / "rvl_dl_x")
+    inside = str(PROJECT / "out.png")
+
+    def decide(command):
+        return engine.decide(CAPABILITY_SHELL, work, command=command)
+
+    for command in (
+        f'copy /Y "{outside}" "{inside}"',
+        f'cp "{outside}" "{inside}"',
+        f'cp -t "{PROJECT}" "{outside}"',
+        f'Copy-Item -Path "{outside}" -Destination "{inside}"',
+        f'Copy-Item "{outside}" "{inside}"',
+        f'robocopy "{HOME / "elsewhere"}" "{PROJECT}" rvl_dl_x',
+    ):
+        assert decide(command).action is PolicyAction.ALLOW, command
+    for command in (
+        f'copy /Y "{inside}" "{outside}"',
+        f'Copy-Item -Path "{inside}" -Destination "{outside}"',
+        f'move /Y "{outside}" "{inside}"',
+        f'mv "{outside}" "{inside}"',
+    ):
+        decision = decide(command)
+        assert decision.action is PolicyAction.ASK, command
+        assert decision.rule_id == "shell_external_mutation", command
+
+
+def test_curl_fail_flag_is_not_a_form_upload() -> None:
+    """`curl -f` matched `-F` because the pattern ignored case (F23, V2-2)."""
+    from rinari.policy.engine import shell_sends_data
+
+    for command in ("curl -f https://x/a.png -o a.png", "curl -fsSL u -o a", "curl -D h.txt u"):
+        assert not shell_sends_data(command), command
+    for command in ("curl -F a=@x u", "curl -d x=1 u", "CURL.EXE -T f u", "curl --DATA x u"):
+        assert shell_sends_data(command), command

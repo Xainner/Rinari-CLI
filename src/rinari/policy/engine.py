@@ -276,12 +276,15 @@ def is_local_host(host: str | None) -> bool:
 
 
 # Shell commands that send data out (a body, a form, an upload).
+# curl's one-letter options are case-sensitive: `-f` (fail on errors) is not
+# `-F` (send a form), nor is `-D` (save headers) `-d` (send data). Program
+# names and long options are not (plan 0.4.0 v2, V2-2).
 _SHELL_SENDS = re.compile(
-    r"\b(curl\b[^|;&]*\s(-d|--data[\w-]*|-F|--form|-T|--upload-file|-X\s*(POST|PUT|PATCH|DELETE))\b"
-    r"|wget\b[^|;&]*\s--post-(data|file)\b"
-    r"|(invoke-webrequest|invoke-restmethod|iwr|irm)\b[^|;&]*-method\s+(post|put|patch|delete)\b"
-    r"|scp\s|rsync\s[^|;&]*\S+:)",
-    re.IGNORECASE,
+    r"\b((?i:curl)\b[^|;&]*\s(-d|(?i:--data)[\w-]*|-F|(?i:--form)|-T|(?i:--upload-file)"
+    r"|-X\s*(?i:POST|PUT|PATCH|DELETE))\b"
+    r"|(?i:wget\b[^|;&]*\s--post-(data|file))\b"
+    r"|(?i:(invoke-webrequest|invoke-restmethod|iwr|irm)\b[^|;&]*-method\s+(post|put|patch|delete))\b"
+    r"|(?i:scp)\s|(?i:rsync)\s[^|;&]*\S+:)",
 )
 
 
@@ -341,6 +344,27 @@ _INSPECTION_SHELL = re.compile(
 _CHAINING = re.compile(r"[;&|`]|\$\(|>")
 _REDIRECT_TARGET = re.compile(r"(?<!>)>>?\s*(?:\"([^\"]+)\"|'([^']+)'|([^\s;&|]+))")
 _PATH_TOKEN = re.compile(r"(?:\"([^\"]+)\"|'([^']+)'|([^\s;&|]+))")
+
+
+# Copying reads its sources and writes only its destination; moving changes
+# both, so `move`/`mv` keep every path (plan 0.4.0 v2, V2-2).
+_COPY_VERBS = frozenset({"cp", "copy", "xcopy", "robocopy", "copy-item", "cpi"})
+
+
+def _copy_destination(verb: str, raw: list[str], positional: list[str]) -> list[str]:
+    """The path a copy writes: `-Destination`/`-t` when named, robocopy's
+    second argument, else the last one."""
+    for index, token in enumerate(raw):
+        lowered = token.lower()
+        if lowered in ("-destination", "-t", "--target-directory") and index + 1 < len(raw):
+            return [raw[index + 1]]
+        if lowered.startswith("--target-directory="):
+            return [token.split("=", 1)[1]]
+    if verb == "robocopy":
+        return positional[1:2]
+    if verb in ("copy-item", "cpi") and len(positional) >= 2:
+        return [positional[1]]
+    return positional[-1:]
 
 
 def _local_part(command: str) -> str:
@@ -451,6 +475,7 @@ def classify_shell_risk(command: str, scope: SessionScope) -> ShellRisk:
     mutation = bool(_MUTATING_SHELL.search(command) or _REDIRECT_TARGET.search(command))
     destructive = bool(_DESTRUCTIVE_SHELL.search(command))
     candidates: list[str] = []
+    reads: list[str] = []
     for match in _REDIRECT_TARGET.finditer(command):
         candidates.append(next(value for value in match.groups() if value is not None))
     if mutation:
@@ -463,16 +488,24 @@ def classify_shell_risk(command: str, scope: SessionScope) -> ShellRisk:
             ]
             # cmd.exe verbs take /switches (move /y, del /q): not paths.
             cmd_verb = bool(tokens) and tokens[0].lower() in _CMD_SWITCH_VERBS
-            candidates.extend(
+            arguments = [
                 token
                 for token in tokens[1:]
                 if not token.startswith("-")
                 and not (cmd_verb and re.fullmatch(r"/[A-Za-z?]{1,2}", token))
-            )
+            ]
+            verb = _program(tokens[0]) if tokens else ""
+            if verb in _COPY_VERBS:
+                written = _copy_destination(verb, tokens[1:], arguments)
+                # The sources are only read: still checked for secrets and
+                # private data, never counted as writes outside.
+                reads.extend(token for token in arguments if token not in written)
+                arguments = written
+            candidates.extend(arguments)
     external: list[str] = []
     sensitive = False
     private = False
-    for raw in candidates:
+    for raw, writes in [(item, True) for item in candidates] + [(item, False) for item in reads]:
         value = raw.strip().rstrip(",)")
         if not value or value in {"-", "/dev/null"} or value.upper() in {"NUL", "NUL:"}:
             continue
@@ -499,6 +532,8 @@ def classify_shell_risk(command: str, scope: SessionScope) -> ShellRisk:
             continue
         sensitive = sensitive or is_system_secret(resolved)
         private = private or _inside_any(resolved, scope.private_roots)
+        if not writes:
+            continue
         root = scope.root.resolve() if scope.root is not None else None
         home = scope.user_home.resolve() if scope.user_home is not None else None
         if root is not None and root == home:
