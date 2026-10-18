@@ -51,6 +51,20 @@ def _project(schema: Any, *, root: bool = False) -> Any:
     if not isinstance(schema, dict):
         return schema
     wire = dict(schema)
+    # Limits some backends drop or models skip (F20, F39): said in words too,
+    # for any tool (plan 0.4.0 v2, V2-14).
+    said = []
+    if isinstance(wire.get("maxLength"), int):
+        said.append(f"At most {wire['maxLength']} characters.")
+    enum = wire.get("enum")
+    if isinstance(enum, list) and 1 < len(enum) <= 12 and all(isinstance(v, str) for v in enum):
+        said.append("One of: " + ", ".join(enum) + ".")
+    if said:
+        existing = wire.get("description")
+        text = existing.strip() if isinstance(existing, str) else ""
+        missing = [s for s in said if s not in text]
+        if missing:
+            wire["description"] = " ".join([text, *missing]).strip()
     if isinstance(wire.get("properties"), dict):
         wire["properties"] = {key: _project(sub) for key, sub in wire["properties"].items()}
     if isinstance(wire.get("items"), dict):

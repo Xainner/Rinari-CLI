@@ -247,6 +247,24 @@ def _spec(arguments: dict, ctx: ToolContext) -> Any:
         from rinari.documents.contracts import DocumentError, DocumentErrorCode
 
         service = _service(ctx)
+        if not uri.startswith("artifact://"):
+            # A spec the model wrote in the project (F13, plan 0.4.0 v2, V2-14):
+            # read with the same rules as fs.read.
+            from rinari.tools.native.fs import _resolve_read
+
+            path, error = _resolve_read(ctx, uri)
+            if error is not None or path is None:
+                raise DocumentError(
+                    DocumentErrorCode.NOT_FOUND,
+                    f"spec_uri {uri!r} is not a readable file of this workspace "
+                    "nor an artifact:// of this session",
+                )
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                raise DocumentError(
+                    DocumentErrorCode.INVALID_SPEC, f"spec_uri is not a JSON spec: {exc}"
+                ) from exc
         if not uri.startswith(f"artifact://{service.session_id}/"):
             raise DocumentError(DocumentErrorCode.NOT_FOUND, "spec_uri must be of this session")
         try:
@@ -649,7 +667,11 @@ def document_tools() -> list[ToolDefinition]:
                     "spec": {"type": "object"},
                     "template": _DOCUMENT,
                     "context": {"type": "object"},
-                    "spec_uri": {"type": "string"},
+                    "spec_uri": {
+                        "type": "string",
+                        "description": "A JSON spec: a workspace file or an artifact:// of "
+                        "this conversation.",
+                    },
                     "output_name": {"type": "string"},
                     "resources": _RESOURCES,
                     "expected_text": _TEXTS,

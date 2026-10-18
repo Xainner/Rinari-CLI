@@ -352,3 +352,42 @@ def test_an_expected_red_exit_is_not_a_failed_command(project) -> None:
     assert "exited_as_expected" in expected.to_model_text("shell.exec")
     assert _tool_activity_presentation("shell.exec", {}, plain)["status"] == "failed"
     assert "as_expected" not in listed.data
+
+
+def test_limits_are_said_in_words_in_the_wire_schema() -> None:
+    """memory.episodic's maxLength and memory.propose's kinds were skipped by the
+    model (F20, F39): the wire schema repeats them in the description."""
+    from rinari.tools.schema import wire_input_schema
+
+    wire = wire_input_schema(
+        {
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string", "maxLength": 400, "description": "What was done."},
+                "kind": {"type": "string", "enum": ["fact", "workflow"]},
+            },
+        }
+    )
+    assert wire["properties"]["summary"]["description"] == "What was done. At most 400 characters."
+    assert wire["properties"]["summary"]["maxLength"] == 400
+    assert wire["properties"]["kind"]["description"] == "One of: fact, workflow."
+    again = wire_input_schema(wire)
+    assert again["properties"]["summary"]["description"].count("At most") == 1
+
+
+def test_a_document_spec_can_be_a_workspace_file(project, monkeypatch) -> None:
+    """documents.create refused a spec the model wrote in the project: «spec_uri
+    must be of this session» (F13, plan 0.4.0 v2, V2-14)."""
+    import json
+    from types import SimpleNamespace
+
+    from rinari.tools.native import documents
+
+    tmp_path, root, _ = project
+    ctx = _ctx(tmp_path, root)
+    monkeypatch.setattr(documents, "_service", lambda ctx: SimpleNamespace(session_id="s1"))
+    spec_file = root / "ventas-spec.json"
+    spec_file.write_text(json.dumps({"title": "Ventas"}), encoding="utf-8")
+
+    assert documents._spec({"spec_uri": "ventas-spec.json"}, ctx) == {"title": "Ventas"}
+    assert documents._spec({"spec_uri": str(spec_file)}, ctx) == {"title": "Ventas"}
