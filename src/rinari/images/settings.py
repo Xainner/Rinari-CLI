@@ -23,7 +23,15 @@ from typing import Any
 
 FILE = "images.json"
 #: Connector kinds this Engine knows; the settings reject any other.
-KINDS = ("chatgpt", "openai")
+KINDS = ("chatgpt", "openai", "fal", "google", "openrouter", "comfyui", "mcp")
+#: Kinds that use an API key of their own (kept as a credential reference).
+KEYED = ("openai", "fal", "google", "openrouter")
+OPERATIONS = ("generate", "edit", "variations", "upscale", "remove_background")
+_PRIVATE_HTTP = re.compile(
+    r"^http://(127\.0\.0\.1|localhost|\[::1\]|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|"
+    r"172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|[a-z0-9-]+(\.local|\.lan)?)(:\d+)?(/.*)?$",
+    re.IGNORECASE,
+)
 _ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}$")
 
 
@@ -85,23 +93,65 @@ def validate(value: Any) -> dict[str, Any]:
         if not isinstance(model, str) or len(model) > 120:
             raise ValueError("model must be a short string")
         entry: dict[str, Any] = {"id": cid, "kind": kind, "label": label, "model": model}
-        if kind == "chatgpt":
+        if kind == "chatgpt" or (kind == "openrouter" and item.get("provider_id")):
             provider = item.get("provider_id")
             if not isinstance(provider, str) or not provider:
-                raise ValueError("A ChatGPT connector needs provider_id")
+                raise ValueError(f"A {kind} connector needs provider_id")
             entry["provider_id"] = provider
-        if kind == "openai":
+        if kind in KEYED:
             ref = item.get("api_key_ref")
             if ref is not None and (not isinstance(ref, str) or "://" not in ref):
                 raise ValueError("api_key_ref must be a credential reference")
             entry["api_key_ref"] = ref
-            endpoint = item.get("endpoint")
-            if endpoint is not None:
-                if not isinstance(endpoint, str) or not endpoint.startswith(
-                    ("https://", "http://127.0.0.1", "http://localhost")
+        endpoint = item.get("endpoint")
+        if endpoint is not None:
+            # A local ComfyUI is plain http on this PC or the LAN; the rest are
+            # https (or loopback, for a test service).
+            local = isinstance(endpoint, str) and bool(_PRIVATE_HTTP.match(endpoint))
+            secure = isinstance(endpoint, str) and endpoint.startswith("https://")
+            if not (secure or local):
+                raise ValueError("endpoint must be https, or http on this PC or the local network")
+            entry["endpoint"] = endpoint.rstrip("/")
+        if kind == "fal" and item.get("models") is not None:
+            models = item["models"]
+            if not isinstance(models, dict) or any(
+                op not in OPERATIONS or not isinstance(value, str) or len(value) > 120
+                for op, value in models.items()
+            ):
+                raise ValueError("models must map operations to FAL model ids")
+            entry["models"] = {op: value for op, value in models.items() if value}
+        if kind == "comfyui":
+            workflows = item.get("workflows") or {}
+            if not isinstance(workflows, dict) or any(
+                op not in OPERATIONS or not isinstance(graph, dict)
+                for op, graph in workflows.items()
+            ):
+                raise ValueError("workflows must map operations to ComfyUI workflows (API format)")
+            entry["workflows"] = workflows
+            entry.setdefault("endpoint", "http://127.0.0.1:8188")
+        if kind == "mcp":
+            server = item.get("server")
+            if not isinstance(server, str) or not server:
+                raise ValueError("An MCP connector needs server")
+            tools = item.get("tools") or {}
+            if not isinstance(tools, dict) or not tools:
+                raise ValueError("An MCP connector maps at least one operation to a tool")
+            clean_tools: dict[str, dict[str, str]] = {}
+            for op, spec in tools.items():
+                if (
+                    op not in OPERATIONS
+                    or not isinstance(spec, dict)
+                    or not isinstance(spec.get("tool"), str)
+                    or not spec["tool"]
                 ):
-                    raise ValueError("endpoint must be https (or a local address)")
-                entry["endpoint"] = endpoint.rstrip("/")
+                    raise ValueError(f"Invalid MCP tool for {op!r}")
+                clean_tools[op] = {
+                    key: str(spec[key])
+                    for key in ("tool", "prompt_arg", "image_arg")
+                    if spec.get(key)
+                }
+            entry["server"] = server
+            entry["tools"] = clean_tools
         clean.append(entry)
     ids = {item["id"] for item in clean}
     default = value.get("default_connector")

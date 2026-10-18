@@ -90,6 +90,8 @@ class CostEstimate:
     def label(self) -> str:
         if self.basis == "included":
             return "included in the subscription"
+        if self.basis == "local":
+            return "free (runs on your computer)"
         if self.usd is None:
             return "cost unknown"
         return f"~${self.usd:.3f}"

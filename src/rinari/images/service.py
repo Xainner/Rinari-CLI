@@ -44,11 +44,13 @@ class ImageService:
         value = image_settings.load(self._home)
         credentials = getattr(self._services, "credentials", None)
         for item in value["connectors"]:
-            if item["kind"] == "openai":
+            if item["kind"] in image_settings.KEYED and not item.get("provider_id"):
                 ref = item.get("api_key_ref")
                 item["has_key"] = bool(ref) and (credentials is None or _exists(credentials, ref))
         value["kinds"] = list(image_settings.KINDS)
         value["subscriptions"] = self.subscriptions()
+        value["openrouter_providers"] = self.subscriptions("openrouter")
+        value["mcp_servers"] = self.mcp_servers()
         return value
 
     def configure(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -62,7 +64,7 @@ class ImageService:
                 raise ValueError("Each connector must be an object")
             item = {key: value for key, value in raw.items() if key not in ("api_key", "has_key")}
             literal = raw.get("api_key")
-            if raw.get("kind") == "openai":
+            if raw.get("kind") in image_settings.KEYED:
                 if isinstance(literal, str) and literal.strip():
                     item["api_key_ref"] = self._services.credentials.store_secret(
                         secret_slot(str(raw.get("id"))), literal.strip()
@@ -90,8 +92,9 @@ class ImageService:
                     self._services.credentials.delete(ref)
         return self.settings()
 
-    def subscriptions(self) -> list[dict[str, Any]]:
-        """ChatGPT subscriptions connected as providers: what a `chatgpt` connector can use."""
+    def subscriptions(self, product: str = "chatgpt") -> list[dict[str, Any]]:
+        """Providers already connected that a connector can reuse: the ChatGPT
+        subscription (oauth) for `chatgpt`, an OpenRouter key for `openrouter`."""
         from rinari.providers.catalog import product_for
 
         found = []
@@ -100,9 +103,23 @@ class ImageService:
         except Exception:
             return []
         for record in records:
-            if getattr(record, "auth_method", None) == "oauth" and product_for(record) == "chatgpt":
-                found.append({"provider_id": record.id, "name": getattr(record, "name", record.id)})
+            if product_for(record) != product:
+                continue
+            if product == "chatgpt" and getattr(record, "auth_method", None) != "oauth":
+                continue
+            name = getattr(record, "name", None) or getattr(record, "alias", None) or record.id
+            found.append({"provider_id": record.id, "name": name})
         return found
+
+    def mcp_servers(self) -> list[str]:
+        """MCP servers the owner registered: any of them can be assigned."""
+        try:
+            rows = self._services.mcp.list()
+        except Exception:
+            return []
+        return sorted(
+            {str(row.get("name")) for row in rows if isinstance(row, dict) and row.get("name")}
+        )
 
     # -- connectors ------------------------------------------------------------
 
@@ -157,7 +174,91 @@ class ImageService:
                 token=lambda: token_for(providers, record),
                 refresh=lambda rejected: token_for(providers, record, rejected_token=rejected),
             )
+        if entry["kind"] in ("fal", "google"):
+            from rinari.images.more_connectors import FalImagesConnector, GoogleImagesConnector
+
+            key = self._key(entry)
+            if entry["kind"] == "fal":
+                return FalImagesConnector(
+                    id=entry["id"],
+                    kind="fal",
+                    label=entry["label"],
+                    model=entry.get("model") or "",
+                    client_factory=factory,
+                    api_key=key,
+                    endpoint=entry.get("endpoint") or "https://fal.run",
+                    models=dict(entry.get("models") or {}),
+                )
+            return GoogleImagesConnector(
+                id=entry["id"],
+                kind="google",
+                label=entry["label"],
+                model=entry.get("model") or "",
+                client_factory=factory,
+                api_key=key,
+                endpoint=entry.get("endpoint")
+                or "https://generativelanguage.googleapis.com/v1beta",
+            )
+        if entry["kind"] == "openrouter":
+            from rinari.images.more_connectors import OpenRouterImagesConnector
+
+            endpoint = entry.get("endpoint") or "https://openrouter.ai/api/v1"
+            if entry.get("provider_id"):
+                # The OpenRouter the owner already uses as a provider: its key.
+                try:
+                    record = self._services.providers.get(entry["provider_id"])
+                except Exception as exc:
+                    raise ImageConnectorError(
+                        "AUTH_REQUIRED", f"{entry['label']}: the provider is no longer connected"
+                    ) from exc
+                key = self._services.providers.resolve_secret(record) or ""
+                endpoint = entry.get("endpoint") or (record.endpoint or endpoint).rstrip("/")
+            else:
+                key = self._key(entry)
+            return OpenRouterImagesConnector(
+                id=entry["id"],
+                kind="openrouter",
+                label=entry["label"],
+                model=entry.get("model") or "",
+                client_factory=factory,
+                api_key=key,
+                endpoint=endpoint,
+            )
+        if entry["kind"] == "comfyui":
+            from rinari.images.more_connectors import ComfyUIConnector
+
+            return ComfyUIConnector(
+                id=entry["id"],
+                kind="comfyui",
+                label=entry["label"],
+                client_factory=factory,
+                endpoint=entry.get("endpoint") or "http://127.0.0.1:8188",
+                workflows=dict(entry.get("workflows") or {}),
+            )
+        if entry["kind"] == "mcp":
+            from rinari.images.more_connectors import McpImagesConnector
+
+            mcp = self._services.mcp
+            server = entry["server"]
+
+            def call(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+                return mcp.client(server).call_tool(tool, arguments)
+
+            return McpImagesConnector(
+                id=entry["id"],
+                kind="mcp",
+                label=entry["label"],
+                client_factory=factory,
+                call=call,
+                tools=dict(entry.get("tools") or {}),
+            )
         raise ImageConnectorError("UNSUPPORTED", f"Unknown connector kind {entry['kind']!r}")
+
+    def _key(self, entry: dict[str, Any]) -> str:
+        ref = entry.get("api_key_ref")
+        if not ref:
+            raise ImageConnectorError("AUTH_REQUIRED", f"{entry['label']} has no API key")
+        return self._services.credentials.resolve(ref)
 
     def test(self, connector_id: str) -> dict[str, Any]:
         value = image_settings.load(self._home)

@@ -5258,6 +5258,30 @@
               }
             }
           }
+        },
+        "openrouter_providers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "provider_id",
+              "name"
+            ],
+            "properties": {
+              "provider_id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "mcp_servers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       }
     },
@@ -5275,7 +5299,12 @@
         "kind": {
           "enum": [
             "chatgpt",
-            "openai"
+            "openai",
+            "fal",
+            "google",
+            "openrouter",
+            "comfyui",
+            "mcp"
           ]
         },
         "label": {
@@ -5302,6 +5331,45 @@
         },
         "has_key": {
           "type": "boolean"
+        },
+        "models": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "FAL: model id per operation."
+        },
+        "workflows": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object"
+          },
+          "description": "ComfyUI: workflow (API format) per operation; {{prompt}} and {{image}} are replaced."
+        },
+        "server": {
+          "type": "string",
+          "description": "MCP: the registered server name."
+        },
+        "tools": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "tool"
+            ],
+            "properties": {
+              "tool": {
+                "type": "string"
+              },
+              "prompt_arg": {
+                "type": "string"
+              },
+              "image_arg": {
+                "type": "string"
+              }
+            }
+          },
+          "description": "MCP: tool per operation and its argument names."
         }
       }
     }

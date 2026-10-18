@@ -1282,6 +1282,16 @@ un claim de "fixed" sin evidencia pasada queda como `IMPLEMENTED_UNVERIFIED`/
   `chatgpt` (the ChatGPT subscription connected as a provider; the Responses
   endpoint's hosted `image_generation` tool, included in the plan) or `openai`
   (Images API with an API key kept as a credential reference, priced per image).
+  More kinds (block 29, `rinari/images/more_connectors.py`): `fal` (FAL.ai,
+  one documented model per operation, the only paid one that upscales),
+  `google` (Gemini image models, `generateContent` with `responseModalities`
+  IMAGE), `openrouter` (chat completions with `modalities: ["image","text"]`;
+  the key of the owner's OpenRouter provider or its own; the cost it reports
+  is recorded), `comfyui` (a local or LAN server with one API-format workflow
+  per operation, `{{prompt}}`/`{{image}}` replaced; free) and `mcp` (any
+  registered MCP server, the owner maps a tool per operation; image blocks,
+  data URLs and http(s) links in the result are read; nothing specific to
+  one server).
   A default connector and an optional one for edits. No default by design:
   without one the tools fail with `UNSUPPORTED` / `NO_IMAGE_CONNECTOR` and the
   model must tell the owner instead of improvising.

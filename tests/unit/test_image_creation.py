@@ -356,3 +356,68 @@ def test_usage_report_counts_images_and_adds_their_cost(server) -> None:
     )
     assert media["images"] == 2
     assert media["cost"] == pytest.approx(0.042)
+
+
+def test_the_service_builds_each_new_kind_from_the_settings(server, monkeypatch) -> None:
+    from rinari.images.more_connectors import (
+        ComfyUIConnector,
+        FalImagesConnector,
+        McpImagesConnector,
+    )
+    from rinari.images.service import ImageService
+
+    saved = _call(
+        server,
+        "images.settings.set",
+        {
+            "connectors": [
+                {"id": "fal", "kind": "fal", "label": "FAL", "api_key": "fal-secret"},
+                {
+                    "id": "comfy",
+                    "kind": "comfyui",
+                    "label": "ComfyUI",
+                    "workflows": {"upscale": {"1": {}}},
+                },
+                {
+                    "id": "lab",
+                    "kind": "mcp",
+                    "label": "Lab",
+                    "server": "lab",
+                    "tools": {"generate": {"tool": "make"}},
+                },
+            ],
+            "default_connector": "fal",
+            "edit_connector": "comfy",
+        },
+    )
+    assert saved["ok"], saved
+    assert saved["result"]["connectors"][0]["has_key"] is True
+    service = ImageService(server._services)
+    fal = service.connector("generate")
+    assert isinstance(fal, FalImagesConnector) and fal.api_key == "fal-secret"
+    assert isinstance(service.connector("upscale"), ComfyUIConnector)
+    calls = []
+
+    class Client:
+        def call_tool(self, tool, arguments):
+            calls.append((tool, arguments))
+            return {
+                "content": [
+                    {
+                        "type": "image",
+                        "data": base64.b64encode(_png()).decode(),
+                        "mimeType": "image/png",
+                    }
+                ]
+            }
+
+    monkeypatch.setattr(server._services.mcp, "client", lambda name, project=None: Client())
+    entry = next(
+        item
+        for item in image_settings.load(Path(server._services.ctx.home))["connectors"]
+        if item["id"] == "lab"
+    )
+    lab = service.build(entry)
+    assert isinstance(lab, McpImagesConnector)
+    assert lab.run(ImageJob("generate", "luna")).images
+    assert calls == [("make", {})]
