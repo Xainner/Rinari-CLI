@@ -408,6 +408,25 @@ def test_repeated_rewrites_back_to_an_earlier_state() -> None:
     assert signal.action == NUDGE
 
 
+def test_rejected_edits_are_not_rewrites() -> None:
+    """luna/t2: five fs.patch calls rejected in validation were read as the file
+    going back to an earlier state, and the turn was closed with the task
+    undone (plan 0.4.0 v2, V2-9, F25)."""
+    det = LoopDetector(repeats=3)
+    edit = {"path": "facturas.py", "old_string": "a", "new_string": "b"}
+    undo = {"path": "facturas.py", "old_string": "b", "new_string": "a"}
+    for arguments in (edit, undo, edit, undo, edit):
+        det.record_tool("fs.patch", arguments, "INVALID_ARGUMENT", applied=False)
+        signal = det.check()
+        assert signal is None or signal.kind != "repeated-rewrites"
+    kinds = []
+    for arguments in (edit, undo, edit, undo):
+        det.record_tool("fs.patch", arguments)
+        signal = det.check()
+        kinds.append(signal.kind if signal else None)
+    assert "repeated-rewrites" in kinds
+
+
 def test_different_edits_of_one_file_are_progress() -> None:
     """ses_01M3F5SH…: four distinct patches of a fresh template were stopped."""
     det = LoopDetector()

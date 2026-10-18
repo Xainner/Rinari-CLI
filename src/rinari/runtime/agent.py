@@ -965,6 +965,7 @@ class AgentLoop:
                         call.name,
                         call.arguments,
                         outcome_digest(result.data if result.ok else result.error.message),
+                        applied=result.ok,
                     )
                     if result.error is not None:
                         loop.record_error(call.name, result.error.code.value, result.error.message)
