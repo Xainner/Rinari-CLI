@@ -87,17 +87,31 @@ def fs_patch(arguments: dict) -> tuple[dict, list[str]]:
     Only that exact shape maps: with `old_string`, `replace_all` or `files`
     alongside, the call means something else and validation rejects it.
     """
+    notes: list[str] = []
+    if isinstance(arguments.get("edits"), str):
+        # A list of edits sent as JSON text (F12): the top-level `edits` is not
+        # in the schema, so the generic coercion never sees it.
+        try:
+            parsed = json.loads(arguments["edits"])
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, list):
+            arguments = {**arguments, "edits": parsed}
+            notes.append("used edits as a list (received it as text)")
     keys = set(arguments)
     if (
         not {"path", "edits"} <= keys
         or not keys <= _PATCH_SINGLE_FILE
         or not isinstance(arguments["edits"], list)
     ):
-        return arguments, []
+        return arguments, notes
     row = {"path": arguments["path"], "edits": arguments["edits"]}
     if "expected_hash" in arguments:
         row["expected_hash"] = arguments["expected_hash"]
-    return {"files": [row]}, ["used files=[{path, edits}] (received top-level path and edits)"]
+    return {"files": [row]}, [
+        *notes,
+        "used files=[{path, edits}] (received top-level path and edits)",
+    ]
 
 
 def fs_read_lines(arguments: dict) -> tuple[dict, list[str]]:

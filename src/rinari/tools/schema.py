@@ -132,6 +132,66 @@ def coerce_types(schema: Any, value: Any, path: str = "$") -> tuple[Any, list[st
 _NO_VALUE = object()
 
 
+def _empty(value: Any) -> bool:
+    return value is None or value == "" or value == [] or value == {}
+
+
+def drop_empty_optionals(schema: Any, value: Any) -> tuple[Any, list[str]]:
+    """Optional text arguments a model sent empty count as absent.
+
+    Strict structured outputs (OpenAI's among them) make a model send every
+    declared key, so optional ones arrive as `""`. Read
+    as values they changed the call: `expected_hash: ""` turned a new file
+    into a conflict, and `path: ""` beside `files` made fs.patch see two
+    forms at once (plan 0.4.0 v2, V2-8). Driven by the schema, for any tool:
+    a key required at the top level is never touched; a key required only by
+    one `oneOf`/`anyOf` alternative is dropped when it is empty and another
+    alternative is fully given with real values.
+    """
+    if not isinstance(schema, dict) or not isinstance(value, dict):
+        return value, []
+    required = set(schema.get("required") or ())
+    branches = [
+        set(clause.get("required") or ())
+        for key in ("oneOf", "anyOf")
+        for clause in schema.get(key) or ()
+        if isinstance(clause, dict)
+    ]
+    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    satisfied = [b for b in branches if b and all(not _empty(value.get(k, None)) for k in b)]
+    in_branch = set().union(*branches) if branches else set()
+    keep = set().union(*satisfied) if satisfied else set()
+    result, dropped = dict(value), []
+    for key, item in value.items():
+        # Only empty text: a `null` in a typed field stays invalid (the
+        # contract of test_builtin_tool_validation), and `[]`/`{}` are values.
+        if key in required or item != "":
+            continue
+        if key in in_branch and (not satisfied or key in keep):
+            continue  # its own alternative may need it ("" can be a real new_string)
+        del result[key]
+        dropped.append(key)
+    notes = [f"ignored empty optional {', '.join(sorted(dropped))}"] if dropped else []
+    # The same inside objects and lists of objects (files[].expected_hash).
+    for key, item in list(result.items()):
+        sub = properties.get(key)
+        if not isinstance(sub, dict):
+            continue
+        if isinstance(item, dict):
+            result[key], inner = drop_empty_optionals(sub, item)
+            notes.extend(f"{key}: {note}" for note in inner)
+        elif isinstance(item, list) and isinstance(sub.get("items"), dict):
+            rows = []
+            for index, row in enumerate(item):
+                row, inner = drop_empty_optionals(sub["items"], row)
+                rows.append(row)
+                notes.extend(f"{key}[{index}]: {note}" for note in inner)
+            result[key] = rows
+    if not notes:
+        return value, []
+    return result, notes
+
+
 def _parse_as(expected: str, text: str) -> Any:
     stripped = text.strip()
     if expected == "boolean":

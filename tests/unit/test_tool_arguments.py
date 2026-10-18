@@ -166,3 +166,133 @@ def test_effective_timeout_respects_the_tool_deadline(project) -> None:
     capped = effective_timeout(900, 60.0, near)
     assert capped["source"] == "deadline" and capped["effective_s"] <= 5
     assert capped["requested_s"] == 900
+
+
+# -- empty optionals and text lists (plan 0.4.0 v2, V2-8) ---------------------
+
+
+def test_patch_with_empty_single_file_form_beside_files_uses_files(project) -> None:
+    """GPT sends every key: path/old_string/new_string empty next to files (F1)."""
+    tmp_path, root, _ = project
+    ctx = _ctx(tmp_path, root, profile="full-access")
+    runtime, _ = _runtime(ctx, tmp_path, answer="y")
+    target = root / "facturas.py"
+    target.write_text("total = 1\n", encoding="utf-8")
+
+    result = runtime.execute(
+        "fs.patch",
+        {
+            "path": "",
+            "old_string": "",
+            "new_string": "",
+            "replace_all": False,
+            "expected_hash": "",
+            "files": [
+                {
+                    "path": str(target),
+                    "expected_hash": "",
+                    "edits": [{"old_string": "total = 1", "new_string": "total = 2"}],
+                }
+            ],
+        },
+        ctx,
+    )
+
+    assert result.ok, result.error
+    assert target.read_text(encoding="utf-8") == "total = 2\n"
+    assert any("ignored empty optional" in note for note in result.notes)
+
+
+def test_new_file_with_empty_expected_hash_is_created(project) -> None:
+    """`expected_hash: ""` on a new file read as a hash and failed (F8)."""
+    tmp_path, root, _ = project
+    ctx = _ctx(tmp_path, root, profile="full-access")
+    runtime, _ = _runtime(ctx, tmp_path, answer="y")
+    target = root / "nuevo.py"
+
+    result = runtime.execute(
+        "fs.write", {"path": str(target), "content": "x = 1\n", "expected_hash": ""}, ctx
+    )
+
+    assert result.ok, result.error
+    assert target.read_text(encoding="utf-8") == "x = 1\n"
+
+
+def test_patch_edits_sent_as_json_text_are_read_as_a_list(project) -> None:
+    """DeepSeek sent `edits` as serialized JSON next to path (F12)."""
+    import json
+
+    tmp_path, root, _ = project
+    ctx = _ctx(tmp_path, root, profile="full-access")
+    runtime, _ = _runtime(ctx, tmp_path, answer="y")
+    target = root / "a.py"
+    target.write_text("a = 1\n", encoding="utf-8")
+
+    result = runtime.execute(
+        "fs.patch",
+        {
+            "path": str(target),
+            "edits": json.dumps([{"old_string": "a = 1", "new_string": "a = 3"}]),
+        },
+        ctx,
+    )
+
+    assert result.ok, result.error
+    assert target.read_text(encoding="utf-8") == "a = 3\n"
+
+
+def test_empty_new_string_still_deletes_in_the_single_file_form(project) -> None:
+    tmp_path, root, _ = project
+    ctx = _ctx(tmp_path, root, profile="full-access")
+    runtime, _ = _runtime(ctx, tmp_path, answer="y")
+    target = root / "b.py"
+    target.write_bytes(b"keep drop")
+
+    result = runtime.execute(
+        "fs.patch", {"path": str(target), "old_string": " drop", "new_string": ""}, ctx
+    )
+
+    assert result.ok, result.error
+    assert target.read_bytes() == b"keep"
+
+
+def test_a_rejected_call_does_not_use_up_its_request_id(project) -> None:
+    """Correcting the arguments after INVALID_ARGUMENT kept the same request_id
+    and hit «already used with different arguments» (F24)."""
+    tmp_path, root, _ = project
+    ctx = _ctx(tmp_path, root)
+    runtime, _ = _runtime(ctx, tmp_path, answer="y")
+    tool, calls = _counting_tool(
+        "fs.receipted",
+        {"type": "object", "properties": {"n": {"type": "integer"}}, "required": ["n"]},
+    )
+    runtime.registry.register(dataclasses.replace(tool, manifest={"supports_request_id": True}))
+
+    bad = runtime.execute("fs.receipted", {"request_id": "r1", "n": "x"}, ctx)
+    good = runtime.execute("fs.receipted", {"request_id": "r1", "n": 2}, ctx)
+    again = runtime.execute("fs.receipted", {"request_id": "r1", "n": 3}, ctx)
+
+    assert bad.error.code is ToolErrorCode.INVALID_ARGUMENT
+    assert good.ok, good.error
+    assert again.error.code is ToolErrorCode.CONFLICT
+    assert calls == [{"n": 2}]
+
+
+def test_required_and_nullable_keys_are_never_dropped() -> None:
+    from rinari.tools.schema import drop_empty_optionals
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "content": {"type": "string"},
+            "note": {"type": ["string", "null"]},
+            "tags": {"type": "array"},
+            "cwd": {"type": "string"},
+        },
+        "required": ["content"],
+    }
+    value, notes = drop_empty_optionals(
+        schema, {"content": "", "note": None, "tags": [], "cwd": ""}
+    )
+    assert value == {"content": "", "note": None, "tags": []}
+    assert notes == ["ignored empty optional cwd"]

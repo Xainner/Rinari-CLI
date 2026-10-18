@@ -50,6 +50,7 @@ from rinari.tools.registry import ToolRegistry
 from rinari.tools.schema import (
     coerce_types,
     declared_properties,
+    drop_empty_optionals,
     unknown_arguments_message,
     validate_against,
 )
@@ -235,7 +236,13 @@ class ToolRuntime:
                     )
                 else:
                     result = self._execute_inner(tool_name, clean, ctx, tool_call_id)
-                    self._receipts[key] = (fingerprint, result)
+                    # A call rejected before running (bad arguments) did nothing:
+                    # the corrected retry may reuse its request_id (V2-8, F24).
+                    if not (
+                        result.error is not None
+                        and result.error.code is ToolErrorCode.INVALID_ARGUMENT
+                    ):
+                        self._receipts[key] = (fingerprint, result)
                     if len(self._receipts) > 256:
                         self._receipts.popitem(last=False)
         else:
@@ -315,6 +322,10 @@ class ToolRuntime:
         notes: tuple[str, ...] = ()
         if resolved_from is not None:
             notes = (f"used tool {tool_name} (received {resolved_from})",)
+        if tool.manifest.get("source") not in _DYNAMIC_SOURCES:
+            # Optional keys sent empty count as absent (plan 0.4.0 v2, V2-8).
+            arguments, emptied = drop_empty_optionals(tool.input_schema, arguments)
+            notes = (*notes, *emptied)
         if tool.normalize is not None and tool.manifest.get("source") not in _DYNAMIC_SOURCES:
             try:
                 arguments, rewritten = tool.normalize(arguments)
