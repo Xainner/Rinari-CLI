@@ -541,11 +541,9 @@ def test_git_tools_in_repo(project) -> None:
     ctx = _ctx(tmp_path, root)
     runtime, _ = _runtime(ctx, tmp_path)
     status = runtime.execute("git.status", {}, ctx)
-    # not a git repo -> NOT_FOUND (structured, not a crash)
-    if status.ok is False:
-        assert status.error.code is ToolErrorCode.NOT_FOUND
-    else:
-        assert status.data["branch"]
+    # Not a git repo: an answer, not a failure (plan 0.4.0 v2, V2-14).
+    assert status.ok, status.error
+    assert status.data.get("is_repo") is False or status.data["branch"]
 
     init_cmd = "git init -q && git config user.email a@b.c && git config user.name t"
     init = runtime.execute("shell.exec", {"command": init_cmd}, ctx)

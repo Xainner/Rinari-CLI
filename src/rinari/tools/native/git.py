@@ -99,9 +99,27 @@ def _truncated(out: str) -> bool:
     return len(out) > MAX_OUTPUT
 
 
+def _not_a_repo(result: ToolResult) -> bool:
+    error = result.error
+    return error is not None and error.message.startswith("Not a git repository")
+
+
 def git_status(input: dict, ctx: ToolContext) -> ToolResult:
     result = _run_git(ctx, input, "status", "--porcelain=v1", "-z", "--branch")
     if isinstance(result, ToolResult):
+        if _not_a_repo(result):
+            # Models call it to look around: a folder without git is an
+            # answer, not a failure (F2, plan 0.4.0 v2, V2-14).
+            return _ok(
+                {
+                    "is_repo": False,
+                    "branch": None,
+                    "dirty": False,
+                    "files": [],
+                    "total_files": 0,
+                    "truncated": False,
+                }
+            )
         return result
     _, out, _ = result
     base = (
@@ -176,6 +194,8 @@ def git_diff(input: dict, ctx: ToolContext) -> ToolResult:
             args += ["--", target.name if target.is_file() else "."]
     result = _run_git(ctx, input, *args)
     if isinstance(result, ToolResult):
+        if _not_a_repo(result):
+            return _ok({"is_repo": False, "diff": "", "truncated": False})
         return result
     _, out, _ = result
     bound, truncated = _bound(out)

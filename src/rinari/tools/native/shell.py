@@ -505,6 +505,8 @@ def shell_exec(input: dict, ctx: ToolContext) -> ToolResult:
         )
 
     exit_code = process.returncode if process.returncode is not None else -1
+    expected = input.get("expect_exit")
+    expected = [expected] if isinstance(expected, int) else list(expected or [])
     data = {
         "command": command,
         "cwd": cwd,
@@ -514,6 +516,11 @@ def shell_exec(input: dict, ctx: ToolContext) -> ToolResult:
         "truncated": stdout.truncated or stderr.truncated,
         "timeout": timeout,
     }
+    if expected and exit_code != 0 and exit_code in expected:
+        # A red the model asked for on purpose is not a failed tool: it no
+        # longer counts as an incident nor dirties the metrics (F4, F27).
+        data["expected_exit"] = expected
+        data["as_expected"] = True
     if cancelled:
         result = _fail(ToolErrorCode.CANCELLED, "Command cancelled", data=data)
     elif timed_out:
@@ -568,6 +575,14 @@ def shell_tools() -> list[ToolDefinition]:
                     },
                     "env": {"type": "object"},
                     "shell": SHELL_SCHEMA,
+                    "expect_exit": {
+                        "type": ["integer", "array"],
+                        "items": {"type": "integer"},
+                        "description": (
+                            "Exit code(s) that mean the command did what you expected, e.g. 1 "
+                            "for tests you expect to fail before a fix. Default 0."
+                        ),
+                    },
                 },
                 "oneOf": [{"required": ["command"]}, {"required": ["argv"]}],
             },

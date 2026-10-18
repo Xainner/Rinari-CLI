@@ -127,7 +127,13 @@ class ToolResult:
         if "exit_code" in process:
             code = process["exit_code"]
             envelope["process_status"] = (
-                "running" if code is None else "failed" if code != 0 else "exited_zero"
+                "running"
+                if code is None
+                else "exited_as_expected"
+                if process.get("as_expected")
+                else "failed"
+                if code != 0
+                else "exited_zero"
             )
             envelope["task_verified"] = False
         if self.ok:
@@ -183,7 +189,15 @@ class ToolResult:
                 lines.append(
                     "error_details: " + json.dumps(err.details, ensure_ascii=False, default=str)
                 )
-        status = "running" if code is None else "exited_zero" if code == 0 else "failed"
+        status = (
+            "running"
+            if code is None
+            else "exited_zero"
+            if code == 0
+            else "exited_as_expected"
+            if self.data.get("as_expected")
+            else "failed"
+        )
         timing = f", {round(self.duration_ms)} ms" if self.duration_ms else ""
         lines.append(f"exit_code: {code} ({status}; task not verified{timing})")
         if self.notes:

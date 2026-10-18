@@ -1597,9 +1597,9 @@ def _tool_activity_presentation(tool: str, arguments: dict, result: ToolResult) 
         exit_code = data.get("exit_code")
         if not isinstance(exit_code, int):
             exit_code = presentation.get("exit_code")
-        if isinstance(exit_code, int) and exit_code != 0:
+        if isinstance(exit_code, int) and exit_code != 0 and not data.get("as_expected"):
             presentation["status"] = "failed"
-        elif result.ok and exit_code == 0:
+        elif result.ok and (exit_code == 0 or data.get("as_expected")):
             presentation["status"] = "success"
     else:
         presentation["data"] = data

@@ -313,3 +313,42 @@ def test_patching_a_missing_file_outside_says_so_before_asking(project) -> None:
     assert result.error.code is ToolErrorCode.NOT_FOUND
     assert "does not exist" in result.error.message
     assert not [kind for kind, _ in events if "Approval" in kind or kind == "PolicyDecision"]
+
+
+def test_git_status_and_diff_outside_a_repository_answer_instead_of_failing(project) -> None:
+    """Models call git.status to look around; a folder without git counted as a
+    failed tool (F2, plan 0.4.0 v2, V2-14)."""
+    tmp_path, _root, _ = project
+    plain = tmp_path / "sin-git"
+    plain.mkdir()
+    ctx = dataclasses.replace(_ctx(tmp_path, plain), project_root=None)
+    runtime, _ = _runtime(ctx, tmp_path, answer="y")
+
+    status = runtime.execute("git.status", {}, ctx)
+    diff = runtime.execute("git.diff", {}, ctx)
+
+    assert status.ok, status.error
+    assert status.data["is_repo"] is False and status.data["files"] == []
+    assert diff.ok, diff.error
+    assert diff.data == {"is_repo": False, "diff": "", "truncated": False}
+
+
+def test_an_expected_red_exit_is_not_a_failed_command(project) -> None:
+    """pytest red before a fix and negative checks counted as failed tools and
+    incidents (F4, F27, plan 0.4.0 v2, V2-14)."""
+    from rinari.runtime.agent import _tool_activity_presentation
+
+    tmp_path, root, _ = project
+    ctx = _ctx(tmp_path, root, profile="full-access")
+    runtime, _ = _runtime(ctx, tmp_path, answer="y")
+    argv = [sys.executable, "-c", "raise SystemExit(1)"]
+
+    expected = runtime.execute("shell.exec", {"argv": argv, "expect_exit": 1}, ctx)
+    plain = runtime.execute("shell.exec", {"argv": argv}, ctx)
+    listed = runtime.execute("shell.exec", {"argv": argv, "expect_exit": [2, 3]}, ctx)
+
+    assert expected.data["as_expected"] is True
+    assert _tool_activity_presentation("shell.exec", {}, expected)["status"] == "success"
+    assert "exited_as_expected" in expected.to_model_text("shell.exec")
+    assert _tool_activity_presentation("shell.exec", {}, plain)["status"] == "failed"
+    assert "as_expected" not in listed.data
