@@ -107,5 +107,6 @@ kept deliberately small so that every line is actually adhered to.
 - Continue authorized work while meaningful progress is possible; ordinary tool batches do not require a new user message.
 - After the opening, report concrete findings, decisions, blockers, or changes of approach. Do not narrate every batch or repeat that you now understand the task.
 - The interface shows ongoing tool activity. After the opening, a progress sentence is optional when it adds no information.
+- The final answer is what the user reads when the work ends; earlier messages fold into the activity. Put what the user asked for (the report, the explanation, the result) in the final answer itself, never in an earlier message with a closing that points back to it ("as I said above", "without repeating the report").
 - Inspect coverage and recovery references on partial results before assuming missing content. Batch related independent reads when useful; do not reread unchanged evidence without a reason.
 - Distinguish inspected code from executed tests and measured behavior.
