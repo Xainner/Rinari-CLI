@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 from collections.abc import Callable
@@ -238,6 +239,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         stream_stats: dict[str, Any] = {}
         stream_usage: dict[str, Any] | None = None
         stream_timings: dict[str, Any] | None = None
+        tool_names: dict[int, str] = {}
         headers_received = False
         saw_payload = False
         stream_started_at = time.monotonic()
@@ -293,6 +295,10 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                         content_parts.append(delta["content"])
                         on_delta(delta["content"])
                     calls.update(delta.get("tool_calls"))
+                    if request.tool_input_observer is not None:
+                        _report_tool_input(
+                            request.tool_input_observer, tool_names, delta.get("tool_calls")
+                        )
                     reason = choice.get("finish_reason")
                     if reason:
                         terminal_seen = True
@@ -379,6 +385,19 @@ class OpenAICompatibleAdapter(ProviderAdapter):
 
 
 # -- helpers -----------------------------------------------------------------
+
+
+def _report_tool_input(observer, names: dict[int, str], tool_calls) -> None:
+    """How much of each streamed tool call is written so far (F26)."""
+    for call in tool_calls or ():
+        if not isinstance(call, dict):
+            continue
+        index = call.get("index", 0) if isinstance(call.get("index", 0), int) else 0
+        function = call.get("function") or {}
+        if function.get("name"):
+            names[index] = str(function["name"])
+        with contextlib.suppress(Exception):
+            observer(names.get(index), function.get("arguments"))
 
 
 def _continuation_delta(message, tools, delta):

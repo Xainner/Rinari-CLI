@@ -21,6 +21,7 @@ from __future__ import annotations
 import contextlib
 import json
 import queue
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -381,6 +382,10 @@ class AgentLoop:
             self._emit_activity(
                 "model.started",
                 {"model_call_id": model_call_id, "model": ctx.model_ref},
+            )
+            request = replace(
+                request,
+                tool_input_observer=ToolInputProgress(self._emit_activity, model_call_id),
             )
 
             accepted_output = False
@@ -1495,6 +1500,45 @@ class AgentLoop:
             return
         with contextlib.suppress(Exception):
             self._activity_sink(event, payload)
+
+
+class ToolInputProgress:
+    """`model.tool_input`: what a model is writing into a tool call, while it
+    writes it (F26). DeepSeek spent 5 min 13 s generating whole files inside
+    fs.write arguments with no sign of life. Throttled to one event a second,
+    and only past a size where the wait is noticeable."""
+
+    MIN_CHARS = 2000
+    EVERY_S = 1.0
+    _PATH = re.compile(r'"(?:path|file|filename|target)"\s*:\s*"((?:[^"\\]|\\.){1,240})"')
+
+    def __init__(self, emit, model_call_id: str) -> None:
+        self._emit = emit
+        self._call = model_call_id
+        self._lock = threading.Lock()
+        self._chars: dict[str, int] = {}
+        self._head: dict[str, str] = {}
+        self._last = 0.0
+
+    def __call__(self, name: str | None, piece: str | None) -> None:
+        if not piece:
+            return
+        tool = name or "tool"
+        with self._lock:
+            self._chars[tool] = self._chars.get(tool, 0) + len(piece)
+            head = self._head.get(tool, "")
+            if len(head) < 600:
+                self._head[tool] = head + piece[: 600 - len(head)]
+            chars = self._chars[tool]
+            now = time.monotonic()
+            if chars < self.MIN_CHARS or now - self._last < self.EVERY_S:
+                return
+            self._last = now
+            match = self._PATH.search(self._head[tool])
+        payload = {"model_call_id": self._call, "tool": tool, "chars": chars}
+        if match:
+            payload["path"] = match.group(1).replace("\\\\", "\\")
+        self._emit("model.tool_input", payload)
 
 
 def _invalid_arguments_message(call: ToolCall) -> str:

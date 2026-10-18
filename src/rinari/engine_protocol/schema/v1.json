@@ -633,6 +633,7 @@
         "model.completed",
         "model.failed",
         "model.retrying",
+        "model.tool_input",
         "model.changed",
         "session.renamed",
         "tool.requested",

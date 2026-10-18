@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 from collections.abc import Callable
@@ -240,6 +241,12 @@ class AnthropicAdapter(ProviderAdapter):
                             calls.append_json(
                                 _optional_int(event.get("index")), delta.get("partial_json")
                             )
+                            if request.tool_input_observer is not None and block is not None:
+                                # How much of the tool call is written so far (F26).
+                                with contextlib.suppress(Exception):
+                                    request.tool_input_observer(
+                                        block.get("name"), delta.get("partial_json")
+                                    )
                     elif event_type == "message_delta":
                         stop_reason = _stop_reason_from_anthropic(
                             (event.get("delta") or {}).get("stop_reason")

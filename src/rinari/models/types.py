@@ -200,3 +200,6 @@ class ModelRequest:
     # Last, so a positional ModelRequest(...) keeps meaning what it meant.
     usage_call_id: str = field(default_factory=lambda: uuid4().hex, compare=False, repr=False)
     usage_observer: Any = field(default=None, compare=False, repr=False)
+    # Runtime-only: told `(tool name or None, piece of its arguments)` while a
+    # streamed tool call is being written (plan 0.4.0 v2, V2-15, F26).
+    tool_input_observer: Any = field(default=None, compare=False, repr=False)
