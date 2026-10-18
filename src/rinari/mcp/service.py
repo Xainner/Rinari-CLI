@@ -376,7 +376,16 @@ class McpService:
     def tools(self, name: str, project: Path | None = None) -> list:
         client = self._client(name, project)
         infos: list[McpToolInfo] = client.list_tools()
-        return mcp_tool_definitions(name, infos)
+        definitions = mcp_tool_definitions(name, infos)
+        note = getattr(client, "instructions", None)
+        if note:
+            from dataclasses import replace
+
+            definitions = [
+                replace(tool, manifest={**tool.manifest, "server_instructions": note})
+                for tool in definitions
+            ]
+        return definitions
 
     def invoke(
         self,

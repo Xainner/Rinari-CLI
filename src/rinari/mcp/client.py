@@ -98,6 +98,7 @@ class McpClient:
         self._server_info: dict[str, Any] | None = None
         self._capabilities: dict[str, Any] = {}
         self._protocol_version: str | None = None
+        self._instructions: str | None = None
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -131,6 +132,10 @@ class McpClient:
             self._capabilities = capabilities if isinstance(capabilities, dict) else {}
             negotiated = result.get("protocolVersion")
             self._protocol_version = negotiated if isinstance(negotiated, str) else None
+            # How to use its tools, in the server's words (MCP `initialize`):
+            # shown with its group of tools (plan 0.4.0 v2, V2-6).
+            note = result.get("instructions")
+            self._instructions = note if isinstance(note, str) and note.strip() else None
         self._transport.notify(notification(METHOD_INITIALIZED))
         self._started = True
         return self._server_info
@@ -157,6 +162,10 @@ class McpClient:
     @property
     def protocol_version(self) -> str | None:
         return self._protocol_version
+
+    @property
+    def instructions(self) -> str | None:
+        return self._instructions
 
     # -- methods ---------------------------------------------------------------
 

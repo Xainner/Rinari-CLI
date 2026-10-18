@@ -395,12 +395,25 @@ SCHEMAS: dict[str, dict[str, Any]] = {
 
 
 def image_create_tools(host: ImageHost) -> list[ToolDefinition]:
+    # A service the owner chose loads these tools from the start and says
+    # which one it is; without one they stay on demand and say there is none
+    # (plan 0.4.0 v2, V2-1). The name comes from the owner's settings.
+    try:
+        label = host.service.default_label()
+    except Exception:
+        label = None
+    chosen = (
+        f" Uses the image service the owner chose: {label}. For images use these tools, "
+        "not another skill or MCP server, unless the owner names one."
+        if label
+        else ""
+    )
     tools = []
     for operation in ("generate", "edit", "variations", "upscale", "remove_background"):
         tools.append(
             ToolDefinition(
                 name=f"image.{operation}",
-                description=DESCRIPTIONS[operation],
+                description=DESCRIPTIONS[operation] + chosen,
                 input_schema=SCHEMAS[operation],
                 capabilities=(CAPABILITY,),
                 risk=RISK_MEDIUM,
@@ -412,8 +425,8 @@ def image_create_tools(host: ImageHost) -> list[ToolDefinition]:
                 classify=lambda args, op=operation: host.classify(op, args),
                 precheck=lambda args, ctx, op=operation: host.precheck(op, args, ctx),
                 namespace="image",
-                always_loaded=False,
-                manifest={"source": "images"},
+                always_loaded=bool(label),
+                manifest={"source": "images", **({"configured_service": label} if label else {})},
             )
         )
     return tools

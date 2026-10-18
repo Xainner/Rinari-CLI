@@ -69,6 +69,8 @@ class AssemblerContext:
     # Compact catalog of available skills (name + one-liner + how to
     # activate). Bodies stay out until a skill is activated (harness.md 49).
     skill_catalog: str | None = None
+    # Tools that load on demand, generated from the registry (V2-6).
+    tool_index: str | None = None
     skills: tuple[ActiveSkill, ...] = ()
     task_state: str | None = None
     # Preserved task truth after context compaction (harness.md 67-68).
@@ -233,6 +235,17 @@ class PromptAssembler:
                     trust=SegmentTrust.SCOPED_TRUSTED,
                     cache_policy=CachePolicy.SESSION,
                     provenance="skill:catalog",
+                )
+            )
+        if context.tool_index:
+            segments.append(
+                PromptSegment(
+                    id="tool-index",
+                    kind=SegmentKind.RUNTIME_POLICY,
+                    content=context.tool_index,
+                    trust=SegmentTrust.SCOPED_TRUSTED,
+                    cache_policy=CachePolicy.SESSION,
+                    provenance="tools:registry",
                 )
             )
         for skill in context.skills:

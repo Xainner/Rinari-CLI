@@ -131,6 +131,10 @@ def search_capabilities(
         score = base * _RELIABILITY.get(source, 0.9) - _RISK_DEMOTION.get(tool.risk, 0.0)
         if tool.name == query:
             score += 10  # exact tool-name match wins outright
+        if (tool.manifest or {}).get("configured_service"):
+            # Backed by a service the owner chose (V2-1): it goes before a
+            # skill's or an MCP server's tool that does the same.
+            score += 5
         scored.append((score, tool.name, tool))
     scored.sort(key=lambda item: (-item[0], item[1]))
     results: list[dict] = []
@@ -224,11 +228,29 @@ def capability_search_tool(registry: ToolRegistry, skills=None) -> ToolDefinitio
                 skill_matches = search_skills(skills(), query)
             except Exception:
                 skill_matches = []
-        if skill_matches:
+        configured = next(
+            (
+                item
+                for item in results
+                if (registry.get(item["name"]) is not None)
+                and (registry.get(item["name"]).manifest or {}).get("configured_service")
+            ),
+            None,
+        )
+        native = [item["name"] for item in results if item.get("source") == "native"][:3]
+        if configured is not None:
+            service = registry.get(configured["name"]).manifest["configured_service"]
+            guidance = (
+                f"The owner chose a service for this: use {configured['name']} ({service}). "
+                "Use a skill or an MCP server for it only if the owner names one."
+            )
+        elif skill_matches:
             guidance = (
                 f"A skill covers this: activate {skill_matches[0]['name']!r} with skills.activate "
                 "and follow its procedure before improvising with tools."
             )
+            if native:
+                guidance += " Typed tools that match: " + ", ".join(native) + "."
         elif results:
             guidance = "Use an exact returned tool name."
         else:

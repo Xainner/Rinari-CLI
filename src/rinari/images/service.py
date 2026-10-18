@@ -123,6 +123,13 @@ class ImageService:
 
     # -- connectors ------------------------------------------------------------
 
+    def default_label(self) -> str | None:
+        """The name of the service the owner chose by default, or None."""
+        value = image_settings.load(self._home)
+        choice = value["default_connector"]
+        entry = next((item for item in value["connectors"] if item["id"] == choice), None)
+        return (entry.get("label") or entry["id"]) if entry else None
+
     def connector(self, operation: str) -> ImageConnector | None:
         """The connector for this operation: the edit one for edits (when set), else the default."""
         value = image_settings.load(self._home)
