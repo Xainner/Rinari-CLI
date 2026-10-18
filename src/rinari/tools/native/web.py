@@ -23,6 +23,7 @@ from rinari.tools.definition import (
     RISK_MEDIUM,
     SIDE_EFFECT_LOCAL_REVERSIBLE,
     SIDE_EFFECT_NONE,
+    ArtifactRef,
     ClassifiedAction,
     ToolContext,
     ToolDefinition,
@@ -482,24 +483,81 @@ def web_download(input: dict, ctx: ToolContext) -> ToolResult:
     if denied is not None:
         downloaded.path.unlink(missing_ok=True)
         return denied
-    return _ok(
-        {
-            "path": str(downloaded.path),
+    path, uri, name = _keep_download(ctx, downloaded)
+    data = {
+        "path": str(path),
+        "bytes": downloaded.bytes,
+        "sha256": downloaded.sha256,
+        "content_type": downloaded.content_type,
+        "truncated": False,
+        "provenance": {
+            "url": downloaded.url,
+            "final_url": downloaded.final_url,
+            "status": downloaded.status,
+            "content_type": downloaded.content_type,
             "bytes": downloaded.bytes,
             "sha256": downloaded.sha256,
-            "content_type": downloaded.content_type,
-            "truncated": False,
-            "provenance": {
-                "url": downloaded.url,
-                "final_url": downloaded.final_url,
-                "status": downloaded.status,
-                "content_type": downloaded.content_type,
-                "bytes": downloaded.bytes,
-                "sha256": downloaded.sha256,
-                "fetched_at": now_iso(ctx.clock),
-            },
-        }
+            "fetched_at": now_iso(ctx.clock),
+        },
+    }
+    if uri is None:
+        return _ok(data)
+    # A file of this conversation: file.present shows it with its card and
+    # artifact.export copies it into the project (plan 0.4.0 v2, V2-3).
+    data["uri"] = uri
+    kind = "image" if (downloaded.content_type or "").startswith("image/") else "file"
+    return ToolResult(ok=True, data=data, artifacts=(ArtifactRef(uri, name, kind),))
+
+
+def _with_extension(name: str, content_type: str | None) -> str:
+    """`rvl_dl_F0ync…` served as image/png becomes `rvl_dl_F0ync….png`."""
+    import mimetypes
+
+    if Path(name).suffix or not content_type:
+        return name
+    mime = content_type.split(";", 1)[0].strip().lower()
+    if mime in ("", "application/octet-stream"):
+        return name
+    extension = {"image/jpeg": ".jpg", "text/plain": ".txt"}.get(mime) or (
+        mimetypes.guess_extension(mime) or ""
     )
+    return f"{name}{extension}" if extension else name
+
+
+def _keep_download(ctx: ToolContext, downloaded) -> tuple[Path, str | None, str]:
+    """Move the download into this conversation's files, named with its type.
+
+    Downloads landed loose in the shared artifacts folder, without an
+    extension and without an artifact:// address, so the model copied them
+    with the shell to show them (V2-3). Without a store (tests, the CLI's bare
+    tools) the file stays where it was downloaded, with its extension.
+    """
+    name = _with_extension(downloaded.path.name, downloaded.content_type)
+    store = getattr(ctx, "artifact_store", None)
+    session_id = getattr(ctx, "session_id", "") or ""
+    if store is None or not session_id.strip():
+        if name != downloaded.path.name:
+            target = downloaded.path.with_name(name)
+            if not target.exists():
+                downloaded.path.replace(target)
+                return target, None, name
+        return downloaded.path, None, downloaded.path.name
+    if store._storage_path(f"{session_id.strip()}/downloads/{name}").exists():
+        stem, suffix = Path(name).stem, Path(name).suffix
+        name = f"{stem}-{downloaded.sha256[:8]}{suffix}"
+    try:
+        record = store.create_from_file(
+            session_id,
+            "downloads",
+            name,
+            downloaded.path,
+            content_type=(downloaded.content_type or "application/octet-stream").split(";")[0],
+            summary=f"Downloaded from {downloaded.final_url}"[:200],
+            provenance=f"web.download:{downloaded.final_url}"[:500],
+        )
+    except Exception:
+        return downloaded.path, None, downloaded.path.name
+    return store._storage_path(record.storage_path), record.uri(), name
 
 
 # -- provenance: web.cite / web.sources ------------------------------------------------------

@@ -657,3 +657,50 @@ def test_download_cancelled_mid_way_keeps_nothing(tmp_path) -> None:
         )
     assert excinfo.value.code == "CANCELLED"
     assert list((tmp_path / "out").iterdir()) == []
+
+
+# -- downloads are files of the conversation (plan 0.4.0 v2, V2-3) -------------------
+
+
+def test_web_download_keeps_an_image_as_a_conversation_file_with_its_extension(
+    tmp_path, app_ctx
+) -> None:
+    """A Visual Lab link served image/png landed as `rvl_dl_…` with no extension and
+    no artifact:// address, so the model copied it with the shell to show it."""
+    from dataclasses import replace
+
+    from rinari.artifacts.store import ArtifactStore
+    from rinari.tools.native.present import present_tools
+
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+    url = "https://lab.example/mcp/files/rvl_dl_F0yncIzpy"
+    route = httpx.Response(200, content=png, headers={"content-type": "image/png"})
+    store = ArtifactStore(app_ctx)
+    ctx = replace(
+        _ctx(tmp_path, web=_factory(_handler({url: route}))),
+        artifact_store=store,
+        artifact_root=store._root(),  # one folder, as in the Engine
+        session_id="ses_web",
+    )
+
+    result = _tool("web.download").handler({"url": url}, ctx)
+
+    assert result.ok, result.error
+    assert result.data["uri"].startswith("artifact://")
+    assert result.data["uri"].endswith("/downloads/rvl_dl_F0yncIzpy.png")
+    assert Path(result.data["path"]).read_bytes() == png
+    assert [(a.name, a.kind) for a in result.artifacts] == [("rvl_dl_F0yncIzpy.png", "image")]
+    present = present_tools()[0].handler({"items": [{"path": result.data["uri"]}]}, ctx)
+    assert present.ok, present.error
+
+    again = _tool("web.download").handler({"url": url}, ctx)
+    assert again.ok and again.data["uri"] != result.data["uri"]
+
+
+def test_web_download_without_a_store_still_gets_its_extension(tmp_path) -> None:
+    url = "https://lab.example/files/abc"
+    route = httpx.Response(200, content=b"%PDF-1.7", headers={"content-type": "application/pdf"})
+    ctx = _ctx(tmp_path, web=_factory(_handler({url: route})))
+    result = _tool("web.download").handler({"url": url}, ctx)
+    assert result.ok and Path(result.data["path"]).name == "abc.pdf"
+    assert "uri" not in result.data
