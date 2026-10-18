@@ -85,6 +85,22 @@ def test_codex_requests_share_a_prompt_cache_per_conversation() -> None:
     assert "prompt_cache_key" not in CodexResponsesAdapter()._responses_payload(bare, stream=True)
 
 
+def test_codex_requests_carry_the_conversation_session_header() -> None:
+    """The subscription backend kept no cache without `session_id`: 0 % in 8
+    calls, ~90 % with it (measured 2026-10-18, plan 0.4.0 v2, V2-10)."""
+    import uuid
+
+    adapter = CodexResponsesAdapter()
+    request = ModelRequest(model="gpt-x", messages=(ChatMessage.user("hola"),), session_id="ses_1")
+    first = adapter.request_headers("token", request)["session_id"]
+    assert uuid.UUID(first)
+    assert adapter.request_headers("token", request)["session_id"] == first
+    other = ModelRequest(model="gpt-x", messages=(ChatMessage.user("hola"),), session_id="ses_2")
+    assert adapter.request_headers("token", other)["session_id"] != first
+    bare = ModelRequest(model="gpt-x", messages=(ChatMessage.user("hola"),))
+    assert "session_id" not in adapter.request_headers("token", bare)
+
+
 def test_llama_cpp_reports_its_window_inside_meta() -> None:
     assert normalize({"id": "q", "meta": {"n_ctx_train": 131072}}) == {"max_context_tokens": 131072}
     assert normalize({"meta": {"n_ctx": 32768, "n_ctx_train": 131072}}) == {
