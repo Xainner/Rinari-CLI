@@ -73,6 +73,22 @@ def test_responses_usage_reads_cache_and_reasoning() -> None:
     assert _usage_from_responses({"input_tokens": 5}).cached_input_tokens is None
 
 
+def test_cache_reads_are_found_in_every_known_shape() -> None:
+    """Only the standard field was read: llama.cpp reports `timings.cache_n` and
+    DeepSeek's API `prompt_cache_hit_tokens` (plan 0.4.0 v2, V2-11)."""
+    from rinari.providers.adapters.openai_compatible import _usage_from_openai
+
+    standard = {"prompt_tokens": 100, "prompt_tokens_details": {"cached_tokens": 80}}
+    assert _usage_from_openai(standard).cached_input_tokens == 80
+    deepseek = {"prompt_tokens": 100, "prompt_cache_hit_tokens": 70}
+    assert _usage_from_openai(deepseek).cached_input_tokens == 70
+    llama = {"prompt_tokens": 100}
+    assert _usage_from_openai(llama, {"cache_n": 60, "prompt_n": 40}).cached_input_tokens == 60
+    assert _usage_from_openai({"prompt_tokens": 100}).cached_input_tokens is None
+    zero = {"prompt_tokens": 100, "prompt_tokens_details": {"cached_tokens": 0}}
+    assert _usage_from_openai(zero, {"cache_n": 60}).cached_input_tokens == 0
+
+
 def test_codex_requests_share_a_prompt_cache_per_conversation() -> None:
     request = ModelRequest(
         model="gpt-x",

@@ -237,6 +237,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         done_seen = False
         stream_stats: dict[str, Any] = {}
         stream_usage: dict[str, Any] | None = None
+        stream_timings: dict[str, Any] | None = None
         headers_received = False
         saw_payload = False
         stream_started_at = time.monotonic()
@@ -283,6 +284,8 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                         raise classify_stream_error(chunk["error"], model=request.model)
                     if isinstance(chunk.get("usage"), dict):
                         stream_usage = chunk["usage"]
+                    if isinstance(chunk.get("timings"), dict):
+                        stream_timings = chunk["timings"]
                     choice = (chunk.get("choices") or [{}])[0]
                     delta = choice.get("delta") or {}
                     _continuation_delta(continuation_message, continuation_tools, delta)
@@ -346,7 +349,11 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             stop_reason = StopReason.TOOL_CALLS
         # §6.2: captured chunk usage is authoritative; silence is marked,
         # never zero-filled.
-        usage = _usage_from_openai(stream_usage) if stream_usage else Usage(source="unavailable")
+        usage = (
+            _usage_from_openai(stream_usage, stream_timings)
+            if stream_usage
+            else Usage(source="unavailable")
+        )
         if continuation_tools:
             continuation_message["tool_calls"] = [
                 continuation_tools[k] for k in sorted(continuation_tools)
@@ -492,7 +499,7 @@ def _response_from_openai(data: Any, url: str) -> ModelResponse:
     return ModelResponse(
         content=content,
         tool_calls=() if choice.get("finish_reason") == "length" else tool_calls,
-        usage=_usage_from_openai(data.get("usage")),
+        usage=_usage_from_openai(data.get("usage"), data.get("timings")),
         stop_reason=_stop_reason_from_openai(
             choice.get("finish_reason"), has_tool_calls=bool(tool_calls)
         ),
@@ -540,15 +547,26 @@ def _tool_call_from_openai(raw: Any) -> ToolCall:
     )
 
 
-def _usage_from_openai(raw: Any) -> Usage:
+def _usage_from_openai(raw: Any, timings: Any = None) -> Usage:
     if not isinstance(raw, dict):
         return Usage()
     prompt_details = raw.get("prompt_tokens_details") or {}
     completion_details = raw.get("completion_tokens_details") or {}
+    # The cache read, in whichever of the known shapes the server reports it
+    # (plan 0.4.0 v2, V2-11): the standard field, `prompt_cache_hit_tokens`
+    # (DeepSeek's own API) or llama.cpp's `timings.cache_n`. By protocol shape,
+    # for any provider or model that uses it; none of them is "no data", not 0.
+    cached = _optional_int(
+        prompt_details.get("cached_tokens") if isinstance(prompt_details, dict) else None
+    )
+    if cached is None:
+        cached = _optional_int(raw.get("prompt_cache_hit_tokens"))
+    if cached is None and isinstance(timings, dict):
+        cached = _optional_int(timings.get("cache_n"))
     return Usage(
         input_tokens=_optional_int(raw.get("prompt_tokens")),
         output_tokens=_optional_int(raw.get("completion_tokens")),
-        cached_input_tokens=_optional_int(prompt_details.get("cached_tokens")),
+        cached_input_tokens=cached,
         reasoning_tokens=_optional_int(completion_details.get("reasoning_tokens")),
     )
 
