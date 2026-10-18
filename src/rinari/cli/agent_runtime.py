@@ -13,8 +13,10 @@ so switching here can never delete or reorder saved providers/models.
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import sys
+import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -91,6 +93,9 @@ class AgentSession:
     # after its mother read the web (plan-sesiones-hijas 5.2).
     next_turn_external: bool = False
     activity_sink: object = field(default=None, repr=False)
+    # The title asked beside the current turn (V2-4); hosts that exit right
+    # after a turn (a one-shot CLI run) may join it.
+    title_thread: object = field(default=None, repr=False)
     # Bound by build_agent_session; the host calls it exactly once when the
     # session ends (emits the SessionEnd lifecycle hook).
     close: object = field(default=None, repr=False)
@@ -331,6 +336,10 @@ def _exposure_for(services: ServiceContainer, record: SessionRecord, root: Path 
             exposure.activate(list(required), reason=f"skill {name}", scope="session")
     return exposure
 
+
+# The conversation title is asked beside the first turn (V2-4). Tests that
+# script one model for both calls turn it off to keep their order.
+TITLE_IN_BACKGROUND = True
 
 # The skill catalog rides on every turn: full lines up to this many skills,
 # names only past it, and descriptions clipped to this many characters.
@@ -2456,11 +2465,36 @@ def _run_turn_unlocked(
             raise TitleIncomplete()
         return response.content or ""
 
-    session.record = services.sessions.name_from_first_message(
-        session.record.id,
-        session.context.pending_display_content or message,
-        title_factory=generate_title,
-    )
+    # The title is asked beside the turn, not before it: the first model call
+    # waited for it (8.9 s of «Preparando el turno…» with a slow model, plan
+    # 0.4.0 v2, V2-4). It lands as SessionRenamed (`session.renamed` for the
+    # desktop) whenever it arrives; the budget ledger is thread-safe.
+    title_source = session.context.pending_display_content or message
+    session_id_for_title = session.record.id
+    # Read now: by the time the thread runs, the turn has stored this message.
+    had_messages = bool(services.ctx.message_repo.list(session_id_for_title))
+
+    def name_in_background() -> None:
+        try:
+            services.sessions.name_from_first_message(
+                session_id_for_title,
+                title_source,
+                title_factory=generate_title,
+                had_messages=had_messages,
+            )
+        except Exception:  # naming is optional metadata: never the turn's problem
+            logging.getLogger(__name__).warning("Session title thread failed", exc_info=True)
+
+    # The desktop shows the turn while the title arrives; the CLI keeps its
+    # order (a one-shot run may exit right after the answer).
+    if TITLE_IN_BACKGROUND and session.activity_sink is not None:
+        title_thread = threading.Thread(
+            target=name_in_background, name=f"title-{session_id_for_title}", daemon=True
+        )
+        title_thread.start()
+        session.title_thread = title_thread
+    else:
+        name_in_background()
     owner_source_record, owner_memory_source = _prepare_owner_memory_source(
         services, session.record, session, message, memory_origin, turn_id
     )

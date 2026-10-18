@@ -683,7 +683,7 @@ class SessionService:
         return record
 
     def name_from_first_message(
-        self, ref: str, message: str, *, title_factory=None
+        self, ref: str, message: str, *, title_factory=None, had_messages: bool | None = None
     ) -> SessionRecord:
         """Give an untouched session a title that summarizes the user's intent.
 
@@ -693,6 +693,10 @@ class SessionService:
         `TITLE_ATTEMPTS` failures in all; a manual rename always wins. Every
         failure leaves a `SessionTitleFailed` event with its reason (never the
         content), so a bad title can be diagnosed afterwards.
+
+        `had_messages` is whether the session had messages before this turn,
+        read by a caller that names it beside the turn (V2-4): by then the
+        turn has already stored this message.
         """
         record = self._resolve(ref)
         renames = [
@@ -712,7 +716,12 @@ class SessionService:
             }
             if record.title not in defaults:
                 return record
-            if self._ctx.message_repo.list(record.id):
+            earlier = (
+                had_messages
+                if had_messages is not None
+                else bool(self._ctx.message_repo.list(record.id))
+            )
+            if earlier:
                 # Earlier messages had no topic ("Hola"): name it from this one.
                 deferred = sum(
                     1

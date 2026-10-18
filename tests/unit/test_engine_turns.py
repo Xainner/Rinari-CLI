@@ -2109,3 +2109,45 @@ def test_send_now_moves_a_foreground_command_to_the_background(
         assert len(running) == 1 and "instalando" in running[0].stdout.text()
     finally:
         registry.stop_all(include_persistent=True)
+
+
+@pytest.mark.background_title
+def test_a_slow_title_does_not_hold_the_first_turn(server, services, tmp_path, monkeypatch):
+    """«Preparando el turno…» lasted 9.6 s: 8.9 s were the title call, asked
+    before the turn's first model call (plan 0.4.0 v2, V2-4)."""
+    import threading
+
+    title_started = threading.Event()
+    release_title = threading.Event()
+    order: list[str] = []
+
+    class Model(FakeModel):
+        def invoke(self, request):
+            first = request.messages[0].content or ""
+            if "conversation title" in first:
+                order.append("title-start")
+                title_started.set()
+                release_title.wait(10)
+                order.append("title-end")
+                return ModelResponse(content="Naves espaciales", stop_reason=StopReason.END_TURN)
+            order.append("turn")
+            return _answer()
+
+    model = Model(scripted=[])
+    model.model_id = "fake-model-1"  # the title call names the conversation's model
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda services, rec: model)
+    session_id = _create_chat(server, tmp_path, tag="slow-title")
+    server.handle_line(
+        _req(
+            "st", "session.turn.start", {"session_id": session_id, "message": "Diseñemos un juego"}
+        )
+    )
+    seen = _collect_until(server, session_id)
+    assert seen and seen[-1]["event"] == "turn.completed"
+    assert title_started.wait(5)
+    assert "turn" in order and "title-end" not in order  # the turn finished first
+    release_title.set()
+    deadline = time.time() + 10
+    while time.time() < deadline and services.sessions.show(session_id).title != "Naves espaciales":
+        time.sleep(0.05)
+    assert services.sessions.show(session_id).title == "Naves espaciales"
