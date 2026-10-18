@@ -594,12 +594,62 @@ def test_shell_classification_false_positives() -> None:
     work = _scope()
     for command in (
         r"move /y build\hero.mp4 assets\video\ >nul",
-        'ssh casa3090 "docker exec db pg_dump -U app > /tmp/dump.sql"',
         "echo ok 2>NUL",
     ):
         assert (
             engine.decide(CAPABILITY_SHELL, work, command=command).action is PolicyAction.ALLOW
         ), command
+    # The redirection runs over there: it is not a local write, but the
+    # command runs on another machine (plan 0.4.0 v2, V2-7).
+    remote = engine.decide(
+        CAPABILITY_SHELL,
+        work,
+        command='ssh casa3090 "docker exec db pg_dump -U app > /tmp/dump.sql"',
+    )
+    assert remote.action is PolicyAction.ASK
+    assert remote.rule_id == "shell_remote"
+    assert "casa3090" in remote.reason and "outside" not in remote.reason
+
+
+def test_commands_on_another_machine_are_reviewed() -> None:
+    """`ssh host "…"` and scp/rsync reach another machine (plan 0.4.0 v2, V2-7)."""
+    from rinari.policy.engine import remote_actions
+
+    engine = PolicyEngine()
+    work, full = _scope(), _scope(profile="full-access")
+
+    def decide(command, scope=work):
+        return engine.decide(CAPABILITY_SHELL, scope, command=command)
+
+    deletes = decide('ssh saturno "rm -rf /srv/app/cache"')
+    assert deletes.action is PolicyAction.ASK and deletes.rule_id == "remote_destructive"
+    assert deletes.choices == ("deny", "allow_once")
+    for command in (
+        'ssh saturno "python3 rvl_mcp.py --token-file t"',
+        "ssh -p 2222 -i C:\\keys\\id user@host ls /srv",
+        "C:\\Windows\\System32\\OpenSSH\\ssh.exe host uptime",
+        "ssh saturno",
+        "cd tools && ssh saturno 'nvidia-smi'",
+    ):
+        decision = decide(command)
+        assert decision.action is PolicyAction.ASK and decision.rule_id == "shell_remote", command
+        assert decide(command, full).action is PolicyAction.ALLOW, command
+    upload = decide("scp out.png saturno:/srv/in/")
+    assert upload.action is PolicyAction.ASK and "copies files to" in upload.reason
+    fetch = decide("scp saturno:/srv/out/logo.png ./logo.png")
+    assert fetch.action is PolicyAction.ASK and "copies files from" in fetch.reason
+    # Full access follows the owner's switch for new destinations after
+    # external content, like every other send.
+    tainted = _replace(full, external_content=True, ask_new_destinations=True)
+    assert decide("scp out.png saturno:/srv/in/", tainted).action is PolicyAction.ASK
+    assert decide(r"copy C:\a.png D:\b.png").rule_id != "shell_remote"
+    assert decide('ssh h "rm -rf /"').action is PolicyAction.DENY
+    assert remote_actions('ssh -o "ProxyJump=a b" h "echo; rm x"') == [
+        __import__("rinari.policy.engine", fromlist=["RemoteAction"]).RemoteAction(
+            "exec", "h", "echo; rm x"
+        )
+    ]
+    assert remote_actions('git commit -m "ssh notes: host"') == []
 
 
 @pytest.mark.parametrize(

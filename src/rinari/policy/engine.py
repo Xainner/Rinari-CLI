@@ -354,6 +354,95 @@ def _is_inspection(command: str) -> bool:
     return bool(_INSPECTION_SHELL.match(command)) and not _CHAINING.search(command)
 
 
+# ssh options that take a value (`ssh -p 22 -i key host cmd`): the host is the
+# first token that is neither an option nor the value of one.
+_SSH_VALUE_OPTIONS = frozenset("BbcDEeFIiJLlmOoPpQRSWw")
+_REMOTE_PATH = re.compile(r"^(?:[\w.-]+@)?[\w.-]+:")
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteAction:
+    """A command that reaches another machine (plan 0.4.0 v2, V2-7)."""
+
+    kind: str  # "exec" (ssh with a command or a login) | "send" | "fetch" (scp, rsync)
+    host: str
+    payload: str = ""  # what runs over there, for `exec`
+
+
+def _segments(command: str) -> list[list[str]]:
+    """The command's simple commands, split at `;`, `&&`, `||`, `|` and `&`,
+    with quotes respected (a quoted ssh payload stays one token)."""
+    import shlex
+
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+    lexer.whitespace_split = True
+    lexer.escape = ""  # Windows paths keep their backslashes
+    segments: list[list[str]] = [[]]
+    for token in lexer:
+        if token and set(token) <= set(";&|"):
+            segments.append([])
+        else:
+            segments[-1].append(token)
+    return [segment for segment in segments if segment]
+
+
+def _program(token: str) -> str:
+    name = re.split(r"[\\/]", token)[-1].lower()
+    return name[:-4] if name.endswith(".exe") else name
+
+
+def remote_actions(command: str) -> list[RemoteAction]:
+    """What in `command` runs on, or copies to or from, another machine.
+
+    The local analysis only sees `ssh host`: the payload runs over there and
+    `scp` moves files between machines, so neither is a local command in the
+    workspace. A command that cannot be tokenized but names ssh, scp or rsync
+    still counts, with an unknown host.
+    """
+    try:
+        segments = _segments(command or "")
+    except ValueError:
+        if re.search(r"(?:^|[\s;&|\\/])(?:ssh|scp|rsync)(?:\.exe)?\s", command or "", re.I):
+            return [RemoteAction("exec", "?", command)]
+        return []
+    found: list[RemoteAction] = []
+    for tokens in segments:
+        while tokens and _program(tokens[0]) in {"sudo", "env", "nohup", "time"}:
+            tokens = tokens[1:]
+        if not tokens:
+            continue
+        program = _program(tokens[0])
+        if program == "ssh":
+            host, index = None, 1
+            while index < len(tokens):
+                token = tokens[index]
+                if token == "--":
+                    index += 1
+                    break
+                if token.startswith("-") and len(token) > 1:
+                    if token[-1] in _SSH_VALUE_OPTIONS and len(token) == 2:
+                        index += 1  # its value is the next token
+                    index += 1
+                    continue
+                break
+            if index < len(tokens):
+                host, payload = tokens[index], " ".join(tokens[index + 1 :])
+                found.append(RemoteAction("exec", host, payload))
+        elif program in {"scp", "rsync"}:
+            paths = [token for token in tokens[1:] if not token.startswith("-")]
+            if not paths:
+                continue
+            target = paths[-1]
+            if _REMOTE_PATH.match(target) and not re.match(r"^[A-Za-z]:[\\/]", target):
+                found.append(RemoteAction("send", target.split(":", 1)[0]))
+            elif any(
+                _REMOTE_PATH.match(p) and not re.match(r"^[A-Za-z]:[\\/]", p) for p in paths[:-1]
+            ):
+                source = next(p for p in paths[:-1] if _REMOTE_PATH.match(p))
+                found.append(RemoteAction("fetch", source.split(":", 1)[0]))
+    return found
+
+
 def classify_shell_risk(command: str, scope: SessionScope) -> ShellRisk:
     """Recognise obvious filesystem mutation targets across common shells."""
 
@@ -1017,6 +1106,59 @@ class PolicyEngine:
             return self._deny(
                 CAPABILITY_SHELL, "read-only profile cannot execute commands", target=command
             )
+        machines = remote_actions(command or "")
+        if machines:
+            # What runs on another machine is not a local command in the
+            # workspace (V2-7): the local analysis only saw `ssh host`.
+            hosts = ", ".join(dict.fromkeys(action.host for action in machines))
+            for action in machines:
+                why = catastrophic(action.payload) if action.payload else None
+                if why is not None:
+                    return self._deny(
+                        CAPABILITY_SHELL,
+                        f"on the catastrophic list on {action.host}: the command {why}",
+                        target=command,
+                        risk="critical",
+                        risk_class="remote-destructive",
+                        rule_id="catastrophic",
+                    )
+            if any(
+                action.payload and _DESTRUCTIVE_SHELL.search(action.payload) for action in machines
+            ):
+                return self._hard(
+                    scope,
+                    CAPABILITY_SHELL,
+                    f"deletes on another machine ({hosts})",
+                    target=command,
+                    rule_id="remote_destructive",
+                    risk_class="remote-destructive",
+                )
+            sends = any(action.kind == "send" for action in machines)
+            if scope.profile is not PermissionProfile.FULL_ACCESS:
+                if sends:
+                    reason = f"copies files to another machine ({hosts})"
+                elif all(action.kind == "fetch" for action in machines):
+                    reason = f"copies files from another machine ({hosts})"
+                else:
+                    reason = f"runs a command on another machine ({hosts})"
+                return self._ask(
+                    CAPABILITY_SHELL,
+                    reason,
+                    target=command,
+                    risk="high",
+                    risk_class="communication" if sends else "remote-reversible",
+                    rule_id="shell_remote",
+                )
+            if sends and scope.external_content:
+                return self._outbound(
+                    scope,
+                    CAPABILITY_SHELL,
+                    "command sends data out",
+                    target=command,
+                    risk="high",
+                    risk_class="communication",
+                    rule_id="shell_send",
+                )
         if shell_risk.destructive and shell_risk.external_path_targets:
             return self._hard(
                 scope,
