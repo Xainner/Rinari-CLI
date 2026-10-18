@@ -270,3 +270,17 @@ def test_a_short_explicit_limit_or_an_interactive_command_still_stops(tmp_path, 
     assert registry.list() == []
     assert _waits_for_a_person("ssh server") and _waits_for_a_person("vim notes.txt")
     assert not _waits_for_a_person("ssh server uptime")
+
+
+def test_a_requested_stop_is_not_a_failure(tmp_path, registry) -> None:
+    """A server stopped on request ended with code 1 on Windows and counted as a
+    failed tool (F19, plan 0.4.0 v2, V2-14)."""
+    from rinari.runtime.agent import _tool_activity_presentation
+
+    ctx = _ctx(tmp_path, registry)
+    process_start({"command": _script(tmp_path, "srv.py", SERVER), "name": "web"}, ctx)
+    stopped = process_stop({"name": "web"}, ctx)
+    assert stopped.ok and stopped.data["running"] is False
+    assert stopped.data["stop_requested"] is True
+    assert "failed" not in stopped.to_model_text("process.stop").split("process_status")[-1][:40]
+    assert _tool_activity_presentation("process.stop", {}, stopped).get("status") != "failed"

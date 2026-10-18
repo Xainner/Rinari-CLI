@@ -397,6 +397,13 @@ class ProcessRegistry:
             self.get(handle.id)
             return
         handle.stop_requested = True
+        if sys.platform == "win32" and _interrupt(handle.process, grace_s=2.0):
+            # It ran its own shutdown. What is left of its tree (children of
+            # npm, say) ends through its job object; never by PID, which may
+            # belong to another process once this one is gone.
+            if handle.job is not None:
+                handle.job.terminate()
+            return
         self._terminate(handle)
 
     def _terminate(self, handle: _Handle) -> None:
@@ -609,6 +616,23 @@ def _last_lines(handle: _Handle, count: int, pattern: str | None = None) -> list
     return [line[:400] for line in lines[-count:]]
 
 
+def _interrupt(process, *, grace_s: float) -> bool:
+    """Ask a Windows process group to stop as Ctrl+Break does, so a server
+    runs its own shutdown, and wait a little (F19, plan 0.4.0 v2, V2-14).
+    True when it ended; otherwise the caller ends it by force."""
+    import signal
+
+    try:
+        process.send_signal(signal.CTRL_BREAK_EVENT)
+    except (OSError, ValueError, AttributeError):
+        return False
+    try:
+        process.wait(timeout=grace_s)
+    except subprocess.TimeoutExpired:
+        return False
+    return True
+
+
 def _describe(handle: _Handle) -> dict:
     last = _last_lines(handle, 1)
     return {
@@ -620,6 +644,9 @@ def _describe(handle: _Handle) -> dict:
         "port": handle.port,
         "ready": handle.ready,
         "persist": handle.persist,
+        # Stopped because it was asked: its exit code (1 on Windows when
+        # killed) is not a failure.
+        **({"stop_requested": True} if getattr(handle, "stop_requested", False) else {}),
         "last_line": last[0] if last else None,
         "age_s": round(time.time() - handle.started_at, 1),
     }

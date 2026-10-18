@@ -129,6 +129,8 @@ class ToolResult:
             envelope["process_status"] = (
                 "running"
                 if code is None
+                else "stopped"
+                if process.get("stop_requested")
                 else "exited_as_expected"
                 if process.get("as_expected")
                 else "failed"
@@ -194,6 +196,8 @@ class ToolResult:
             if code is None
             else "exited_zero"
             if code == 0
+            else "stopped"
+            if self.data.get("stop_requested")
             else "exited_as_expected"
             if self.data.get("as_expected")
             else "failed"
