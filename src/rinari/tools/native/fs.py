@@ -9,6 +9,7 @@ bounded (harness.md section 65).
 from __future__ import annotations
 
 import codecs
+import contextlib
 import dataclasses
 import fnmatch
 import hashlib
@@ -510,6 +511,26 @@ def fs_write(input: dict, ctx: ToolContext) -> ToolResult:
 # -- fs.patch -----------------------------------------------------------------
 
 
+def _patch_precheck(input: dict, ctx: ToolContext) -> ToolResult | None:
+    """A patch of a file that does not exist cannot succeed: say so before
+    asking the owner to allow it (F36, plan 0.4.0 v2, V2-13)."""
+    rows = input.get("files") if isinstance(input.get("files"), list) else [input]
+    for row in rows:
+        path = row.get("path") if isinstance(row, dict) else None
+        if not isinstance(path, str) or not path or path.startswith(_ARTIFACT_PREFIX):
+            continue
+        candidate = Path(path).expanduser()
+        if not candidate.is_absolute():
+            candidate = Path(ctx.cwd) / candidate
+        with contextlib.suppress(OSError):
+            if not candidate.exists():
+                return _fail(
+                    ToolErrorCode.NOT_FOUND,
+                    f"{path} does not exist; fs.patch edits existing files (fs.write creates one)",
+                )
+    return None
+
+
 def fs_patch(input: dict, ctx: ToolContext) -> ToolResult:
     if "files" in input:
         from rinari.tools.patches import patch_files
@@ -948,6 +969,7 @@ def filesystem_tools() -> list[ToolDefinition]:
             side_effects=SIDE_EFFECT_LOCAL_REVERSIBLE,
             idempotent=False,
             handler=fs_patch,
+            precheck=_patch_precheck,
             normalize=normalize.fs_patch,
             namespace="fs",
         ),

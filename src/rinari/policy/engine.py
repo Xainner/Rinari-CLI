@@ -657,6 +657,7 @@ class PolicyEngine:
                 return self._ask(
                     capability,
                     "interacting with a web page can act on the site",
+                    target=target,
                     risk=risk,
                     risk_class=risk_class,
                     rule_id="browser_interact",

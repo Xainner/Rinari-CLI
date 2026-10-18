@@ -296,3 +296,20 @@ def test_required_and_nullable_keys_are_never_dropped() -> None:
     )
     assert value == {"content": "", "note": None, "tags": []}
     assert notes == ["ignored empty optional cwd"]
+
+
+def test_patching_a_missing_file_outside_says_so_before_asking(project) -> None:
+    """A stray fs.patch on a path that does not exist asked «write outside the
+    project» first and failed only after approval (F36, plan 0.4.0 v2, V2-13)."""
+    tmp_path, root, _ = project
+    ctx = _ctx(tmp_path, root)
+    runtime, events = _runtime(ctx, tmp_path, answer="y")
+    missing = tmp_path / "elsewhere" / "proyectos"
+
+    result = runtime.execute(
+        "fs.patch", {"path": str(missing), "old_string": "x", "new_string": "y"}, ctx
+    )
+
+    assert result.error.code is ToolErrorCode.NOT_FOUND
+    assert "does not exist" in result.error.message
+    assert not [kind for kind, _ in events if "Approval" in kind or kind == "PolicyDecision"]

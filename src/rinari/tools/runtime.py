@@ -443,7 +443,13 @@ class ToolRuntime:
                 risk=tool.risk,
                 risk_class=tool.side_effects,
                 # The approval of an image shows its connector and cost (#28).
-                target=action.target if action.capability == "media.generate" else None,
+                # What the owner judges on the card: an image's connector and cost
+                # (#28), the script a page would run (V2-13).
+                target=(
+                    action.target
+                    if action.capability in ("media.generate", "browser.mutate")
+                    else None
+                ),
                 network_mode=getattr(action, "mode", None) or "read",
             )
             self._event(

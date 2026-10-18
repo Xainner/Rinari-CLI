@@ -1252,7 +1252,11 @@ def browse_tools() -> list[ToolDefinition]:
             },
             risk=RISK_HIGH,
             side_effects=SIDE_EFFECT_REMOTE_REVERSIBLE,
-            classify=_write_classify,
+            # The approval shows the script it would run, so the owner can judge
+            # it (F15, plan 0.4.0 v2, V2-13).
+            classify=lambda i: ClassifiedAction(
+                "browser.mutate", str((i or {}).get("expression") or "")[:500] or None
+            ),
             handler=browser_evaluate,
             namespace="browser",
             capabilities=("browser.mutate",),
