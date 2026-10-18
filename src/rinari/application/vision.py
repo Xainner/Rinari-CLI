@@ -567,6 +567,7 @@ class VisionCaller:
             retire_images,
             select_visual_context,
         )
+        from rinari.runtime.vision import needs_sight
 
         self._check()
         request = select_visual_context(request)
@@ -602,6 +603,13 @@ class VisionCaller:
                 continue
             if historical:
                 messages.append(retire_images(message))
+                continue
+            if not decision.available and not needs_sight(message):
+                # A capture or a created image (#11, #28) never fails the
+                # turn: with no way to see it, it goes back with a note and
+                # the turn goes on. The owner's attachment, or an image a tool
+                # read to look at it, still stops.
+                messages.append(retire_images(message, unseen=True))
                 continue
             if not decision.available:
                 raise ValueError(decision.reason)

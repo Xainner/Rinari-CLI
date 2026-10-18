@@ -825,3 +825,36 @@ def test_tool_images_go_to_the_model_once():
     seen = select_visual_context(later)
     assert not seen.messages[1].images
     assert "already looked at these images" in seen.messages[1].content
+
+
+def test_a_tool_image_the_model_cannot_see_goes_back_with_a_note_and_the_turn_goes_on(visual):
+    """A capture or a created image (plan 0.4.0 #11, #28) never fails the turn."""
+    from rinari.models.types import ToolCall
+
+    caller, request, calls = visual
+    (caller.services.ctx.home / "vision.json").unlink()
+    caller.main.router.main_vision = None
+    owner = ChatMessage(role="user", content="Hazme una luna")
+    tool = ChatMessage(
+        role="tool",
+        tool_call_id="make",
+        name="image.generate",
+        images=request.messages[0].images,
+        content="created",
+    )
+    messages = (
+        owner,
+        ChatMessage.assistant("", (ToolCall("make", "image.generate", {"prompt": "luna"}),)),
+        tool,
+    )
+    caller.invoke(replace(request, messages=messages))
+    assert [m for m, _ in calls] == ["main"]
+    sent = calls[0][1].messages[-1]
+    assert sent.images == ()
+    assert "were not shown to you" in sent.content
+    # The owner's own attachment, or an image read to look at it, still needs sight.
+    with pytest.raises(ValueError, match="Vision settings"):
+        caller.invoke(request)
+    read = replace(tool, name="fs.read_image")
+    with pytest.raises(ValueError, match="Vision settings"):
+        caller.invoke(replace(request, messages=(owner, messages[1], read)))

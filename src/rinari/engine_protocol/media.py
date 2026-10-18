@@ -373,6 +373,30 @@ def register_media(dispatcher, services):
     dispatcher.register("context.status", context_status)
     dispatcher.register("context.models", context_models)
     dispatcher.register("vision.settings.set", save_vision)
+
+    # Ajustes → Visión e imágenes → Creación de imágenes (plan 0.4.0 #28).
+    from rinari.images.service import ImageService
+
+    images = ImageService(services)
+
+    def images_set(params):
+        try:
+            return images.configure(params or {})
+        except ValueError as exc:
+            raise EngineProtocolError(INVALID_PARAMS, str(exc)) from exc
+
+    def images_test(params):
+        connector_id = (params or {}).get("connector_id")
+        if not isinstance(connector_id, str) or not connector_id:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'connector_id' must be a string.")
+        try:
+            return images.test(connector_id)
+        except ValueError as exc:
+            raise EngineProtocolError(INVALID_PARAMS, str(exc)) from exc
+
+    dispatcher.register("images.settings.get", lambda params: images.settings())
+    dispatcher.register("images.settings.set", images_set)
+    dispatcher.register("images.connector.test", images_test)
     dispatcher.register("session.image_support", support)
     dispatcher.register("artifact.receive_image", receive)
     dispatcher.register("artifact.delete_media", delete)

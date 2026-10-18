@@ -431,6 +431,8 @@ class ToolRuntime:
                 host=action.target if action.capability == CAPABILITY_NETWORK else None,
                 risk=tool.risk,
                 risk_class=tool.side_effects,
+                # The approval of an image shows its connector and cost (#28).
+                target=action.target if action.capability == "media.generate" else None,
                 network_mode=getattr(action, "mode", None) or "read",
             )
             self._event(

@@ -222,6 +222,23 @@ def build_report(
         )
     }
     costs = [entry["cost"] for entry in rows if entry["cost"] is not None]
+    # Images created with a connector (plan 0.4.0 #28): their cost joins the total.
+    media = {"images": 0, "batches": 0, "cost": None, "by_connector": {}}
+    for _row, payload in _events(services, ("media.generated",), sessions, since):
+        media["batches"] += 1
+        media["images"] += int(payload.get("images") or 0)
+        connector = str(payload.get("connector") or "unknown")
+        entry = media["by_connector"].setdefault(
+            connector, {"connector": connector, "images": 0, "cost": None}
+        )
+        entry["images"] += int(payload.get("images") or 0)
+        cost = payload.get("cost_usd")
+        if isinstance(cost, (int, float)):
+            entry["cost"] = round((entry["cost"] or 0) + float(cost), 4)
+            media["cost"] = round((media["cost"] or 0) + float(cost), 4)
+    media["by_connector"] = list(media["by_connector"].values())
+    if media["cost"]:
+        costs.append(media["cost"])
     totals["cost"] = round(sum(costs), 4) if costs else None
     return {
         "scope": scope,
@@ -236,6 +253,7 @@ def build_report(
             "top": [{"tool": name, "count": count} for name, count in tools.most_common(5)],
         },
         "compactions": compactions,
+        "media": media,
         "warnings": warnings,
         "time": {"first_at": first_at, "last_at": last_at, "active_ms": active_ms},
         **_snapshot_extras(
@@ -605,6 +623,14 @@ def render_text(report: dict[str, Any]) -> str:
         f"Tools: {tools.get('total', 0)} ({tools.get('ok', 0)} ok, {tools.get('failed', 0)} failed)"
         + (f" · {top}" if top else ""),
         f"Compactions: {report.get('compactions', 0)}",
+        *(
+            [
+                f"Images: {media.get('images', 0)}"
+                + (f" · ${media['cost']:.4f}" if media.get("cost") else "")
+            ]
+            if (media := report.get("media") or {}).get("images")
+            else []
+        ),
         f"Active time: {round(time_.get('active_ms', 0) / 1000)} s"
         + (
             f" · from {time_['first_at']} to {time_['last_at']}"

@@ -1273,12 +1273,35 @@ un claim de "fixed" sin evidencia pasada queda como `IMPLEMENTED_UNVERIFIED`/
 - `image.convert`
 - `image.compress`
 
-### Generation & Editing
-- `image.generate`
-- `image.edit`
-- `image.inpaint`
-- `image.outpaint`
-- `image.upscale`
+### Generation & Editing (implemented, plan 0.4.0 #28)
+- `image.generate`, `image.edit` (with an optional mask), `image.variations`,
+  `image.upscale` and `image.remove_background`. Found with `capability.search`
+  (namespace `image`).
+- They run on the connector the owner chose in Ajustes → Visión e imágenes →
+  Creación de imágenes (`images.settings.get/set`, `~/.rinari/images.json`):
+  `chatgpt` (the ChatGPT subscription connected as a provider; the Responses
+  endpoint's hosted `image_generation` tool, included in the plan) or `openai`
+  (Images API with an API key kept as a credential reference, priced per image).
+  A default connector and an optional one for edits. No default by design:
+  without one the tools fail with `UNSUPPORTED` / `NO_IMAGE_CONNECTOR` and the
+  model must tell the owner instead of improvising.
+- Capability `media.generate`: asks in read-only and project mode with the
+  connector, model and estimated cost as target; full access does not ask.
+  `precheck` refuses an operation the connector cannot do
+  (`OPERATION_UNSUPPORTED`, e.g. upscale on both connectors above) and the
+  per-conversation spend cap (`IMAGE_BUDGET`) before anyone is asked.
+- Each image is a session artifact (`artifact://<session>/media/...`), comes back
+  in `ToolResult.images` so the model looks at it before delivering, and is
+  shown with the `file.presented` card. Each batch records `media.generated`
+  (connector, model, images, cost), which the spend cap and `/usage` read.
+- Not idempotent: a paid call is never retried on its own.
+- A model that cannot see (no vision and no auxiliary visual model) does not
+  fail the turn because of these images: like a `browser.screenshot`, they go
+  back with a note and the turn goes on. Only the owner's attachments and the
+  tools that exist to look at an image (`fs.read_image`, `fs.read_pdf_pages`;
+  `runtime/vision.py` `SEEING_TOOLS`) still need a way to be seen.
+- Still listed, not implemented: `image.inpaint`, `image.outpaint` (an edit
+  with a mask covers them).
 
 ---
 

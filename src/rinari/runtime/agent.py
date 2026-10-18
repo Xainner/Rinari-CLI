@@ -1252,7 +1252,12 @@ class AgentLoop:
 
         request = replace(select_visual_context(request), cancellation=cancellation)
         last_user = last_owner_message(request.messages)
-        if any(message.images for message in request.messages[last_user:]):
+        # The owner's images and those a tool read to look at them need a way
+        # to be seen; a capture or a created image goes back with a note when
+        # the model cannot see it, and the turn goes on (#11, #28).
+        from rinari.runtime.vision import needs_sight
+
+        if any(message.images and needs_sight(message) for message in request.messages[last_user:]):
             decision = visual_status(self._provider)
             if not decision.available:
                 from rinari.shared.errors import InvalidUsageError

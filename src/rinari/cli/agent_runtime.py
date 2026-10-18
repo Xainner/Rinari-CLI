@@ -1245,6 +1245,12 @@ def _build_tools(
             from rinari.tools.native.rinari_state import RinariStateHost, rinari_state_tools
 
             registry.register_all(rinari_state_tools(RinariStateHost(services, root)))
+        with registry.loading("images"):
+            # Create and edit images with the owner's connector (plan 0.4.0 #28);
+            # found with capability.search, like the other optional packs.
+            from rinari.tools.native.image_create import ImageHost, image_create_tools
+
+            registry.register_all(image_create_tools(ImageHost(services)))
         if orchestrator is not None and services.ctx.config.config.agents.enabled:
             with registry.loading("agents"):
                 from rinari.agents.tools import AgentToolHost, agent_tools

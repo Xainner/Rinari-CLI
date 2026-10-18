@@ -154,6 +154,8 @@ CAPABILITIES: dict[str, bool] = {
     # (no git subprocess), so project lists can show it.
     "project_git_head_v1": True,
     "project_flow_v1": True,
+    # image.* tools and Ajustes → Creación de imágenes (plan 0.4.0 #28).
+    "image_creation_v1": True,
     # project.delete: an archived project and everything Rinari keeps about it.
     "project_delete_v1": True,
     # session.pin + sessionSummary.pinned_at (desktop Fijados).

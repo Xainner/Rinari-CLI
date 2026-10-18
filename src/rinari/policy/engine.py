@@ -562,6 +562,23 @@ class PolicyEngine:
             return self._allow(
                 capability, "a proposal the owner saves or discards", risk, risk_class
             )
+        if capability == "media.generate":
+            # Creating or editing an image with a service (plan 0.4.0 #28):
+            # usually paid, and the prompt and images leave the machine. The
+            # target carries the connector, the model and the estimated cost.
+            # Full access does not ask (permissions v4); read-only and project
+            # mode ask, with the cost in front of the owner.
+            if scope.profile is PermissionProfile.FULL_ACCESS:
+                return self._allow(capability, "creating images", risk, risk_class, target=target)
+            return self._ask(
+                capability,
+                "creating or editing an image with a service (it may cost money)",
+                target=target,
+                risk=risk,
+                risk_class=risk_class,
+                rule_id="media_generate",
+                choices=CHOICES_LASTING,
+            )
         if capability == "file.present":
             # Presenting a result only shows it to the owner in the chat: no
             # side effects and nothing leaves the machine. It asked for

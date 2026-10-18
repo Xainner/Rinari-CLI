@@ -79,7 +79,9 @@
     "followupSuggestion",
     "conversationSummary",
     "repoPullRequest",
-    "repoStatus"
+    "repoStatus",
+    "imageCreationSettings",
+    "imageConnector"
   ],
   "$defs": {
     "webPreview": {
@@ -538,6 +540,9 @@
         "workspace.process.stop",
         "vision.settings.get",
         "vision.settings.set",
+        "images.settings.get",
+        "images.settings.set",
+        "images.connector.test",
         "vision.model.reset",
         "context.settings.get",
         "context.settings.set",
@@ -712,6 +717,7 @@
         "repo.pr.failed",
         "session.summary.changed",
         "file.presented",
+        "media.generated",
         "speech.setup_needed",
         "steer.updated",
         "steer.cancelled"
@@ -5191,6 +5197,111 @@
               }
             }
           }
+        }
+      }
+    },
+    "imageCreationSettings": {
+      "type": "object",
+      "description": "images.settings.get / images.settings.set (plan 0.4.0 #28). Connectors never carry a secret: set takes an optional `api_key` per OpenAI connector and keeps only its credential reference.",
+      "required": [
+        "connectors",
+        "default_connector",
+        "edit_connector",
+        "session_budget_usd"
+      ],
+      "properties": {
+        "connectors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/imageConnector"
+          }
+        },
+        "default_connector": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "edit_connector": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_budget_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "kinds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "subscriptions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "provider_id",
+              "name"
+            ],
+            "properties": {
+              "provider_id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "imageConnector": {
+      "type": "object",
+      "required": [
+        "id",
+        "kind",
+        "label"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "chatgpt",
+            "openai"
+          ]
+        },
+        "label": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "provider_id": {
+          "type": "string"
+        },
+        "api_key_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "api_key": {
+          "type": "string",
+          "description": "Write-only: stored in the credential store."
+        },
+        "endpoint": {
+          "type": "string"
+        },
+        "has_key": {
+          "type": "boolean"
         }
       }
     }
