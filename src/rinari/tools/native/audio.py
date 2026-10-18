@@ -13,6 +13,7 @@ from typing import Any
 from rinari.tools.definition import (
     RISK_LOW,
     SIDE_EFFECT_NONE,
+    ClassifiedAction,
     ToolContext,
     ToolDefinition,
     ToolErrorCode,
@@ -94,6 +95,11 @@ def audio_tools() -> list[ToolDefinition]:
             side_effects=SIDE_EFFECT_NONE,
             idempotent=True,
             handler=_transcribe,
+            # A local read: whisper.cpp on this computer, no network, nothing
+            # written. It follows the rules of reading the file (V2-5).
+            classify=lambda arguments: ClassifiedAction(
+                "fs.read", str((arguments or {}).get("path") or "")
+            ),
             namespace="audio",
         )
     ]
