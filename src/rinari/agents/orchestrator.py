@@ -365,6 +365,10 @@ class AgentOrchestrator:
         if self.result(agent_id) is not None:
             self._collected_results.add(agent_id)
 
+    def result_delivered(self, agent_id: str) -> bool:
+        """Whether this agent's result already reached the model."""
+        return agent_id in self._collected_results
+
     def wait(self, agent_id: str, timeout_s: float | None = None) -> AgentResult:
         state = self._state(agent_id)
         thread = state["thread"]

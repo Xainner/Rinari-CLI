@@ -98,17 +98,25 @@ def _agent_tools(host: AgentToolHost):
                 if ctx.cancellation:
                     ctx.cancellation.throw_if_cancelled()
                 rows = []
-                terminal = False
+                fresh = False
+                finished = 0
                 for agent_id in ids:
                     result = orch.result(agent_id)
+                    delivered = result is not None and orch.result_delivered(agent_id)
                     rows.append(
                         {
                             "agent_id": agent_id,
                             "result": _result_dict(result) if result else None,
                             "state": orch.status(agent_id)["state"],
+                            **({"delivered_before": True} if delivered else {}),
                         }
                     )
-                    terminal |= result is not None
+                    finished += result is not None
+                    # A result the model already read does not end the wait:
+                    # the coordinator re-asked 25 times in a row once the first
+                    # child was done (F38, plan 0.4.0 v2, V2-12).
+                    fresh |= result is not None and not delivered
+                terminal = fresh or finished == len(ids)
                 if terminal or time.time() >= deadline:
                     for row in rows:
                         if row["result"] is not None:

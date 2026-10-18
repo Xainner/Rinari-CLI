@@ -16,6 +16,7 @@ ships in v1.
 
 from __future__ import annotations
 
+import contextlib
 import re
 import unicodedata
 from collections.abc import Callable
@@ -369,11 +370,34 @@ def capability_activation_tools(registry: ToolRegistry) -> list[ToolDefinition]:
         reason = str(arguments.get("reason") or "")
         from rinari.tools.exposure import _schema_tokens
 
-        visible = set(exposure.exposed_names(registry)) | set(names)
-        if (
-            len(visible) > exposure.max_schema_count
-            or sum(_schema_tokens(registry.get(n)) for n in visible) > exposure.max_schema_tokens
-        ):
+        def over_budget() -> bool:
+            visible = set(exposure.exposed_names(registry)) | set(names)
+            return (
+                len(visible) > exposure.max_schema_count
+                or sum(_schema_tokens(registry.get(n)) for n in visible)
+                > exposure.max_schema_tokens
+            )
+
+        # Room is made by dropping this turn's oldest activations that are not
+        # asked for again (F33, plan 0.4.0 v2, V2-12): a large MCP server ran
+        # out of budget on its third tool while finished ones stayed loaded.
+        # Session activations (a pinned skill's tools) are never dropped.
+        evicted: list[str] = []
+        if over_budget():
+            for old in [
+                name
+                for name, activation in exposure.activated.items()
+                if activation.scope != "session" and name not in names
+            ]:
+                exposure.deactivate([old])
+                with contextlib.suppress(ValueError):
+                    exposure.recent.remove(old)
+                evicted.append(old)
+                if not over_budget():
+                    break
+        if over_budget():
+            if evicted:
+                exposure.activate(evicted, reason="restored", scope="turn")
             return ToolResult(
                 ok=False,
                 error=ToolErrorInfo(
@@ -383,11 +407,10 @@ def capability_activation_tools(registry: ToolRegistry) -> list[ToolDefinition]:
                 origin="capability",
             )
         activated = exposure.activate(names, reason=reason, scope=scope, ttl_rounds=ttl)
-        return ToolResult(
-            ok=True,
-            data={"activated": activated, "scope": scope, "reason": reason},
-            origin="capability",
-        )
+        data = {"activated": activated, "scope": scope, "reason": reason}
+        if evicted:
+            data["unloaded_to_make_room"] = evicted
+        return ToolResult(ok=True, data=data, origin="capability")
 
     def deactivate_handler(arguments: dict, ctx) -> object:
         from rinari.tools.definition import ToolErrorCode, ToolErrorInfo, ToolResult

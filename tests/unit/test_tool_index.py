@@ -104,3 +104,29 @@ def test_search_puts_the_chosen_service_before_a_skill_or_an_mcp_server() -> Non
     result = search.handler({"query": "generate image"}, SimpleNamespace(exposure=None))
     assert result.data["results"][0]["name"] == "image.generate"
     assert "The owner chose a service for this: use image.generate" in result.data["guidance"]
+
+
+def test_activating_past_the_budget_unloads_this_turns_oldest_tools() -> None:
+    """A large MCP server hit «Schema budget exceeded» on its third tool while
+    finished ones stayed loaded (F33, plan 0.4.0 v2, V2-12)."""
+    from rinari.capability_search import capability_activation_tools
+    from rinari.tools.exposure import ToolExposure
+
+    lazy = [
+        _tool(f"mcp.Big.t{i}", namespace="mcp.Big", manifest={"source": "mcp"}) for i in range(4)
+    ]
+    registry = _registry(_tool("fs.read", loaded=True), *lazy)
+    activate = capability_activation_tools(registry)[0]
+    core = len([n for n in registry.names() if registry.get(n).always_loaded])
+    exposure = ToolExposure(max_schema_count=core + 2)
+    exposure.activate(["mcp.Big.t0"], reason="pinned", scope="session")
+    ctx = SimpleNamespace(exposure=exposure)
+
+    assert activate.handler({"names": ["mcp.Big.t1"]}, ctx).ok
+    result = activate.handler({"names": ["mcp.Big.t2"]}, ctx)
+
+    assert result.ok, result.error
+    assert result.data["unloaded_to_make_room"] == ["mcp.Big.t1"]
+    assert "mcp.Big.t0" in exposure.activated  # a session activation stays
+    too_many = activate.handler({"names": ["mcp.Big.t2", "mcp.Big.t3"]}, ctx)
+    assert not too_many.ok and "mcp.Big.t2" in exposure.activated
