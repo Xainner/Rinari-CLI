@@ -109,3 +109,66 @@ def test_unread_messages_can_be_edited_or_withdrawn_and_carry_files(server, tmp_
         {"session_id": session_id, "steer_id": kept["steer_id"], "message": "tarde"},
     )
     assert not late["ok"] and late["error"]["code"] == "STEER_ALREADY_READ"
+
+
+class _Stuck(_Model):
+    """The first call never answers (a model writing a huge tool call); the rest do."""
+
+    def __init__(self, scripted) -> None:
+        super().__init__(scripted)
+        self.entered = 0
+        self.waiting = threading.Event()
+        self.release = threading.Event()
+
+    def invoke(self, request: ModelRequest) -> ModelResponse:
+        self.entered += 1
+        if self.entered == 1:
+            self.waiting.set()
+            self.release.wait(30)
+            raise RuntimeError("left behind")
+        return super().invoke(request)
+
+
+def test_send_now_on_a_waiting_message_cuts_a_step_that_writes_no_text(
+    server, tmp_path, monkeypatch
+):
+    # P7: the owner waited 22 minutes while the model wrote one tool call;
+    # the cut only looked at visible text. «Enviar ahora» on the waiting
+    # message ends the step whatever the model is doing.
+    session_id = _session(server, tmp_path)
+    model = _Stuck([_done("Leído: paro y te muestro la imagen.")])
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda services, rec: model)
+    assert _call(server, "session.turn.start", {"session_id": session_id, "message": "empieza"})[
+        "ok"
+    ]
+    assert model.waiting.wait(20)
+    queued = _call(
+        server, "session.turn.steer", {"session_id": session_id, "message": "¿y mi imagen?"}
+    )["result"]
+    assert queued["delivery"] == "steer"
+
+    promoted = _call(
+        server,
+        "session.turn.steer.promote",
+        {"session_id": session_id, "steer_id": queued["steer_id"]},
+    )
+    assert promoted["ok"], promoted
+    assert promoted["result"]["status"] == "promoted"
+    assert "answer" in promoted["result"]["interrupted"]
+    try:
+        seen = _until_done(server, session_id)
+    finally:
+        model.release.set()
+    assert [e["event"] for e in seen][-1] == "turn.completed"
+    steered = [m for m in model.requests[0].messages if (m.origin or {}).get("steer_id")]
+    assert len(steered) == 1 and steered[0].origin.get("interrupt") is True
+    assert steered[0].content.startswith("[The user interrupted your current step")
+    updated = [e for e in seen if e["event"] == "steer.updated"]
+    assert updated and updated[0]["payload"]["interrupt"] is True
+
+    late = _call(
+        server,
+        "session.turn.steer.promote",
+        {"session_id": session_id, "steer_id": queued["steer_id"]},
+    )
+    assert not late["ok"] and late["error"]["code"] == "STEER_ALREADY_READ"

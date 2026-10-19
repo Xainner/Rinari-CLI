@@ -413,6 +413,7 @@ class EngineServer:
         self._dispatcher.register("session.turn.steer_now", self._turn_steer_now)
         self._dispatcher.register("session.turn.steer.update", self._turn_steer_update)
         self._dispatcher.register("session.turn.steer.cancel", self._turn_steer_cancel)
+        self._dispatcher.register("session.turn.steer.promote", self._turn_steer_promote)
         self._dispatcher.register("turn.changes.get", self._turn_changes_get)
         self._dispatcher.register("turn.changes.review", self._turn_changes_review)
         self._dispatcher.register("turn.changes.undo.preview", self._turn_changes_undo_preview)
@@ -4493,6 +4494,11 @@ class EngineServer:
             raise EngineProtocolError(INVALID_PARAMS, "Param 'message' must be a string.")
         return self._turns.steer_update(
             self._need_str(params, "session_id"), self._need_str(params, "steer_id"), message
+        )
+
+    def _turn_steer_promote(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._turns.steer_promote(
+            self._need_str(params, "session_id"), self._need_str(params, "steer_id")
         )
 
     def _turn_steer_cancel(self, params: dict[str, Any]) -> dict[str, Any]:

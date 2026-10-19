@@ -428,6 +428,10 @@ class AgentLoop:
                     {"model_call_id": call_id, "delta": text},
                 )
 
+            # «Enviar ahora» asked before this call is already in the request
+            # (the steering was taken above): only a later one cuts this step.
+            if ctx.step_interrupt is not None:
+                ctx.step_interrupt.clear()
             try:
                 try:
                     response = call_model(request)
@@ -1127,7 +1131,14 @@ class AgentLoop:
 
     def _take_steering(self, ctx: AgentContext) -> None:
         if ctx.collect_steering is not None:
-            self._append_steering(ctx, ctx.collect_steering())
+            messages = ctx.collect_steering()
+            if messages:
+                # Read: the waits of the next steps no longer end for these.
+                turn_state = getattr(getattr(ctx, "tool_ctx", None), "turn_state", None)
+                wrote = getattr(turn_state, "owner_wrote", None)
+                if wrote is not None:
+                    wrote.clear()
+            self._append_steering(ctx, messages)
 
     def _append_steering(self, ctx: AgentContext, messages: list[ChatMessage]) -> None:
         for message in messages:
@@ -1253,10 +1264,30 @@ class AgentLoop:
         on_delta: DeltaFn | None,
         cancellation: CancellationToken,
     ) -> Any:
-        from rinari.models.visual_context import last_owner_message, select_visual_context
+        from rinari.models.visual_context import select_visual_context
+
+        # The call gets its own token, cancelled with the turn or when «Enviar
+        # ahora» cuts the step (P7): the provider stops streaming instead of
+        # writing on into a step that was left behind.
+        call_token = CancellationToken()
+        unlink = cancellation.on_cancel(call_token.cancel)
+        request = replace(select_visual_context(request), cancellation=call_token)
+        try:
+            return self._invoke_call(ctx, request, on_delta, cancellation, call_token)
+        finally:
+            unlink()
+
+    def _invoke_call(
+        self,
+        ctx: AgentContext,
+        request: ModelRequest,
+        on_delta: DeltaFn | None,
+        cancellation: CancellationToken,
+        call_token: CancellationToken,
+    ) -> Any:
+        from rinari.models.visual_context import last_owner_message
         from rinari.runtime.vision import visual_status
 
-        request = replace(select_visual_context(request), cancellation=cancellation)
         last_user = last_owner_message(request.messages)
         # The owner's images and those a tool read to look at them need a way
         # to be seen; a capture or a created image goes back with a note when
@@ -1311,6 +1342,14 @@ class AgentLoop:
             except CancelledError as exc:
                 exc.details = {"partial_text": "".join(partial_text)}
                 raise
+            # «Enviar ahora» (P7): the step ends here whatever the model is
+            # doing (text, reasoning, the arguments of a tool call). Only text
+            # deltas used to notice it, so a model writing a 61 KB tool call
+            # kept the owner waiting for 22 minutes.
+            interrupt = getattr(ctx, "step_interrupt", None)
+            if interrupt is not None and interrupt.is_set():
+                call_token.cancel()
+                raise StepInterrupted()
             try:
                 ok, value = completed.get(timeout=0.05)
             except queue.Empty:

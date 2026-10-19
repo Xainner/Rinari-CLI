@@ -1515,6 +1515,7 @@ class TurnManager:
             else:
                 target = None
         if target is not None:
+            self._owner_wrote(target)
             if now:
                 delivered["interrupted"] = self._interrupt_step(target)
             return delivered
@@ -1534,6 +1535,41 @@ class TurnManager:
         self._start_next_queued(record.id)
         return {"session_id": record.id, "delivery": "queued", "position": queued["position"]}
 
+    @staticmethod
+    def _owner_wrote(turn: _ActiveTurn) -> None:
+        """A message for the running turn: its waits end so it is read now (P7)."""
+        session = turn.session
+        context = getattr(session, "context", None) if session is not None else None
+        tool_ctx = getattr(context, "tool_ctx", None)
+        wrote = getattr(getattr(tool_ctx, "turn_state", None), "owner_wrote", None)
+        if wrote is not None:
+            wrote.set()
+
+    def steer_promote(self, session_id: str, steer_id: str) -> dict[str, Any]:
+        """«Enviar ahora» on a message that waits (P7): cut the step and read it now."""
+        record = self._services.sessions.show(session_id)
+        with self._lock:
+            turn, index = self._queued_steer(record.id, steer_id)
+            current = turn.steering[index]
+            content = current.content or ""
+            if content.startswith(STEER_PREFIX):
+                content = STEER_NOW_PREFIX + content[len(STEER_PREFIX) :]
+            turn.steering[index] = replace(
+                current,
+                content=content,
+                origin={**(current.origin or {}), "interrupt": True},
+            )
+            turn_id = turn.turn_id
+        interrupted = self._interrupt_step(turn)
+        payload = {
+            "session_id": record.id,
+            "turn_id": turn_id,
+            "steer_id": steer_id,
+            "interrupt": True,
+        }
+        self._emit(event("steer.updated", payload))
+        return {**payload, "status": "promoted", "interrupted": interrupted}
+
     def _interrupt_step(self, turn: _ActiveTurn) -> list[str]:
         """End the current step, not the turn, so the message is read now (#31).
 
@@ -1546,6 +1582,7 @@ class TurnManager:
         done: list[str] = []
         session = turn.session
         context = getattr(session, "context", None) if session is not None else None
+        self._owner_wrote(turn)
         if context is not None:
             if context.step_interrupt is None:
                 context.step_interrupt = threading.Event()

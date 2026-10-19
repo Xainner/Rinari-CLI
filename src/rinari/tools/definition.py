@@ -7,6 +7,7 @@ envelope; error codes follow the standard error classes in tools.md 62.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -333,6 +334,15 @@ class TurnState:
         # owner. One picture gets one card; one never shown is shown at the end.
         self.presented: set[str] = set()
         self.to_present: list[dict] = []
+        # The owner wrote while the turn runs (P7): a wait (a child, a port,
+        # a while) ends at once, since waiting is no work to lose. Only the
+        # conversation the owner wrote to (`owner_session`) reacts; its
+        # subagents share this state and keep waiting.
+        self.owner_wrote = threading.Event()
+        self.owner_session: str | None = None
+
+    def owner_is_waiting(self, session_id: str | None) -> bool:
+        return self.owner_wrote.is_set() and session_id == self.owner_session
 
     def mark_external(self, source: str) -> None:
         self.external_content = True

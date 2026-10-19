@@ -256,3 +256,28 @@ def test_the_shell_points_at_wait_for_instead_of_sleeping():
     catalog = builtin_catalog()
     assert "wait.for" in catalog.get("shell.exec").description
     assert "Start-Sleep" in catalog.get("wait.for").description
+
+
+def test_the_owner_writing_ends_the_wait_at_once(ctx, tmp_path):
+    # P7: waiting is no work to lose; a message from the owner is read now.
+    from rinari.tools.definition import TurnState
+
+    state = TurnState()
+    state.owner_session = ctx.session_id
+    waiting = replace(ctx, turn_state=state)
+    threading.Timer(0.3, state.owner_wrote.set).start()
+    started = time.monotonic()
+    result = wait_for({"file": "never/appears.txt", "timeout_s": 30}, waiting)
+    assert result.ok, result.error
+    assert result.data["state"] == "owner_wrote" and result.data["ready"] is False
+    assert time.monotonic() - started < 5
+
+
+def test_a_subagent_keeps_waiting_when_the_owner_writes_to_its_mother(ctx, tmp_path):
+    from rinari.tools.definition import TurnState
+
+    state = TurnState()
+    state.owner_session = "the-mother"
+    state.owner_wrote.set()
+    result = wait_for({"file": "never/appears.txt", "timeout_s": 1}, replace(ctx, turn_state=state))
+    assert result.data["state"] == "timed_out"

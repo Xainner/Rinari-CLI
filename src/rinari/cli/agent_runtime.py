@@ -2359,6 +2359,7 @@ def _run_turn_unlocked(
 
     # A fresh TurnState per turn: the untrusted-content guard starts clean.
     turn_state = TurnState()
+    turn_state.owner_session = session.record.id
     if session.next_turn_external:
         turn_state.mark_external("mother conversation")
     session.context.tool_ctx = replace(

@@ -609,7 +609,8 @@
         "repo.pr.create",
         "session.summary",
         "session.turn.steer.update",
-        "session.turn.steer.cancel"
+        "session.turn.steer.cancel",
+        "session.turn.steer.promote"
       ]
     },
     "event": {

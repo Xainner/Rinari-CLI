@@ -97,6 +97,8 @@ def _agent_tools(host: AgentToolHost):
             while True:
                 if ctx.cancellation:
                     ctx.cancellation.throw_if_cancelled()
+                if _owner_wrote(ctx):
+                    return _owner_wrote_result({"agent_ids": ids})
                 rows = []
                 fresh = False
                 finished = 0
@@ -133,6 +135,8 @@ def _agent_tools(host: AgentToolHost):
         while True:
             if ctx.cancellation:
                 ctx.cancellation.throw_if_cancelled()
+            if _owner_wrote(ctx):
+                return _owner_wrote_result({"agent_id": agent_id})
             remaining = deadline - time.time()
             if remaining <= 0:
                 return ToolResult(
@@ -346,6 +350,32 @@ def _agent_tools(host: AgentToolHost):
             handler=synthesize,
         ),
     ]
+
+
+def _owner_wrote(ctx) -> bool:
+    """The owner wrote to this conversation while it waits (P7)."""
+    turn_state = getattr(ctx, "turn_state", None)
+    check = getattr(turn_state, "owner_is_waiting", None)
+    return bool(callable(check) and check(getattr(ctx, "session_id", None)))
+
+
+def _owner_wrote_result(data: dict):
+    from rinari.tools.definition import ToolResult
+
+    return ToolResult(
+        ok=True,
+        data={
+            **data,
+            "state": "waiting",
+            "status": "owner_wrote",
+            "timed_out": False,
+            "note": (
+                "The user wrote while you waited; their message comes next. The agents keep "
+                "working: wait for them again with agent.wait when it fits."
+            ),
+        },
+        origin="agents",
+    )
 
 
 def _result_dict(result) -> dict:
