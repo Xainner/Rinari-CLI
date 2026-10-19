@@ -166,6 +166,53 @@ def test_fs_patch_shapes_that_mean_something_else_are_not_rewritten() -> None:
     assert single == {"files": [{"path": "a", "edits": edits, "expected_hash": "h"}]}
 
 
+def test_fs_patch_with_both_forms_repeating_one_edit_applies_it(project) -> None:
+    # F41: GPT sent the edit in both forms and was refused until the loop
+    # guard stopped the turn.
+    tmp_path, root, _ = project
+    ctx = _ctx(tmp_path, root)
+    runtime, _ = _runtime(ctx, tmp_path)
+    target = root / "src" / "a.py"
+
+    result = runtime.execute(
+        "fs.patch",
+        {
+            "path": "src/a.py",
+            "old_string": "world",
+            "new_string": "there",
+            "files": [
+                {
+                    "path": "src\\a.py" if os.name == "nt" else "src/./a.py",
+                    "edits": [{"old_string": "world", "new_string": "there"}],
+                }
+            ],
+        },
+        ctx,
+    )
+
+    assert result.ok, result.error
+    assert target.read_text(encoding="utf-8") == "hello\nthere\n"
+    assert result.notes == (
+        "used files (path, old_string and new_string repeated an edit already in files)",
+    )
+
+
+def test_fs_patch_with_both_forms_that_differ_keeps_files_and_says_so() -> None:
+    edits = [{"old_string": "a", "new_string": "b"}]
+    rewritten, notes = normalize.fs_patch(
+        {
+            "path": "x",
+            "old_string": "c",
+            "new_string": "d",
+            "expected_hash": "h",
+            "files": [{"path": "a", "edits": edits}],
+        }
+    )
+
+    assert rewritten == {"files": [{"path": "a", "edits": edits, "expected_hash": "h"}]}
+    assert "left out the separate path/old_string/new_string" in notes[0]
+
+
 def test_fs_read_with_a_line_range_points_to_fs_read_lines(project) -> None:
     tmp_path, root, _ = project
     ctx = _ctx(tmp_path, root)

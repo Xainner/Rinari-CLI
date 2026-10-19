@@ -560,6 +560,11 @@ def classify_shell_risk(command: str, scope: SessionScope) -> ShellRisk:
     )
 
 
+#: Cost bases a service declares (images/connectors.py `CostEstimate.basis`)
+#: that mean no money is spent per use.
+NO_EXTRA_COST = frozenset({"included", "local"})
+
+
 class PolicyEngine:
     def __init__(self, *, network: NetworkPolicy | None = None) -> None:
         from rinari.policy.network import NetworkPolicy  # local: avoid import cycle
@@ -584,6 +589,7 @@ class PolicyEngine:
         risk_class: str = "none",
         target: str | None = None,
         network_mode: str = "read",
+        cost_basis: str | None = None,
     ) -> PolicyDecision:
         read_only = scope.profile is PermissionProfile.READ_ONLY
         if read_only and capability == CAPABILITY_SHELL:
@@ -695,6 +701,13 @@ class PolicyEngine:
             # mode ask, with the cost in front of the owner.
             if scope.profile is PermissionProfile.FULL_ACCESS:
                 return self._allow(capability, "creating images", risk, risk_class, target=target)
+            if not read_only and cost_basis in NO_EXTRA_COST:
+                # P2: the service itself says it costs nothing extra (a plan
+                # that includes it, or a model on this computer). The budget
+                # precheck still guards money; nothing here is paid per use.
+                return self._allow(
+                    capability, "creating images at no extra cost", risk, risk_class, target=target
+                )
             return self._ask(
                 capability,
                 "creating or editing an image with a service (it may cost money)",

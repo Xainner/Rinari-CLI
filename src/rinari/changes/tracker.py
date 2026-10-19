@@ -172,6 +172,14 @@ class TurnChangeTracker:
             )
         return rows
 
+    def has_changes(self) -> bool:
+        """Whether a file the turn touched differs from before it (no diff built)."""
+        for key, after in self.after.items():
+            before = self.before.get(key)
+            if before is None or before.exists != after.exists or before.sha256 != after.sha256:
+                return True
+        return False
+
     def finalize(self) -> dict[str, Any] | None:
         if not self.mutating_tool_seen:
             return None

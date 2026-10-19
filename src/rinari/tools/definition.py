@@ -296,10 +296,14 @@ class ClassifiedAction:
         target: str | None = None,
         mode: str | None = None,
         cwd: str | None = None,
+        cost_basis: str | None = None,
     ) -> None:
         self.capability = capability
         self.target = target
         self.mode = mode
+        # Paid actions (an image service): how the service charges for it,
+        # as it declares (`included`, `local`, `per_image`, `unknown`).
+        self.cost_basis = cost_basis
         # Shell-like actions: the folder the command runs in, when the call
         # names one (`cwd` argument). Policy judges paths from there.
         self.cwd = cwd

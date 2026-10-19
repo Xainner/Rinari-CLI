@@ -117,7 +117,11 @@ class ImageHost:
         what = f"{job.count} x {job.size}" if job else "1"
         cost = estimate.label() if estimate else "cost unknown"
         model = connector.model or "default model"
-        return ClassifiedAction(CAPABILITY, target=f"{connector.label} · {model} · {what} · {cost}")
+        return ClassifiedAction(
+            CAPABILITY,
+            target=f"{connector.label} · {model} · {what} · {cost}",
+            cost_basis=estimate.basis if estimate else None,
+        )
 
     def _connector_or_none(self, operation: str):
         try:

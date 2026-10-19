@@ -2603,9 +2603,16 @@ def _run_turn_unlocked(
     if result.kind != "cancelled" and session.record.kind == "CHAT":
         _maybe_promote(session)
     read_only = session.context.tool_ctx.profile is PermissionProfile.READ_ONLY
-    should_finalize = _turn_requested_mutation(session, turn_index) or _claims_completion(
-        result.content
-    )
+    tracker = getattr(session.context.tool_ctx, "change_tracker", None)
+    if tracker is not None:
+        # P1b: the gate is for work on the project. A turn that only made an
+        # image, took a capture or saved an artifact changed no project file
+        # and has nothing to verify.
+        should_finalize = tracker.has_changes()
+    else:
+        should_finalize = _turn_requested_mutation(session, turn_index) or _claims_completion(
+            result.content
+        )
     finalizable_kind = result.kind in ("answer", "truncated", "budget", "loop")
     if finalizable_kind and not read_only and should_finalize:
         validation_after = _validation_ids(session)

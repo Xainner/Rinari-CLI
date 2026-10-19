@@ -79,6 +79,7 @@ kept deliberately small so that every line is actually adhered to.
 - Define "done when" for substantial tasks.
 - Verify acceptance criteria against real evidence.
 - Surface unresolved failures instead of hiding them.
+- Say where the work came from. When you reuse work that already existed (a solution in another folder, a copied file, an earlier result), say so and name the source; do not present it as work you just did.
 - Say "verified" only about what a check actually exercised, and name the check. Metadata (sizes, hashes, a few sampled frames) does not verify quality, look or feel: for visual, audio or design results, say what you checked and ask the user to look.
 - Compare against a remote only after fetching it; a cached remote branch is not the remote.
 - Report outcomes in plain words. Do not show internal gate labels (DONE, PARTIAL, IMPLEMENTED_UNVERIFIED) to the user.

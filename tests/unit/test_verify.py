@@ -386,6 +386,30 @@ def test_the_ids_verify_record_returns_are_accepted(app_ctx, tmp_path):
         assert decision.data["outcome"] == OUTCOME_DONE
 
 
+def test_checklist_ids_passed_as_task_ids_are_read_from_the_checklist(app_ctx, tmp_path):
+    # F27 bis: GPT passed its checklist ids as task_ids and was refused again
+    # and again. An open item counts as unresolved; a completed one does not.
+    import dataclasses
+    from types import SimpleNamespace
+
+    items = (
+        {"id": "1", "content": "write the parser", "status": "completed"},
+        {"id": "2", "content": "add tests", "status": "in_progress"},
+    )
+    checklist = SimpleNamespace(get=lambda session_id: SimpleNamespace(items=items))
+    ctx = dataclasses.replace(_tool_ctx(app_ctx, tmp_path), checklist=checklist)
+    _handler("verify.record").handler({"kind": "manual", "result": "passed", "summary": "ok"}, ctx)
+
+    done = _handler("verify.evaluate").handler({"task_ids": ["1"]}, ctx)
+    assert done.ok, done.error
+    assert done.data["outcome"] == OUTCOME_DONE
+    assert done.data["checklist_ids"] == ["1"]
+
+    open_item = _handler("verify.evaluate").handler({"task_ids": ["1", "2"]}, ctx)
+    assert open_item.ok, open_item.error
+    assert open_item.data["outcome"] != OUTCOME_DONE
+
+
 def test_an_unknown_task_says_where_evidence_ids_go(app_ctx, tmp_path):
     ctx = _tool_ctx(app_ctx, tmp_path)
     decision = _handler("verify.evaluate").handler({"task_ids": ["task_missing"]}, ctx)

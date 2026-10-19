@@ -164,7 +164,8 @@ class VerificationService:
                 if task is None:
                     raise InvalidUsageError(
                         f"Task not found: {task_id}. task_ids are task ids (task_…); the "
-                        "ids verify.record returns (val_…) go in record_ids."
+                        "ids verify.record returns (val_…) go in record_ids, and the "
+                        "conversation's checklist items are read from checklist.update."
                     )
                 report = done_when_report(task)
                 report["title"] = task.get("title") or task_id

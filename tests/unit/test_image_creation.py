@@ -333,6 +333,29 @@ def test_creating_an_image_asks_with_its_cost_except_in_full_access(tmp_path) ->
     assert engine.decide("media.generate", full, target=target).action is PolicyAction.ALLOW
 
 
+def test_an_image_at_no_extra_cost_is_not_asked_for_in_project_mode(tmp_path) -> None:
+    # P2: the owner was asked for an image their subscription already
+    # includes. What decides is the cost the service declares, not its name.
+    engine = PolicyEngine(network=NetworkPolicy())
+    project = SessionScope(
+        kind="PROJECT", root=tmp_path, cwd=tmp_path, profile=PermissionProfile.WORKSPACE
+    )
+    read_only = SessionScope(
+        kind="PROJECT", root=tmp_path, cwd=tmp_path, profile=PermissionProfile.READ_ONLY
+    )
+    for basis in ("included", "local"):
+        assert engine.decide("media.generate", project, cost_basis=basis).action is (
+            PolicyAction.ALLOW
+        )
+        assert engine.decide("media.generate", read_only, cost_basis=basis).action is (
+            PolicyAction.ASK
+        )
+    for basis in ("per_image", "unknown", None):
+        assert engine.decide("media.generate", project, cost_basis=basis).action is (
+            PolicyAction.ASK
+        )
+
+
 def test_usage_report_counts_images_and_adds_their_cost(server) -> None:
     session_id = _session(server)
     repo = server._services.ctx.event_repo

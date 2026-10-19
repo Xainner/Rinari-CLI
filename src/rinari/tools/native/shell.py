@@ -580,7 +580,10 @@ def shell_tools() -> list[ToolDefinition]:
                         "items": {"type": "integer"},
                         "description": (
                             "Exit code(s) that mean the command did what you expected, e.g. 1 "
-                            "for tests you expect to fail before a fix. Default 0."
+                            "for tests you expect to fail before a fix. Default 0. Some "
+                            "programs report success with codes other than 0 (their "
+                            "documentation lists them); pass those codes here so the run "
+                            "is not counted as a failure."
                         ),
                     },
                 },

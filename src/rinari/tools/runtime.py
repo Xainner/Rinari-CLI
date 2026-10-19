@@ -451,6 +451,7 @@ class ToolRuntime:
                     else None
                 ),
                 network_mode=getattr(action, "mode", None) or "read",
+                cost_basis=getattr(action, "cost_basis", None),
             )
             self._event(
                 "PolicyDecision",

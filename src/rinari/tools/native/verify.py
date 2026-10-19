@@ -141,6 +141,20 @@ def verify_evaluate(input: dict, ctx: ToolContext) -> ToolResult:
     evidence_ids = [i for i in task_ids if i.startswith(f"{VALIDATION_ID_PREFIX}_")]
     task_ids = [i for i in task_ids if i not in evidence_ids]
     record_ids = [*record_ids, *evidence_ids]
+    # Ids of this conversation's checklist, passed as task_ids, were refused
+    # again and again (F27 bis): they are checklist items, not tasks. An item
+    # not completed yet is still open work, so it counts as unresolved.
+    checklist_items = _checklist_items(ctx, task_ids)
+    if checklist_items:
+        task_ids = [i for i in task_ids if i not in checklist_items]
+        unresolved = [
+            *unresolved,
+            *(
+                f"checklist item {item_id} ({item.get('status')}): {item.get('content')}"
+                for item_id, item in checklist_items.items()
+                if item.get("status") != "completed"
+            ),
+        ]
     if not kinds:
         # What verify.plan said: with no test suite, the evidence is checking
         # the result by hand (manual/custom), not a test the project lacks.
@@ -163,7 +177,31 @@ def verify_evaluate(input: dict, ctx: ToolContext) -> ToolResult:
         )
     except Exception as exc:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, getattr(exc, "message", str(exc)))
-    return _ok(decision.to_dict())
+    result = decision.to_dict()
+    if checklist_items:
+        result["checklist_ids"] = sorted(checklist_items)
+        result["note"] = (
+            "These ids are checklist items, not tasks (task_…); they were read from the "
+            "checklist and any item not completed counts as unresolved."
+        )
+    return _ok(result)
+
+
+def _checklist_items(ctx: ToolContext, ids: list[str]) -> dict[str, dict]:
+    """Items of this conversation's checklist named by `ids` (task ids excluded)."""
+    service = getattr(ctx, "checklist", None)
+    session_id = getattr(ctx, "session_id", None)
+    candidates = [i for i in ids if not i.startswith("task_")]
+    if service is None or not session_id or not candidates:
+        return {}
+    try:
+        current = service.get(session_id)
+    except Exception:
+        return {}
+    if current is None:
+        return {}
+    by_id = {str(item.get("id")): item for item in current.items}
+    return {i: by_id[i] for i in candidates if i in by_id}
 
 
 def verify_tools() -> list[ToolDefinition]:
