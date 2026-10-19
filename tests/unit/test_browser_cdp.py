@@ -1526,3 +1526,46 @@ def test_an_empty_target_id_means_the_active_tab(tmp_path, fake_cdp, monkeypatch
     )
     assert result.ok, result.error
     manager.close()
+
+
+def test_navigate_with_no_tab_open_opens_one_and_says_so(tmp_path, fake_cdp, monkeypatch) -> None:
+    # P6: with no tab, navigate failed with «the page is gone» and the model
+    # went around in circles before trying browser.open.
+    manager = _connected_manager(tmp_path, fake_cdp, monkeypatch)
+    opened: list[str] = []
+    monkeypatch.setattr(manager, "targets", lambda: [])
+    monkeypatch.setattr(
+        manager,
+        "new_page",
+        lambda url="about:blank": (opened.append(url), {"target_id": "t9", "url": url})[1],
+    )
+    runtime = _runtime(tmp_path, manager=manager, network_mode="allow")
+    ctx = _ctx(tmp_path, manager=manager, network=NetworkGuard(NetworkPolicy(mode="allow")))
+    result = runtime.execute("browser.navigate", {"url": "https://example.com/"}, ctx)
+    assert result.ok, result.error
+    assert opened == ["https://example.com/"]
+    assert result.data["opened_new_tab"] is True and result.data["target_id"] == "t9"
+    manager.close()
+
+
+def test_a_transient_capture_failure_is_retryable_and_reports_its_code(
+    tmp_path, fake_cdp, monkeypatch
+) -> None:
+    # P5: UnknownVizError came back as UNKNOWN, not retryable, without the
+    # browser_error the other browser tools carry.
+    from rinari.browser.manager import BrowserError
+
+    manager = _connected_manager(tmp_path, fake_cdp, monkeypatch)
+
+    def fail(*args, **kwargs):
+        raise BrowserError("CAPTURE_TRANSIENT", "the page could not be copied right now")
+
+    monkeypatch.setattr(manager, "screenshot", fail)
+    runtime = _runtime(tmp_path, manager=manager, network_mode="allow")
+    ctx = _ctx(tmp_path, manager=manager, network=NetworkGuard(NetworkPolicy(mode="allow")))
+    result = runtime.execute("browser.screenshot", {"target_id": "t1"}, ctx)
+    assert result.ok is False
+    assert result.error.retryable is True
+    assert result.data["browser_error"] == "CAPTURE_TRANSIENT"
+    assert result.data["outcome"] == "failed"
+    manager.close()

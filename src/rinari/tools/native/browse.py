@@ -18,6 +18,7 @@ Capability model (phase 5 "Browser engine" decision, AGENTS.md 11):
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import time
 from collections.abc import Callable
@@ -66,6 +67,9 @@ _CODE_MAP: dict[str, ToolErrorCode] = {
     # El código crudo viaja en `browser_error`, que es lo que lo distingue de
     # cualquier otro UNKNOWN.
     "CAPTURE_EMPTY": ToolErrorCode.UNKNOWN,
+    # El compositor no pudo copiar la página en ese momento (P5): el host ya
+    # reintentó; otro intento un poco más tarde suele salir.
+    "CAPTURE_TRANSIENT": ToolErrorCode.TIMEOUT,
     # El dueño está usando el navegador (documento 03 §7). El agente espera a
     # que lo suelte (plan 0.4.0 #46); si no lo suelta en un buen rato, la
     # herramienta lo dice en vez de ejecutarse a escondidas o reintentar.
@@ -117,6 +121,26 @@ def _retryable_for(exc: BrowserError, code: ToolErrorCode) -> bool:
     return exc.retryable or code in _RETRYABLE
 
 
+def _browser_failure(exc: BrowserError, manager: BrowserManager | None) -> ToolResult:
+    """The same failure for every browser tool: the raw code, the outcome, diagnostics."""
+    code = _CODE_MAP.get(exc.code, ToolErrorCode.UNKNOWN)
+    diagnostics: dict = {}
+    if manager is not None:
+        with contextlib.suppress(Exception):
+            diagnostics = manager.diagnostics()
+    return ToolResult(
+        ok=False,
+        data={
+            "browser_error": exc.code,
+            # Se dice en los datos, no sólo en el texto: el runtime y el
+            # modelo tienen que poder distinguir «no pasó» de «no se sabe».
+            "outcome": "unknown" if exc.uncertain else "failed",
+            "diagnostics": diagnostics,
+        },
+        error=ToolErrorInfo(code=code, message=exc.message, retryable=_retryable_for(exc, code)),
+    )
+
+
 def _run(ctx: ToolContext, fn: Callable[[], Any]) -> ToolResult:
     _manager_instance, error = _need_manager(ctx)
     if error is not None:
@@ -124,20 +148,7 @@ def _run(ctx: ToolContext, fn: Callable[[], Any]) -> ToolResult:
     try:
         return _ok(fn())
     except BrowserError as exc:
-        code = _CODE_MAP.get(exc.code, ToolErrorCode.UNKNOWN)
-        return ToolResult(
-            ok=False,
-            data={
-                "browser_error": exc.code,
-                # Se dice en los datos, no sólo en el texto: el runtime y el
-                # modelo tienen que poder distinguir «no pasó» de «no se sabe».
-                "outcome": "unknown" if exc.uncertain else "failed",
-                "diagnostics": _manager_instance.diagnostics() if _manager_instance else {},
-            },
-            error=ToolErrorInfo(
-                code=code, message=exc.message, retryable=_retryable_for(exc, code)
-            ),
-        )
+        return _browser_failure(exc, _manager_instance)
     except SandboxViolationError as exc:
         return ToolResult(
             ok=False, error=ToolErrorInfo(code=ToolErrorCode.SANDBOX_VIOLATION, message=exc.message)
@@ -334,13 +345,7 @@ def browser_open(input: dict, ctx: ToolContext) -> ToolResult:
         created = manager.new_page(str(url))
         return _ok(created)
     except BrowserError as exc:
-        code = _CODE_MAP.get(exc.code, ToolErrorCode.UNKNOWN)
-        return ToolResult(
-            ok=False,
-            error=ToolErrorInfo(
-                code=code, message=exc.message, retryable=_retryable_for(exc, code)
-            ),
-        )
+        return _browser_failure(exc, manager)
 
 
 def browser_navigate(input: dict, ctx: ToolContext) -> ToolResult:
@@ -356,10 +361,33 @@ def browser_navigate(input: dict, ctx: ToolContext) -> ToolResult:
     target = _page_target(input, ctx)
     if isinstance(target, ToolResult):
         return target
+    if target is None:
+        opened = _open_when_no_tab(ctx, str(url))
+        if opened is not None:
+            return opened
     return _run(
         ctx,
         lambda: _manager(ctx).navigate(target, str(url), cancelled=_cancelled_fn(ctx)),  # type: ignore[union-attr]
     )
+
+
+def _open_when_no_tab(ctx: ToolContext, url: str) -> ToolResult | None:
+    """No tab open yet: «go to this page» opens one (P6), and says so.
+
+    Navigating with no tab failed with «the page is gone», and the model went
+    around in circles before trying browser.open. Only when there is no tab at
+    all: a stale explicit target_id still fails, with how to list the tabs.
+    """
+    manager = _manager(ctx)
+    if manager is None:
+        return None
+    try:
+        if manager.targets():
+            return None
+        created = manager.new_page(url)
+    except BrowserError as exc:
+        return _browser_failure(exc, manager)
+    return _ok({**created, "opened_new_tab": True, "note": "No tab was open; opened a new one."})
 
 
 def browser_snapshot(input: dict, ctx: ToolContext) -> ToolResult:
@@ -381,13 +409,7 @@ def browser_snapshot(input: dict, ctx: ToolContext) -> ToolResult:
             return _ok(snap)
         snap = manager.snapshot(target, cancelled=_cancelled_fn(ctx))
     except BrowserError as exc:
-        code = _CODE_MAP.get(exc.code, ToolErrorCode.UNKNOWN)
-        return ToolResult(
-            ok=False,
-            error=ToolErrorInfo(
-                code=code, message=exc.message, retryable=_retryable_for(exc, code)
-            ),
-        )
+        return _browser_failure(exc, manager)
     data: dict[str, Any] = {"bytes": snap["bytes"], "truncated": snap["truncated"]}
     artifacts: list[ArtifactRef] = []
     if snap["truncated"]:
@@ -421,13 +443,7 @@ def browser_screenshot(input: dict, ctx: ToolContext) -> ToolResult:
     try:
         png = manager.screenshot(target, cancelled=_cancelled_fn(ctx))
     except BrowserError as exc:
-        code = _CODE_MAP.get(exc.code, ToolErrorCode.UNKNOWN)
-        return ToolResult(
-            ok=False,
-            error=ToolErrorInfo(
-                code=code, message=exc.message, retryable=_retryable_for(exc, code)
-            ),
-        )
+        return _browser_failure(exc, manager)
     path = _artifact_dir(ctx) / f"screenshot-{int(time.time())}.png"
     path.write_bytes(png)
     digest = _sha256(path)
@@ -744,13 +760,7 @@ def browser_upload(input: dict, ctx: ToolContext) -> ToolResult:
             cancelled=_cancelled_fn(ctx),
         )
     except BrowserError as exc:
-        code = _CODE_MAP.get(exc.code, ToolErrorCode.UNKNOWN)
-        return ToolResult(
-            ok=False,
-            error=ToolErrorInfo(
-                code=code, message=exc.message, retryable=_retryable_for(exc, code)
-            ),
-        )
+        return _browser_failure(exc, manager)
     out["provenance"] = provenance
     return _ok(out)
 
@@ -765,13 +775,7 @@ def browser_download(input: dict, ctx: ToolContext) -> ToolResult:
             timeout_s=float(input.get("wait_s") or 15.0), cancelled=_cancelled_fn(ctx)
         )
     except BrowserError as exc:
-        code = _CODE_MAP.get(exc.code, ToolErrorCode.UNKNOWN)
-        return ToolResult(
-            ok=False,
-            error=ToolErrorInfo(
-                code=code, message=exc.message, retryable=_retryable_for(exc, code)
-            ),
-        )
+        return _browser_failure(exc, manager)
     if ref is None:
         return ToolResult(
             ok=False,
