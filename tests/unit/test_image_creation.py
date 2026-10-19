@@ -279,12 +279,63 @@ def test_generate_stores_the_image_shows_it_and_records_its_cost(
     # The model gets to look at it; the owner gets the delivery card.
     assert result.images and result.images[0].uri == image["uri"]
     names = [name for name, _payload in events]
-    assert names == ["media.generated", "file.presented"]
+    # P1: the model looks first; the owner's card comes from file.present.
+    assert names == ["media.generated"]
     assert events[0][1]["cost_usd"] == pytest.approx(0.011)
-    assert events[1][1]["items"][0]["kind"] == "image"
+    assert "file.present" in result.data["note"]
+    from rinari.tools.native.present import present_tools
+
+    present = present_tools()[0]
+    # P3: presented by its store path, the card carries the artifact URI.
+    shown = present.handler({"items": [{"path": image["path"], "caption": "Luna"}]}, ctx)
+    assert shown.ok and shown.data["presented"] == 1
+    card = events[-1][1]["items"][0]
+    assert events[-1][0] == "file.presented" and card["kind"] == "image"
+    assert card["uri"] == image["uri"]
+    # One picture, one card: presenting it again (by URI) shows nothing new.
+    again = present.handler({"items": [{"path": image["uri"]}]}, ctx)
+    assert again.ok and again.data["presented"] == 0 and again.data["already_shown"] == 1
+    assert [name for name, _ in events].count("file.presented") == 1
+    # Already presented, so the end of the turn adds nothing.
+    from rinari.cli.agent_runtime import _present_unshown
+
+    _present_unshown(ctx)
+    assert [name for name, _ in events].count("file.presented") == 1
     # An operation the connector cannot do is refused before asking anyone.
     upscale = host.precheck("upscale", {"image": image["uri"]}, ctx)
     assert upscale is not None and upscale.error.details["reason"] == "OPERATION_UNSUPPORTED"
+
+
+def test_an_image_the_model_never_presents_is_shown_when_the_turn_ends(
+    server, tmp_path, monkeypatch
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(_png()).decode()}]})
+
+    _openai_images(handler, monkeypatch)
+    assert _call(
+        server,
+        "images.settings.set",
+        {
+            "connectors": [
+                {"id": "openai", "kind": "openai", "label": "OpenAI", "api_key": "sk-x"}
+            ],
+            "default_connector": "openai",
+        },
+    )["ok"]
+    session_id = _session(server)
+    events: list = []
+    ctx = _ctx(server, tmp_path, session_id, events)
+    result = ImageHost(server._services).run("generate", {"prompt": "a moon"}, ctx)
+    assert result.ok, result.error
+    from rinari.cli.agent_runtime import _present_unshown
+
+    _present_unshown(ctx)
+    cards = [payload for name, payload in events if name == "file.presented"]
+    assert len(cards) == 1
+    assert cards[0]["items"][0]["uri"] == result.data["images"][0]["uri"]
+    _present_unshown(ctx)
+    assert [name for name, _ in events].count("file.presented") == 1
 
 
 def test_the_session_spend_cap_stops_a_paid_image_before_asking(server, tmp_path) -> None:

@@ -328,6 +328,11 @@ class TurnState:
     def __init__(self) -> None:
         self.external_content = False
         self.sources: list[str] = []
+        # Deliveries (P1): what file.present already showed this turn, by
+        # artifact URI or content hash, and the images a tool made for the
+        # owner. One picture gets one card; one never shown is shown at the end.
+        self.presented: set[str] = set()
+        self.to_present: list[dict] = []
 
     def mark_external(self, source: str) -> None:
         self.external_content = True

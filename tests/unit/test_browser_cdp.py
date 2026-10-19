@@ -1310,7 +1310,8 @@ def test_browser_screenshot_is_a_session_image_the_chat_can_show(
     assert result.ok, result.error
     uri = result.data["uri"]
     assert uri.startswith("artifact://") and result.data["artifact"] == uri
-    assert result.data["markdown"] == f"![{result.data['name']}]({uri})"
+    # P4: the owner sees a capture through file.present, not inline Markdown.
+    assert "markdown" not in result.data
     assert result.presentation["kind"] == "image"
     assert result.artifacts[0].kind == "image" and result.artifacts[0].uri == uri
     # The model sees the capture in the same step: no fs.read_image afterwards (#11).

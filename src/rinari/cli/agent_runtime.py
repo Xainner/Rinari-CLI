@@ -2602,6 +2602,7 @@ def _run_turn_unlocked(
     _capture_owner_messages(services, session.record.id, captured, memory_origin)
     if result.kind != "cancelled" and session.record.kind == "CHAT":
         _maybe_promote(session)
+    _present_unshown(session.context.tool_ctx)
     read_only = session.context.tool_ctx.profile is PermissionProfile.READ_ONLY
     tracker = getattr(session.context.tool_ctx, "change_tracker", None)
     if tracker is not None:
@@ -2627,6 +2628,28 @@ def _run_turn_unlocked(
         result = replace(result, compacted=True)
     _account_turn(session, result=result, budget=budget)
     return result
+
+
+def _present_unshown(tool_ctx) -> None:
+    """Show the images made this turn that the model never presented (P1).
+
+    The model presents an image after looking at it; one it forgot to present
+    still reaches the owner, once, when the turn ends.
+    """
+    turn_state = getattr(tool_ctx, "turn_state", None)
+    pending = list(getattr(turn_state, "to_present", None) or ())
+    if not pending:
+        return
+    from rinari.tools.native.present import present_items
+
+    by_card: dict[str, list[dict]] = {}
+    for item in pending:
+        card = dict(item)
+        by_card.setdefault(str(card.pop("present_id", "") or "image"), []).append(card)
+    for present_id, items in by_card.items():
+        with contextlib.suppress(Exception):
+            present_items(tool_ctx, items, present_id)
+    turn_state.to_present.clear()
 
 
 def _account_turn(session: AgentSession, *, result: TurnResult, budget: BudgetMeter) -> None:

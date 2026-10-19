@@ -41,7 +41,8 @@ DESCRIPTION = (
     "made (audio, video, images, documents, sheets, sites), not every file you touched. "
     "The app shows a card with a player or preview. items: [{path | url, caption?}]; "
     "paths inside the project or workspace, or artifact://; urls for a page or a local "
-    "preview (http://localhost:5173)."
+    "preview (http://localhost:5173). This is how the user sees an image, capture or "
+    "download a tool made for you; each one is shown once."
 )
 
 INPUT_SCHEMA: dict[str, Any] = {
@@ -140,8 +141,11 @@ def _path_item(
         "name": resolved.name,
         "caption": caption,
     }
-    if raw.startswith("artifact://"):
-        item["uri"] = raw
+    uri = raw if raw.startswith("artifact://") else _artifact_uri(ctx, resolved)
+    if uri:
+        # A saved output named by its file path (P3): the desktop opens it by
+        # URI; the path itself is the Engine's private store.
+        item["uri"] = uri
     if resolved.is_dir():
         item.update(_folder(resolved))
         return item, None
@@ -152,6 +156,62 @@ def _path_item(
     if kind == "archive":
         item.update(_archive(resolved))
     return item, None
+
+
+def _artifact_uri(ctx: ToolContext, resolved: Path) -> str | None:
+    """`artifact://<session>/…` for a path inside this conversation's saved outputs."""
+    root = getattr(ctx, "artifact_root", None)
+    session_id = getattr(ctx, "session_id", None)
+    if not root or not session_id:
+        return None
+    try:
+        base = (Path(root) / session_id).resolve()
+        relative = resolved.resolve().relative_to(base)
+    except (OSError, ValueError):
+        return None
+    if not relative.parts:
+        return None
+    return f"artifact://{session_id}/{relative.as_posix()}"
+
+
+def _delivery_key(item: dict[str, Any]) -> str | None:
+    """What makes two cards the same picture: its URI, else its content."""
+    if item.get("uri"):
+        return str(item["uri"])
+    if item.get("url"):
+        return str(item["url"])
+    path = item.get("path")
+    if not path or item.get("kind") == "folder":
+        return None
+    import hashlib
+
+    try:
+        if Path(path).stat().st_size > 64 * 1024 * 1024:
+            return f"path:{path}"
+        return "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def present_items(
+    ctx: ToolContext, items: list[dict[str, Any]], present_id: str
+) -> list[dict[str, Any]]:
+    """Emit one card for the items not shown yet this turn; return those shown."""
+    turn_state = getattr(ctx, "turn_state", None)
+    seen = getattr(turn_state, "presented", None)
+    fresh: list[dict[str, Any]] = []
+    for item in items:
+        key = _delivery_key(item)
+        if seen is not None and key is not None:
+            if key in seen:
+                continue
+            seen.add(key)
+        fresh.append(item)
+    sink = getattr(ctx, "activity_sink", None)
+    if fresh and callable(sink):
+        with contextlib.suppress(Exception):
+            sink("file.presented", {"present_id": present_id, "items": fresh})
+    return fresh
 
 
 def _present(arguments: dict, ctx: ToolContext) -> ToolResult:
@@ -178,20 +238,15 @@ def _present(arguments: dict, ctx: ToolContext) -> ToolResult:
             if item is None:
                 return error or _fail(ToolErrorCode.NOT_FOUND, f"cannot present {path}")
         items.append(item)
-    sink = getattr(ctx, "activity_sink", None)
-    if callable(sink):
-        with contextlib.suppress(Exception):
-            sink(
-                "file.presented",
-                {"present_id": getattr(ctx, "tool_call_id", "") or "present", "items": items},
-            )
-    return ToolResult(
-        ok=True,
-        data={
-            "presented": len(items),
-            "items": [{"name": i["name"], "kind": i["kind"]} for i in items],
-        },
-    )
+    shown = present_items(ctx, items, getattr(ctx, "tool_call_id", "") or "present")
+    data: dict[str, Any] = {
+        "presented": len(shown),
+        "items": [{"name": i["name"], "kind": i["kind"]} for i in shown],
+    }
+    if len(shown) < len(items):
+        data["already_shown"] = len(items) - len(shown)
+        data["note"] = "Some items were already shown to the user this turn; not shown again."
+    return ToolResult(ok=True, data=data)
 
 
 def present_tools() -> list[ToolDefinition]:

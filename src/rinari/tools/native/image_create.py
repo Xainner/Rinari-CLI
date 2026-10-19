@@ -48,9 +48,10 @@ NO_CONNECTOR = (
     "try to make the image another way."
 )
 REVIEW_NOTE = (
-    "Look at the image before delivering it. If it does not match what was asked "
-    "(wrong subject, text, hands, missing parts), say so and edit or regenerate it, "
-    "at most twice."
+    "The owner has not seen the image yet. Look at it first: if it does not match "
+    "what was asked (wrong subject, text, hands, missing parts), say so and edit or "
+    "regenerate it, at most twice. Then show the one you keep with file.present "
+    "(path: its uri)."
 )
 _CODES = {code.value for code in ToolErrorCode}
 
@@ -209,7 +210,6 @@ class ImageHost:
                 "width": width,
                 "height": height,
                 "mime_type": image.mime,
-                "markdown": f"![{name}]({uri})",
             }
             if image.revised_prompt:
                 info["revised_prompt"] = image.revised_prompt
@@ -242,12 +242,15 @@ class ImageHost:
                 "cost_basis": estimate.basis,
             },
         )
-        sink = getattr(ctx, "activity_sink", None)
-        if callable(sink):
-            sink(
-                "file.presented",
-                {"present_id": ctx.tool_call_id or f"image-{stamp}", "items": items},
-            )
+        # The model looks before the owner sees it (P1): the card comes from
+        # file.present. One the model never presents is shown when the turn
+        # ends, so a made image is never lost.
+        turn_state = getattr(ctx, "turn_state", None)
+        if turn_state is not None and hasattr(turn_state, "to_present"):
+            for item in items:
+                turn_state.to_present.append(
+                    {**item, "present_id": ctx.tool_call_id or f"image-{stamp}"}
+                )
         data = {
             "operation": operation,
             "connector": connector.label,

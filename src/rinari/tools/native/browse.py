@@ -466,8 +466,6 @@ def browser_screenshot(input: dict, ctx: ToolContext) -> ToolResult:
         "width": width,
         "height": height,
         "mime_type": "image/png",
-        # How to show it to the owner: file:// paths do not render in the chat.
-        "markdown": f"![{path.name}]({uri})",
     }
     # The capture goes to the model in the same step, as `fs.read_image` does:
     # without it the model had to read the same file again, one more call and
@@ -1046,8 +1044,8 @@ def browse_tools() -> list[ToolDefinition]:
             name="browser.screenshot",
             description=(
                 "Capture the page as a PNG image. The capture already comes to you as an "
-                "image in this result: do not read it again with fs.read_image. To show it "
-                "to the owner in the chat, include the returned `markdown` in your reply."
+                "image in this result: do not read it again with fs.read_image. The owner "
+                "does not see it unless you show it with file.present (path: its uri)."
             ),
             input_schema=optional_target,
             risk=RISK_LOW,
