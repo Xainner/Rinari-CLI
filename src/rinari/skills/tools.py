@@ -182,6 +182,14 @@ def skill_tools(host: SkillToolHost):
             exposed = exposure.activate(
                 list(m.required_tools), reason=f"skill {m.name}", scope="session"
             )
+        # The procedure comes back in this result, so it enters the
+        # conversation where it was activated (F43, like Claude Code): the
+        # system prompt and the skill catalog stay the same, and so does the
+        # provider's cached prefix.
+        try:
+            procedure = service.load(m.name, _project())
+        except SkillError:
+            procedure = ""
         return ToolResult(
             ok=True,
             data={
@@ -189,6 +197,8 @@ def skill_tools(host: SkillToolHost):
                 "version": m.version,
                 "active": True,
                 "tools_activated": exposed,
+                "procedure": procedure,
+                "note": "This is the skill's procedure: follow it from here on.",
             },
             origin="skills",
         )
@@ -399,8 +409,8 @@ def skill_tools(host: SkillToolHost):
         ToolDefinition(
             name="skills.activate",
             description=(
-                "Pin a skill on this session so its procedure is injected into "
-                "active-skills context, and expose the tools it requires. Grants no "
+                "Pin a skill on this session: its procedure comes back in this result "
+                "(follow it) and the tools it requires are exposed. Grants no "
                 "permission: each tool call still goes through policy."
             ),
             input_schema={

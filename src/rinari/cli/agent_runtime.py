@@ -320,6 +320,26 @@ def build_assembler_context(
     )
 
 
+def _skills_in_history(history) -> set[str]:
+    """Skills whose procedure an activation result already put in the conversation."""
+    import json
+
+    names: set[str] = set()
+    for message in history or ():
+        if getattr(message, "role", None) != "tool" or getattr(message, "name", None) != (
+            "skills.activate"
+        ):
+            continue
+        try:
+            envelope = json.loads(message.content or "")
+        except (TypeError, ValueError):
+            continue
+        data = envelope.get("data") if isinstance(envelope, dict) else None
+        if isinstance(data, dict) and data.get("procedure") and isinstance(data.get("name"), str):
+            names.add(data["name"])
+    return names
+
+
 def _exposure_for(services: ServiceContainer, record: SessionRecord, root: Path | None):
     """Tool exposure for one runtime, with the tools of the pinned skills visible.
 
@@ -358,11 +378,21 @@ class TitleIncomplete(Exception):
 _CATALOG_DESCRIPTION_CHARS = 160
 
 
-def _skill_prompt_parts(services: ServiceContainer, root: Path | None, record: SessionRecord):
+def _skill_prompt_parts(
+    services: ServiceContainer,
+    root: Path | None,
+    record: SessionRecord,
+    history: list | tuple | None = None,
+):
     """(active skill bodies, catalog) for the prompt (harness.md 49).
 
     Only ACTIVE skills get their full procedure injected; everything else
-    stays at the one-line catalog summary (context discipline).
+    stays at the one-line catalog summary (context discipline). An active
+    skill activated by the model already has its procedure in the
+    conversation (the skills.activate result, F43): it is not repeated in the
+    system prompt, which stays the same, and so does the cached prefix. One
+    pinned elsewhere (the app, the CLI) or whose result compaction dropped
+    still goes in the system prompt.
     """
     from rinari.prompts.assembler import ActiveSkill
 
@@ -370,10 +400,11 @@ def _skill_prompt_parts(services: ServiceContainer, root: Path | None, record: S
         rows = services.skills.summaries(root, session=record)
     except Exception:
         return (), None
+    delivered = _skills_in_history(history)
     active = tuple(
         ActiveSkill(name=row["name"], summary=services.skills.load(row["name"], root))
         for row in rows
-        if row["active"]
+        if row["active"] and row["name"] not in delivered
     )
     if rows:
         # Paid on every turn: descriptions are clipped, and a large library
@@ -382,7 +413,8 @@ def _skill_prompt_parts(services: ServiceContainer, root: Path | None, record: S
         lines = [
             "Available skills. Before acting on a request, check this list: when a skill "
             "matches it (by name, app or task), activate it with skills.activate first and "
-            "follow its procedure instead of improvising. [active] ones are already loaded:"
+            "follow its procedure instead of improvising (one you already activated in "
+            "this conversation is in effect: its procedure is where you activated it):"
         ]
         if names_only:
             lines[0] = (
@@ -390,15 +422,16 @@ def _skill_prompt_parts(services: ServiceContainer, root: Path | None, record: S
                 "request with skills.list and a query (or capability.search), activate it with "
                 "skills.activate and follow its procedure:"
             )
+        # No active marker (F43): the catalog stays the same when a skill is
+        # activated, so the system prompt and its cached prefix do too.
         for row in rows:
-            flag = " [active]" if row["active"] else ""
-            if names_only and not row["active"]:
+            if names_only:
                 lines.append(f"- {row['name']}")
                 continue
             description = row["description"]
             if len(description) > _CATALOG_DESCRIPTION_CHARS:
                 description = description[: _CATALOG_DESCRIPTION_CHARS - 1].rstrip() + "…"
-            lines.append(f"- {row['name']}{flag}: {description}")
+            lines.append(f"- {row['name']}: {description}")
         if _auto_learn(services) == "propose":
             lines.append(
                 "After a complex task that ended verified, if the approach is reusable and "
@@ -2384,7 +2417,10 @@ def _run_turn_unlocked(
     # tool or `rinari skills activate`); refresh the prompt segments per turn.
     try:
         skills_tuple, catalog = _skill_prompt_parts(
-            session.services, _root_of(session.record), session.record
+            session.services,
+            _root_of(session.record),
+            session.record,
+            history=session.context.history,
         )
     except Exception:
         skills_tuple, catalog = base.skills, base.skill_catalog

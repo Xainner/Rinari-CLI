@@ -192,6 +192,9 @@ class AgentContext:
     # Reads whose full text this conversation already holds (tools.read_cache);
     # created on first use and cleared when compaction rewrites the history.
     read_cache: Any = None
+    # Where the settled part of the request ends (context.settle, F45); kept
+    # between calls so the prefix only moves when context pressure asks.
+    settle_state: Any = None
 
 
 class AgentLoop:
@@ -1174,9 +1177,18 @@ class AgentLoop:
         messages: list[ChatMessage] = []
         if bundle.system_prompt:
             messages.append(ChatMessage.system(bundle.system_prompt))
-        from rinari.context.settle import settle_old_observations
+        from rinari.context.settle import SettleState, plan_boundary, settle_old_observations
 
-        messages.extend(settle_old_observations(ctx.history))
+        if ctx.settle_state is None:
+            ctx.settle_state = SettleState()
+        window = getattr(self._provider.capabilities(), "max_context_tokens", None)
+        boundary = plan_boundary(
+            ctx.history,
+            ctx.settle_state,
+            window_tokens=window,
+            fixed_tokens=estimate_tokens(system_prompt=bundle.system_prompt or ""),
+        )
+        messages.extend(settle_old_observations(ctx.history, boundary=boundary))
         # Volatile state closes the request instead of opening it: the system
         # prompt and the history stay a byte-identical prefix between calls
         # and turns, which is what provider prompt caches reuse. The note is

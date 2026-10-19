@@ -72,6 +72,7 @@ class ReadCache:
             self,
             history=lambda: agent_ctx.history,
             revision=lambda: getattr(agent_ctx, "compact_revision", None),
+            settle=lambda: getattr(agent_ctx, "settle_state", None),
         )
 
     def _sync(self, revision: Any, history_len: int) -> None:
@@ -109,9 +110,11 @@ class ReadView:
         *,
         history: Callable[[], Sequence[Any]],
         revision: Callable[[], Any],
+        settle: Callable[[], Any] | None = None,
     ) -> None:
         self._cache = cache
         self._history = history
+        self._settle = settle
         self._revision = revision
 
     def record(self, path: str, call_id: str) -> None:
@@ -160,7 +163,13 @@ class ReadView:
         }
         from rinari.context.settle import kept_intact, settled_boundary
 
-        boundary = settled_boundary(history)
+        # The same boundary the next request uses (F45): never point the model
+        # at a read it no longer sees.
+        state = self._settle() if self._settle is not None else None
+        if state is not None and getattr(state, "by_pressure", False):
+            boundary = state.current(history)
+        else:
+            boundary = settled_boundary(history)
         for call_id in reversed(calls):
             index = positions.get(call_id)
             if index is None:

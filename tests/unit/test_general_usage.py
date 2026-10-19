@@ -256,3 +256,47 @@ def test_openai_gets_a_prompt_cache_key_and_other_servers_do_not() -> None:
     }
     assert openai_cache_key({}, "https://opencode.ai/zen/go/v1/chat/completions", request) == {}
     assert openai_cache_key({}, "http://localhost:8080/v1/chat/completions", request) == {}
+
+
+def test_nothing_settles_while_the_request_fits_then_one_jump_and_it_stays() -> None:
+    # F45: settling every few rounds moved the middle of the request; a local
+    # model re-read ~85k tokens at once. By pressure: nothing below SETTLE_AT,
+    # then one jump down to SETTLE_TO, and the boundary stays put after it.
+    from rinari.context.settle import SETTLE_AT, SETTLE_TO, SettleState, plan_boundary
+    from rinari.context.tokens import estimate_tokens
+
+    history = [ChatMessage.user("fix it")]
+    for i in range(12):
+        history += _round(i, 8000)
+    window = 100_000
+    state = SettleState()
+    assert estimate_tokens(history=history) < SETTLE_AT * window
+    assert plan_boundary(history, state, window_tokens=window) == 0
+    assert settle_old_observations(history, boundary=0) == history
+
+    for i in range(12, 30):
+        history += _round(i, 8000)
+    assert estimate_tokens(history=history) >= SETTLE_AT * window
+    boundary = plan_boundary(history, state, window_tokens=window)
+    assert boundary > 0
+    shaped = settle_old_observations(history, boundary=boundary)
+    assert estimate_tokens(history=shaped) <= SETTLE_TO * window + 2100  # one round of slack
+    # The newest rounds are never settled.
+    assert all(len(m.content) == 8000 for m in shaped[-16:] if m.role == "tool")
+
+    # A few more rounds: below the trigger again, so the boundary (and the
+    # cached prefix) does not move.
+    history += _round(30, 8000)
+    assert plan_boundary(history, state, window_tokens=window) == boundary
+    assert settle_old_observations(history, boundary=boundary)[: len(shaped)] == shaped
+
+
+def test_a_rewritten_history_starts_the_boundary_over_and_no_window_keeps_blocks() -> None:
+    from rinari.context.settle import SettleState, plan_boundary, settled_boundary
+
+    history = [m for i in range(30) for m in _round(i, 8000)]
+    state = SettleState()
+    assert plan_boundary(history, state, window_tokens=60_000) > 0
+    compacted = [ChatMessage.user("summary"), *history[-4:]]
+    assert state.current(compacted) == 0
+    assert plan_boundary(history, SettleState(), window_tokens=None) == settled_boundary(history)

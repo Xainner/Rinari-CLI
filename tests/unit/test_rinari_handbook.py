@@ -99,6 +99,8 @@ def test_activating_the_skill_exposes_its_tools_in_the_same_call(app_ctx, tmp_pa
     ctx = _Ctx(record.id)
     result = tools["skills.activate"].handler({"name": "rinari-handbook"}, ctx)
     assert result.ok and set(result.data["tools_activated"]) == HANDBOOK_TOOLS
+    # F43: the procedure comes back in the result, into the conversation.
+    assert result.data["procedure"] and "follow it" in result.data["note"]
     assert set(ctx.exposure.activated) >= HANDBOOK_TOOLS
     assert all(ctx.exposure.activated[n].scope == "session" for n in HANDBOOK_TOOLS)
 

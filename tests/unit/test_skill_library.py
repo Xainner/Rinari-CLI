@@ -458,3 +458,34 @@ def test_section_headings_tolerate_spanish_levels_and_punctuation(tmp_path) -> N
     assert manifest.procedure.startswith("1. Compilar")
     assert manifest.verification == "- curl /health"
     assert not [i for i in validate_skill(manifest, set()) if i["code"] == "MISSING_PROCEDURE"]
+
+
+def test_an_activated_skill_lives_in_the_conversation_not_the_system_prompt(services) -> None:
+    # F43: activating a skill rewrote the system prompt ([active] in the
+    # catalog, the body in a segment) and broke the cached prefix mid-way.
+    import json
+
+    from rinari.models.types import ChatMessage
+
+    user = services.skills.user_skills_dir()
+    user.mkdir(parents=True, exist_ok=True)
+    _skill(user, "local-notes", RINARI_SKILL)
+    idle = SimpleNamespace(active_skills=None)
+    pinned = SimpleNamespace(active_skills=(("local-notes", "1.0.0"),))
+
+    before_active, before_catalog = _skill_prompt_parts(services, None, idle)
+    pinned_active, pinned_catalog = _skill_prompt_parts(services, None, pinned)
+    assert pinned_catalog == before_catalog and "[active]" not in pinned_catalog
+    # Pinned outside the conversation (the app, the CLI): it goes in the prompt.
+    assert [skill.name for skill in pinned_active] == ["local-notes"]
+
+    result = ChatMessage.tool_result(
+        "c1",
+        "skills.activate",
+        json.dumps({"ok": True, "data": {"name": "local-notes", "procedure": "Keep notes."}}),
+    )
+    delivered_active, delivered_catalog = _skill_prompt_parts(
+        services, None, pinned, history=[result]
+    )
+    assert delivered_active == before_active == ()
+    assert delivered_catalog == before_catalog
