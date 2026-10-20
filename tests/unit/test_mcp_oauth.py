@@ -1071,3 +1071,48 @@ def test_protocol_cancel_and_errors(engine, fake) -> None:
     assert missing["error"]["code"] == "NOT_FOUND"
     bad = _call(engine, "mcp.auth.start", {"name": "remote", "timeout_s": "soon"})
     assert bad["error"]["code"] == "INVALID_PARAMS"
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def test_cli_add_login_show_and_logout(fake, tmp_path, monkeypatch) -> None:
+    from typer.testing import CliRunner
+
+    from rinari.cli.main import app
+    from rinari.shared.paths import ENV_HOME
+
+    monkeypatch.setenv(ENV_HOME, str(tmp_path / "cli-home"))
+    monkeypatch.setenv("RINARI_KEYRING", "0")
+    monkeypatch.chdir(tmp_path)
+
+    def browser(url: str) -> bool:
+        threading.Thread(target=_browser, args=(url,), daemon=True).start()
+        return True
+
+    monkeypatch.setattr("webbrowser.open", browser)
+    runner = CliRunner()
+
+    def call(*args: str):
+        result = runner.invoke(app, list(args), catch_exceptions=False)
+        for token in _tokens(fake):
+            assert token not in result.output
+        return result
+
+    added = call(
+        "mcp", "add", "remote", "--url", fake.mcp_url, "--oauth", "--oauth-scope", "mcp.read"
+    )
+    assert added.exit_code == 0, added.output
+    assert "sign-in:   no" in call("mcp", "show", "remote").output
+    login = call("mcp", "login", "remote", "--timeout", "30")
+    assert login.exit_code == 0, login.output
+    assert "signed in to remote" in login.output
+    assert "sign-in:   yes" in call("mcp", "show", "remote").output
+    assert call("mcp", "test", "remote").output.startswith("OK")
+    logout = call("mcp", "logout", "remote")
+    assert logout.exit_code == 0, logout.output
+    assert "tokens revoked and deleted" in logout.output
+    misuse = call("mcp", "add", "plain", "--url", fake.mcp_url, "--client-id", "x")
+    assert misuse.exit_code != 0
