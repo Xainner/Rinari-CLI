@@ -504,6 +504,19 @@ class McpService:
             return False
         return allowed is None or mine or name in allowed
 
+    def reads_only(self, name: str, tool: str) -> bool:
+        """Whether a tool only reads, from its annotations (and the owner's corrections).
+
+        Unknown (the server never listed it, or does not say) is not read-only.
+        """
+        from rinari.mcp.adapter import facts_of
+
+        for definition in self.known_tools(name):
+            if (definition.manifest or {}).get("raw_name") == tool:
+                facts = facts_of(definition)
+                return bool(facts is not None and facts.read_only)
+        return False
+
     def decision_for(self, name: str, tool: str) -> str | None:
         """The owner's Allow / Ask / Block (deny) for a tool, or None (C5)."""
         settings = self.permissions(name)

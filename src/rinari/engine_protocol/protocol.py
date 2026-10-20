@@ -224,6 +224,11 @@ CAPABILITIES: dict[str, bool] = {
     # agency.draft.ready, or agency.draft.failed with a plain message. It uses
     # the owner's default model and creates nothing.
     "agency_draft_v1": True,
+    # «Probar» a proposed rule: schedule.rehearse answers {status, job_id} and
+    # schedule.rehearsed says what it would do (nothing_new, condition_not_met,
+    # would_run with the delivery it would send, blocked, not_rehearsable when
+    # its first tool may change something, failed). Nothing is ever sent.
+    "agency_rule_rehearsal_v1": True,
     # soul.settings.get/set: character intensity (minimal | balanced | full),
     # separate from Soul selection; bundled default Soul 4.0.
     "soul_character_intensity_v1": True,

@@ -103,7 +103,9 @@ class ScheduleRunner:
                     created.append(self._record_skipped(task, due_at, "previous_run_active"))
                 else:
                     created.append(self._run(task, trigger="schedule", scheduled_for=due_at))
-                self.tasks.advance(task, now)
+                # Read again: the run may have stored something on the task
+                # (a watched folder's fingerprint) that the old copy would undo.
+                self.tasks.advance(self._repo.get(task["id"]) or task, now)
         return created
 
     def _recover(self, now: float) -> None:
@@ -148,15 +150,18 @@ class ScheduleRunner:
     def _unchanged(self, task: dict[str, Any]) -> str | None:
         """A watched folder that did not change since the last check: why it is skipped.
 
-        The first check after the Engine starts only takes the folder's
-        fingerprint: what changed while it was closed is not known.
+        The fingerprint is kept with the task, so a change made while the
+        Engine was closed still runs the rule at its next check. Only the
+        very first check of a rule takes the fingerprint without running.
         """
         watch = task.get("watch")
         if not watch:
             return None
         current = folder_fingerprint(Path(watch["path"]))
-        before = self._fingerprints.get(task["id"])
+        before = self._fingerprints.get(task["id"]) or watch.get("fingerprint")
         self._fingerprints[task["id"]] = current
+        if current != before:
+            self._repo.set_watch_fingerprint(task["id"], current)
         if before is None:
             return "watching the folder from now"
         if before == current:
@@ -313,6 +318,77 @@ class ScheduleRunner:
         except Exception as exc:  # never a silent failure
             message = getattr(exc, "message", None) or str(exc)
             self._finish(task, run_id, "failed", reason=message[:500])
+
+    def rehearse(self, params: dict[str, Any]) -> dict[str, Any]:
+        """«Probar» a proposed rule before turning it on (Agency 10.1.3).
+
+        Calls its first tool for real, but only if that tool only reads, and
+        says what the rule would do with the result: nothing new, condition
+        not met, or the delivery it would send (its arguments filled in).
+        The delivery is never sent. Answers {status, job_id} at once; the
+        result arrives as `schedule.rehearsed`.
+        """
+        raw = params.get("task")
+        if not isinstance(raw, dict):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'task' must be an object.")
+        try:
+            task = self.tasks.validate(raw)
+        except ScheduledTaskError as exc:
+            raise EngineProtocolError(INVALID_PARAMS, str(exc)) from None
+        if task["kind"] != "tool":
+            raise EngineProtocolError(
+                INVALID_PARAMS, "Only a rule that calls a connector can be rehearsed."
+            )
+        spec = task["tool"]
+        job_id = self._services.ctx.ids.new("rehearsal")
+
+        def emit(payload: dict[str, Any]) -> None:
+            self._turns.emit_external(event("schedule.rehearsed", {"job_id": job_id, **payload}))
+
+        def run() -> None:
+            try:
+                allowed, agent_id = self._rule_scope(task)
+                if not self._services.mcp.reads_only(spec["server"], spec["tool"]):
+                    emit(
+                        {
+                            "outcome": "not_rehearsable",
+                            "reason": f"{spec['server']} · {spec['tool']} may change or send "
+                            "something, so it is not called to rehearse.",
+                        }
+                    )
+                    return
+                text = self._call_rule_tool(spec, allowed, agent_id)
+            except RuleBlockedError as exc:
+                emit({"outcome": "blocked", "reason": str(exc)[:500]})
+                return
+            except Exception as exc:  # the desktop must hear back
+                message = getattr(exc, "message", None) or str(exc)
+                emit({"outcome": "failed", "reason": message[:500]})
+                return
+            sample = text[: SUMMARY_CHARS * 2]
+            if not text.strip():
+                emit({"outcome": "nothing_new", "result": ""})
+                return
+            wanted = spec.get("only_if_contains")
+            if wanted and wanted.casefold() not in text.casefold():
+                emit({"outcome": "condition_not_met", "result": sample})
+                return
+            payload: dict[str, Any] = {
+                "outcome": "would_run",
+                "on_result": spec.get("on_result"),
+                "result": sample,
+            }
+            if spec.get("on_result") == "deliver" and spec.get("deliver"):
+                deliver = spec["deliver"]
+                payload["delivery"] = {
+                    "server": deliver["server"],
+                    "tool": deliver["tool"],
+                    "arguments": fill_result(deliver.get("arguments") or {}, sample),
+                }
+            emit(payload)
+
+        threading.Thread(target=run, name="rinari-rule-rehearsal", daemon=True).start()
+        return {"status": "started", "job_id": job_id}
 
     def _rule_scope(self, task: dict[str, Any]) -> tuple[frozenset[str] | None, str | None]:
         agent_id = task.get("agent_id")

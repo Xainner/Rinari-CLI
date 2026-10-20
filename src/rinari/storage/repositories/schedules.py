@@ -119,6 +119,17 @@ class ScheduleRepository:
         )
         return self.get(task_id) or {}
 
+    def set_watch_fingerprint(self, task_id: str, fingerprint: str) -> None:
+        """What a watched folder looked like at its last check (kept across restarts)."""
+        task = self.get(task_id)
+        if task is None or not task.get("watch"):
+            return
+        watch = {**task["watch"], "fingerprint": fingerprint}
+        self._db.execute(
+            "UPDATE scheduled_tasks SET watch_json = ? WHERE id = ?",
+            (json.dumps(watch, sort_keys=True), task_id),
+        )
+
     def delete(self, task_id: str) -> bool:
         existed = self.get(task_id) is not None
         with self._db.transaction():

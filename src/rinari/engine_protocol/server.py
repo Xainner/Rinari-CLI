@@ -358,6 +358,7 @@ class EngineServer:
         self._dispatcher.register("schedule.runs", self._schedule.runs)
         self._dispatcher.register("schedule.run_now", self._schedule.run)
         self._dispatcher.register("schedule.grant", self._schedule.grant)
+        self._dispatcher.register("schedule.rehearse", self._schedule.rehearse)
         self._dispatcher.register("workspace.process.list", self._process_tasks.list)
         self._dispatcher.register("workspace.process.read", self._process_tasks.read)
         self._dispatcher.register("workspace.process.stop", self._process_tasks.stop)

@@ -582,3 +582,66 @@ def test_a_rule_watching_a_folder_runs_only_when_it_changes(server, calls, tmp_p
         server, "schedule.create", {"task": {**_rule(), "watch": {"path": "no/such/folder"}}}
     )
     assert refused["ok"] is False
+
+
+def _rehearsal(server, task):
+    import time
+
+    started = _ok(_call(server, "schedule.rehearse", {"task": task}))
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        for evt in server.drain_events():
+            if evt.get("event") == "schedule.rehearsed":
+                assert evt["payload"]["job_id"] == started["job_id"]
+                return evt["payload"]
+        time.sleep(0.02)
+    raise AssertionError("no rehearsal")
+
+
+def test_a_rehearsal_says_what_the_rule_would_send_and_sends_nothing(
+    server, calls, monkeypatch
+) -> None:
+    seen, answers = calls
+    _connector(server, "gmail")
+    _connector(server, "telegram")
+    monkeypatch.setattr(server._services.mcp, "reads_only", lambda name, tool: tool == "search")
+    rule = _rule(
+        on_result="deliver",
+        deliver={"server": "telegram", "tool": "send_message", "arguments": {"text": "{result}"}},
+    )
+    result = _rehearsal(server, rule)
+    assert result["outcome"] == "would_run"
+    assert result["delivery"] == {
+        "server": "telegram",
+        "tool": "send_message",
+        "arguments": {"text": "Factura 42 de x@patito.com"},
+    }
+    assert [call[1] for call in seen] == ["search"]
+    assert server._services.schedules.list() == []
+    # A first tool that may change something is never called to rehearse.
+    risky = _rehearsal(server, _rule(tool="archive"))
+    assert risky["outcome"] == "not_rehearsable"
+    assert [call[1] for call in seen] == ["search"]
+    answers["search"] = "nada de patito"
+    quiet = _rehearsal(server, _rule(only_if_contains="factura"))
+    assert quiet["outcome"] == "condition_not_met"
+    assert _call(server, "schedule.rehearse", {"task": {**_rule(), "kind": "agent"}})["ok"] is False
+
+
+def test_a_watched_folders_fingerprint_survives_a_restart(server, calls, tmp_path) -> None:
+    seen, _answers = calls
+    _connector(server, "gmail")
+    folder = tmp_path / "vigilada"
+    folder.mkdir()
+    (folder / "a.txt").write_text("uno", encoding="utf-8")
+    task = _ok(
+        _call(server, "schedule.create", {"task": {**_rule(), "watch": {"path": str(folder)}}})
+    )["task"]
+    assert _tick_run(server, task["id"])["reason"] == "watching the folder from now"
+    stored = server._services.schedules.get(task["id"])["watch"]
+    assert stored["path"] == str(folder) and stored["fingerprint"]
+    # The Engine restarts (nothing in memory) and the folder changed meanwhile.
+    server._schedule._fingerprints.clear()
+    (folder / "b.txt").write_text("dos", encoding="utf-8")
+    assert _tick_run(server, task["id"])["status"] == "completed"
+    assert len(seen) == 1

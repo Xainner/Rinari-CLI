@@ -37,7 +37,8 @@ ALTER TABLE scheduled_tasks ADD COLUMN agent_id TEXT;
 ALTER TABLE scheduled_tasks ADD COLUMN tool_json TEXT;
 
 -- A rule can watch a folder: on each check it runs only when the folder
--- changed. watch_json holds the folder.
+-- changed. watch_json holds the folder and its fingerprint at the last
+-- check, so a restart of the Engine does not lose what it looked like.
 ALTER TABLE scheduled_tasks ADD COLUMN watch_json TEXT;
 
 -- Plan de conectores C8: an account that belongs to an agent (agent:ID).

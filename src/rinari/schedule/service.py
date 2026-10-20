@@ -149,7 +149,12 @@ def _watch(raw: Any) -> dict[str, Any] | None:
     folder = Path(path.strip()).expanduser()
     if not folder.is_absolute() or not folder.is_dir():
         raise ScheduledTaskError(f"The watched folder must be an existing folder: {path}")
-    return {"path": str(folder)}
+    watch = {"path": str(folder)}
+    # Kept while the folder stays the same: a new folder starts from scratch.
+    fingerprint = raw.get("fingerprint")
+    if isinstance(fingerprint, str) and raw.get("path") == str(folder):
+        watch["fingerprint"] = fingerprint
+    return watch
 
 
 def _grant(raw: Any) -> dict[str, Any]:
