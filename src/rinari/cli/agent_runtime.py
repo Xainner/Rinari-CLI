@@ -1380,7 +1380,9 @@ def _build_tools(
             registry.register_all(
                 schedule_tools(
                     ScheduleToolHost(
-                        service=getattr(services, "schedules", None), project_id=record.project_id
+                        service=getattr(services, "schedules", None),
+                        project_id=record.project_id,
+                        agent_id=getattr(record, "agent_id", None),
                     )
                 )
             )

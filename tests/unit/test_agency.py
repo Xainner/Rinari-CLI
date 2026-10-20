@@ -504,3 +504,27 @@ def test_an_owner_must_be_an_existing_agent(server) -> None:
             {"name": "x", "transport": "http", "url": "https://x.example/mcp", "owner": owner},
         )
         assert refused["ok"] is False
+
+
+def test_an_agent_only_proposes_its_rules_for_the_owner_to_confirm(server) -> None:
+    from types import SimpleNamespace
+
+    from rinari.schedule.tools import ScheduleToolHost, schedule_tools
+
+    _connector(server, "gmail")
+    services = server._services
+    agent = _ok(
+        _call(server, "agency.agent.create", {"agent": {"name": "Emails", "connectors": ["gmail"]}})
+    )["agent"]
+    [tool] = schedule_tools(ScheduleToolHost(service=services.schedules, agent_id=agent["id"]))
+    ctx = SimpleNamespace(session_id=agent["session_id"], origin_kind="user")
+    result = tool.handler(_rule(), ctx)
+    assert result.ok and result.data["status"] == "proposed"
+    assert result.data["proposal"]["agent_id"] == agent["id"]
+    assert result.data["proposal"]["kind"] == "tool"
+    # Nothing is stored until the owner confirms the card.
+    assert services.schedules.list() == []
+    # Outside an agent's conversation, a connector call without the model is refused.
+    [plain] = schedule_tools(ScheduleToolHost(service=services.schedules))
+    refused = plain.handler(_rule(), SimpleNamespace(session_id="s", origin_kind="user"))
+    assert refused.ok is False
