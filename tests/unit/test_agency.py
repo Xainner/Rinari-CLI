@@ -645,3 +645,38 @@ def test_a_watched_folders_fingerprint_survives_a_restart(server, calls, tmp_pat
     (folder / "b.txt").write_text("dos", encoding="utf-8")
     assert _tick_run(server, task["id"])["status"] == "completed"
     assert len(seen) == 1
+
+
+def test_new_destinations_follow_the_agents_card_and_its_external_triggers(server) -> None:
+    from rinari.cli.agent_runtime import _ask_new_destinations
+
+    services = server._services
+    show = services.sessions.show
+    rinari = show(_ok(_call(server, "session.create", {"chat": True}))["session"]["id"])
+    agent = _ok(_call(server, "agency.agent.create", {"agent": {"name": "Emails"}}))["agent"]
+    # Nothing set: the app's setting (off by default), for Rinari and the agent.
+    assert _ask_new_destinations(services, rinari) is False
+    assert _ask_new_destinations(services, show(agent["session_id"])) is False
+    # A run started by a rule that reads a connector is an external trigger: on.
+    task = services.schedules.create({**_rule(), "agent_id": agent["id"]})
+    run = _ok(_call(server, "session.create", {"chat": True}))["session"]["id"]
+    services.ctx.agency_repo.set_session_agent(run, agent["id"])
+    services.ctx.session_repo.set_lineage(run, None, "schedule", {"task_id": task["id"]})
+    assert _ask_new_destinations(services, show(run)) is True
+    # The owner turns it off on the card, and the card wins.
+    _ok(
+        _call(
+            server,
+            "agency.agent.update",
+            {"agent_id": agent["id"], "patch": {"ask_new_destinations": False}},
+        )
+    )
+    assert _ask_new_destinations(services, show(run)) is False
+    _ok(
+        _call(
+            server,
+            "agency.agent.update",
+            {"agent_id": agent["id"], "patch": {"ask_new_destinations": True}},
+        )
+    )
+    assert _ask_new_destinations(services, show(agent["session_id"])) is True

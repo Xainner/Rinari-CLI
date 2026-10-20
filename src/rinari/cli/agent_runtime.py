@@ -215,6 +215,30 @@ def _runtime_facts(services: ServiceContainer, record: SessionRecord) -> dict[st
     return facts
 
 
+def _ask_new_destinations(services: ServiceContainer, record: SessionRecord) -> bool:
+    """«Preguntar antes de enviar datos a destinos nuevos» for this conversation.
+
+    Rinari Agency (D-6): an agent's card decides when it says so. When it does
+    not, a run started by a rule that reads a connector (an external trigger:
+    what arrives is content from outside) starts with it on; the owner turns
+    it off on the agent's card. Anything else follows the app's setting.
+    """
+    default = bool(services.ctx.config.config.permissions.ask_new_destinations)
+    if not getattr(record, "agent_id", None) or services.agency is None:
+        return default
+    agent = services.agency.for_session(record.id)
+    if agent is None:
+        return default
+    if agent.get("ask_new_destinations") is not None:
+        return bool(agent["ask_new_destinations"])
+    if getattr(record, "lineage_kind", None) == "schedule":
+        task_id = (getattr(record, "brief", None) or {}).get("task_id")
+        task = services.ctx.schedule_repo.get(task_id) if task_id else None
+        if task is not None and task.get("kind") == "tool":
+            return True
+    return default
+
+
 def _agent_identity(services: ServiceContainer, record: SessionRecord) -> str | None:
     """Rinari Agency: who this conversation's agent is, from the owner's card.
 
@@ -960,7 +984,7 @@ def build_agent_session(
         observation_budget_bytes=services.ctx.config.config.runtime.tools.observation_bytes,
         round_observation_bytes=services.ctx.config.config.runtime.tools.round_observation_bytes,
         max_concurrency=services.ctx.config.config.runtime.tools.max_concurrency,
-        ask_new_destinations=services.ctx.config.config.permissions.ask_new_destinations,
+        ask_new_destinations=_ask_new_destinations(services, record),
         session_id=record.id,
         kind=record.kind,
         cwd=root if root is not None else cwd,
