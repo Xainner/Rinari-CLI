@@ -9,13 +9,21 @@ Anything outside them still asks, and the run shows as `needs_you`.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from typing import Any
 
 from rinari.schedule.rules import Schedule, ScheduleError, describe, next_run, parse_schedule
 
-KINDS = ("agent", "reminder", "command")
+KINDS = ("agent", "reminder", "command", "tool")
 # A «command» task (plan 0.4.0 #50) runs without the model: zero tokens.
+# A «tool» task (Rinari Agency, permanent rules) calls a connector tool with
+# fixed arguments, also without the model, and drops the result somewhere.
+TOOL_ON_RESULT = ("nothing", "notify", "agent", "deliver")
+MAX_TOOL_ARGUMENTS = 8000
+MAX_PER_DAY = 1000
+#: In a delivery's arguments, replaced by the text the first tool returned.
+RESULT_PLACEHOLDER = "{result}"
 SHELLS = ("default", "cmd", "powershell", "bash")
 ON_RESULT = ("nothing", "notify_failure", "agent")
 MAX_COMMAND = 4000
@@ -73,6 +81,54 @@ def _command(raw: Any) -> dict[str, Any]:
     }
 
 
+def _tool_call(raw: Any, what: str) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ScheduledTaskError(f"{what} needs its server and tool.")
+    server = raw.get("server")
+    tool = raw.get("tool")
+    if not isinstance(server, str) or not server.strip() or len(server) > 200:
+        raise ScheduledTaskError(f"{what} needs its connector (server).")
+    if not isinstance(tool, str) or not tool.strip() or len(tool) > 256:
+        raise ScheduledTaskError(f"{what} needs its tool.")
+    arguments = raw.get("arguments") or {}
+    if not isinstance(arguments, dict):
+        raise ScheduledTaskError(f"{what}: arguments must be an object.")
+    try:
+        size = len(json.dumps(arguments))
+    except (TypeError, ValueError):
+        raise ScheduledTaskError(f"{what}: arguments must be plain JSON.") from None
+    if size > MAX_TOOL_ARGUMENTS:
+        raise ScheduledTaskError(
+            f"{what}: arguments must be under {MAX_TOOL_ARGUMENTS} characters."
+        )
+    return {"server": server.strip(), "tool": tool.strip(), "arguments": arguments}
+
+
+def _tool(raw: Any) -> dict[str, Any]:
+    """What a «tool» task calls and where the result goes (Rinari Agency).
+
+    The arguments are fixed when the owner creates the rule: an exact
+    condition (a sender, a subject) lives in them, so nothing the tool
+    returns can change what is called or where it goes.
+    """
+    spec = _tool_call(raw, "A tool task")
+    on_result = raw.get("on_result") or "notify"
+    if on_result not in TOOL_ON_RESULT:
+        raise ScheduledTaskError(f"on_result must be one of {', '.join(TOOL_ON_RESULT)}.")
+    spec["on_result"] = on_result
+    if on_result == "deliver":
+        spec["deliver"] = _tool_call(raw.get("deliver"), "A delivery")
+    max_per_day = raw.get("max_per_day")
+    if max_per_day is not None and (
+        isinstance(max_per_day, bool)
+        or not isinstance(max_per_day, int)
+        or not 1 <= max_per_day <= MAX_PER_DAY
+    ):
+        raise ScheduledTaskError(f"max_per_day must be 1..{MAX_PER_DAY}.")
+    spec["max_per_day"] = max_per_day
+    return spec
+
+
 def _grant(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ScheduledTaskError("Each grant must be {capability, target?}.")
@@ -95,6 +151,7 @@ class ScheduleService:
         project_exists: Callable[[str], bool] = lambda project_id: True,
         model_exists: Callable[[str], bool] = lambda model: True,
         skill_exists: Callable[[str], bool] = lambda name: True,
+        agent_exists: Callable[[str], bool] = lambda agent_id: True,
     ) -> None:
         self._repo = repo
         self._clock = clock
@@ -102,6 +159,7 @@ class ScheduleService:
         self._project_exists = project_exists
         self._model_exists = model_exists
         self._skill_exists = skill_exists
+        self._agent_exists = agent_exists
         # Set by the Engine server: a validated proposal becomes the
         # `schedule.proposed` event the desktop shows as a card.
         self.on_proposed: Callable[[dict[str, Any]], None] | None = None
@@ -117,7 +175,7 @@ class ScheduleService:
             raise ScheduledTaskError(f"The name must be 1..{MAX_NAME} characters.")
         kind = merged.get("kind", "agent")
         if kind not in KINDS:
-            raise ScheduledTaskError("Kind must be agent, reminder or command.")
+            raise ScheduledTaskError("Kind must be agent, reminder, command or tool.")
         try:
             schedule = parse_schedule(merged.get("schedule"))
         except ScheduleError as exc:
@@ -126,9 +184,10 @@ class ScheduleService:
         if not isinstance(prompt, str) or len(prompt) > MAX_PROMPT:
             raise ScheduledTaskError(f"The prompt must be text up to {MAX_PROMPT} characters.")
         command = _command(merged.get("command")) if kind == "command" else None
-        # A command task needs no prompt; with on_result=agent the prompt is
-        # what to ask about the output.
-        if not prompt.strip() and kind != "command":
+        tool = _tool(merged.get("tool")) if kind == "tool" else None
+        # A command or tool task needs no prompt; with on_result=agent the
+        # prompt is what to ask about the output.
+        if not prompt.strip() and kind not in ("command", "tool"):
             raise ScheduledTaskError("Say what to do (agent) or what to remind (reminder).")
         project_id = merged.get("project_id") or None
         if project_id is not None and (
@@ -157,6 +216,11 @@ class ScheduleService:
         for grant in map(_grant, grants_raw):
             if grant not in grants:
                 grants.append(grant)
+        agent_id = merged.get("agent_id") or None
+        if agent_id is not None and (
+            not isinstance(agent_id, str) or not self._agent_exists(agent_id)
+        ):
+            raise ScheduledTaskError(f"Unknown agent: {agent_id}")
         enabled = merged.get("enabled", True)
         if not isinstance(enabled, bool):
             raise ScheduledTaskError("'enabled' must be a boolean.")
@@ -172,6 +236,8 @@ class ScheduleService:
             "skills": list(dict.fromkeys(skills)),
             "grants": grants,
             "command": command,
+            "tool": tool,
+            "agent_id": agent_id,
             "enabled": enabled,
         }
 

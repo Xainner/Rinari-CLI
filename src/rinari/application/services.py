@@ -115,6 +115,8 @@ def build_services(
         model_exists=lambda model: _exists(models.resolve, model),
         # A task may name a project skill: its folder is only known at run time.
         skill_exists=lambda name: True,
+        # Rinari Agency: a permanent rule belongs to an agent.
+        agent_exists=lambda agent_id: ctx.agency_repo.get(agent_id) is not None,
     )
     rinari_profiles = RinariProfileService(ctx)
     projects.profiles = rinari_profiles
@@ -122,6 +124,16 @@ def build_services(
     # A broken profile file never keeps the engine from starting.
     with contextlib.suppress(Exception):
         rinari_profiles.reconcile_orphans()
+    agency = AgencyService(
+        ctx.agency_repo,
+        ctx.clock,
+        ctx.ids,
+        resolve_model=lambda model: _model_id(models, model),
+        connector_exists=lambda name: any(
+            row.get("name") == name for row in ctx.mcp_server_repo.list(None)
+        ),
+    )
+    mcp.scope_of = lambda session_id: _agent_scope(agency, session_id)
     return ServiceContainer(
         ctx=ctx,
         credentials=credentials,
@@ -153,16 +165,16 @@ def build_services(
         goals=GoalService(ctx),
         resumes=ResumeService(ctx),
         followups=FollowupService(ctx),
-        agency=AgencyService(
-            ctx.agency_repo,
-            ctx.clock,
-            ctx.ids,
-            resolve_model=lambda model: _model_id(models, model),
-            connector_exists=lambda name: any(
-                row.get("name") == name for row in ctx.mcp_server_repo.list(None)
-            ),
-        ),
+        agency=agency,
     )
+
+
+def _agent_scope(agency: AgencyService, session_id: str):
+    """(allowed connectors, agent id) of an agent's conversation, else (None, None)."""
+    agent = agency.for_session(session_id)
+    if agent is None:
+        return None, None
+    return frozenset(agent.get("connectors") or ()), agent["id"]
 
 
 def _model_id(models, ref: str) -> str | None:

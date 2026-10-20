@@ -65,6 +65,9 @@ class AssemblerContext:
     voice: str = ""
     extended_identity: str = ""
     include_extended_identity: bool = False
+    # Rinari Agency: who this conversation's agent is (its card, written by the
+    # owner only). None outside an agent's conversations.
+    agent_identity: str | None = None
     preferences: str | None = None
     project_instructions: tuple[ProjectInstruction, ...] = ()
     # Compact catalog of available skills (name + one-liner + how to
@@ -235,6 +238,17 @@ class PromptAssembler:
                     content=context.extended_identity,
                     trust=SegmentTrust.TRUSTED,
                     cache_policy=CachePolicy.TURN,
+                )
+            )
+        if context.agent_identity:
+            segments.append(
+                PromptSegment(
+                    id="agency-agent",
+                    kind=SegmentKind.USER_PREFERENCE,
+                    content=context.agent_identity,
+                    trust=SegmentTrust.TRUSTED,
+                    # Changes only when the owner edits the agent's card.
+                    cache_policy=CachePolicy.SESSION,
                 )
             )
         if context.preferences:

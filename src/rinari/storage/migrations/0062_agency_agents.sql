@@ -29,8 +29,12 @@ ALTER TABLE sessions ADD COLUMN agent_id TEXT;
 
 CREATE INDEX idx_sessions_agent ON sessions(agent_id);
 
--- A permanent rule is a scheduled task of an agent.
+-- A permanent rule is a scheduled task of an agent. tool_json holds what a
+-- «tool» task calls without the model (a connector tool with fixed
+-- arguments) and where its result goes.
 ALTER TABLE scheduled_tasks ADD COLUMN agent_id TEXT;
+
+ALTER TABLE scheduled_tasks ADD COLUMN tool_json TEXT;
 
 -- Plan de conectores C8: an account that belongs to an agent (agent:ID).
 -- Empty means everyone, as before.

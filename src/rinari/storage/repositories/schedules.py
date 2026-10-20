@@ -23,6 +23,8 @@ _TASK_COLUMNS = (
     "skills_json",
     "grants_json",
     "command_json",
+    "tool_json",
+    "agent_id",
     "enabled",
     "next_run_at",
     "created_at",
@@ -49,6 +51,9 @@ def _task(row: Any) -> dict[str, Any]:
     item["grants"] = json.loads(item.pop("grants_json"))
     raw_command = item.pop("command_json", None)
     item["command"] = json.loads(raw_command) if raw_command else None
+    raw_tool = item.pop("tool_json", None)
+    item["tool"] = json.loads(raw_tool) if raw_tool else None
+    item["agent_id"] = item.get("agent_id")
     item["enabled"] = bool(item["enabled"])
     return item
 
@@ -90,6 +95,8 @@ class ScheduleRepository:
             "command_json": (
                 json.dumps(task["command"], sort_keys=True) if task.get("command") else None
             ),
+            "tool_json": json.dumps(task["tool"], sort_keys=True) if task.get("tool") else None,
+            "agent_id": task.get("agent_id"),
             "enabled": 1 if task.get("enabled", True) else 0,
             "next_run_at": task.get("next_run_at"),
             "created_at": task["created_at"],

@@ -23,6 +23,9 @@ ENGINE_ERROR = "ENGINE_ERROR"
 TURN_PREPARATION_TIMEOUT = "TURN_PREPARATION_TIMEOUT"
 # The answer exists but would not fit one protocol line (frames.MAX_FRAME_BYTES).
 RESPONSE_TOO_LARGE = "RESPONSE_TOO_LARGE"
+# Rinari Agency: the conversation's agent spent its daily budget, or was archived.
+AGENT_OVER_BUDGET = "AGENT_OVER_BUDGET"
+AGENT_ARCHIVED = "AGENT_ARCHIVED"
 
 
 class EngineProtocolError(Exception):

@@ -106,13 +106,34 @@ def _from_mcp_error(exc: Exception) -> ToolResult:
     return ToolResult(ok=False, error=tool_error(exc), origin="mcp")
 
 
+def _out_of_reach(service: Any, server: Any, ctx) -> ToolResult | None:
+    """Rinari Agency: an agent's conversation only reaches its own connectors."""
+    session_id = getattr(ctx, "session_id", None)
+    allowed, agent = service.session_scope(session_id)
+    if allowed is None and agent is None:
+        return None
+    if server in service.resource_servers(getattr(ctx, "project_root", None), session_id):
+        return None
+    return _failure(
+        ToolErrorCode.NOT_FOUND, f"The MCP server {server} is not one of this agent's connectors."
+    )
+
+
 def _list_handler(arguments: dict, ctx) -> ToolResult:
     service = getattr(ctx, "mcp", None)
     if service is None:
         return _failure(ToolErrorCode.DEPENDENCY_ERROR, "MCP runtime is not available")
     project = getattr(ctx, "project_root", None)
     server = (arguments or {}).get("server")
-    names = [server] if isinstance(server, str) and server else service.resource_servers(project)
+    if isinstance(server, str) and server:
+        refused = _out_of_reach(service, server, ctx)
+        if refused is not None:
+            return refused
+    names = (
+        [server]
+        if isinstance(server, str) and server
+        else service.resource_servers(project, getattr(ctx, "session_id", None))
+    )
     if not names:
         return _failure(
             ToolErrorCode.NOT_FOUND, "No connected MCP server offers resources right now."
@@ -152,6 +173,9 @@ def _read_handler(arguments: dict, ctx) -> ToolResult:
     uri = (arguments or {}).get("uri")
     if not isinstance(server, str) or not server or not isinstance(uri, str) or not uri:
         return _failure(ToolErrorCode.INVALID_ARGUMENT, "server and uri are required")
+    refused = _out_of_reach(service, server, ctx)
+    if refused is not None:
+        return refused
     try:
         result = service.read_resource(server, uri, getattr(ctx, "project_root", None))
     except Exception as exc:

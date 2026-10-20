@@ -695,6 +695,32 @@ class TurnManager:
 
     # -- turn lifecycle ----------------------------------------------------
 
+    def _check_agent(self, record: Any) -> None:
+        """Rinari Agency: an agent's turn waits for the owner past its daily cap.
+
+        Checked before the turn exists, so nothing is spent. An unknown cost
+        (a model without a known price) never stops it: only a token cap can.
+        """
+        from rinari.engine_protocol.agency import spend_today
+
+        agency = getattr(self._services, "agency", None)
+        if agency is None:
+            return
+        agent = agency.for_session(record.id)
+        if agent is None:
+            raise EngineProtocolError(
+                errors.AGENT_ARCHIVED,
+                "This agent was archived; its conversation is read-only.",
+                details={"session_id": record.id, "agent_id": record.agent_id},
+            )
+        spend = spend_today(self._services, agent)
+        if spend["over_budget"]:
+            raise EngineProtocolError(
+                errors.AGENT_OVER_BUDGET,
+                f"{agent['name']} used today's budget; raise it or wait until tomorrow.",
+                details={"session_id": record.id, "agent_id": agent["id"], "spend": spend},
+            )
+
     def start_turn(
         self,
         session_id: str,
@@ -725,6 +751,8 @@ class TurnManager:
                 f"Session {record.id} is closed; resume it before starting turns.",
                 details={"session_id": record.id},
             )
+        if record.agent_id and not compaction_only:
+            self._check_agent(record)
         # A turn is what recency means, and nothing else refreshed it here, so
         # a session stayed where it was however much was said in it. Compaction
         # is housekeeping the user did not ask for and must not reorder a list.

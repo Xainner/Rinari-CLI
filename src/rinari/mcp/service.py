@@ -142,6 +142,9 @@ class _ServerState:
     scope: str = "global"
     # The project folder a project-scope server belongs to ("" = any trusted one).
     root: str = ""
+    # Rinari Agency (connectors C8): "agent:ID" when the account belongs to an
+    # agent, seen only by that agent's conversations ("" = everyone's).
+    owner: str = ""
     project: Path | None = None
     # Failed attempts in a row, and when the next one may run (monotonic).
     attempts: int = 0
@@ -159,11 +162,21 @@ class _ServerState:
 class _Follower:
     """A registry that receives the live servers' tools (a turn's runtime)."""
 
-    __slots__ = ("__weakref__", "project", "registry")
+    __slots__ = ("__weakref__", "agent", "allowed", "project", "registry")
 
-    def __init__(self, registry: Any, project: Path | None) -> None:
+    def __init__(
+        self,
+        registry: Any,
+        project: Path | None,
+        allowed: frozenset[str] | None = None,
+        agent: str | None = None,
+    ) -> None:
         self.registry = registry
         self.project = project
+        # Rinari Agency: the connectors an agent's conversation may use
+        # (None = no agent, every visible server) and the agent's id.
+        self.allowed = allowed
+        self.agent = agent
 
 
 def _unavailable(name: str, state: _ServerState, now: float) -> McpError:
@@ -227,6 +240,9 @@ class McpService:
         self._lock = threading.RLock()
         self._states: dict[str, _ServerState] = {}
         self._followers: weakref.WeakSet[_Follower] = weakref.WeakSet()
+        # Rinari Agency: (allowed connectors, agent id) of a conversation, set by
+        # the services; None means no conversation is an agent's.
+        self.scope_of: Any = None
         self._outbox: list[str] = []
         # Timers retry failed servers only in a serving Engine (start_background).
         self._autoconnect = False
@@ -440,6 +456,60 @@ class McpService:
             return False
         return self._trust.is_trusted(project)
 
+    def _sees(
+        self,
+        name: str,
+        state: _ServerState,
+        project: Path | None,
+        allowed: frozenset[str] | None = None,
+        agent: str | None = None,
+    ) -> bool:
+        """Whether a conversation sees a server: its folder, then its agent.
+
+        Rinari Agency (connectors C8): an account owned by an agent is seen
+        only by that agent's conversations; an agent's conversation sees only
+        its allowed connectors and the accounts it owns.
+        """
+        if not self._visible(state.scope, project, state.root):
+            return False
+        mine = bool(agent) and state.owner == f"agent:{agent}"
+        if state.owner and not mine:
+            return False
+        return allowed is None or mine or name in allowed
+
+    def session_scope(self, session_id: str | None) -> tuple[frozenset[str] | None, str | None]:
+        """(allowed connectors, agent id) of a conversation, (None, None) if no agent's."""
+        hook = self.scope_of
+        if hook is None or not session_id:
+            return None, None
+        try:
+            return hook(session_id)
+        except Exception:
+            return None, None
+
+    def reaches(
+        self, name: str, allowed: frozenset[str] | None = None, agent: str | None = None
+    ) -> bool:
+        """Whether a permanent rule (no conversation, no folder) may call a server.
+
+        Only global servers; an agent's rule reaches its allowed connectors
+        and the accounts it owns, and nobody else's account (C8).
+        """
+        row = self._ctx.mcp_server_repo.find(name, "global")
+        if row is None or not row.get("enabled"):
+            return False
+        owner = row.get("owner") or ""
+        mine = bool(agent) and owner == f"agent:{agent}"
+        if owner and not mine:
+            return False
+        return allowed is None or mine or name in allowed
+
+    def decision_for(self, name: str, tool: str) -> str | None:
+        """The owner's Allow / Ask / Block (deny) for a tool, or None (C5)."""
+        settings = self.permissions(name)
+        spec = (settings.get("tools") or {}).get(tool) or {}
+        return spec.get("decision") or settings.get("default")
+
     def _trusted(self, row: dict, project: Path | None) -> bool:
         return self._visible(row.get("scope"), project, row.get("project_root") or "")
 
@@ -624,6 +694,7 @@ class McpService:
             )
         scope = row.get("scope") or "global"
         root = row.get("project_root") or ""
+        owner = row.get("owner") or ""
         try:
             transport = self._transport_for(row)
         except McpError as exc:
@@ -641,7 +712,7 @@ class McpService:
             raise
         self._log_entry(name, "info", f"connected ({row['transport']})")
         resources = "resources" in (client.capabilities or {})
-        return client, self._definitions(name, client, infos), resources, (scope, root)
+        return client, self._definitions(name, client, infos), resources, (scope, root, owner)
 
     def _attempt(
         self, name: str, project: Path | None, generation: int, done: threading.Event
@@ -675,7 +746,7 @@ class McpService:
                     self._clients[name] = client
                     state.tools = definitions
                     state.resources = resources
-                    state.scope, state.root = scope
+                    state.scope, state.root, state.owner = scope
                     state.about = _about(client)
                     state.attempts = 0
                     state.retry_at = None
@@ -837,6 +908,7 @@ class McpService:
                 if state.status in (STATUS_IDLE, STATUS_DISABLED) and state.attempt is None:
                     state.scope = row.get("scope") or "global"
                     state.root = row.get("project_root") or ""
+                    state.owner = row.get("owner") or ""
                     self._spawn(name, project)
         self._flush()
 
@@ -874,6 +946,7 @@ class McpService:
                 state.attempts = 0
                 state.scope = row.get("scope") or "global"
                 state.root = row.get("project_root") or ""
+                state.owner = row.get("owner") or ""
                 self._spawn(name, project or state.project)
             view = self._state_view(state)
         if previous is not None:
@@ -986,7 +1059,9 @@ class McpService:
 
     # -- registries that follow the live servers --------------------------------
 
-    def follow(self, registry: Any, project: Path | None = None) -> None:
+    def follow(
+        self, registry: Any, project: Path | None = None, session_id: str | None = None
+    ) -> None:
         """Put the known tools in `registry` and keep it up to date.
 
         For a turn's registry: a server that connects later, changes its
@@ -995,7 +1070,8 @@ class McpService:
         never changes: MCP tools are always on demand (F42). The registry
         keeps the follower alive; the service only holds a weak reference.
         """
-        follower = _Follower(registry, project)
+        allowed, agent = self.session_scope(session_id)
+        follower = _Follower(registry, project, allowed, agent)
         with self._lock:
             self._followers.add(follower)
             registry.followers.append(follower)
@@ -1003,16 +1079,17 @@ class McpService:
                 self._sync_one(follower, name)
             self._sync_resources(follower)
 
-    def available_tools(self, project: Path | None = None) -> list:
+    def available_tools(self, project: Path | None = None, session_id: str | None = None) -> list:
         """The tools known right now for a session in `project` (no waiting)."""
+        allowed, agent = self.session_scope(session_id)
         with self._lock:
             tools = [
                 tool
-                for state in self._states.values()
-                if state.tools and self._visible(state.scope, project, state.root)
+                for name, state in self._states.items()
+                if state.tools and self._sees(name, state, project, allowed, agent)
                 for tool in state.tools
             ]
-            if self._resource_servers_locked(project):
+            if self._resource_servers_locked(project, allowed, agent):
                 tools.extend(resource_tools())
         return tools
 
@@ -1026,7 +1103,8 @@ class McpService:
         state = self._states.get(name)
         tools = (
             list(state.tools or ())
-            if state is not None and self._visible(state.scope, follower.project, state.root)
+            if state is not None
+            and self._sees(name, state, follower.project, follower.allowed, follower.agent)
             else []
         )
         follower.registry.replace_where(
@@ -1038,28 +1116,46 @@ class McpService:
         )
 
     def _sync_resources(self, follower: _Follower) -> None:
-        wanted = bool(self._resource_servers_locked(follower.project))
+        wanted = bool(
+            self._resource_servers_locked(follower.project, follower.allowed, follower.agent)
+        )
         follower.registry.replace_where(
             lambda tool: bool((tool.manifest or {}).get("mcp_resources")),
             resource_tools() if wanted else [],
         )
 
-    def _resource_servers_locked(self, project: Path | None) -> list[str]:
+    def _resource_servers_locked(
+        self,
+        project: Path | None,
+        allowed: frozenset[str] | None = None,
+        agent: str | None = None,
+    ) -> list[str]:
         return sorted(
             name
             for name, state in self._states.items()
             if state.resources
             and state.status == STATUS_CONNECTED
-            and self._visible(state.scope, project, state.root)
+            and self._sees(name, state, project, allowed, agent)
         )
 
-    def connectors(self, project: Path | None = None) -> list[dict[str, Any]]:
+    def connectors(
+        self,
+        project: Path | None = None,
+        session_id: str | None = None,
+        *,
+        allowed: frozenset[str] | None = None,
+        agent: str | None = None,
+    ) -> list[dict[str, Any]]:
         """The servers a session in `project` can see, with their state now (C6).
 
         `{name, status, hint}` plus what the server said it is for at its
         last connection (`description`, `title`, `instructions`), sorted by
         name and never a secret. For the model's index of what is connected.
+        An agent's conversation (by `session_id`, or `allowed`/`agent` given)
+        sees only its connectors (Rinari Agency).
         """
+        if allowed is None and agent is None:
+            allowed, agent = self.session_scope(session_id)
         with self._lock:
             return [
                 {
@@ -1073,7 +1169,7 @@ class McpService:
                     **(state.about or {}),
                 }
                 for name, state in sorted(self._states.items())
-                if self._visible(state.scope, project, state.root)
+                if self._sees(name, state, project, allowed, agent)
             ]
 
     def connectors_for(self, registry: Any) -> list[dict[str, Any]] | None:
@@ -1091,12 +1187,17 @@ class McpService:
                 ),
                 None,
             )
-        return self.connectors(follower.project) if follower is not None else None
+        if follower is None:
+            return None
+        return self.connectors(follower.project, allowed=follower.allowed, agent=follower.agent)
 
-    def resource_servers(self, project: Path | None = None) -> list[str]:
+    def resource_servers(
+        self, project: Path | None = None, session_id: str | None = None
+    ) -> list[str]:
         """Connected servers that offer resources, for a session in `project`."""
+        allowed, agent = self.session_scope(session_id)
         with self._lock:
-            return self._resource_servers_locked(project)
+            return self._resource_servers_locked(project, allowed, agent)
 
     # -- capabilities -------------------------------------------------------------
 

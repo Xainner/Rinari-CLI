@@ -3628,6 +3628,17 @@ class EngineServer:
         params = params or {}
         name = self._mcp_name(params)
         fields = self._mcp_fields(params)
+        owner = params.get("owner")
+        if owner is not None:
+            agent_id = owner[len("agent:") :] if isinstance(owner, str) else ""
+            if (
+                not isinstance(owner, str)
+                or not owner.startswith("agent:")
+                or self._services.ctx.agency_repo.get(agent_id) is None
+            ):
+                raise EngineProtocolError(
+                    INVALID_PARAMS, "Param 'owner' must be 'agent:<id>' of an existing agent."
+                )
         try:
             row = self._services.mcp.add(
                 name,
@@ -3643,6 +3654,10 @@ class EngineServer:
             )
         except ValueError as exc:
             raise EngineProtocolError(INVALID_PARAMS, str(exc)) from exc
+        if owner is not None:
+            # Rinari Agency (C8): the account belongs to that agent only.
+            self._services.ctx.mcp_server_repo.set_owner(name, "global", owner)
+            row = self._services.mcp.show(name) or row
         return {"server": self._mcp_view(row, False)}
 
     def _mcp_update(self, params: dict[str, Any]) -> dict[str, Any]:

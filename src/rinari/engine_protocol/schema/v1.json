@@ -3803,6 +3803,13 @@
           ],
           "description": "The folder a project-scope server belongs to (mcp_catalog_v1); null: visible in every trusted project."
         },
+        "owner": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "agency_agents_v1: \"agent:ID\" when the account belongs to an agent, seen only by that agent; null: everyone's."
+        },
         "enabled": {
           "type": "boolean"
         },

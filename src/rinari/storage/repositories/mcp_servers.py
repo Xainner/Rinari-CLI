@@ -9,6 +9,12 @@ class McpServerRepository:
     def __init__(self, db: Database) -> None:
         self._db = db
 
+    def set_owner(self, name: str, scope: str, owner: str) -> None:
+        """Rinari Agency (connectors C8): who an account belongs to ("" = everyone)."""
+        self._db.execute(
+            "UPDATE mcp_servers SET owner = ? WHERE name = ? AND scope = ?", (owner, name, scope)
+        )
+
     def add(
         self,
         server_id: str,

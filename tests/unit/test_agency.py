@@ -239,3 +239,268 @@ def test_what_an_agent_learns_is_its_own_memory(server) -> None:
     assert {row["text"] for row in memory.visible_user_rows("default", rinari["id"])} == {
         "El dueño vive en Costa Rica"
     }
+
+
+# -- turns of an agent ---------------------------------------------------------------
+
+
+def test_an_agent_over_its_budget_does_not_start_a_turn(server) -> None:
+    agent = _ok(
+        _call(
+            server,
+            "agency.agent.create",
+            {"agent": {"name": "Gastona", "budget": {"daily_tokens": 100}}},
+        )
+    )["agent"]
+    _invoked(server, agent["session_id"], 90, 20)
+    refused = _call(
+        server, "session.turn.start", {"session_id": agent["session_id"], "message": "Hola"}
+    )
+    assert refused["ok"] is False
+    assert refused["error"]["code"] == "AGENT_OVER_BUDGET"
+    assert refused["error"]["details"]["agent_id"] == agent["id"]
+
+
+def test_an_archived_agent_does_not_work(server) -> None:
+    agent = _ok(_call(server, "agency.agent.create", {"agent": {"name": "Jubilada"}}))["agent"]
+    _ok(_call(server, "agency.agent.archive", {"agent_id": agent["id"]}))
+    refused = _call(
+        server, "session.turn.start", {"session_id": agent["session_id"], "message": "Hola"}
+    )
+    assert refused["ok"] is False and refused["error"]["code"] == "AGENT_ARCHIVED"
+
+
+def test_the_agents_card_is_its_own_prompt_block(server) -> None:
+    from rinari.cli.agent_runtime import build_assembler_context
+
+    services = server._services
+    agent = _ok(
+        _call(
+            server,
+            "agency.agent.create",
+            {"agent": {"name": "Writer", "role": "Historias", "instructions": "Animales 3D."}},
+        )
+    )["agent"]
+    record = services.sessions.show(agent["session_id"])
+    identity = build_assembler_context(services, record).agent_identity
+    assert "«Writer»" in identity and "Historias" in identity and "Animales 3D." in identity
+    rinari = services.sessions.show(
+        _ok(_call(server, "session.create", {"chat": True}))["session"]["id"]
+    )
+    assert build_assembler_context(services, rinari).agent_identity is None
+
+
+def test_an_agent_only_sees_its_connectors_and_its_own_accounts(server) -> None:
+    from rinari.mcp.service import STATUS_CONNECTED, _ServerState
+
+    mcp = server._services.mcp
+    agency = server._services.agency
+    services_rows = [{"name": name} for name in ("gmail", "telegram")]
+    agency._connector_exists = lambda name: any(row["name"] == name for row in services_rows)
+    mail = _ok(
+        _call(server, "agency.agent.create", {"agent": {"name": "Emails", "connectors": ["gmail"]}})
+    )["agent"]
+    other = _ok(_call(server, "agency.agent.create", {"agent": {"name": "Otra"}}))["agent"]
+    with mcp._lock:
+        mcp._states["gmail"] = _ServerState(status=STATUS_CONNECTED, tools=[])
+        mcp._states["telegram"] = _ServerState(status=STATUS_CONNECTED, tools=[])
+        mcp._states["youtube"] = _ServerState(
+            status=STATUS_CONNECTED, tools=[], owner=f"agent:{mail['id']}"
+        )
+    rinari = _ok(_call(server, "session.create", {"chat": True}))["session"]
+
+    def names(session_id):
+        return [row["name"] for row in mcp.connectors(None, session_id)]
+
+    assert names(rinari["id"]) == ["gmail", "telegram"]
+    assert names(mail["session_id"]) == ["gmail", "youtube"]
+    assert names(other["session_id"]) == []
+
+
+# -- permanent rules: a connector tool, fixed arguments, no model -------------------
+
+
+def _connector(server, name, owner=""):
+    repo = server._services.ctx.mcp_server_repo
+    repo.add(f"mcp_{name}", name=name, transport="http", url=f"https://{name}.example/mcp")
+    if owner:
+        repo.set_owner(name, "global", owner)
+
+
+def _run(server, task_id):
+    import time
+
+    run = _ok(_call(server, "schedule.run_now", {"task_id": task_id}))["run"]
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        current = server._services.ctx.schedule_repo.run(run["id"])
+        if current["status"] not in ("running", "needs_you"):
+            return current
+        time.sleep(0.02)
+    raise AssertionError("the rule did not finish")
+
+
+def _rule(**tool):
+    return {
+        "name": "Correos de patito",
+        "kind": "tool",
+        "schedule": {"kind": "interval", "minutes": 15},
+        "tool": {
+            "server": "gmail",
+            "tool": "search",
+            "arguments": {"query": "from:x@patito.com newer_than:1d"},
+            **tool,
+        },
+    }
+
+
+@pytest.fixture
+def calls(server, monkeypatch):
+    seen: list[tuple[str, str, dict]] = []
+    answers: dict[str, str] = {"search": "Factura 42 de x@patito.com"}
+
+    def invoke(name, tool, arguments, project=None):
+        seen.append((name, tool, arguments))
+        return {"content": [{"type": "text", "text": answers.get(tool, "ok")}]}
+
+    monkeypatch.setattr(server._services.mcp, "invoke", invoke)
+    seen_answers = answers
+    return seen, seen_answers
+
+
+def test_a_rule_delivers_the_result_without_the_model(server, calls) -> None:
+    seen, _answers = calls
+    _connector(server, "gmail")
+    _connector(server, "telegram")
+    agent = _ok(
+        _call(
+            server,
+            "agency.agent.create",
+            {"agent": {"name": "Emails", "connectors": ["gmail", "telegram"]}},
+        )
+    )["agent"]
+    task = _ok(
+        _call(
+            server,
+            "schedule.create",
+            {
+                "task": {
+                    **_rule(
+                        on_result="deliver",
+                        deliver={
+                            "server": "telegram",
+                            "tool": "send_message",
+                            "arguments": {"chat": "owner", "text": "Nuevo: {result}"},
+                        },
+                    ),
+                    "agent_id": agent["id"],
+                }
+            },
+        )
+    )["task"]
+    assert task["agent_id"] == agent["id"] and task["tool"]["on_result"] == "deliver"
+    run = _run(server, task["id"])
+    assert run["status"] == "completed"
+    assert seen == [
+        ("gmail", "search", {"query": "from:x@patito.com newer_than:1d"}),
+        (
+            "telegram",
+            "send_message",
+            {"chat": "owner", "text": "Nuevo: Factura 42 de x@patito.com"},
+        ),
+    ]
+
+
+def test_nothing_new_is_skipped_quietly(server, calls) -> None:
+    _seen, answers = calls
+    answers["search"] = "   "
+    _connector(server, "gmail")
+    task = _ok(_call(server, "schedule.create", {"task": _rule()}))["task"]
+    run = _run(server, task["id"])
+    assert run["status"] == "skipped" and run["reason"] == "nothing new"
+
+
+def test_a_rule_stops_at_a_blocked_tool_or_out_of_its_agents_reach(
+    server, calls, monkeypatch
+) -> None:
+    seen, _answers = calls
+    _connector(server, "gmail")
+    _connector(server, "youtube")
+    agent = _ok(_call(server, "agency.agent.create", {"agent": {"name": "Sin correo"}}))["agent"]
+    task = _ok(_call(server, "schedule.create", {"task": {**_rule(), "agent_id": agent["id"]}}))[
+        "task"
+    ]
+    run = _run(server, task["id"])
+    assert run["status"] == "blocked" and "not available" in run["reason"]
+    # Its own account is in reach, even if not in its list.
+    owner = f"agent:{agent['id']}"
+    _ok(
+        _call(
+            server,
+            "mcp.create",
+            {
+                "name": "mi-gmail",
+                "transport": "http",
+                "url": "https://g.example/mcp",
+                "owner": owner,
+            },
+        )
+    )
+    own = _ok(
+        _call(
+            server,
+            "schedule.create",
+            {"task": {**_rule(server="mi-gmail"), "agent_id": agent["id"]}},
+        )
+    )["task"]
+    assert _run(server, own["id"])["status"] == "completed"
+    # Nobody else reaches an agent's account.
+    other = _ok(_call(server, "schedule.create", {"task": _rule(server="mi-gmail")}))["task"]
+    assert _run(server, other["id"])["status"] == "blocked"
+    # Block in the connector's permissions wins in every case.
+    monkeypatch.setattr(server._services.mcp, "decision_for", lambda name, tool: "deny")
+    free = _ok(_call(server, "schedule.create", {"task": _rule()}))["task"]
+    blocked = _run(server, free["id"])
+    assert blocked["status"] == "blocked" and "blocked" in blocked["reason"]
+    assert [call[0] for call in seen] == ["mi-gmail"]
+
+
+def test_a_rule_respects_its_daily_limit(server, calls) -> None:
+    _connector(server, "gmail")
+    task = _ok(_call(server, "schedule.create", {"task": _rule(max_per_day=1)}))["task"]
+    assert _run(server, task["id"])["status"] == "completed"
+    second = _run(server, task["id"])
+    assert second["status"] == "skipped" and second["reason"] == "daily limit reached"
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        None,
+        {"server": "", "tool": "search"},
+        {"server": "gmail"},
+        {"server": "gmail", "tool": "search", "arguments": "from:x"},
+        {"server": "gmail", "tool": "search", "on_result": "deliver"},
+        {"server": "gmail", "tool": "search", "on_result": "shout"},
+        {"server": "gmail", "tool": "search", "max_per_day": 0},
+    ],
+)
+def test_rules_are_validated(server, tool) -> None:
+    task = _rule()
+    task["tool"] = tool
+    assert _call(server, "schedule.create", {"task": task})["ok"] is False
+
+
+def test_a_rule_of_an_unknown_agent_is_refused(server) -> None:
+    refused = _call(server, "schedule.create", {"task": {**_rule(), "agent_id": "agent_nope"}})
+    assert refused["ok"] is False
+
+
+def test_an_owner_must_be_an_existing_agent(server) -> None:
+    for owner in ("team:1", "agent:agent_nope", 3):
+        refused = _call(
+            server,
+            "mcp.create",
+            {"name": "x", "transport": "http", "url": "https://x.example/mcp", "owner": owner},
+        )
+        assert refused["ok"] is False

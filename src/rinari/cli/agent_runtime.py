@@ -215,6 +215,30 @@ def _runtime_facts(services: ServiceContainer, record: SessionRecord) -> dict[st
     return facts
 
 
+def _agent_identity(services: ServiceContainer, record: SessionRecord) -> str | None:
+    """Rinari Agency: who this conversation's agent is, from the owner's card.
+
+    The card is written by the owner only (never by the model), so its
+    instructions are the owner's words for this agent. It changes only when
+    the owner edits the card, so it is cached with the session.
+    """
+    if not getattr(record, "agent_id", None) or services.agency is None:
+        return None
+    agent = services.agency.for_session(record.id)
+    if agent is None:
+        return None
+    lines = [
+        "## Your role in Rinari Agency",
+        f"In this conversation you work as the agent «{agent['name']}» of the owner's "
+        "Rinari Agency, not as Rinari's general assistant.",
+    ]
+    if agent.get("role"):
+        lines.append(f"Your job: {agent['role']}")
+    if agent.get("instructions"):
+        lines += ["The owner's instructions for this agent:", agent["instructions"]]
+    return "\n".join(lines)
+
+
 def build_assembler_context(
     services: ServiceContainer,
     record: SessionRecord,
@@ -313,6 +337,7 @@ def build_assembler_context(
         soul=canonical,
         voice=_voice_text(services),
         extended_identity=extended,
+        agent_identity=_agent_identity(services, record),
         project_instructions=instructions,
         skill_catalog=catalog,
         tool_index=deferred_index(registry) if registry is not None else None,
@@ -1337,7 +1362,7 @@ def _build_tools(
             # Servers that connect while the turn runs join this registry
             # (capability.search, tool.call); the model's list never changes.
             services.mcp.start(root)
-            services.mcp.follow(registry, root)
+            services.mcp.follow(registry, root, session_id=record.id)
         with registry.loading("openapi"):
             for row in services.api.list():
                 if row.get("enabled"):
