@@ -139,6 +139,8 @@ class _ServerState:
     tools: list | None = None
     resources: bool = False
     scope: str = "global"
+    # The project folder a project-scope server belongs to ("" = any trusted one).
+    root: str = ""
     project: Path | None = None
     # Failed attempts in a row, and when the next one may run (monotonic).
     attempts: int = 0
@@ -226,8 +228,14 @@ class McpService:
         auth: dict[str, Any] | None = None,
         headers: dict[str, Any] | None = None,
         timeout_s: float | None = None,
+        project_root: str | Path | None = None,
     ) -> dict:
-        """Create (or replace) a server. Raises ValueError on invalid config."""
+        """Create (or replace) a server. Raises ValueError on invalid config.
+
+        `project_root` ties a project-scope server to one folder (C4: a
+        server accepted from that folder's `.mcp.json`); without it a project
+        server is visible in every trusted project, as before.
+        """
         if not isinstance(name, str) or not name.strip():
             raise McpConfigError("MCP servers need a name")
         if transport is not None and transport not in TRANSPORTS:
@@ -247,7 +255,8 @@ class McpService:
         draft = apply_patch(ServerDraft(transport=transport), params)
         validate_draft(draft)
         existing = self._ctx.mcp_server_repo.find(name, scope)
-        return self._write(name, scope, draft, existing, enabled=True)
+        root = canonical_root(project_root) if project_root and scope == "project" else None
+        return self._write(name, scope, draft, existing, enabled=True, project_root=root)
 
     def update(self, name: str, params: Mapping[str, Any], *, scope: str = "global") -> dict:
         """Edit an existing server: transport, command/url, env, auth, headers.
@@ -271,8 +280,11 @@ class McpService:
         existing: dict | None,
         *,
         enabled: bool,
+        project_root: str | None = None,
     ) -> dict:
         server_id = existing["id"] if existing is not None else self._ctx.ids.new("mcp")
+        if project_root is None:
+            project_root = (existing or {}).get("project_root") or ""
         created: list[str] = []
         try:
             self._store_literals(server_id, draft, created)
@@ -287,6 +299,7 @@ class McpService:
                 enabled=enabled,
                 config_json=json.dumps(config, sort_keys=True),
                 created_at=_now(self._ctx),
+                project_root=project_root,
             )
         except Exception:
             # A secret stored for a write that never landed is not referenced.
@@ -312,6 +325,7 @@ class McpService:
             created.append(ref)
             slot.ref, slot.literal = ref, None
 
+        store(draft.url_secret, "url")
         if draft.auth_kind == AUTH_BEARER:
             store(draft.auth_token, "auth-token")
         if draft.auth_kind == AUTH_OAUTH and draft.oauth is not None:
@@ -383,13 +397,15 @@ class McpService:
     # its state and hint; it is retried with a growing wait (on a timer in
     # the Engine, or when one of its tools is called) or by `reconnect`.
 
-    def _visible(self, scope: str | None, project: Path | None) -> bool:
+    def _visible(self, scope: str | None, project: Path | None, root: str = "") -> bool:
         if scope != "project":
             return True
-        return project is not None and self._trust.is_trusted(project)
+        if project is None or (root and canonical_root(project) != root):
+            return False
+        return self._trust.is_trusted(project)
 
     def _trusted(self, row: dict, project: Path | None) -> bool:
-        return self._visible(row.get("scope"), project)
+        return self._visible(row.get("scope"), project, row.get("project_root") or "")
 
     def _resolve(self, slot: SecretSlot | None, label: str) -> str:
         if slot is None:
@@ -437,8 +453,11 @@ class McpService:
             if draft.auth_kind == AUTH_BEARER:
                 token = self._resolve(draft.auth_token, "auth.token")
                 headers["Authorization"] = f"Bearer {token}"
+            url = draft.url
+            if draft.url_secret is not None:
+                url = self._resolve(draft.url_secret, "url")
             return StreamableHttpTransport(
-                draft.url,
+                url,
                 headers=headers,
                 timeout_s=timeout,
                 home=self._ctx.home,
@@ -568,6 +587,7 @@ class McpService:
                 hint="project_not_trusted",
             )
         scope = row.get("scope") or "global"
+        root = row.get("project_root") or ""
         try:
             transport = self._transport_for(row)
         except McpError as exc:
@@ -585,7 +605,7 @@ class McpService:
             raise
         self._log_entry(name, "info", f"connected ({row['transport']})")
         resources = "resources" in (client.capabilities or {})
-        return client, self._definitions(name, client, infos), resources, scope
+        return client, self._definitions(name, client, infos), resources, (scope, root)
 
     def _attempt(
         self, name: str, project: Path | None, generation: int, done: threading.Event
@@ -619,7 +639,7 @@ class McpService:
                     self._clients[name] = client
                     state.tools = definitions
                     state.resources = resources
-                    state.scope = scope
+                    state.scope, state.root = scope
                     state.attempts = 0
                     state.retry_at = None
                     self._set(name, state, STATUS_CONNECTED, None)
@@ -702,7 +722,7 @@ class McpService:
             cached = self._clients.get(name)
             state = self._states.get(name)
             if cached is not None and state is not None:
-                if not self._visible(state.scope, project):
+                if not self._visible(state.scope, project, state.root):
                     raise McpError(
                         "MCP_NOT_CONNECTED",
                         f"server {name} is project-scoped and the project is not trusted",
@@ -774,11 +794,12 @@ class McpService:
                     if state is not None and state.status != STATUS_DISABLED:
                         self._set(name, state, STATUS_DISABLED, None)
                     continue
-                if not self._visible(row.get("scope"), project):
+                if not self._visible(row.get("scope"), project, row.get("project_root") or ""):
                     continue
                 state = self._state(name)
                 if state.status in (STATUS_IDLE, STATUS_DISABLED) and state.attempt is None:
                     state.scope = row.get("scope") or "global"
+                    state.root = row.get("project_root") or ""
                     self._spawn(name, project)
         self._flush()
 
@@ -815,6 +836,7 @@ class McpService:
                 previous = self._clients.pop(name, None)
                 state.attempts = 0
                 state.scope = row.get("scope") or "global"
+                state.root = row.get("project_root") or ""
                 self._spawn(name, project or state.project)
             view = self._state_view(state)
         if previous is not None:
@@ -950,7 +972,7 @@ class McpService:
             tools = [
                 tool
                 for state in self._states.values()
-                if state.tools and self._visible(state.scope, project)
+                if state.tools and self._visible(state.scope, project, state.root)
                 for tool in state.tools
             ]
             if self._resource_servers_locked(project):
@@ -967,7 +989,7 @@ class McpService:
         state = self._states.get(name)
         tools = (
             list(state.tools or ())
-            if state is not None and self._visible(state.scope, follower.project)
+            if state is not None and self._visible(state.scope, follower.project, state.root)
             else []
         )
         follower.registry.replace_where(
@@ -991,7 +1013,7 @@ class McpService:
             for name, state in self._states.items()
             if state.resources
             and state.status == STATUS_CONNECTED
-            and self._visible(state.scope, project)
+            and self._visible(state.scope, project, state.root)
         )
 
     def resource_servers(self, project: Path | None = None) -> list[str]:
@@ -1158,6 +1180,11 @@ class McpService:
         return _diagnose(name, draft.transport, transport, timeout)
 
 
+def canonical_root(path: str | Path) -> str:
+    """How a project folder is compared and stored (resolved, case per OS)."""
+    return os.path.normcase(str(Path(path).expanduser().resolve()))
+
+
 def _failure(
     name: str | None, transport: str | None, exc: McpError, started: float | None = None
 ) -> dict:
@@ -1255,4 +1282,5 @@ __all__ = [
     "TRANSPORT_STDLIO",
     "InProcessTransport",
     "McpService",
+    "canonical_root",
 ]

@@ -24,6 +24,11 @@ environment variables: a `keyring://` or `file://` reference from outside is
 rejected so a server can never be pointed at another stored secret (a
 provider's API key, for instance).
 
+A URL whose query carries a secret (`?api_key=…`, `?token=…`; plan de
+conectores C4, imported configurations) is kept whole in the CredentialStore
+(`url_ref`, slot `url`); the row's `url` column and the views keep it with
+those values replaced by `***`.
+
 OAuth (`"kind": "oauth"`, plan de conectores C1) keeps only the client side
 of the configuration in the row: an optional `client_id` (public), the
 `client_secret_ref` of the owner's own client, the `scopes` to ask for, a
@@ -44,7 +49,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 TRANSPORT_STDIO = "stdio"
 TRANSPORT_HTTP = "http"
@@ -83,6 +88,11 @@ _RESERVED_HEADERS = frozenset(
 )
 #: Header names treated as secret unless the client says otherwise.
 _SENSITIVE_HEADER_RE = re.compile(r"(auth|token|key|secret|password|cookie|session)", re.I)
+#: Query parameters whose value is a secret (an API key in the URL).
+_SENSITIVE_QUERY_RE = re.compile(
+    r"(auth|token|key|secret|password|passwd|pwd|credential|session|signature|sig)", re.I
+)
+REDACTED = "***"
 #: Authorization-request parameters Rinari sets itself (PKCE, state, resource…).
 RESERVED_AUTHORIZE_PARAMS = frozenset(
     {
@@ -148,6 +158,8 @@ class ServerDraft:
     headers: dict[str, HeaderSlot] = field(default_factory=dict)
     timeout_s: float | None = None
     oauth: OAuthConfig | None = None
+    #: The whole URL when its query carries a secret; `url` is then redacted.
+    url_secret: SecretSlot | None = None
 
     def copy(self) -> ServerDraft:
         return copy.deepcopy(self)
@@ -171,6 +183,9 @@ def draft_from_row(row: Mapping[str, Any]) -> ServerDraft:
     if not (isinstance(argv, list) and all(isinstance(a, str) for a in argv)):
         argv = [p for p in str(row.get("command") or "").split() if p]
     draft = ServerDraft(transport=transport, argv=list(argv), url=str(row.get("url") or ""))
+    url_ref = config.get("url_ref")
+    if isinstance(url_ref, str) and url_ref:
+        draft.url_secret = SecretSlot(ref=url_ref)
     env = config.get("env")
     if isinstance(env, dict):
         for key, ref in env.items():
@@ -226,6 +241,8 @@ def _oauth_from_stored(auth: Mapping[str, Any]) -> OAuthConfig:
 def config_refs(config: Mapping[str, Any]) -> set[str]:
     """Every secret reference a stored config points at."""
     refs: set[str] = set()
+    if isinstance(config.get("url_ref"), str):
+        refs.add(config["url_ref"])
     env = config.get("env")
     if isinstance(env, dict):
         refs.update(v for v in env.values() if isinstance(v, str))
@@ -303,6 +320,22 @@ def validate_url(url: Any) -> str:
     if len(url) > 2048:
         raise McpConfigError("Param 'url' is too long")
     return url
+
+
+def redact_url(url: str) -> str:
+    """`url` with the values of secret-looking query parameters replaced."""
+    parts = urlsplit(url)
+    if not parts.query:
+        return url
+    pairs = parse_qsl(parts.query, keep_blank_values=True)
+    if not any(_SENSITIVE_QUERY_RE.search(name) and value for name, value in pairs):
+        return url
+    redacted = [
+        (name, REDACTED if value and _SENSITIVE_QUERY_RE.search(name) else value)
+        for name, value in pairs
+    ]
+    query = urlencode(redacted, safe="*")
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
 
 
 def is_local_host(url: str) -> bool:
@@ -434,7 +467,7 @@ def apply_patch(draft: ServerDraft, params: Mapping[str, Any]) -> ServerDraft:
             draft.argv, draft.env = [], {}
         else:
             draft.url, draft.auth_kind, draft.auth_token, draft.headers = "", AUTH_NONE, None, {}
-            draft.oauth = None
+            draft.oauth, draft.url_secret = None, None
         draft.transport = transport
     if "command" in params and params["command"] is not None:
         command = params["command"]
@@ -442,7 +475,15 @@ def apply_patch(draft: ServerDraft, params: Mapping[str, Any]) -> ServerDraft:
             raise McpConfigError("Param 'command' must be a string array")
         draft.argv = [c for c in command if c != ""]
     if "url" in params:
-        draft.url = validate_url(params["url"]) if params["url"] is not None else ""
+        if params["url"] is None:
+            draft.url, draft.url_secret = "", None
+        else:
+            url = validate_url(params["url"])
+            # The redacted URL sent back by an edit form keeps the stored one.
+            if not (draft.url_secret is not None and url == draft.url):
+                display = redact_url(url)
+                draft.url_secret = SecretSlot(literal=url) if display != url else None
+                draft.url = display
     if "timeout_s" in params:
         timeout = params["timeout_s"]
         if timeout is None:
@@ -587,6 +628,8 @@ def config_from_draft(draft: ServerDraft) -> dict[str, Any]:
         if draft.env:
             config["env"] = {k: ref(v) for k, v in sorted(draft.env.items())}
     else:
+        if draft.url_secret is not None:
+            config["url_ref"] = ref(draft.url_secret)
         auth: dict[str, Any] = {"kind": draft.auth_kind}
         if draft.auth_kind == AUTH_BEARER and draft.auth_token is not None:
             auth["token_ref"] = ref(draft.auth_token)
@@ -650,6 +693,8 @@ def draft_view(draft: ServerDraft, env: Mapping[str, str] | None = None) -> dict
         "env": [],
         "warnings": warnings,
     }
+    if draft.url_secret is not None:
+        view["url_secret"] = _secret_view(draft.url_secret, env)
     if draft.auth_kind == AUTH_BEARER:
         view["auth"]["token"] = _secret_view(draft.auth_token, env)
     if draft.auth_kind == AUTH_OAUTH:
@@ -701,6 +746,7 @@ __all__ = [
     "is_local_host",
     "is_owned_ref",
     "parse_secret_input",
+    "redact_url",
     "slot_key",
     "stored_config",
     "validate_client_metadata_url",
