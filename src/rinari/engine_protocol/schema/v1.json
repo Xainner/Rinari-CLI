@@ -632,6 +632,8 @@
         "agency.status",
         "agency.agent.draft",
         "agency.stop_all",
+        "agency.agent.memory.list",
+        "agency.agent.memory.add",
         "project.move_profile",
         "session.move_profile",
         "followup.list",

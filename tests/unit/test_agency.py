@@ -722,3 +722,28 @@ def test_a_key_pasted_in_an_agents_chat_is_flagged_without_its_text(server) -> N
     flagged = [evt for evt in server.drain_events() if evt.get("event") == "agency.secret_pasted"]
     assert [evt["payload"] for evt in flagged] == [{"session_id": agent["session_id"]}]
     assert key not in json.dumps(flagged)
+
+
+def test_an_agents_memory_is_listed_written_and_named_in_the_agency_settings(server) -> None:
+    writer = _ok(_call(server, "agency.agent.create", {"agent": {"name": "Writer"}}))["agent"]
+    video = _ok(_call(server, "agency.agent.create", {"agent": {"name": "Video"}}))["agent"]
+    added = _ok(
+        _call(
+            server,
+            "agency.agent.memory.add",
+            {"agent_id": writer["id"], "topic": "estilo", "text": "Historias de 30 segundos"},
+        )
+    )["record"]
+    assert added["place"] == "agent" and added["place_label"] == "Writer"
+    server._services.memory.remember_user(
+        "Formato vertical", topic="video", place="agent", place_ref=video["id"]
+    )
+    mine = _ok(_call(server, "agency.agent.memory.list", {"agent_id": writer["id"]}))
+    assert [row["text"] for row in mine["records"]] == ["Historias de 30 segundos"]
+    # Forgotten like any personal memory.
+    _ok(_call(server, "memory.forget", {"id": added["id"], "expected_revision": added["revision"]}))
+    assert _ok(_call(server, "agency.agent.memory.list", {"agent_id": writer["id"]}))["count"] == 0
+    bad = _call(
+        server, "agency.agent.memory.add", {"agent_id": writer["id"], "topic": "", "text": "x"}
+    )
+    assert bad["ok"] is False

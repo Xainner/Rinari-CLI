@@ -339,6 +339,8 @@ class EngineServer:
         self._dispatcher.register("agency.status", self._agency.status)
         self._dispatcher.register("agency.agent.draft", self._agency.draft)
         self._dispatcher.register("agency.stop_all", self._agency.stop_all)
+        self._dispatcher.register("agency.agent.memory.list", self._agency.memory_list)
+        self._dispatcher.register("agency.agent.memory.add", self._agency.memory_add)
         from rinari.engine_protocol.resume import ResumeRunner
 
         self._resume = ResumeRunner(self)
@@ -1668,6 +1670,10 @@ class EngineServer:
                     view["place_label"] = (
                         (getattr(record, "title", None) or str(ref)) if ref else ""
                     )
+                elif place == "agent":
+                    # Rinari Agency: an agent's own memory, by the agent's name.
+                    agent = self._services.ctx.agency_repo.get(str(ref)) if ref else None
+                    view["place_label"] = agent["name"] if agent else str(ref or "")
                 else:
                     view["place_label"] = None
             view["origin"] = self._memory_origin(view)

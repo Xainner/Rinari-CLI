@@ -236,6 +236,10 @@ CAPABILITIES: dict[str, bool] = {
     # an agent's chat (memory's credential patterns and the history redactor's).
     # The text is never in the event.
     "agency_secret_warning_v1": True,
+    # An agent's own memory in the Agency settings (D-24):
+    # agency.agent.memory.list/add; memory.update/forget edit and forget it, and
+    # its place_label is the agent's name.
+    "agency_agent_memory_v1": True,
     # soul.settings.get/set: character intensity (minimal | balanced | full),
     # separate from Soul selection; bundled default Soul 4.0.
     "soul_character_intensity_v1": True,

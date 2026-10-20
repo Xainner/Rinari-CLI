@@ -237,6 +237,47 @@ class AgencyMethods:
         threading.Thread(target=run, name="agency-draft", daemon=True).start()
         return {"status": "started", "job_id": job_id}
 
+    def memory_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        """An agent's own memory (D-24, Ajustes de la Agency). Edit and forget
+        use memory.update and memory.forget, like any personal memory."""
+        agent = self._agent(params)
+        rows = [
+            row
+            for row in self._services.memory.list_user(limit=500)
+            if row.get("place") == "agent" and row.get("place_ref") == agent["id"]
+        ]
+        return {"records": self._server._with_place_labels(rows), "count": len(rows)}
+
+    def memory_add(self, params: dict[str, Any]) -> dict[str, Any]:
+        """The owner writes something into an agent's own memory."""
+        from rinari.shared.errors import InvalidUsageError
+
+        agent = self._agent(params)
+        topic = params.get("topic")
+        text = params.get("text")
+        kind = params.get("kind", "fact")
+        if not isinstance(topic, str) or not topic.strip() or len(topic) > 128:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'topic' is required, max 128.")
+        if not isinstance(text, str) or not text.strip() or len(text) > 4096:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'text' is required, max 4096.")
+        if kind not in ("preference", "rule", "fact"):
+            raise EngineProtocolError(
+                INVALID_PARAMS, "Param 'kind' must be preference, rule, or fact."
+            )
+        try:
+            result = self._services.memory.remember_user(
+                text.strip(),
+                kind=kind,
+                topic=topic.strip(),
+                provenance="panel",
+                place="agent",
+                place_ref=agent["id"],
+            )
+        except InvalidUsageError as exc:
+            raise EngineProtocolError(INVALID_PARAMS, exc.message) from None
+        row = self._services.memory.get_user(result["id"])
+        return {"record": self._server._with_place_labels([row])[0] if row else None}
+
     def stop_all(self, params: dict[str, Any]) -> dict[str, Any]:
         """«Detener a todos» (section 8): stop every agent of the profile now.
 
