@@ -472,7 +472,8 @@ class McpService:
         """
         if not self._visible(state.scope, project, state.root):
             return False
-        mine = bool(agent) and state.owner == f"agent:{agent}"
+        # `agent` is the conversation's owner tag: "agent:ID" or, in a post, "team:ID".
+        mine = bool(agent) and state.owner == agent
         if state.owner and not mine:
             return False
         return allowed is None or mine or name in allowed
@@ -499,7 +500,7 @@ class McpService:
         if row is None or not row.get("enabled"):
             return False
         owner = row.get("owner") or ""
-        mine = bool(agent) and owner == f"agent:{agent}"
+        mine = bool(agent) and owner == agent
         if owner and not mine:
             return False
         return allowed is None or mine or name in allowed

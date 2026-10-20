@@ -341,6 +341,28 @@ class EngineServer:
         self._dispatcher.register("agency.stop_all", self._agency.stop_all)
         self._dispatcher.register("agency.agent.memory.list", self._agency.memory_list)
         self._dispatcher.register("agency.agent.memory.add", self._agency.memory_add)
+        from rinari.engine_protocol.agency_teams import AgencyTeams
+
+        self._teams = AgencyTeams(self)
+        self._services.teams.board = self._teams
+        self._dispatcher.register("agency.team.list", self._teams.list)
+        self._dispatcher.register("agency.team.get", self._teams.get)
+        self._dispatcher.register("agency.team.create", self._teams.create)
+        self._dispatcher.register("agency.team.update", self._teams.update)
+        self._dispatcher.register("agency.team.archive", self._teams.archive)
+        self._dispatcher.register("agency.team.join", self._teams.join)
+        self._dispatcher.register("agency.team.leave", self._teams.leave)
+        self._dispatcher.register("agency.office.list", self._teams.office_list)
+        self._dispatcher.register("agency.office.post", self._teams.office_post)
+        self._dispatcher.register("agency.errand.create", self._teams.errand_create)
+        self._dispatcher.register("agency.errand.list", self._teams.errand_list)
+        self._dispatcher.register("agency.errand.review", self._teams.errand_review)
+        self._dispatcher.register("agency.errand.cancel", self._teams.errand_cancel)
+        self._dispatcher.register("agency.errand.retry", self._teams.errand_retry)
+        self._dispatcher.register("agency.team.template", self._teams.template)
+        self._dispatcher.register("agency.team.duplicate", self._teams.duplicate)
+        self._dispatcher.register("agency.settings.get", self._agency.settings_get)
+        self._dispatcher.register("agency.settings.set", self._agency.settings_set)
         from rinari.engine_protocol.resume import ResumeRunner
 
         self._resume = ResumeRunner(self)
@@ -703,6 +725,7 @@ class EngineServer:
     def start_background(self) -> None:
         """Background work of a serving Engine (not of one built for a test)."""
         self._schedule.start()
+        self._teams.start()
         self._resume.start()
         # Connect the MCP servers now, in parallel; no turn waits for them (C2).
         self._services.mcp.start_background()
@@ -1674,6 +1697,9 @@ class EngineServer:
                     # Rinari Agency: an agent's own memory, by the agent's name.
                     agent = self._services.ctx.agency_repo.get(str(ref)) if ref else None
                     view["place_label"] = agent["name"] if agent else str(ref or "")
+                elif place == "team":
+                    team = self._services.ctx.team_repo.get(str(ref)) if ref else None
+                    view["place_label"] = team["name"] if team else str(ref or "")
                 else:
                     view["place_label"] = None
             view["origin"] = self._memory_origin(view)

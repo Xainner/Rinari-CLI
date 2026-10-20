@@ -38,6 +38,7 @@ from rinari.storage.repositories import (
     SessionRepository,
     SkillRecordRepository,
     TaskRepository,
+    TeamRepository,
     TrustEntryRepository,
     TurnChangeRepository,
     ValidationRecordRepository,
@@ -77,6 +78,7 @@ class AppContext:
     skill_repo: SkillRecordRepository = None
     schedule_repo: ScheduleRepository = None
     agency_repo: AgencyRepository = None
+    team_repo: TeamRepository = None
 
     def close(self) -> None:
         self.db.close()
@@ -138,6 +140,7 @@ def build_app_context(
         skill_repo=SkillRecordRepository(db),
         schedule_repo=ScheduleRepository(db),
         agency_repo=AgencyRepository(db),
+        team_repo=TeamRepository(db),
     )
 
 

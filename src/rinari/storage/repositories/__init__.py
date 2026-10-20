@@ -1,4 +1,4 @@
-from rinari.storage.repositories.agency import AgencyRepository
+from rinari.storage.repositories.agency import AgencyRepository, TeamRepository
 from rinari.storage.repositories.api_specs import ApiSpecRepository
 from rinari.storage.repositories.changes import TurnChangeRepository
 from rinari.storage.repositories.checkpoints import CheckpointRepository
@@ -47,6 +47,7 @@ __all__ = [
     "SessionRepository",
     "SkillRecordRepository",
     "TaskRepository",
+    "TeamRepository",
     "TrustEntryRepository",
     "TurnChangeRepository",
     "ValidationRecordRepository",

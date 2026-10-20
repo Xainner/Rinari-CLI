@@ -41,6 +41,49 @@ def checked_owner(services: Any, owner: Any) -> str | None:
     return owner
 
 
+SETTINGS_KEY = "agency.settings"
+ERRAND_MODES = ("turn", "subagents")
+#: The ways an errand can run that exist today (D-28: subagents come later).
+AVAILABLE_ERRAND_MODES = ("turn",)
+
+
+def agency_settings(services: Any) -> dict[str, Any]:
+    """The Agency's own settings: the global daily budget and how errands run."""
+    stored = services.ctx.config_repo.get_json(SETTINGS_KEY) or {}
+    budget = stored.get("budget") if isinstance(stored, dict) else None
+    mode = stored.get("errand_mode") if isinstance(stored, dict) else None
+    return {
+        "budget": budget if isinstance(budget, dict) else {},
+        "errand_mode": mode if mode in AVAILABLE_ERRAND_MODES else "turn",
+        "errand_modes": list(ERRAND_MODES),
+        "available_errand_modes": list(AVAILABLE_ERRAND_MODES),
+    }
+
+
+def spend_of(services: Any, scope: str, ref: str | None, budget: dict[str, Any]) -> dict:
+    """Today's spend of an agent, a team or the whole Agency, against its cap."""
+    from rinari.engine_protocol.usage_report import build_report
+
+    report = build_report(services, scope, ref)
+    totals = report["totals"]
+    tokens = int(totals.get("input_tokens") or 0) + int(totals.get("output_tokens") or 0)
+    priced = all(row.get("cost") is not None for row in report["models"])
+    cost = totals.get("cost") if priced else None
+    over = False
+    if budget.get("daily_tokens") is not None and tokens >= budget["daily_tokens"]:
+        over = True
+    if budget.get("daily_usd") is not None and cost is not None and cost >= budget["daily_usd"]:
+        over = True
+    return {
+        "tokens": tokens,
+        "cost_usd": cost,
+        "cost_known": priced,
+        "calls": int(totals.get("calls") or 0),
+        "budget": budget,
+        "over_budget": over,
+    }
+
+
 def spend_today(services: Any, agent: dict[str, Any]) -> dict[str, Any]:
     """Today's spend of an agent and whether it is over its daily cap."""
     from rinari.engine_protocol.usage_report import build_report
@@ -293,6 +336,40 @@ class AgencyMethods:
             raise EngineProtocolError(INVALID_PARAMS, exc.message) from None
         row = self._services.memory.get_user(result["id"])
         return {"record": self._server._with_place_labels([row])[0] if row else None}
+
+    def settings_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        settings = agency_settings(self._services)
+        return {
+            **settings,
+            "spend_today": spend_of(self._services, "agency", None, settings["budget"]),
+        }
+
+    def settings_set(self, params: dict[str, Any]) -> dict[str, Any]:
+        """The global daily budget and how errands run (D-28)."""
+        from rinari.agency.service import normalize_budget
+        from rinari.shared.clock import now_iso
+
+        current = agency_settings(self._services)
+        stored = {"budget": current["budget"], "errand_mode": current["errand_mode"]}
+        if "budget" in params:
+            try:
+                stored["budget"] = normalize_budget(params.get("budget"))
+            except AgencyError as exc:
+                raise EngineProtocolError(INVALID_PARAMS, str(exc)) from None
+        if "errand_mode" in params:
+            mode = params.get("errand_mode")
+            if mode not in AVAILABLE_ERRAND_MODES:
+                raise EngineProtocolError(
+                    INVALID_PARAMS,
+                    "That way of running errands does not exist yet."
+                    if mode in ERRAND_MODES
+                    else "Unknown errand_mode.",
+                )
+            stored["errand_mode"] = mode
+        self._services.ctx.config_repo.set_json(
+            SETTINGS_KEY, stored, now_iso(self._services.ctx.clock)
+        )
+        return self.settings_get({})
 
     def stop_all(self, params: dict[str, Any]) -> dict[str, Any]:
         """«Detener a todos» (section 8): stop every agent of the profile now.

@@ -221,6 +221,7 @@ def _session_to_record(row: dict) -> SessionRecord:
         lineage_kind=_column(row, "lineage_kind"),
         brief=_brief(_column(row, "brief_json")),
         agent_id=_column(row, "agent_id"),
+        team_id=_column(row, "team_id"),
     )
 
 

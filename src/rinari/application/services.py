@@ -9,6 +9,7 @@ from pathlib import Path
 import httpx
 
 from rinari.agency import AgencyService
+from rinari.agency.teams import TeamService
 from rinari.agents.config import AgentConfigStore
 from rinari.agents.registry import AgentRegistry
 from rinari.application.context import AppContext
@@ -74,6 +75,7 @@ class ServiceContainer:
     resumes: ResumeService = None
     followups: FollowupService = None
     agency: AgencyService = None
+    teams: TeamService = None
 
 
 def build_services(
@@ -133,7 +135,16 @@ def build_services(
             row.get("name") == name for row in ctx.mcp_server_repo.list(None)
         ),
     )
-    mcp.scope_of = lambda session_id: _agent_scope(agency, session_id)
+    teams = TeamService(
+        ctx.team_repo,
+        agency,
+        ctx.clock,
+        ctx.ids,
+        connector_exists=lambda name: any(
+            row.get("name") == name for row in ctx.mcp_server_repo.list(None)
+        ),
+    )
+    mcp.scope_of = lambda session_id: _agent_scope(agency, session_id, ctx)
     return ServiceContainer(
         ctx=ctx,
         credentials=credentials,
@@ -166,15 +177,25 @@ def build_services(
         resumes=ResumeService(ctx),
         followups=FollowupService(ctx),
         agency=agency,
+        teams=teams,
     )
 
 
-def _agent_scope(agency: AgencyService, session_id: str):
-    """(allowed connectors, agent id) of an agent's conversation, else (None, None)."""
+def _agent_scope(agency: AgencyService, session_id: str, ctx: AppContext):
+    """(allowed connectors, owner tag) of an agent's conversation, else (None, None).
+
+    A post (A2) sees its team's connectors and the team's own accounts, never
+    another team's nor the agent's personal ones: in each post, only that team.
+    """
     agent = agency.for_session(session_id)
     if agent is None:
         return None, None
-    return frozenset(agent.get("connectors") or ()), agent["id"]
+    post = ctx.team_repo.post_for_session(session_id) if ctx.team_repo else None
+    if post is not None:
+        team = ctx.team_repo.get(post["team_id"])
+        if team is not None:
+            return frozenset(team.get("connectors") or ()), f"team:{team['id']}"
+    return frozenset(agent.get("connectors") or ()), f"agent:{agent['id']}"
 
 
 def _model_id(models, ref: str) -> str | None:

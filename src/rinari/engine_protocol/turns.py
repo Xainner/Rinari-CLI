@@ -735,6 +735,28 @@ class TurnManager:
                 f"{agent['name']} used today's budget; raise it or wait until tomorrow.",
                 details={"session_id": record.id, "agent_id": agent["id"], "spend": spend},
             )
+        # A2: a post also stops at its team's cap, and every agent at the Agency's.
+        from rinari.engine_protocol.agency import agency_settings, spend_of
+
+        team_id = getattr(record, "team_id", None)
+        team = self._services.ctx.team_repo.get(team_id) if team_id else None
+        if team is not None and team.get("budget"):
+            team_spend = spend_of(self._services, "team", team["id"], team["budget"])
+            if team_spend["over_budget"]:
+                raise EngineProtocolError(
+                    errors.AGENT_OVER_BUDGET,
+                    f"The team {team['name']} used today's budget.",
+                    details={"session_id": record.id, "team_id": team["id"], "spend": team_spend},
+                )
+        global_budget = agency_settings(self._services)["budget"]
+        if global_budget:
+            total = spend_of(self._services, "agency", None, global_budget)
+            if total["over_budget"]:
+                raise EngineProtocolError(
+                    errors.AGENT_OVER_BUDGET,
+                    "The Agency used today's budget.",
+                    details={"session_id": record.id, "spend": total},
+                )
 
     def start_turn(
         self,

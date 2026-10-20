@@ -397,7 +397,7 @@ class ScheduleRunner:
         agent = self._services.ctx.agency_repo.get(agent_id)
         if agent is None or agent.get("archived_at") is not None:
             raise RuleBlockedError("Its agent was archived.")
-        return frozenset(agent.get("connectors") or ()), agent_id
+        return frozenset(agent.get("connectors") or ()), f"agent:{agent_id}"
 
     def _call_rule_tool(
         self, spec: dict[str, Any], allowed: frozenset[str] | None, agent_id: str | None

@@ -634,6 +634,24 @@
         "agency.stop_all",
         "agency.agent.memory.list",
         "agency.agent.memory.add",
+        "agency.team.list",
+        "agency.team.get",
+        "agency.team.create",
+        "agency.team.update",
+        "agency.team.archive",
+        "agency.team.join",
+        "agency.team.leave",
+        "agency.office.list",
+        "agency.office.post",
+        "agency.errand.create",
+        "agency.errand.list",
+        "agency.errand.review",
+        "agency.errand.cancel",
+        "agency.errand.retry",
+        "agency.team.template",
+        "agency.team.duplicate",
+        "agency.settings.get",
+        "agency.settings.set",
         "project.move_profile",
         "session.move_profile",
         "followup.list",
@@ -744,6 +762,9 @@
         "agency.draft.failed",
         "agency.stopped",
         "agency.secret_pasted",
+        "agency.team.changed",
+        "agency.office.message",
+        "agency.chain.stopped",
         "schedule.rehearsed",
         "schedule.run.started",
         "schedule.run.needs_you",
@@ -1055,6 +1076,12 @@
           "type": "string"
         },
         "agent_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "team_id": {
           "type": [
             "string",
             "null"

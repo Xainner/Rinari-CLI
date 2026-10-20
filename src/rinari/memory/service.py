@@ -540,18 +540,30 @@ class MemoryService:
             return getattr(record, "rinari_profile_id", None) or "default"
         if place == "agent":
             return self._agent_of(session_id)
+        if place == "team":
+            return self._team_of(session_id)
         return None
 
     def place_for(self, place: str, session_id: str | None) -> tuple[str, str | None]:
         """Where something learned in this conversation goes.
 
         Rinari Agency (D-7): what an agent learns in its direct chat is its
-        own memory, never the owner's general or profile memory.
+        own memory, and what it learns in a post is its team's; never the
+        owner's general or profile memory.
         """
+        team_id = self._team_of(session_id)
+        if team_id and place in ("general", "profile", "agent"):
+            return "team", team_id
         agent_id = self._agent_of(session_id)
         if agent_id and place in ("general", "profile"):
             return "agent", agent_id
         return place, self.place_ref_for(place, session_id)
+
+    def _team_of(self, session_id: str | None) -> str | None:
+        if not session_id:
+            return None
+        record = self._ctx.session_repo.get(session_id)
+        return getattr(record, "team_id", None)
 
     def _agent_of(self, session_id: str | None) -> str | None:
         if not session_id:
@@ -564,6 +576,7 @@ class MemoryService:
     ) -> list[dict]:
         """General memory, plus this profile's, this chat's and its agent's (#75)."""
         agent_id = self._agent_of(session_id)
+        team_id = self._team_of(session_id)
         rows = []
         for row in self.repo.user_live():
             place = row.get("place") or "general"
@@ -572,6 +585,7 @@ class MemoryService:
                 or (place == "profile" and profile_id and row.get("place_ref") == profile_id)
                 or (place == "chat" and session_id and row.get("place_ref") == session_id)
                 or (place == "agent" and agent_id and row.get("place_ref") == agent_id)
+                or (place == "team" and team_id and row.get("place_ref") == team_id)
             ):
                 rows.append(row)
         return rows

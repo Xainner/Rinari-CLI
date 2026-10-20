@@ -1410,6 +1410,12 @@ def _build_tools(
                     )
                 )
             )
+        if getattr(record, "team_id", None) and getattr(services, "teams", None) is not None:
+            # Rinari Agency A2: a post has its office and its team's board.
+            with registry.loading("agency"):
+                from rinari.agency.tools import TeamToolHost, team_tools
+
+                registry.register_all(team_tools(TeamToolHost(services, record.id)))
         with registry.loading("introspection"):
             from rinari.tools.native.rinari_state import RinariStateHost, rinari_state_tools
 
