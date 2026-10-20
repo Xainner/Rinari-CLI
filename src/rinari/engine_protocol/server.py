@@ -508,6 +508,10 @@ class EngineServer:
 
         self._mcp_auth = McpAuthMethods(self._services, self._turns.emit_external)
         self._mcp_auth.register(self._dispatcher)
+        # Permissions per connector and per tool (connectors plan, C5).
+        from rinari.engine_protocol.mcp_tools import McpToolMethods
+
+        McpToolMethods(self._services).register(self._dispatcher)
         from rinari.engine_protocol.skills import SkillMethods
 
         self._skills = SkillMethods(

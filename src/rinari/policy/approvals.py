@@ -45,6 +45,10 @@ class ApprovalRequest:
     # `exact`: grants bind to this target (never widened to the capability)
     # and a capability-wide grant cannot cover this request.
     binding_mode: str = "capability"
+    # «Siempre» that saves a setting instead of a project grant: Allow for
+    # one MCP tool, kept with its server (connectors plan, C5). Works in a
+    # loose chat too, since the setting belongs to the server.
+    on_always: Callable[[], None] | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +129,12 @@ class ApprovalEngine:
         wide_ok = request.binding_mode != "exact"
         if (
             answer in ("p", "project", "always-project")
+            and request.on_always is not None
+            and "allow_project" in request.choices
+        ):
+            return self._record(self._save_setting(request))
+        if (
+            answer in ("p", "project", "always-project")
             and _has_project(request)
             and (
                 "allow_project" in request.choices
@@ -143,6 +153,27 @@ class ApprovalEngine:
         outcome = ApprovalOutcome(granted=False, reason=f"denied (answer: {answer or 'no prompt'})")
         self._record(outcome)
         return outcome
+
+    @staticmethod
+    def _save_setting(request: ApprovalRequest) -> ApprovalOutcome:
+        """The setting is the lasting answer: nothing goes to the grant stores."""
+        grant = ApprovalGrant(
+            capability=request.capability,
+            scope=GrantScope.ONCE,
+            target=request.target,
+            session_id=request.session_id,
+            project_id=request.project_id,
+            rule_id=request.rule_id,
+        )
+        try:
+            request.on_always()
+        except Exception as exc:  # the call still runs: the owner said yes
+            return ApprovalOutcome(
+                granted=True,
+                grant=grant,
+                reason=f"approved once; saving the setting failed ({type(exc).__name__})",
+            )
+        return ApprovalOutcome(granted=True, grant=grant, reason="approved always (tool setting)")
 
     def _find_grant(self, request: ApprovalRequest) -> ApprovalGrant | None:
         # Old «always in chats» grants no longer apply (#56).

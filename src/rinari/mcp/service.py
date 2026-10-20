@@ -35,7 +35,8 @@ from rinari.shared.errors import RinariError
 from rinari.trust import TrustService
 
 from . import oauth
-from .adapter import mcp_tool_definitions
+from . import permissions as tool_permissions
+from .adapter import mcp_tool_definitions, with_permissions
 from .client import TOOLS_LIST_CHANGED, McpClient, McpError, McpToolInfo
 from .config import (
     AUTH_BEARER,
@@ -277,6 +278,11 @@ class McpService:
         try:
             self._store_literals(server_id, draft, created)
             config = config_from_draft(draft)
+            if existing is not None:
+                # The owner's tool permissions (C5) survive an edit of the server.
+                kept = stored_config(existing).get(tool_permissions.PERMISSIONS_KEY)
+                if kept:
+                    config[tool_permissions.PERMISSIONS_KEY] = kept
             row = self._ctx.mcp_server_repo.add(
                 server_id,
                 name=name,
@@ -1002,7 +1008,7 @@ class McpService:
     # -- capabilities -------------------------------------------------------------
 
     def _definitions(self, name: str, client: McpClient, infos: list[McpToolInfo]) -> list:
-        definitions = mcp_tool_definitions(name, infos)
+        definitions = mcp_tool_definitions(name, infos, self.permissions(name))
         note = getattr(client, "instructions", None)
         if note:
             from dataclasses import replace
@@ -1012,6 +1018,80 @@ class McpService:
                 for tool in definitions
             ]
         return definitions
+
+    # -- the owner's permissions per tool (connectors plan, C5) -------------------
+
+    def permissions(self, name: str, scope: str | None = None) -> dict[str, Any]:
+        """The server's `{default, tools}` settings (`mcp/permissions.py`)."""
+        row = self._find_row(name) if scope is None else self._ctx.mcp_server_repo.find(name, scope)
+        return tool_permissions.stored_permissions(stored_config(row) if row is not None else None)
+
+    def known_tools(self, name: str) -> list:
+        """The server's tools from its last `tools/list`, without connecting."""
+        with self._lock:
+            state = self._states.get(name)
+            return list(state.tools or ()) if state is not None else []
+
+    def set_tool_permission(
+        self, name: str, tool: str, *, scope: str | None = None, **changes: Any
+    ) -> dict[str, Any]:
+        """Change one tool's `decision` and/or `annotations` (only those given).
+
+        Raises LookupError for an unknown server, ValueError for bad input.
+        The connection is kept: the tools are classified again in place.
+        """
+        row = self._permission_row(name, scope)
+        updated = tool_permissions.with_tool_setting(
+            tool_permissions.stored_permissions(stored_config(row)), tool, **changes
+        )
+        return self._save_permissions(row, updated)
+
+    def set_default_permission(
+        self, name: str, decision: str | None, *, scope: str | None = None
+    ) -> dict[str, Any]:
+        """The server's Allow / Ask / Block for tools without their own setting."""
+        row = self._permission_row(name, scope)
+        updated = tool_permissions.with_default(
+            tool_permissions.stored_permissions(stored_config(row)), decision
+        )
+        return self._save_permissions(row, updated)
+
+    def _permission_row(self, name: str, scope: str | None) -> dict:
+        row = self._find_row(name) if scope is None else self._ctx.mcp_server_repo.find(name, scope)
+        if row is None:
+            raise LookupError(name)
+        return row
+
+    def _save_permissions(self, row: dict, updated: dict[str, Any]) -> dict[str, Any]:
+        config = stored_config(row)
+        block = tool_permissions.serialized(updated)
+        if block is None:
+            config.pop(tool_permissions.PERMISSIONS_KEY, None)
+        else:
+            config[tool_permissions.PERMISSIONS_KEY] = block
+        # Same row, same id and secrets: only config_json changes.
+        self._ctx.mcp_server_repo.add(
+            row["id"],
+            name=row["name"],
+            transport=row.get("transport") or TRANSPORT_STDIO,
+            command=row.get("command") or "",
+            url=row.get("url") or "",
+            scope=row.get("scope") or "global",
+            enabled=bool(row.get("enabled")),
+            config_json=json.dumps(config, sort_keys=True),
+            created_at=_now(self._ctx),
+        )
+        saved = tool_permissions.stored_permissions(config)
+        name = row["name"]
+        live = self._find_row(name)  # the global row wins over a project one
+        if live is not None and live.get("id") == row["id"]:
+            with self._lock:
+                state = self._states.get(name)
+                if state is not None and state.tools:
+                    state.tools = with_permissions(state.tools, saved)
+                    self._sync(name)
+        self._log_entry(name, "info", "tool permissions changed")
+        return saved
 
     def tools(self, name: str, project: Path | None = None) -> list:
         """The server's tools, connecting it if needed; `tools/list` is cached."""

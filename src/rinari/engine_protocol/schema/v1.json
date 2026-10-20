@@ -70,6 +70,9 @@
     "mcpAuthOutcome",
     "mcpAuthStatus",
     "mcpAuthSignout",
+    "mcpToolHints",
+    "mcpToolPermission",
+    "mcpToolPermissions",
     "soulSettings",
     "networkSettings",
     "networkEffective",
@@ -430,6 +433,9 @@
         "mcp.auth.status",
         "mcp.auth.cancel",
         "mcp.auth.signout",
+        "mcp.tools.list",
+        "mcp.tools.set",
+        "mcp.tools.set_default",
         "plugin.list",
         "plugin.get",
         "plugin.enable",
@@ -5807,6 +5813,211 @@
         "revoked",
         "removed",
         "cancelled"
+      ]
+    },
+    "mcpToolHints": {
+      "type": "object",
+      "description": "MCP tool annotations that the policy reads (connectors plan C5). null: not declared (in `owner`, the key is simply absent).",
+      "properties": {
+        "readOnlyHint": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "destructiveHint": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "openWorldHint": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      }
+    },
+    "mcpToolPermission": {
+      "type": "object",
+      "description": "mcp.tools.list/set: one tool of an MCP server with its permissions (mcp_tool_permissions_v1). `annotations.server` are the server's hints, `owner` the owner's corrections and `effective` what counts. `setting` is the owner's choice for this tool; `decision` and `decision_source` say what applies (tool, server default, or the mode's rule when null). `by_mode` is what each mode does before any external content; full-access only blocks what the owner blocked. `listed`: false for a saved setting of a tool the server no longer lists (or before it connected).",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The server's own tool name."
+        },
+        "tool": {
+          "type": "string",
+          "description": "Rinari's name: mcp.<server>.<tool>."
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": "string"
+        },
+        "listed": {
+          "type": "boolean"
+        },
+        "annotations": {
+          "type": "object",
+          "properties": {
+            "server": {
+              "$ref": "#/$defs/mcpToolHints"
+            },
+            "owner": {
+              "$ref": "#/$defs/mcpToolHints"
+            },
+            "effective": {
+              "$ref": "#/$defs/mcpToolHints"
+            }
+          },
+          "required": [
+            "server",
+            "owner",
+            "effective"
+          ]
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "destructive"
+          ]
+        },
+        "sends_out": {
+          "type": "boolean",
+          "description": "A call may send data outside (not a read and openWorldHint is not false): after external content from another source it asks in workspace."
+        },
+        "setting": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "allow",
+            "ask",
+            "deny",
+            null
+          ]
+        },
+        "decision": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "allow",
+            "ask",
+            "deny",
+            null
+          ]
+        },
+        "decision_source": {
+          "type": "string",
+          "enum": [
+            "tool",
+            "server",
+            "mode"
+          ]
+        },
+        "by_mode": {
+          "type": "object",
+          "properties": {
+            "read-only": {
+              "type": "string",
+              "enum": [
+                "allow",
+                "ask",
+                "deny"
+              ]
+            },
+            "workspace": {
+              "type": "string",
+              "enum": [
+                "allow",
+                "ask",
+                "deny"
+              ]
+            },
+            "full-access": {
+              "type": "string",
+              "enum": [
+                "allow",
+                "ask",
+                "deny"
+              ]
+            }
+          },
+          "required": [
+            "read-only",
+            "workspace",
+            "full-access"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "tool",
+        "title",
+        "description",
+        "listed",
+        "annotations",
+        "kind",
+        "sends_out",
+        "setting",
+        "decision",
+        "decision_source",
+        "by_mode"
+      ]
+    },
+    "mcpToolPermissions": {
+      "type": "object",
+      "description": "mcp.tools.list/set/set_default `server`: the server's default (Allow / Ask / Block for tools without their own setting; null: the mode decides) and its tools from the last tools/list (nothing connects to answer).",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "global",
+            "project"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/mcpConnectionStatus"
+        },
+        "default": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "allow",
+            "ask",
+            "deny",
+            null
+          ]
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/mcpToolPermission"
+          }
+        }
+      },
+      "required": [
+        "name",
+        "scope",
+        "status",
+        "default",
+        "tools"
       ]
     }
   }

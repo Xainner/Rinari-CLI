@@ -28,6 +28,16 @@ asks for this session at most. In full-access it is the owner's switch «Ask
 before sending data to new destinations» (off by default): on, it asks only
 to send to a destination that is not trusted (registered MCP servers, the
 project's git remote, localhost and the LAN are).
+
+MCP tools (plan de conectores, C5; `policy/mcp_tools.py`). The server's
+annotations count: a declared read is `mcp.read`, `destructiveHint` asks in
+workspace and `openWorldHint` marks a call that sends data out. The owner's
+Allow / Ask / Block per tool (or per server) wins over the mode's rule; Block
+holds in every mode, full access asks for nothing else. Same connector, same
+destination: in workspace, a call that sends out asks after external content
+only when that content came from somewhere else (a page, another connector);
+reading from a connector and calling the same connector again does not.
+
 """
 
 from __future__ import annotations
@@ -37,6 +47,16 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from rinari.policy.mcp_tools import (
+    DECISION_ALLOW,
+    DECISION_ASK,
+    DECISION_DENY,
+    RULE_BLOCKED,
+    RULE_DESTRUCTIVE,
+    RULE_TOOL_ASK,
+    McpToolFacts,
+)
 
 if TYPE_CHECKING:
     from rinari.policy.network import NetworkPolicy
@@ -105,6 +125,10 @@ class SessionScope:
     # Full access asks before sending to a new destination after external
     # content (the owner's switch, off by default).
     ask_new_destinations: bool = False
+    # Where this turn's external content came from (`mcp:<server>` for a
+    # connector, a host or a label otherwise). Empty with external_content
+    # means "unknown": treated as foreign to every connector.
+    external_origins: frozenset[str] = frozenset()
     # Folder a shell-like command runs in when the call names its own `cwd`;
     # None means it runs in the session's cwd.
     command_cwd: Path | None = None
@@ -290,6 +314,20 @@ _SHELL_SENDS = re.compile(
 
 def shell_sends_data(command: str) -> bool:
     return bool(_SHELL_SENDS.search(command or ""))
+
+
+def foreign_content(scope: SessionScope, origin: str) -> bool:
+    """This turn read external content from somewhere other than `origin`.
+
+    Same connector, same destination (C5): what came from a connector going
+    back to that connector is not a new destination. Without known origins
+    the content counts as foreign (a caller that only set the flag).
+    """
+    if not scope.external_content:
+        return False
+    if not scope.external_origins:
+        return True
+    return any(seen != origin for seen in scope.external_origins)
 
 
 def is_sensitive_file(path: Path) -> bool:
@@ -590,6 +628,7 @@ class PolicyEngine:
         target: str | None = None,
         network_mode: str = "read",
         cost_basis: str | None = None,
+        mcp: McpToolFacts | None = None,
     ) -> PolicyDecision:
         read_only = scope.profile is PermissionProfile.READ_ONLY
         if read_only and capability == CAPABILITY_SHELL:
@@ -636,6 +675,8 @@ class PolicyEngine:
             return self._allow(capability, "local validation evidence", risk, risk_class)
         if capability == CAPABILITY_FS_WRITE:
             return self._fs_write(scope, path, risk, risk_class)
+        if capability in (CAPABILITY_MCP_READ, CAPABILITY_MCP_WRITE) and mcp is not None:
+            return self._mcp_tool(scope, capability, mcp, risk, risk_class)
         if capability in (CAPABILITY_BROWSER_READ, CAPABILITY_BROWSER_WRITE, CAPABILITY_MCP_READ):
             if read_only:
                 return self._deny(
@@ -887,6 +928,96 @@ class PolicyEngine:
             risk_class=risk_class,
             rule_id=rule_id,
             binding_mode=binding_mode,
+        )
+
+    # -- MCP tools (connectors plan, C5) -----------------------------------------
+
+    def _mcp_tool(
+        self,
+        scope: SessionScope,
+        capability: str,
+        facts: McpToolFacts,
+        risk: str,
+        risk_class: str,
+    ) -> PolicyDecision:
+        """One MCP tool call: the owner's setting, the annotations and the mode.
+
+        Block holds in every mode. Read-only calls no MCP tool. Full access
+        asks for nothing else (a registered server is a trusted destination).
+        In workspace the owner's Ask, or a destructive tool without Allow,
+        asks with «always» (which saves Allow for the tool); a call that can
+        send data out after external content from another source asks for
+        this session at most, whatever the setting.
+        """
+        name = f"{facts.server}/{facts.tool}"
+        by = "for this tool" if facts.decision_source == "tool" else "for this server"
+        if facts.decision == DECISION_DENY:
+            return self._deny(
+                capability,
+                f"the owner blocked {name} ({by}) in Settings",
+                target=name,
+                risk=risk,
+                risk_class=risk_class,
+                rule_id=RULE_BLOCKED,
+            )
+        if scope.profile is PermissionProfile.READ_ONLY:
+            return self._deny(
+                capability,
+                "read-only profile does not call MCP tools",
+                target=name,
+                risk=risk,
+                risk_class=risk_class,
+            )
+        if facts.destructive:
+            risk, risk_class = "high", "remote-destructive"
+        if scope.profile is PermissionProfile.FULL_ACCESS:
+            return self._allow(
+                capability, f"full-access: {name}, a server the owner registered", risk, risk_class
+            )
+        guard = facts.sends_out and scope.external_content and foreign_content(scope, facts.origin)
+        asks = facts.decision == DECISION_ASK or (
+            facts.destructive and facts.decision != DECISION_ALLOW
+        )
+        if asks:
+            reason = (
+                f"the owner asked to be asked before {name} ({by})"
+                if facts.decision == DECISION_ASK
+                else f"{name} says it is destructive (deletes or overwrites)"
+            )
+        if guard:
+            reason = (
+                f"{reason}; " if asks else f"{name} can send data out; "
+            ) + "after reading external content from another source in this turn"
+            return self._ask(
+                capability,
+                reason,
+                target=name,
+                risk="high",
+                risk_class=risk_class if facts.destructive else "communication",
+                rule_id="external_content_send",
+                choices=CHOICES_SESSION,
+                binding_mode="exact",
+            )
+        if asks:
+            return self._ask(
+                capability,
+                reason,
+                target=name,
+                risk="high" if facts.destructive else risk,
+                risk_class=risk_class,
+                rule_id=RULE_TOOL_ASK if facts.decision == DECISION_ASK else RULE_DESTRUCTIVE,
+                choices=CHOICES_LASTING,
+                binding_mode="exact",
+            )
+        if facts.decision == DECISION_ALLOW:
+            return self._allow(capability, f"the owner allowed {name} ({by})", risk, risk_class)
+        return self._allow(
+            capability,
+            "a read-only MCP call"
+            if facts.read_only
+            else "a tool from an MCP server the owner registered",
+            risk,
+            risk_class,
         )
 
     # -- network ---------------------------------------------------------------
