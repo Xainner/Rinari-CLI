@@ -282,3 +282,44 @@ def test_memory_never_captures_a_runtime_note() -> None:
     )
     agent_runtime._capture_owner_messages(services, "s", [owner, note])
     assert captured == ["soy Ana"]
+
+
+def test_a_cancelled_turn_leaves_its_note_and_the_next_one_reuses_it(app_ctx, tmp_path) -> None:
+    from rinari.models.types import ModelResponse as Response
+    from rinari.shared.errors import CancelledError
+
+    services, record = _session(app_ctx, tmp_path)
+    services.sessions.name_from_first_message = lambda *a, **k: None
+    # Something for the turn state to say (the folder's files).
+    (tmp_path / "work" / "a.txt").write_text("uno\n", encoding="utf-8")
+
+    class Cancelling(FakeModel):
+        def invoke(self, request):
+            self.requests.append(request)
+            raise CancelledError("stopped by the owner")
+
+    def turn(model, message):
+        session = agent_runtime.build_agent_session(services, record, interactive=False)
+        session.loop._provider = model
+        agent_runtime.run_turn(session, message)
+        session.end()
+
+    def kept():
+        return [
+            row
+            for row in services.ctx.message_repo.list(record.id)
+            if (row.origin or {}).get("source") == "turn-state"
+        ]
+
+    turn(Cancelling(scripted=[]), "Empieza por revisar el proyecto, por favor.")
+    assert len(kept()) == 1
+    turn(FakeModel(scripted=[Response(content="ok")]), "Sigue con lo que estabas haciendo.")
+    assert len(kept()) == 1  # same state: no second copy
+    # With the conversation forgotten (messages and events), the next turn
+    # writes it again.
+    for table in ("session_messages", "session_events"):
+        services.ctx.db.execute(f"DELETE FROM {table} WHERE session_id = ?", (record.id,))
+    turn(
+        FakeModel(scripted=[Response(content="ok")]), "Empieza por revisar el proyecto, por favor."
+    )
+    assert len(kept()) == 1
