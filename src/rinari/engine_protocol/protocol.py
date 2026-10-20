@@ -185,6 +185,13 @@ CAPABILITIES: dict[str, bool] = {
     # env/header secrets in the CredentialStore, mcp.update, mcp.probe and the
     # structured mcp.test diagnosis (code, http_status, hint, latency_ms).
     "mcp_remote_v1": True,
+    # MCP servers connect in the Engine, in parallel and in the background
+    # (connectors plan, C2): mcpServer.status (idle | connecting | connected |
+    # reauth_required | error | disabled) and .connection (code, hint,
+    # message, tools, resources, attempts, retry_in_s, changed_at), the
+    # mcp.status.changed event, mcp.reconnect, tools refreshed on the
+    # server's list_changed, and mcp.resources.list/read for the model.
+    "mcp_background_connect_v1": True,
     # soul.settings.get/set: character intensity (minimal | balanced | full),
     # separate from Soul selection; bundled default Soul 4.0.
     "soul_character_intensity_v1": True,

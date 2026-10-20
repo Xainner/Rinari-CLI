@@ -481,6 +481,12 @@ class EngineServer:
         self._dispatcher.register("soul.settings.set", self._soul_settings_set)
         self._dispatcher.register("session.soul.set", self._session_soul_set)
         self._dispatcher.register("session.soul.clear", self._session_soul_clear)
+        # MCP connections (connectors plan, C2): the Engine connects servers in
+        # the background; each change of state reaches the clients as an event.
+        self._services.mcp.on_status = lambda payload: self._turns.emit_external(
+            event("mcp.status.changed", payload)
+        )
+        self._dispatcher.register("mcp.reconnect", self._mcp_reconnect)
         self._dispatcher.register("mcp.list", self._mcp_list)
         self._dispatcher.register("mcp.get", self._mcp_get)
         self._dispatcher.register("mcp.create", self._mcp_create)
@@ -667,10 +673,13 @@ class EngineServer:
         """Background work of a serving Engine (not of one built for a test)."""
         self._schedule.start()
         self._resume.start()
+        # Connect the MCP servers now, in parallel; no turn waits for them (C2).
+        self._services.mcp.start_background()
 
     def close(self) -> None:
         self._schedule.close()
         self._resume.close()
+        self._services.mcp.stop_background()
         if hasattr(self, "_provider_auth_service"):
             self._provider_auth_service.close()
         self._attachment_jobs.close()
@@ -3515,6 +3524,24 @@ class EngineServer:
             raise EngineProtocolError(INVALID_PARAMS, "Param 'ref' must be a non-empty string.")
         record = self._services.sessions.clear_soul(ref)
         return {"session": session_to_dict(record), **self._soul_effective(record)}
+
+    # -- MCP connections (connectors plan, C2) ------------------------------------
+
+    def _mcp_reconnect(self, params: dict[str, Any]) -> dict[str, Any]:
+        """«Reconectar»: connect again now, in the background, whatever the wait.
+
+        Returns at once with the server (status `connecting`); the outcome
+        arrives as `mcp.status.changed`.
+        """
+        name = self._mcp_name(params or {})
+        try:
+            self._services.mcp.reconnect(name)
+        except LookupError:
+            raise NotFoundError(f"Unknown MCP server: {name}.") from None
+        row = self._services.mcp.show(name) or self._services.mcp.show(name, "project")
+        if row is None:
+            raise NotFoundError(f"Unknown MCP server: {name}.")
+        return {"server": self._mcp_view(row)}
 
     # -- ecosystem (Phase 9) ----------------------------------------------------
 
