@@ -6,7 +6,9 @@ connected server; the agent loop never talks JSON-RPC directly.
 
 from __future__ import annotations
 
+import contextlib
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -19,11 +21,17 @@ from .protocol import (
     METHOD_RESOURCES_READ,
     METHOD_TOOLS_CALL,
     METHOD_TOOLS_LIST,
+    McpMessage,
     initialize_params,
     notification,
     request,
 )
 from .transport import McpTransport, TransportError
+
+#: Server notification that its tool list changed (MCP `tools.listChanged`).
+TOOLS_LIST_CHANGED = "notifications/tools/list_changed"
+#: Pages read from one paginated list before giving up (a broken cursor loop).
+MAX_LIST_PAGES = 50
 
 
 class McpError(Exception):
@@ -99,6 +107,10 @@ class McpClient:
         self._capabilities: dict[str, Any] = {}
         self._protocol_version: str | None = None
         self._instructions: str | None = None
+        # Who hears the notifications the server sends on its own (C2:
+        # `notifications/tools/list_changed` refreshes that server's tools).
+        self._listeners: list[Callable[[str, dict[str, Any]], None]] = []
+        transport.on_notification = self._on_notification
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -167,6 +179,22 @@ class McpClient:
     def instructions(self) -> str | None:
         return self._instructions
 
+    def add_listener(self, listener: Callable[[str, dict[str, Any]], None]) -> None:
+        """`listener(method, params)` for each server notification.
+
+        It runs on the transport's reader thread: it must hand slow work
+        (another request to this server) to its own thread.
+        """
+        self._listeners.append(listener)
+
+    def _on_notification(self, message: McpMessage) -> None:
+        method = message.method
+        if not method:
+            return
+        for listener in list(self._listeners):
+            with contextlib.suppress(Exception):
+                listener(method, message.params)
+
     # -- methods ---------------------------------------------------------------
 
     def _call(self, method: str, params: dict[str, Any] | None) -> Any:
@@ -176,8 +204,9 @@ class McpClient:
             frame = request(method, params)
             message = self._transport.send(frame, self._timeout_s)
         except TransportError as exc:
-            if exc.code in ("TRANSPORT_SESSION_EXPIRED", "TRANSPORT_CLOSED"):
-                # The next use reconnects (the service drops stale clients).
+            if exc.code in ("TRANSPORT_SESSION_EXPIRED", "TRANSPORT_CLOSED", "TRANSPORT_IO"):
+                # The session or the process is gone: the next use reconnects
+                # (the service drops clients that are no longer connected).
                 self.close()
             raise McpError.from_transport(exc) from exc
         if message.has_error:
@@ -187,9 +216,22 @@ class McpClient:
             raise McpError("MCP_PROTOCOL", f"{method} failed: {error.get('message', error)}")
         return message.result
 
+    def _list_all(self, method: str, key: str) -> list[Any]:
+        """Every page of a paginated list (`nextCursor`), in order."""
+        items: list[Any] = []
+        cursor: str | None = None
+        for _page in range(MAX_LIST_PAGES):
+            params = {"cursor": cursor} if cursor else None
+            result = self._call(method, params)
+            items.extend(_as_list(result, key))
+            following = result.get("nextCursor") if isinstance(result, dict) else None
+            if not isinstance(following, str) or not following or following == cursor:
+                break
+            cursor = following
+        return items
+
     def list_tools(self) -> list[McpToolInfo]:
-        result = self._call(METHOD_TOOLS_LIST, {"cursor": None})
-        tools = _as_list(result, "tools")
+        tools = self._list_all(METHOD_TOOLS_LIST, "tools")
         return [McpToolInfo.from_raw(t) for t in tools if isinstance(t, dict) and t.get("name")]
 
     def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -210,8 +252,8 @@ class McpClient:
         return result
 
     def list_resources(self) -> list[dict[str, Any]]:
-        result = self._call(METHOD_RESOURCES_LIST, None)
-        return [r for r in _as_list(result, "resources") if isinstance(r, dict)]
+        resources = self._list_all(METHOD_RESOURCES_LIST, "resources")
+        return [r for r in resources if isinstance(r, dict)]
 
     def read_resource(self, uri: str) -> dict[str, Any]:
         result = self._call(METHOD_RESOURCES_READ, {"uri": uri})
@@ -270,4 +312,4 @@ def _content_text(content: Any) -> str:
     return "\n".join(parts)
 
 
-__all__ = ["McpClient", "McpError", "McpToolInfo"]
+__all__ = ["TOOLS_LIST_CHANGED", "McpClient", "McpError", "McpToolInfo"]
