@@ -1236,6 +1236,24 @@ reconnecting.
   Block for tools without their own setting (`null`: the mode decides) →
   `{server}`.
 
+Docker in the console policy (plan de conectores C7), for every user with or
+without a connector. `docker`, `docker compose` and `docker-compose` (after
+`sudo`/`env`, with global options such as `-H`/`--context` and compose's
+`-f`/`-p`): reads (`ps`, `logs`, `inspect`, `images`, `version`, `info`,
+`top`, `stats`, `compose ps`/`logs`, `<object> ls`/`inspect`, `system df`)
+run in every mode, also read-only, and from a folder outside the project;
+piped only into filters (`grep`, `head`, `tail`…) they stay reads, while a
+redirection or another command makes them commands that run. `run`, `build`,
+`exec`, `compose up`/`down` (without `-v`), `start`, `stop`, `restart`,
+`pull` and the rest are local commands (asked in read-only, free in project
+mode inside the project). Deletions (`rm`, `rmi`, `container`/`image`/
+`volume`/`network rm`, `system`/`image`/`container`/`volume`/`network`/
+`builder prune`, `compose down -v`/`--volumes`/`--rmi`, `compose rm`, with
+`-f`, `--force` and `-a` alike) are refused in read-only, ask in project mode
+(once or for this session, rule `docker_destructive`, bound to the exact
+command) and run in full access; on another machine over `ssh` they ask every
+time. `docker push` sends like any other send (rule `docker_push`; refused in
+read-only). The catastrophic list still wins.
 The envelope contract is unchanged across slices.
 
 ---
