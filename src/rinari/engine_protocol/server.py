@@ -337,6 +337,7 @@ class EngineServer:
         self._dispatcher.register("agency.agent.update", self._agency.update)
         self._dispatcher.register("agency.agent.archive", self._agency.archive)
         self._dispatcher.register("agency.status", self._agency.status)
+        self._dispatcher.register("agency.agent.draft", self._agency.draft)
         from rinari.engine_protocol.resume import ResumeRunner
 
         self._resume = ResumeRunner(self)

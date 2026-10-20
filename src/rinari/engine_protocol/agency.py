@@ -12,6 +12,7 @@ invented, and only a token cap can stop that agent.
 
 from __future__ import annotations
 
+import threading
 from typing import TYPE_CHECKING, Any
 
 from rinari.agency import AgencyError
@@ -155,6 +156,86 @@ class AgencyMethods:
     def archive(self, params: dict[str, Any]) -> dict[str, Any]:
         agent = self._agent(params)
         return {"agent": self._view(self.agency.archive(agent["id"]))}
+
+    def _draft_caller(self):
+        """The owner's default model (the one a new conversation uses), or None."""
+        from rinari.models.router import ModelRouter
+        from rinari.runtime.model_caller import ModelCaller
+
+        selection = self._services.providers.current()
+        if selection is None or selection.model is None:
+            return None
+        router = ModelRouter(self._services.providers, self._services.models)
+        return ModelCaller(router, selection.provider, selection.model.id)
+
+    def draft(self, params: dict[str, Any]) -> dict[str, Any]:
+        """«Créalo con Rinari»: a draft of a card from one sentence. Creates nothing.
+
+        The Engine serves one request at a time and a model call takes
+        seconds: this answers at once with a job id, and the draft arrives as
+        `agency.draft.ready` (or `agency.draft.failed`, with a plain reason).
+        """
+        from rinari.agency.draft import (
+            DRAFT_MAX_TOKENS,
+            MAX_DESCRIPTION,
+            SYSTEM_PROMPT,
+            parse_draft,
+        )
+        from rinari.models.types import ChatMessage, ModelRequest
+
+        description = params.get("description")
+        if (
+            not isinstance(description, str)
+            or not description.strip()
+            or len(description) > MAX_DESCRIPTION
+        ):
+            raise EngineProtocolError(
+                INVALID_PARAMS, f"Param 'description' must be 1..{MAX_DESCRIPTION} characters."
+            )
+        caller = self._draft_caller()
+        if caller is None:
+            raise EngineProtocolError(
+                INVALID_PARAMS, "Connect a provider with a model first: the draft uses it."
+            )
+        job_id = self._services.ctx.ids.new("draft")
+
+        def run() -> None:
+            try:
+                response = caller.invoke(
+                    ModelRequest(
+                        model=caller.model_id or "",
+                        messages=(
+                            ChatMessage.system(SYSTEM_PROMPT),
+                            ChatMessage.user(description.strip()),
+                        ),
+                        max_tokens=DRAFT_MAX_TOKENS,
+                    )
+                )
+                draft = parse_draft(response.content or "")
+            except Exception as exc:  # the desktop must hear back
+                message = getattr(exc, "message", None) or str(exc)
+                self._turns.emit_external(
+                    event("agency.draft.failed", {"job_id": job_id, "message": message[:500]})
+                )
+                return
+            if draft is None:
+                self._turns.emit_external(
+                    event(
+                        "agency.draft.failed",
+                        {
+                            "job_id": job_id,
+                            "message": "The model did not return a usable draft. "
+                            "Try again or fill in the form.",
+                        },
+                    )
+                )
+                return
+            self._turns.emit_external(
+                event("agency.draft.ready", {"job_id": job_id, "draft": draft})
+            )
+
+        threading.Thread(target=run, name="agency-draft", daemon=True).start()
+        return {"status": "started", "job_id": job_id}
 
     def status(self, params: dict[str, Any]) -> dict[str, Any]:
         """What the Agency card says: how many agents, working and waiting."""

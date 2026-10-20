@@ -219,6 +219,11 @@ CAPABILITIES: dict[str, bool] = {
     # agency.status (what the Agency card says), agency.agent.changed and
     # usage.report scope "agent" (today's spend over its conversations).
     "agency_agents_v1": True,
+    # «Créalo con Rinari»: agency.agent.draft answers {status, job_id} at once
+    # and the draft (name, role, instructions, permission_profile) arrives as
+    # agency.draft.ready, or agency.draft.failed with a plain message. It uses
+    # the owner's default model and creates nothing.
+    "agency_draft_v1": True,
     # soul.settings.get/set: character intensity (minimal | balanced | full),
     # separate from Soul selection; bundled default Soul 4.0.
     "soul_character_intensity_v1": True,
