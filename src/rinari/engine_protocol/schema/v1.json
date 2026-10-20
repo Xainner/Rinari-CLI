@@ -741,6 +741,7 @@
         "agency.draft.ready",
         "agency.draft.failed",
         "agency.stopped",
+        "agency.secret_pasted",
         "schedule.rehearsed",
         "schedule.run.started",
         "schedule.run.needs_you",

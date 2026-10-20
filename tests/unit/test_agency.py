@@ -712,3 +712,13 @@ def test_stop_all_stops_the_agents_and_only_them(server, monkeypatch) -> None:
     assert services.schedules.get(rinari_task["id"])["enabled"] is True
     stopped = [evt for evt in server.drain_events() if evt.get("event") == "agency.stopped"]
     assert stopped[-1]["payload"]["paused_rules"] == [own_rule["id"]]
+
+
+def test_a_key_pasted_in_an_agents_chat_is_flagged_without_its_text(server) -> None:
+    agent = _ok(_call(server, "agency.agent.create", {"agent": {"name": "Emails"}}))["agent"]
+    key = "sk-proj-" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0"
+    server._turns._warn_pasted_secret(agent["session_id"], f"usa esta clave: {key}")
+    server._turns._warn_pasted_secret(agent["session_id"], "hola, ¿cómo vas?")
+    flagged = [evt for evt in server.drain_events() if evt.get("event") == "agency.secret_pasted"]
+    assert [evt["payload"] for evt in flagged] == [{"session_id": agent["session_id"]}]
+    assert key not in json.dumps(flagged)

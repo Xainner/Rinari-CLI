@@ -695,6 +695,21 @@ class TurnManager:
 
     # -- turn lifecycle ----------------------------------------------------
 
+    def _warn_pasted_secret(self, session_id: str, message: str) -> None:
+        """Rinari Agency (D-11): the owner pasted what looks like a key in an agent's chat.
+
+        It already went to the model's provider with the message, so it cannot
+        be taken back: the desktop says so and recommends changing it. The
+        event never carries the text, only that it happened.
+        """
+        from rinari.memory.service import find_sensitive_match
+        from rinari.shared.redaction import redact_text
+
+        text = message or ""
+        if find_sensitive_match(text) is None and redact_text(text) == text:
+            return
+        self.emit_external(event("agency.secret_pasted", {"session_id": session_id}))
+
     def _check_agent(self, record: Any) -> None:
         """Rinari Agency: an agent's turn waits for the owner past its daily cap.
 
@@ -753,6 +768,8 @@ class TurnManager:
             )
         if record.agent_id and not compaction_only:
             self._check_agent(record)
+            if origin is None and memory_origin == "interactive":
+                self._warn_pasted_secret(record.id, message)
         # A turn is what recency means, and nothing else refreshed it here, so
         # a session stayed where it was however much was said in it. Compaction
         # is housekeeping the user did not ask for and must not reorder a list.

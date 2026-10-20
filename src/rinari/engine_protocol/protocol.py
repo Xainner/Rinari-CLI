@@ -232,6 +232,10 @@ CAPABILITIES: dict[str, bool] = {
     # «Detener a todos»: agency.stop_all cancels the turns of every agent of the
     # profile and pauses their active rules; event agency.stopped.
     "agency_stop_all_v1": True,
+    # agency.secret_pasted {session_id}: the owner sent what looks like a key in
+    # an agent's chat (memory's credential patterns and the history redactor's).
+    # The text is never in the event.
+    "agency_secret_warning_v1": True,
     # soul.settings.get/set: character intensity (minimal | balanced | full),
     # separate from Soul selection; bundled default Soul 4.0.
     "soul_character_intensity_v1": True,
