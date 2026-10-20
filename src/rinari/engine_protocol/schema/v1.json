@@ -92,7 +92,15 @@
     "repoPullRequest",
     "repoStatus",
     "imageCreationSettings",
-    "imageConnector"
+    "imageConnector",
+    "mcpCatalogText",
+    "mcpCatalogEntry",
+    "mcpCatalogAdd",
+    "mcpImportSecret",
+    "mcpImportCandidate",
+    "mcpImportSource",
+    "mcpImportResult",
+    "mcpProjectOffers"
   ],
   "$defs": {
     "webPreview": {
@@ -629,7 +637,13 @@
         "session.summary",
         "session.turn.steer.update",
         "session.turn.steer.cancel",
-        "session.turn.steer.promote"
+        "session.turn.steer.promote",
+        "mcp.catalog.list",
+        "mcp.catalog.add",
+        "mcp.import.scan",
+        "mcp.import.apply",
+        "mcp.project_offers.list",
+        "mcp.project_offers.decide"
       ]
     },
     "event": {
@@ -3758,12 +3772,23 @@
         "url": {
           "type": "string"
         },
+        "url_secret": {
+          "$ref": "#/$defs/mcpSecretState",
+          "description": "Present when the URL's query carried a secret: the whole URL is in the credential store and `url` shows those values as ***."
+        },
         "scope": {
           "type": "string",
           "enum": [
             "global",
             "project"
           ]
+        },
+        "project_root": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The folder a project-scope server belongs to (mcp_catalog_v1); null: visible in every trusted project."
         },
         "enabled": {
           "type": "boolean"
@@ -6018,6 +6043,607 @@
         "status",
         "default",
         "tools"
+      ]
+    },
+    "mcpCatalogText": {
+      "type": "object",
+      "required": [
+        "es",
+        "en"
+      ],
+      "properties": {
+        "es": {
+          "type": "string"
+        },
+        "en": {
+          "type": "string"
+        }
+      },
+      "description": "A catalog text in Spanish and English."
+    },
+    "mcpCatalogEntry": {
+      "type": "object",
+      "description": "mcp.catalog.list entry: a connector the Engine ships (src/rinari/mcp/catalog.json, schema catalog.schema.json). `added` and `servers` say which saved servers match it (same URL or command).",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "logo": {
+          "type": "string",
+          "description": "An identifier for the client's own artwork; the Engine ships no images."
+        },
+        "category": {
+          "type": "string",
+          "enum": [
+            "google",
+            "work",
+            "dev",
+            "design",
+            "files",
+            "crm",
+            "media",
+            "data"
+          ]
+        },
+        "group": {
+          "type": "string"
+        },
+        "preview": {
+          "type": "boolean"
+        },
+        "description": {
+          "$ref": "#/$defs/mcpCatalogText"
+        },
+        "notes": {
+          "$ref": "#/$defs/mcpCatalogText"
+        },
+        "docs_url": {
+          "type": "string"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "server": {
+          "type": "object",
+          "properties": {
+            "transport": {
+              "type": "string",
+              "enum": [
+                "http",
+                "stdio"
+              ]
+            },
+            "url": {
+              "type": "string"
+            },
+            "auth": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "oauth",
+                    "bearer",
+                    "none"
+                  ]
+                },
+                "scopes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "authorize_params": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "command": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "env": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "label",
+                  "secret",
+                  "required"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "$ref": "#/$defs/mcpCatalogText"
+                  },
+                  "secret": {
+                    "type": "boolean"
+                  },
+                  "required": {
+                    "type": "boolean"
+                  },
+                  "default": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "connection_string": {
+              "type": "object",
+              "properties": {
+                "schemes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "env": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "required": [
+            "transport"
+          ]
+        },
+        "setup": {
+          "type": "object",
+          "required": [
+            "kind",
+            "help"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "registration",
+                "client_metadata",
+                "own_client",
+                "token",
+                "secrets"
+              ]
+            },
+            "fields": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "required"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "enum": [
+                      "client_id",
+                      "client_secret",
+                      "redirect_port",
+                      "token",
+                      "connection_string"
+                    ]
+                  },
+                  "required": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            },
+            "console_url": {
+              "type": "string"
+            },
+            "help": {
+              "$ref": "#/$defs/mcpCatalogText"
+            },
+            "alternatives": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "kind",
+                  "help"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "registration",
+                      "client_metadata",
+                      "own_client",
+                      "token",
+                      "secrets"
+                    ]
+                  },
+                  "fields": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "name",
+                        "required"
+                      ],
+                      "properties": {
+                        "name": {
+                          "type": "string",
+                          "enum": [
+                            "client_id",
+                            "client_secret",
+                            "redirect_port",
+                            "token",
+                            "connection_string"
+                          ]
+                        },
+                        "required": {
+                          "type": "boolean"
+                        }
+                      }
+                    }
+                  },
+                  "console_url": {
+                    "type": "string"
+                  },
+                  "help": {
+                    "$ref": "#/$defs/mcpCatalogText"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "added": {
+          "type": "boolean"
+        },
+        "servers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "scope": {
+                "type": "string",
+                "enum": [
+                  "global",
+                  "project"
+                ]
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "status": {
+                "$ref": "#/$defs/mcpConnectionStatus"
+              }
+            }
+          }
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "logo",
+        "category",
+        "description",
+        "docs_url",
+        "server",
+        "setup",
+        "added",
+        "servers"
+      ]
+    },
+    "mcpCatalogAdd": {
+      "type": "object",
+      "description": "mcp.catalog.add result. `next`: sign_in (call mcp.auth.start) or connect (already connecting in the background).",
+      "properties": {
+        "server": {
+          "$ref": "#/$defs/mcpServer"
+        },
+        "entry_id": {
+          "type": "string"
+        },
+        "next": {
+          "type": "string",
+          "enum": [
+            "sign_in",
+            "connect"
+          ]
+        }
+      },
+      "required": [
+        "server",
+        "entry_id",
+        "next"
+      ]
+    },
+    "mcpImportSecret": {
+      "type": "object",
+      "description": "A secret an imported definition brings: where and its name, never its value. `kind` env_ref is an env://NAME reference (from ${VAR}).",
+      "properties": {
+        "where": {
+          "type": "string",
+          "enum": [
+            "env",
+            "header",
+            "url"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "value",
+            "env_ref"
+          ]
+        }
+      },
+      "required": [
+        "where",
+        "name",
+        "kind"
+      ]
+    },
+    "mcpImportCandidate": {
+      "type": "object",
+      "description": "A server found by mcp.import.scan or offered by mcp.project_offers.list. Shape and secret names only. `reason` (not importable): legacy_sse_unsupported, secret_in_command, unresolved_variable, invalid_url, invalid_definition. `warnings`: disabled_in_source, unresolved_variable:<field>, invalid_env_name, cwd_ignored, env_file_ignored.",
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "claude_desktop",
+            "claude_code",
+            "cursor",
+            "vscode",
+            "codex",
+            "pasted",
+            "project"
+          ]
+        },
+        "source_label": {
+          "type": "string"
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project_root": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "transport": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "stdio",
+            "http",
+            null
+          ]
+        },
+        "command": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "url": {
+          "type": "string"
+        },
+        "secrets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/mcpImportSecret"
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "importable": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "suggested_name": {
+          "type": "string"
+        },
+        "existing": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "A saved server with the same definition, if any."
+        },
+        "changed": {
+          "type": "boolean",
+          "description": "Project offers: the definition changed since the owner answered."
+        },
+        "previous_decision": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "accepted",
+            "rejected",
+            null
+          ]
+        }
+      },
+      "required": [
+        "key",
+        "name",
+        "source",
+        "transport",
+        "command",
+        "url",
+        "secrets",
+        "warnings",
+        "importable"
+      ]
+    },
+    "mcpImportSource": {
+      "type": "object",
+      "description": "A config file mcp.import.scan looked at (Windows, macOS or Linux paths of each app).",
+      "properties": {
+        "source": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "found": {
+          "type": "boolean"
+        },
+        "servers": {
+          "type": "integer"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "unreadable",
+            "file_too_large",
+            null
+          ]
+        }
+      },
+      "required": [
+        "source",
+        "path",
+        "found",
+        "servers"
+      ]
+    },
+    "mcpImportResult": {
+      "type": "object",
+      "description": "mcp.import.apply and mcp.project_offers.decide: what was created and what failed (each server on its own).",
+      "properties": {
+        "created": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "server": {
+                "$ref": "#/$defs/mcpServer"
+              }
+            },
+            "required": [
+              "key",
+              "server"
+            ]
+          }
+        },
+        "failed": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "key",
+              "message"
+            ]
+          }
+        },
+        "rejected": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "project": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "created",
+        "failed"
+      ]
+    },
+    "mcpProjectOffers": {
+      "type": "object",
+      "description": "mcp.project_offers.list: servers a trusted folder brings that the owner has not answered (once per server). Untrusted: trusted false and no offers.",
+      "properties": {
+        "project": {
+          "type": "string"
+        },
+        "trusted": {
+          "type": "boolean"
+        },
+        "offers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/mcpImportCandidate"
+          }
+        },
+        "answered": {
+          "type": "integer"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/mcpImportSource"
+          }
+        }
+      },
+      "required": [
+        "project",
+        "trusted",
+        "offers",
+        "answered"
       ]
     }
   }

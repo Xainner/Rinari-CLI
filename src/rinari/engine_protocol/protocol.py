@@ -205,6 +205,13 @@ CAPABILITIES: dict[str, bool] = {
     # of external content treats a connector's own results as the same
     # destination.
     "mcp_tool_permissions_v1": True,
+    # Connector catalog and imports (connectors plan, C4): mcp.catalog.list/add
+    # (catalog shipped with the Engine, `added` per entry, `next` sign_in |
+    # connect), mcp.import.scan/apply (Claude Desktop, Claude Code, Cursor,
+    # VS Code, Codex or a pasted JSON; only marked servers are created),
+    # mcp.project_offers.list/decide (a trusted folder's .mcp.json asked once
+    # per server), mcpServer.project_root and url_secret.
+    "mcp_catalog_v1": True,
     # soul.settings.get/set: character intensity (minimal | balanced | full),
     # separate from Soul selection; bundled default Soul 4.0.
     "soul_character_intensity_v1": True,

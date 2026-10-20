@@ -21,21 +21,23 @@ class McpServerRepository:
         enabled: bool = True,
         config_json: str = "",
         created_at: str = "",
+        project_root: str = "",
     ) -> dict:
         self._db.execute(
             """
             INSERT INTO mcp_servers (
                 id, name, transport, command, url, scope, enabled, config_json,
-                created_at, updated_at
+                created_at, updated_at, project_root
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(scope, name) DO UPDATE SET
                 transport = excluded.transport,
                 command = excluded.command,
                 url = excluded.url,
                 enabled = excluded.enabled,
                 config_json = excluded.config_json,
-                updated_at = excluded.created_at
+                updated_at = excluded.created_at,
+                project_root = excluded.project_root
             """,
             (
                 server_id,
@@ -48,6 +50,7 @@ class McpServerRepository:
                 config_json,
                 created_at,
                 created_at,
+                project_root,
             ),
         )
         return self.find(name, scope)

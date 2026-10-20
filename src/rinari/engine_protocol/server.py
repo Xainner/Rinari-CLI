@@ -512,6 +512,15 @@ class EngineServer:
         from rinari.engine_protocol.mcp_tools import McpToolMethods
 
         McpToolMethods(self._services).register(self._dispatcher)
+
+        # Connector catalog and imports (connectors plan, C4): mcp.catalog.*,
+        # mcp.import.* and mcp.project_offers.*.
+        from rinari.engine_protocol.mcp_connectors import McpConnectorMethods
+
+        user_home = self._user_home
+        McpConnectorMethods(
+            self._services, home=(lambda: user_home) if user_home is not None else None
+        ).register(self._dispatcher)
         from rinari.engine_protocol.skills import SkillMethods
 
         self._skills = SkillMethods(

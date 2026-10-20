@@ -1,0 +1,1178 @@
+{
+  "version": 1,
+  "verified_at": "2026-10-19",
+  "entries": [
+    {
+      "id": "notion",
+      "name": "Notion",
+      "logo": "notion",
+      "category": "work",
+      "description": {
+        "es": "Busca, lee y edita páginas y bases de datos de tu espacio de Notion.",
+        "en": "Search, read and edit the pages and databases of your Notion workspace."
+      },
+      "docs_url": "https://developers.notion.com/docs/mcp",
+      "server": {
+        "transport": "http",
+        "url": "https://mcp.notion.com/mcp",
+        "auth": {
+          "kind": "oauth"
+        }
+      },
+      "setup": {
+        "kind": "registration",
+        "help": {
+          "es": "Pulsa «Conectar» e inicia sesión en Notion en tu navegador. Rinari se registra solo como cliente: no tienes que crear ninguna app ni copiar claves.",
+          "en": "Press Connect and sign in to Notion in your browser. Rinari registers itself as a client: there is no app to create and no key to copy."
+        }
+      }
+    },
+    {
+      "id": "linear",
+      "name": "Linear",
+      "logo": "linear",
+      "category": "work",
+      "description": {
+        "es": "Consulta y gestiona incidencias, proyectos y ciclos de Linear.",
+        "en": "Look up and manage Linear issues, projects and cycles."
+      },
+      "docs_url": "https://linear.app/docs/mcp",
+      "server": {
+        "transport": "http",
+        "url": "https://mcp.linear.app/mcp",
+        "auth": {
+          "kind": "oauth"
+        }
+      },
+      "setup": {
+        "kind": "registration",
+        "help": {
+          "es": "Pulsa «Conectar» e inicia sesión en Linear en tu navegador. Rinari se registra solo como cliente: no tienes que crear ninguna app ni copiar claves.",
+          "en": "Press Connect and sign in to Linear in your browser. Rinari registers itself as a client: there is no app to create and no key to copy."
+        }
+      }
+    },
+    {
+      "id": "todoist",
+      "name": "Todoist",
+      "logo": "todoist",
+      "category": "work",
+      "description": {
+        "es": "Lee, crea y completa tareas y proyectos de Todoist.",
+        "en": "Read, create and complete Todoist tasks and projects."
+      },
+      "docs_url": "https://github.com/Doist/todoist-ai",
+      "server": {
+        "transport": "http",
+        "url": "https://ai.todoist.net/mcp",
+        "auth": {
+          "kind": "oauth"
+        }
+      },
+      "setup": {
+        "kind": "registration",
+        "help": {
+          "es": "Pulsa «Conectar» e inicia sesión en Todoist en tu navegador. Rinari se registra solo como cliente: no tienes que crear ninguna app ni copiar claves.",
+          "en": "Press Connect and sign in to Todoist in your browser. Rinari registers itself as a client: there is no app to create and no key to copy."
+        }
+      }
+    },
+    {
+      "id": "airtable",
+      "name": "Airtable",
+      "logo": "airtable",
+      "category": "work",
+      "description": {
+        "es": "Lee y edita bases, tablas y registros de Airtable.",
+        "en": "Read and edit Airtable bases, tables and records."
+      },
+      "docs_url": "https://support.airtable.com/docs/using-the-airtable-mcp-server",
+      "server": {
+        "transport": "http",
+        "url": "https://mcp.airtable.com/mcp",
+        "auth": {
+          "kind": "oauth"
+        }
+      },
+      "setup": {
+        "kind": "registration",
+        "help": {
+          "es": "Pulsa «Conectar» e inicia sesión en Airtable en tu navegador. Rinari se registra solo como cliente: no tienes que crear ninguna app ni copiar claves.",
+          "en": "Press Connect and sign in to Airtable in your browser. Rinari registers itself as a client: there is no app to create and no key to copy."
+        }
+      }
+    },
+    {
+      "id": "sentry",
+      "name": "Sentry",
+      "logo": "sentry",
+      "category": "dev",
+      "description": {
+        "es": "Consulta errores, incidencias y rendimiento de tus proyectos en Sentry.",
+        "en": "Look into errors, issues and performance of your Sentry projects."
+      },
+      "docs_url": "https://docs.sentry.io/product/sentry-mcp/",
+      "server": {
+        "transport": "http",
+        "url": "https://mcp.sentry.dev/mcp",
+        "auth": {
+          "kind": "oauth"
+        }
+      },
+      "setup": {
+        "kind": "registration",
+        "help": {
+          "es": "Pulsa «Conectar» e inicia sesión en Sentry en tu navegador. Rinari se registra solo como cliente: no tienes que crear ninguna app ni copiar claves.",
+          "en": "Press Connect and sign in to Sentry in your browser. Rinari registers itself as a client: there is no app to create and no key to copy."
+        }
+      }
+    },
+    {
+      "id": "canva",
+      "name": "Canva",
+      "logo": "canva",
+      "category": "design",
+      "description": {
+        "es": "Busca, crea y exporta diseños de Canva.",
+        "en": "Search, create and export Canva designs."
+      },
+      "docs_url": "https://www.canva.dev/docs/mcp/",
+      "server": {
+        "transport": "http",
+        "url": "https://mcp.canva.com/mcp",
+        "auth": {
+          "kind": "oauth"
+        }
+      },
+      "setup": {
+        "kind": "registration",
+        "help": {
+          "es": "Pulsa «Conectar» e inicia sesión en Canva en tu navegador. Rinari se registra solo como cliente: no tienes que crear ninguna app ni copiar claves.",
+          "en": "Press Connect and sign in to Canva in your browser. Rinari registers itself as a client: there is no app to create and no key to copy."
+        }
+      }
+    },
+    {
+      "id": "clickup",
+      "name": "ClickUp",
+      "logo": "clickup",
+      "category": "work",
+      "description": {
+        "es": "Consulta y gestiona tareas, listas y documentos de ClickUp.",
+        "en": "Look up and manage ClickUp tasks, lists and docs."
+      },
+      "docs_url": "https://developer.clickup.com/docs/connect-an-ai-assistant-to-clickups-mcp-server",
+      "server": {
+        "transport": "http",
+        "url": "https://mcp.clickup.com/mcp",
+        "auth": {
+          "kind": "oauth"
+        }
+      },
+      "setup": {
+        "kind": "registration",
+        "help": {
+          "es": "Pulsa «Conectar» e inicia sesión en ClickUp en tu navegador. Rinari se registra solo como cliente: no tienes que crear ninguna app ni copiar claves.",
+          "en": "Press Connect and sign in to ClickUp in your browser. Rinari registers itself as a client: there is no app to create and no key to copy."
+        }
+      }
+    },
+    {
+      "id": "vercel",
+      "name": "Vercel",
+      "logo": "vercel",
+      "category": "dev",
+      "description": {
+        "es": "Consulta proyectos, despliegues y registros de Vercel.",
+        "en": "Look into Vercel projects, deployments and logs."
+      },
+      "docs_url": "https://vercel.com/docs/mcp/vercel-mcp",
+      "server": {
+        "transport": "http",
+        "url": "https://mcp.vercel.com",
+        "auth": {
+          "kind": "oauth"
+        }
+      },
+      "setup": {
+        "kind": "registration",
+        "help": {
+          "es": "Pulsa «Conectar» e inicia sesión en Vercel en tu navegador. Rinari se registra solo como cliente: no tienes que crear ninguna app ni copiar claves.",
+          "en": "Press Connect and sign in to Vercel in your browser. Rinari registers itself as a client: there is no app to create and no key to copy."
+        }
+      }
+    },
+    {
+      "id": "supabase",
+      "name": "Supabase",
+      "logo": "supabase",
+      "category": "dev",
+      "description": {
+        "es": "Gestiona proyectos de Supabase: tablas, consultas SQL, funciones y registros.",
+        "en": "Manage Supabase projects: tables, SQL queries, functions and logs."
+      },
+      "docs_url": "https://supabase.com/docs/guides/getting-started/mcp",
+      "server": {
+        "transport": "http",
+        "url": "https://mcp.supabase.com/mcp",
+        "auth": {
+          "kind": "oauth"
+        }
+      },
+      "setup": {
+        "kind": "registration",
+        "help": {
+          "es": "Pulsa «Conectar» e inicia sesión en Supabase en tu navegador. Rinari se registra solo como cliente: no tienes que crear ninguna app ni copiar claves.",
+          "en": "Press Connect and sign in to Supabase in your browser. Rinari registers itself as a client: there is no app to create and no key to copy."
+        }
+      }
+    },
+    {
+      "id": "stripe",
+      "name": "Stripe",
+      "logo": "stripe",
+      "category": "dev",
+      "description": {
+        "es": "Consulta clientes, pagos, suscripciones y la documentación de Stripe.",
+        "en": "Look up Stripe customers, payments, subscriptions and docs."
+      },
+      "docs_url": "https://docs.stripe.com/mcp",
+      "server": {
+        "transport": "http",
+        "url": "https://mcp.stripe.com",
+        "auth": {
+          "kind": "oauth"
+        }
+      },
+      "setup": {
+        "kind": "registration",
+        "help": {
+          "es": "Pulsa «Conectar» e inicia sesión en Stripe en tu navegador. Rinari se registra solo como cliente: no tienes que crear ninguna app ni copiar claves.",
+          "en": "Press Connect and sign in to Stripe in your browser. Rinari registers itself as a client: there is no app to create and no key to copy."
+        }
+      }
+    },
+    {
+      "id": "figma",
+      "name": "Figma",
+      "logo": "figma",
+      "category": "design",
+      "description": {
+        "es": "Lee archivos, marcos y componentes de Figma para pasar del diseño al código.",
+        "en": "Read Figma files, frames and components to go from design to code."
+      },
+      "docs_url": "https://developers.figma.com/docs/figma-mcp-server/",
+      "server": {
+        "transport": "http",
+        "url": "https://mcp.figma.com/mcp",
+        "auth": {
+          "kind": "oauth"
+        }
+      },
+      "setup": {
+        "kind": "registration",
+        "help": {
+          "es": "Pulsa «Conectar» e inicia sesión en Figma en tu navegador. Rinari se registra solo como cliente: no tienes que crear ninguna app ni copiar claves.",
+          "en": "Press Connect and sign in to Figma in your browser. Rinari registers itself as a client: there is no app to create and no key to copy."
+        }
+      }
+    },
+    {
+      "id": "dropbox",
+      "name": "Dropbox",
+      "logo": "dropbox",
+      "category": "files",
+      "description": {
+        "es": "Busca, lee y organiza archivos de Dropbox.",
+        "en": "Search, read and organize Dropbox files."
+      },
+      "docs_url": "https://help.dropbox.com/integrations/connect-dropbox-mcp-server",
+      "server": {
+        "transport": "http",
+        "url": "https://mcp.dropbox.com/mcp",
+        "auth": {
+          "kind": "oauth"
+        }
+      },
+      "setup": {
+        "kind": "registration",
+        "help": {
+          "es": "Pulsa «Conectar» e inicia sesión en Dropbox en tu navegador. Rinari se registra solo como cliente: no tienes que crear ninguna app ni copiar claves.",
+          "en": "Press Connect and sign in to Dropbox in your browser. Rinari registers itself as a client: there is no app to create and no key to copy."
+        }
+      }
+    },
+    {
+      "id": "atlassian",
+      "name": "Atlassian (Jira, Confluence)",
+      "logo": "atlassian",
+      "category": "work",
+      "description": {
+        "es": "Consulta y edita incidencias de Jira y páginas de Confluence.",
+        "en": "Look up and edit Jira issues and Confluence pages."
+      },
+      "docs_url": "https://support.atlassian.com/atlassian-rovo-mcp-server/docs/getting-started-with-the-atlassian-remote-mcp-server/",
+      "server": {
+        "transport": "http",
+        "url": "https://mcp.atlassian.com/v1/mcp",
+        "auth": {
+          "kind": "oauth"
+        }
+      },
+      "setup": {
+        "kind": "registration",
+        "help": {
+          "es": "Pulsa «Conectar» e inicia sesión en Atlassian en tu navegador. Rinari se registra solo como cliente: no tienes que crear ninguna app ni copiar claves.",
+          "en": "Press Connect and sign in to Atlassian in your browser. Rinari registers itself as a client: there is no app to create and no key to copy."
+        }
+      }
+    },
+    {
+      "id": "elevenlabs",
+      "name": "ElevenLabs",
+      "logo": "elevenlabs",
+      "category": "media",
+      "description": {
+        "es": "Genera voz, efectos de sonido y transcripciones con ElevenLabs.",
+        "en": "Generate speech, sound effects and transcripts with ElevenLabs."
+      },
+      "docs_url": "https://elevenlabs.io/docs/eleven-agents/operate/hosted-mcp",
+      "server": {
+        "transport": "http",
+        "url": "https://api.elevenlabs.io/v1/mcp",
+        "auth": {
+          "kind": "oauth"
+        }
+      },
+      "setup": {
+        "kind": "client_metadata",
+        "help": {
+          "es": "ElevenLabs no ofrece registro dinámico: Rinari se identifica con su documento de metadatos de cliente (una URL pública). Si tu Rinari no tiene uno configurado, usa la alternativa con un client_id propio.",
+          "en": "ElevenLabs offers no dynamic registration: Rinari identifies itself with its client metadata document (a public URL). If your Rinari has none configured, use the alternative with your own client_id."
+        },
+        "alternatives": [
+          {
+            "kind": "own_client",
+            "fields": [
+              {
+                "name": "client_id",
+                "required": true
+              },
+              {
+                "name": "client_secret",
+                "required": false
+              },
+              {
+                "name": "redirect_port",
+                "required": false
+              }
+            ],
+            "help": {
+              "es": "Pega el client_id de un cliente OAuth tuyo de ElevenLabs. Si tu app exige una redirección exacta, registra http://127.0.0.1:<puerto>/callback y pon ese mismo puerto en «Puerto de redirección».",
+              "en": "Paste the client_id of your own ElevenLabs OAuth client. If your app needs an exact redirect, register http://127.0.0.1:<port>/callback and enter that same port as the redirect port."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "slack",
+      "name": "Slack",
+      "logo": "slack",
+      "category": "work",
+      "description": {
+        "es": "Busca y lee mensajes y canales de Slack, y envía mensajes.",
+        "en": "Search and read Slack messages and channels, and send messages."
+      },
+      "docs_url": "https://docs.slack.dev/ai/mcp-server",
+      "server": {
+        "transport": "http",
+        "url": "https://mcp.slack.com/mcp",
+        "auth": {
+          "kind": "oauth"
+        }
+      },
+      "setup": {
+        "kind": "own_client",
+        "fields": [
+          {
+            "name": "client_id",
+            "required": true
+          },
+          {
+            "name": "client_secret",
+            "required": true
+          },
+          {
+            "name": "redirect_port",
+            "required": false
+          }
+        ],
+        "console_url": "https://api.slack.com/apps",
+        "help": {
+          "es": "Slack no registra clientes solo: crea una app de Slack tuya, añade la redirección de Rinari en «OAuth & Permissions» y pega aquí su Client ID y su Client Secret. Si tu app exige una redirección exacta, registra http://127.0.0.1:<puerto>/callback y pon ese mismo puerto en «Puerto de redirección».",
+          "en": "Slack does not register clients by itself: create your own Slack app, add Rinari's redirect under OAuth & Permissions and paste its Client ID and Client Secret here. If your app needs an exact redirect, register http://127.0.0.1:<port>/callback and enter that same port as the redirect port."
+        }
+      }
+    },
+    {
+      "id": "asana",
+      "name": "Asana",
+      "logo": "asana",
+      "category": "work",
+      "description": {
+        "es": "Consulta y gestiona tareas, proyectos y portafolios de Asana.",
+        "en": "Look up and manage Asana tasks, projects and portfolios."
+      },
+      "docs_url": "https://developers.asana.com/docs/using-asanas-mcp-server",
+      "server": {
+        "transport": "http",
+        "url": "https://mcp.asana.com/v2/mcp",
+        "auth": {
+          "kind": "oauth"
+        }
+      },
+      "setup": {
+        "kind": "own_client",
+        "fields": [
+          {
+            "name": "client_id",
+            "required": true
+          },
+          {
+            "name": "client_secret",
+            "required": false
+          },
+          {
+            "name": "redirect_port",
+            "required": false
+          }
+        ],
+        "console_url": "https://app.asana.com/0/my-apps",
+        "help": {
+          "es": "Asana no registra clientes solo: crea una app en la consola de desarrolladores de Asana, añade la redirección de Rinari y pega aquí su client_id (y el secreto si la app lo tiene). Si tu app exige una redirección exacta, registra http://127.0.0.1:<puerto>/callback y pon ese mismo puerto en «Puerto de redirección».",
+          "en": "Asana does not register clients by itself: create an app in Asana's developer console, add Rinari's redirect and paste its client_id here (and its secret if the app has one). If your app needs an exact redirect, register http://127.0.0.1:<port>/callback and enter that same port as the redirect port."
+        }
+      }
+    },
+    {
+      "id": "hubspot",
+      "name": "HubSpot",
+      "logo": "hubspot",
+      "category": "crm",
+      "description": {
+        "es": "Consulta contactos, empresas, negocios y tickets del CRM de HubSpot.",
+        "en": "Look up HubSpot CRM contacts, companies, deals and tickets."
+      },
+      "docs_url": "https://developers.hubspot.com/mcp",
+      "server": {
+        "transport": "http",
+        "url": "https://mcp.hubspot.com",
+        "auth": {
+          "kind": "oauth"
+        }
+      },
+      "setup": {
+        "kind": "own_client",
+        "fields": [
+          {
+            "name": "client_id",
+            "required": true
+          },
+          {
+            "name": "client_secret",
+            "required": true
+          },
+          {
+            "name": "redirect_port",
+            "required": false
+          }
+        ],
+        "console_url": "https://developers.hubspot.com/",
+        "help": {
+          "es": "HubSpot no registra clientes solo: crea una app en tu cuenta de desarrollador de HubSpot, añade la redirección de Rinari y pega aquí su Client ID y su Client Secret. Si tu app exige una redirección exacta, registra http://127.0.0.1:<puerto>/callback y pon ese mismo puerto en «Puerto de redirección».",
+          "en": "HubSpot does not register clients by itself: create an app in your HubSpot developer account, add Rinari's redirect and paste its Client ID and Client Secret here. If your app needs an exact redirect, register http://127.0.0.1:<port>/callback and enter that same port as the redirect port."
+        }
+      }
+    },
+    {
+      "id": "github",
+      "name": "GitHub",
+      "logo": "github",
+      "category": "dev",
+      "description": {
+        "es": "Consulta y gestiona repositorios, incidencias, pull requests y acciones de GitHub.",
+        "en": "Look up and manage GitHub repositories, issues, pull requests and actions."
+      },
+      "docs_url": "https://github.com/github/github-mcp-server",
+      "server": {
+        "transport": "http",
+        "url": "https://api.githubcopilot.com/mcp/",
+        "auth": {
+          "kind": "bearer"
+        }
+      },
+      "setup": {
+        "kind": "token",
+        "fields": [
+          {
+            "name": "token",
+            "required": true
+          }
+        ],
+        "console_url": "https://github.com/settings/personal-access-tokens",
+        "help": {
+          "es": "Crea un token personal de GitHub (mejor «fine-grained», solo con los repositorios y permisos que quieras dar) y pégalo aquí. Se guarda en el almacén de credenciales y Rinari lo envía como Bearer.",
+          "en": "Create a GitHub personal access token (preferably fine-grained, with only the repositories and permissions you want to give) and paste it here. It is kept in the credential store and sent as a Bearer token."
+        },
+        "alternatives": [
+          {
+            "kind": "own_client",
+            "fields": [
+              {
+                "name": "client_id",
+                "required": true
+              },
+              {
+                "name": "client_secret",
+                "required": true
+              },
+              {
+                "name": "redirect_port",
+                "required": false
+              }
+            ],
+            "console_url": "https://github.com/settings/developers",
+            "help": {
+              "es": "O crea una OAuth App propia en GitHub y pega su Client ID y su Client Secret para iniciar sesión en el navegador. Si tu app exige una redirección exacta, registra http://127.0.0.1:<puerto>/callback y pon ese mismo puerto en «Puerto de redirección».",
+              "en": "Or create your own GitHub OAuth App and paste its Client ID and Client Secret to sign in in the browser. If your app needs an exact redirect, register http://127.0.0.1:<port>/callback and enter that same port as the redirect port."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "google-workspace",
+      "name": "Google Workspace",
+      "logo": "google-workspace",
+      "category": "google",
+      "group": "google",
+      "preview": true,
+      "description": {
+        "es": "Todo Google Workspace en un solo conector: correo, archivos, documentos y calendario.",
+        "en": "All of Google Workspace in one connector: mail, files, documents and calendar."
+      },
+      "notes": {
+        "es": "Los MCP de Google Workspace están en Developer Preview: tu cuenta tiene que estar inscrita y aceptada en el programa de vista previa de Google Workspace antes de conectar. En modo «Prueba» la sesión vence a los 7 días; publicada, no vence.",
+        "en": "Google Workspace MCP servers are in Developer Preview: your account has to be enrolled and accepted in the Google Workspace preview program before connecting. In Testing mode the sign-in expires after 7 days; published, it does not."
+      },
+      "docs_url": "https://developers.google.com/workspace/guides/configure-mcp-servers",
+      "server": {
+        "transport": "http",
+        "url": "https://workspacemcp.googleapis.com/mcp/v1",
+        "auth": {
+          "kind": "oauth",
+          "authorize_params": {
+            "access_type": "offline"
+          }
+        }
+      },
+      "setup": {
+        "kind": "own_client",
+        "fields": [
+          {
+            "name": "client_id",
+            "required": true
+          },
+          {
+            "name": "client_secret",
+            "required": true
+          },
+          {
+            "name": "redirect_port",
+            "required": false
+          }
+        ],
+        "console_url": "https://console.cloud.google.com/apis/credentials",
+        "help": {
+          "es": "Google va con tu propio cliente OAuth: 1) inscríbete en el programa Developer Preview de Google Workspace; 2) crea un proyecto en Google Cloud; 3) activa la API normal y la API MCP de cada servicio que quieras usar (por ejemplo gmail.googleapis.com y gmailmcp.googleapis.com); 4) configura la pantalla de consentimiento («Interno» si es una cuenta de Workspace; «Externo» con tu cuenta como usuario de prueba si es personal); 5) crea un cliente OAuth «Aplicación web», marca «Use this client for an AI-powered agent» y registra http://127.0.0.1:<puerto>/callback; 6) pega aquí su Client ID, su Client Secret y ese puerto. El mismo cliente sirve para todos los conectores de Google.",
+          "en": "Google uses your own OAuth client: 1) enroll in the Google Workspace Developer Preview program; 2) create a Google Cloud project; 3) enable the regular API and the MCP API of each service you want to use (for example gmail.googleapis.com and gmailmcp.googleapis.com); 4) set up the consent screen (Internal for a Workspace account; External with yourself as a test user for a personal one); 5) create a Web application OAuth client, tick «Use this client for an AI-powered agent» and register http://127.0.0.1:<port>/callback; 6) paste its Client ID, Client Secret and that port here. The same client works for every Google connector."
+        }
+      }
+    },
+    {
+      "id": "google-gmail",
+      "name": "Gmail",
+      "logo": "google-gmail",
+      "category": "google",
+      "group": "google",
+      "preview": true,
+      "description": {
+        "es": "Busca, lee y redacta correos de Gmail.",
+        "en": "Search, read and draft Gmail messages."
+      },
+      "notes": {
+        "es": "Los MCP de Google Workspace están en Developer Preview: tu cuenta tiene que estar inscrita y aceptada en el programa de vista previa de Google Workspace antes de conectar. En modo «Prueba» la sesión vence a los 7 días; publicada, no vence.",
+        "en": "Google Workspace MCP servers are in Developer Preview: your account has to be enrolled and accepted in the Google Workspace preview program before connecting. In Testing mode the sign-in expires after 7 days; published, it does not."
+      },
+      "docs_url": "https://developers.google.com/workspace/gmail/api/guides/configure-mcp-server",
+      "server": {
+        "transport": "http",
+        "url": "https://gmailmcp.googleapis.com/mcp/v1",
+        "auth": {
+          "kind": "oauth",
+          "authorize_params": {
+            "access_type": "offline"
+          }
+        }
+      },
+      "setup": {
+        "kind": "own_client",
+        "fields": [
+          {
+            "name": "client_id",
+            "required": true
+          },
+          {
+            "name": "client_secret",
+            "required": true
+          },
+          {
+            "name": "redirect_port",
+            "required": false
+          }
+        ],
+        "console_url": "https://console.cloud.google.com/apis/credentials",
+        "help": {
+          "es": "Google va con tu propio cliente OAuth: 1) inscríbete en el programa Developer Preview de Google Workspace; 2) crea un proyecto en Google Cloud; 3) activa la Gmail API (gmail.googleapis.com) y su API MCP (gmailmcp.googleapis.com); 4) configura la pantalla de consentimiento («Interno» si es una cuenta de Workspace; «Externo» con tu cuenta como usuario de prueba si es personal); 5) crea un cliente OAuth «Aplicación web», marca «Use this client for an AI-powered agent» y registra http://127.0.0.1:<puerto>/callback; 6) pega aquí su Client ID, su Client Secret y ese puerto. El mismo cliente sirve para todos los conectores de Google.",
+          "en": "Google uses your own OAuth client: 1) enroll in the Google Workspace Developer Preview program; 2) create a Google Cloud project; 3) enable the Gmail API (gmail.googleapis.com) and its MCP API (gmailmcp.googleapis.com); 4) set up the consent screen (Internal for a Workspace account; External with yourself as a test user for a personal one); 5) create a Web application OAuth client, tick «Use this client for an AI-powered agent» and register http://127.0.0.1:<port>/callback; 6) paste its Client ID, Client Secret and that port here. The same client works for every Google connector."
+        }
+      }
+    },
+    {
+      "id": "google-drive",
+      "name": "Google Drive",
+      "logo": "google-drive",
+      "category": "google",
+      "group": "google",
+      "preview": true,
+      "description": {
+        "es": "Busca y lee archivos de Google Drive.",
+        "en": "Search and read Google Drive files."
+      },
+      "notes": {
+        "es": "Los MCP de Google Workspace están en Developer Preview: tu cuenta tiene que estar inscrita y aceptada en el programa de vista previa de Google Workspace antes de conectar. En modo «Prueba» la sesión vence a los 7 días; publicada, no vence.",
+        "en": "Google Workspace MCP servers are in Developer Preview: your account has to be enrolled and accepted in the Google Workspace preview program before connecting. In Testing mode the sign-in expires after 7 days; published, it does not."
+      },
+      "docs_url": "https://developers.google.com/workspace/drive/api/guides/configure-mcp-server",
+      "server": {
+        "transport": "http",
+        "url": "https://drivemcp.googleapis.com/mcp/v1",
+        "auth": {
+          "kind": "oauth",
+          "authorize_params": {
+            "access_type": "offline"
+          }
+        }
+      },
+      "setup": {
+        "kind": "own_client",
+        "fields": [
+          {
+            "name": "client_id",
+            "required": true
+          },
+          {
+            "name": "client_secret",
+            "required": true
+          },
+          {
+            "name": "redirect_port",
+            "required": false
+          }
+        ],
+        "console_url": "https://console.cloud.google.com/apis/credentials",
+        "help": {
+          "es": "Google va con tu propio cliente OAuth: 1) inscríbete en el programa Developer Preview de Google Workspace; 2) crea un proyecto en Google Cloud; 3) activa la Google Drive API (drive.googleapis.com) y su API MCP (drivemcp.googleapis.com); 4) configura la pantalla de consentimiento («Interno» si es una cuenta de Workspace; «Externo» con tu cuenta como usuario de prueba si es personal); 5) crea un cliente OAuth «Aplicación web», marca «Use this client for an AI-powered agent» y registra http://127.0.0.1:<puerto>/callback; 6) pega aquí su Client ID, su Client Secret y ese puerto. El mismo cliente sirve para todos los conectores de Google.",
+          "en": "Google uses your own OAuth client: 1) enroll in the Google Workspace Developer Preview program; 2) create a Google Cloud project; 3) enable the Google Drive API (drive.googleapis.com) and its MCP API (drivemcp.googleapis.com); 4) set up the consent screen (Internal for a Workspace account; External with yourself as a test user for a personal one); 5) create a Web application OAuth client, tick «Use this client for an AI-powered agent» and register http://127.0.0.1:<port>/callback; 6) paste its Client ID, Client Secret and that port here. The same client works for every Google connector."
+        }
+      }
+    },
+    {
+      "id": "google-docs",
+      "name": "Google Docs",
+      "logo": "google-docs",
+      "category": "google",
+      "group": "google",
+      "preview": true,
+      "description": {
+        "es": "Lee y edita documentos de Google Docs.",
+        "en": "Read and edit Google Docs documents."
+      },
+      "notes": {
+        "es": "Los MCP de Google Workspace están en Developer Preview: tu cuenta tiene que estar inscrita y aceptada en el programa de vista previa de Google Workspace antes de conectar. En modo «Prueba» la sesión vence a los 7 días; publicada, no vence.",
+        "en": "Google Workspace MCP servers are in Developer Preview: your account has to be enrolled and accepted in the Google Workspace preview program before connecting. In Testing mode the sign-in expires after 7 days; published, it does not."
+      },
+      "docs_url": "https://developers.google.com/workspace/docs/api/guides/configure-mcp-server",
+      "server": {
+        "transport": "http",
+        "url": "https://docsmcp.googleapis.com/mcp/v1",
+        "auth": {
+          "kind": "oauth",
+          "authorize_params": {
+            "access_type": "offline"
+          }
+        }
+      },
+      "setup": {
+        "kind": "own_client",
+        "fields": [
+          {
+            "name": "client_id",
+            "required": true
+          },
+          {
+            "name": "client_secret",
+            "required": true
+          },
+          {
+            "name": "redirect_port",
+            "required": false
+          }
+        ],
+        "console_url": "https://console.cloud.google.com/apis/credentials",
+        "help": {
+          "es": "Google va con tu propio cliente OAuth: 1) inscríbete en el programa Developer Preview de Google Workspace; 2) crea un proyecto en Google Cloud; 3) activa la Google Docs API (docs.googleapis.com) y su API MCP (docsmcp.googleapis.com); 4) configura la pantalla de consentimiento («Interno» si es una cuenta de Workspace; «Externo» con tu cuenta como usuario de prueba si es personal); 5) crea un cliente OAuth «Aplicación web», marca «Use this client for an AI-powered agent» y registra http://127.0.0.1:<puerto>/callback; 6) pega aquí su Client ID, su Client Secret y ese puerto. El mismo cliente sirve para todos los conectores de Google.",
+          "en": "Google uses your own OAuth client: 1) enroll in the Google Workspace Developer Preview program; 2) create a Google Cloud project; 3) enable the Google Docs API (docs.googleapis.com) and its MCP API (docsmcp.googleapis.com); 4) set up the consent screen (Internal for a Workspace account; External with yourself as a test user for a personal one); 5) create a Web application OAuth client, tick «Use this client for an AI-powered agent» and register http://127.0.0.1:<port>/callback; 6) paste its Client ID, Client Secret and that port here. The same client works for every Google connector."
+        }
+      }
+    },
+    {
+      "id": "google-sheets",
+      "name": "Google Sheets",
+      "logo": "google-sheets",
+      "category": "google",
+      "group": "google",
+      "preview": true,
+      "description": {
+        "es": "Lee y edita hojas de cálculo de Google Sheets.",
+        "en": "Read and edit Google Sheets spreadsheets."
+      },
+      "notes": {
+        "es": "Los MCP de Google Workspace están en Developer Preview: tu cuenta tiene que estar inscrita y aceptada en el programa de vista previa de Google Workspace antes de conectar. En modo «Prueba» la sesión vence a los 7 días; publicada, no vence.",
+        "en": "Google Workspace MCP servers are in Developer Preview: your account has to be enrolled and accepted in the Google Workspace preview program before connecting. In Testing mode the sign-in expires after 7 days; published, it does not."
+      },
+      "docs_url": "https://developers.google.com/workspace/sheets/api/guides/configure-mcp-server",
+      "server": {
+        "transport": "http",
+        "url": "https://sheetsmcp.googleapis.com/mcp/v1",
+        "auth": {
+          "kind": "oauth",
+          "authorize_params": {
+            "access_type": "offline"
+          }
+        }
+      },
+      "setup": {
+        "kind": "own_client",
+        "fields": [
+          {
+            "name": "client_id",
+            "required": true
+          },
+          {
+            "name": "client_secret",
+            "required": true
+          },
+          {
+            "name": "redirect_port",
+            "required": false
+          }
+        ],
+        "console_url": "https://console.cloud.google.com/apis/credentials",
+        "help": {
+          "es": "Google va con tu propio cliente OAuth: 1) inscríbete en el programa Developer Preview de Google Workspace; 2) crea un proyecto en Google Cloud; 3) activa la Google Sheets API (sheets.googleapis.com) y su API MCP (sheetsmcp.googleapis.com); 4) configura la pantalla de consentimiento («Interno» si es una cuenta de Workspace; «Externo» con tu cuenta como usuario de prueba si es personal); 5) crea un cliente OAuth «Aplicación web», marca «Use this client for an AI-powered agent» y registra http://127.0.0.1:<puerto>/callback; 6) pega aquí su Client ID, su Client Secret y ese puerto. El mismo cliente sirve para todos los conectores de Google.",
+          "en": "Google uses your own OAuth client: 1) enroll in the Google Workspace Developer Preview program; 2) create a Google Cloud project; 3) enable the Google Sheets API (sheets.googleapis.com) and its MCP API (sheetsmcp.googleapis.com); 4) set up the consent screen (Internal for a Workspace account; External with yourself as a test user for a personal one); 5) create a Web application OAuth client, tick «Use this client for an AI-powered agent» and register http://127.0.0.1:<port>/callback; 6) paste its Client ID, Client Secret and that port here. The same client works for every Google connector."
+        }
+      }
+    },
+    {
+      "id": "google-slides",
+      "name": "Google Slides",
+      "logo": "google-slides",
+      "category": "google",
+      "group": "google",
+      "preview": true,
+      "description": {
+        "es": "Lee y edita presentaciones de Google Slides.",
+        "en": "Read and edit Google Slides presentations."
+      },
+      "notes": {
+        "es": "Los MCP de Google Workspace están en Developer Preview: tu cuenta tiene que estar inscrita y aceptada en el programa de vista previa de Google Workspace antes de conectar. En modo «Prueba» la sesión vence a los 7 días; publicada, no vence.",
+        "en": "Google Workspace MCP servers are in Developer Preview: your account has to be enrolled and accepted in the Google Workspace preview program before connecting. In Testing mode the sign-in expires after 7 days; published, it does not."
+      },
+      "docs_url": "https://developers.google.com/workspace/slides/api/guides/configure-mcp-server",
+      "server": {
+        "transport": "http",
+        "url": "https://slidesmcp.googleapis.com/mcp/v1",
+        "auth": {
+          "kind": "oauth",
+          "authorize_params": {
+            "access_type": "offline"
+          }
+        }
+      },
+      "setup": {
+        "kind": "own_client",
+        "fields": [
+          {
+            "name": "client_id",
+            "required": true
+          },
+          {
+            "name": "client_secret",
+            "required": true
+          },
+          {
+            "name": "redirect_port",
+            "required": false
+          }
+        ],
+        "console_url": "https://console.cloud.google.com/apis/credentials",
+        "help": {
+          "es": "Google va con tu propio cliente OAuth: 1) inscríbete en el programa Developer Preview de Google Workspace; 2) crea un proyecto en Google Cloud; 3) activa la Google Slides API (slides.googleapis.com) y su API MCP (slidesmcp.googleapis.com); 4) configura la pantalla de consentimiento («Interno» si es una cuenta de Workspace; «Externo» con tu cuenta como usuario de prueba si es personal); 5) crea un cliente OAuth «Aplicación web», marca «Use this client for an AI-powered agent» y registra http://127.0.0.1:<puerto>/callback; 6) pega aquí su Client ID, su Client Secret y ese puerto. El mismo cliente sirve para todos los conectores de Google.",
+          "en": "Google uses your own OAuth client: 1) enroll in the Google Workspace Developer Preview program; 2) create a Google Cloud project; 3) enable the Google Slides API (slides.googleapis.com) and its MCP API (slidesmcp.googleapis.com); 4) set up the consent screen (Internal for a Workspace account; External with yourself as a test user for a personal one); 5) create a Web application OAuth client, tick «Use this client for an AI-powered agent» and register http://127.0.0.1:<port>/callback; 6) paste its Client ID, Client Secret and that port here. The same client works for every Google connector."
+        }
+      }
+    },
+    {
+      "id": "google-calendar",
+      "name": "Google Calendar",
+      "logo": "google-calendar",
+      "category": "google",
+      "group": "google",
+      "preview": true,
+      "description": {
+        "es": "Consulta y crea eventos de Google Calendar.",
+        "en": "Look up and create Google Calendar events."
+      },
+      "notes": {
+        "es": "Los MCP de Google Workspace están en Developer Preview: tu cuenta tiene que estar inscrita y aceptada en el programa de vista previa de Google Workspace antes de conectar. En modo «Prueba» la sesión vence a los 7 días; publicada, no vence.",
+        "en": "Google Workspace MCP servers are in Developer Preview: your account has to be enrolled and accepted in the Google Workspace preview program before connecting. In Testing mode the sign-in expires after 7 days; published, it does not."
+      },
+      "docs_url": "https://developers.google.com/workspace/calendar/api/guides/configure-mcp-server",
+      "server": {
+        "transport": "http",
+        "url": "https://calendarmcp.googleapis.com/mcp/v1",
+        "auth": {
+          "kind": "oauth",
+          "authorize_params": {
+            "access_type": "offline"
+          }
+        }
+      },
+      "setup": {
+        "kind": "own_client",
+        "fields": [
+          {
+            "name": "client_id",
+            "required": true
+          },
+          {
+            "name": "client_secret",
+            "required": true
+          },
+          {
+            "name": "redirect_port",
+            "required": false
+          }
+        ],
+        "console_url": "https://console.cloud.google.com/apis/credentials",
+        "help": {
+          "es": "Google va con tu propio cliente OAuth: 1) inscríbete en el programa Developer Preview de Google Workspace; 2) crea un proyecto en Google Cloud; 3) activa la Google Calendar API (calendar.googleapis.com) y su API MCP (calendarmcp.googleapis.com); 4) configura la pantalla de consentimiento («Interno» si es una cuenta de Workspace; «Externo» con tu cuenta como usuario de prueba si es personal); 5) crea un cliente OAuth «Aplicación web», marca «Use this client for an AI-powered agent» y registra http://127.0.0.1:<puerto>/callback; 6) pega aquí su Client ID, su Client Secret y ese puerto. El mismo cliente sirve para todos los conectores de Google.",
+          "en": "Google uses your own OAuth client: 1) enroll in the Google Workspace Developer Preview program; 2) create a Google Cloud project; 3) enable the Google Calendar API (calendar.googleapis.com) and its MCP API (calendarmcp.googleapis.com); 4) set up the consent screen (Internal for a Workspace account; External with yourself as a test user for a personal one); 5) create a Web application OAuth client, tick «Use this client for an AI-powered agent» and register http://127.0.0.1:<port>/callback; 6) paste its Client ID, Client Secret and that port here. The same client works for every Google connector."
+        }
+      }
+    },
+    {
+      "id": "google-chat",
+      "name": "Google Chat",
+      "logo": "google-chat",
+      "category": "google",
+      "group": "google",
+      "preview": true,
+      "description": {
+        "es": "Lee y envía mensajes de Google Chat.",
+        "en": "Read and send Google Chat messages."
+      },
+      "notes": {
+        "es": "Los MCP de Google Workspace están en Developer Preview: tu cuenta tiene que estar inscrita y aceptada en el programa de vista previa de Google Workspace antes de conectar. En modo «Prueba» la sesión vence a los 7 días; publicada, no vence.",
+        "en": "Google Workspace MCP servers are in Developer Preview: your account has to be enrolled and accepted in the Google Workspace preview program before connecting. In Testing mode the sign-in expires after 7 days; published, it does not."
+      },
+      "docs_url": "https://developers.google.com/workspace/chat/api/guides/configure-mcp-server",
+      "server": {
+        "transport": "http",
+        "url": "https://chatmcp.googleapis.com/mcp/v1",
+        "auth": {
+          "kind": "oauth",
+          "authorize_params": {
+            "access_type": "offline"
+          }
+        }
+      },
+      "setup": {
+        "kind": "own_client",
+        "fields": [
+          {
+            "name": "client_id",
+            "required": true
+          },
+          {
+            "name": "client_secret",
+            "required": true
+          },
+          {
+            "name": "redirect_port",
+            "required": false
+          }
+        ],
+        "console_url": "https://console.cloud.google.com/apis/credentials",
+        "help": {
+          "es": "Google va con tu propio cliente OAuth: 1) inscríbete en el programa Developer Preview de Google Workspace; 2) crea un proyecto en Google Cloud; 3) activa la Google Chat API (chat.googleapis.com) y su API MCP (chatmcp.googleapis.com); 4) configura la pantalla de consentimiento («Interno» si es una cuenta de Workspace; «Externo» con tu cuenta como usuario de prueba si es personal); 5) crea un cliente OAuth «Aplicación web», marca «Use this client for an AI-powered agent» y registra http://127.0.0.1:<puerto>/callback; 6) pega aquí su Client ID, su Client Secret y ese puerto. El mismo cliente sirve para todos los conectores de Google.",
+          "en": "Google uses your own OAuth client: 1) enroll in the Google Workspace Developer Preview program; 2) create a Google Cloud project; 3) enable the Google Chat API (chat.googleapis.com) and its MCP API (chatmcp.googleapis.com); 4) set up the consent screen (Internal for a Workspace account; External with yourself as a test user for a personal one); 5) create a Web application OAuth client, tick «Use this client for an AI-powered agent» and register http://127.0.0.1:<port>/callback; 6) paste its Client ID, Client Secret and that port here. The same client works for every Google connector."
+        }
+      }
+    },
+    {
+      "id": "google-people",
+      "name": "Google Contacts (People)",
+      "logo": "google-people",
+      "category": "google",
+      "group": "google",
+      "preview": true,
+      "description": {
+        "es": "Consulta contactos y perfiles con la People API de Google.",
+        "en": "Look up contacts and profiles with Google's People API."
+      },
+      "notes": {
+        "es": "Los MCP de Google Workspace están en Developer Preview: tu cuenta tiene que estar inscrita y aceptada en el programa de vista previa de Google Workspace antes de conectar. En modo «Prueba» la sesión vence a los 7 días; publicada, no vence.",
+        "en": "Google Workspace MCP servers are in Developer Preview: your account has to be enrolled and accepted in the Google Workspace preview program before connecting. In Testing mode the sign-in expires after 7 days; published, it does not."
+      },
+      "docs_url": "https://developers.google.com/workspace/guides/configure-mcp-servers",
+      "server": {
+        "transport": "http",
+        "url": "https://people.googleapis.com/mcp/v1",
+        "auth": {
+          "kind": "oauth",
+          "authorize_params": {
+            "access_type": "offline"
+          }
+        }
+      },
+      "setup": {
+        "kind": "own_client",
+        "fields": [
+          {
+            "name": "client_id",
+            "required": true
+          },
+          {
+            "name": "client_secret",
+            "required": true
+          },
+          {
+            "name": "redirect_port",
+            "required": false
+          }
+        ],
+        "console_url": "https://console.cloud.google.com/apis/credentials",
+        "help": {
+          "es": "Google va con tu propio cliente OAuth: 1) inscríbete en el programa Developer Preview de Google Workspace; 2) crea un proyecto en Google Cloud; 3) activa la People API (people.googleapis.com); 4) configura la pantalla de consentimiento («Interno» si es una cuenta de Workspace; «Externo» con tu cuenta como usuario de prueba si es personal); 5) crea un cliente OAuth «Aplicación web», marca «Use this client for an AI-powered agent» y registra http://127.0.0.1:<puerto>/callback; 6) pega aquí su Client ID, su Client Secret y ese puerto. El mismo cliente sirve para todos los conectores de Google.",
+          "en": "Google uses your own OAuth client: 1) enroll in the Google Workspace Developer Preview program; 2) create a Google Cloud project; 3) enable the People API (people.googleapis.com); 4) set up the consent screen (Internal for a Workspace account; External with yourself as a test user for a personal one); 5) create a Web application OAuth client, tick «Use this client for an AI-powered agent» and register http://127.0.0.1:<port>/callback; 6) paste its Client ID, Client Secret and that port here. The same client works for every Google connector."
+        }
+      }
+    },
+    {
+      "id": "postgres",
+      "name": "PostgreSQL",
+      "logo": "postgres",
+      "category": "data",
+      "description": {
+        "es": "Consulta y explora una base de datos PostgreSQL (MCP Toolbox for Databases de Google, local).",
+        "en": "Query and explore a PostgreSQL database (Google's MCP Toolbox for Databases, local)."
+      },
+      "notes": {
+        "es": "Corre en tu PC con npx (necesita Node.js). Puede ejecutar cualquier SQL: usa un usuario de la base con los permisos justos (por ejemplo solo lectura).",
+        "en": "Runs on your PC with npx (needs Node.js). It can run any SQL: use a database user with just the permissions it needs (read-only, for instance)."
+      },
+      "docs_url": "https://mcp-toolbox.dev/integrations/postgres/prebuilt-configs/",
+      "tools": [
+        "execute_sql",
+        "list_tables",
+        "list_schemas",
+        "list_views",
+        "list_indexes",
+        "get_query_plan",
+        "database_overview",
+        "list_active_queries"
+      ],
+      "server": {
+        "transport": "stdio",
+        "command": [
+          "npx",
+          "-y",
+          "@toolbox-sdk/server",
+          "--prebuilt=postgres",
+          "--stdio"
+        ],
+        "env": [
+          {
+            "name": "POSTGRES_HOST",
+            "label": {
+              "es": "Servidor",
+              "en": "Host"
+            },
+            "secret": false,
+            "required": false,
+            "default": "localhost"
+          },
+          {
+            "name": "POSTGRES_PORT",
+            "label": {
+              "es": "Puerto",
+              "en": "Port"
+            },
+            "secret": false,
+            "required": false,
+            "default": "5432"
+          },
+          {
+            "name": "POSTGRES_DATABASE",
+            "label": {
+              "es": "Base de datos",
+              "en": "Database"
+            },
+            "secret": false,
+            "required": true
+          },
+          {
+            "name": "POSTGRES_USER",
+            "label": {
+              "es": "Usuario",
+              "en": "User"
+            },
+            "secret": false,
+            "required": true
+          },
+          {
+            "name": "POSTGRES_PASSWORD",
+            "label": {
+              "es": "Contraseña",
+              "en": "Password"
+            },
+            "secret": true,
+            "required": true
+          },
+          {
+            "name": "POSTGRES_QUERY_PARAMS",
+            "label": {
+              "es": "Parámetros extra (sslmode=require…)",
+              "en": "Extra parameters (sslmode=require…)"
+            },
+            "secret": false,
+            "required": false
+          }
+        ],
+        "connection_string": {
+          "schemes": [
+            "postgres",
+            "postgresql"
+          ],
+          "env": {
+            "host": "POSTGRES_HOST",
+            "port": "POSTGRES_PORT",
+            "database": "POSTGRES_DATABASE",
+            "user": "POSTGRES_USER",
+            "password": "POSTGRES_PASSWORD",
+            "query": "POSTGRES_QUERY_PARAMS"
+          }
+        }
+      },
+      "setup": {
+        "kind": "secrets",
+        "fields": [
+          {
+            "name": "connection_string",
+            "required": false
+          }
+        ],
+        "help": {
+          "es": "Pega la cadena de conexión (postgresql://usuario:contraseña@servidor:5432/base) o rellena cada campo. Todo se guarda en el almacén de credenciales y no se vuelve a mostrar.",
+          "en": "Paste the connection string (postgresql://user:password@host:5432/database) or fill in each field. Everything is kept in the credential store and never shown again."
+        }
+      }
+    },
+    {
+      "id": "sqlite",
+      "name": "SQLite",
+      "logo": "sqlite",
+      "category": "data",
+      "description": {
+        "es": "Consulta y explora un archivo SQLite (MCP Toolbox for Databases de Google, local).",
+        "en": "Query and explore a SQLite file (Google's MCP Toolbox for Databases, local)."
+      },
+      "notes": {
+        "es": "Corre en tu PC con npx (necesita Node.js). Puede ejecutar cualquier SQL sobre el archivo: haz una copia si no quieres que se modifique.",
+        "en": "Runs on your PC with npx (needs Node.js). It can run any SQL on the file: work on a copy if it must not change."
+      },
+      "docs_url": "https://mcp-toolbox.dev/integrations/sqlite/prebuilt-configs/sqlite/",
+      "tools": [
+        "execute_sql",
+        "list_tables"
+      ],
+      "server": {
+        "transport": "stdio",
+        "command": [
+          "npx",
+          "-y",
+          "@toolbox-sdk/server",
+          "--prebuilt=sqlite",
+          "--stdio"
+        ],
+        "env": [
+          {
+            "name": "SQLITE_DATABASE",
+            "label": {
+              "es": "Archivo de la base",
+              "en": "Database file"
+            },
+            "secret": false,
+            "required": true
+          }
+        ],
+        "connection_string": {
+          "schemes": [
+            "sqlite",
+            "file"
+          ],
+          "env": {
+            "path": "SQLITE_DATABASE"
+          }
+        }
+      },
+      "setup": {
+        "kind": "secrets",
+        "fields": [
+          {
+            "name": "connection_string",
+            "required": false
+          }
+        ],
+        "help": {
+          "es": "Pon la ruta del archivo .db o .sqlite (o una cadena sqlite:///ruta). Se guarda en el almacén de credenciales.",
+          "en": "Enter the path of the .db or .sqlite file (or a sqlite:///path string). It is kept in the credential store."
+        }
+      }
+    }
+  ]
+}
