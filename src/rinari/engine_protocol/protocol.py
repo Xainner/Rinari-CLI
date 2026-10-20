@@ -229,6 +229,9 @@ CAPABILITIES: dict[str, bool] = {
     # would_run with the delivery it would send, blocked, not_rehearsable when
     # its first tool may change something, failed). Nothing is ever sent.
     "agency_rule_rehearsal_v1": True,
+    # «Detener a todos»: agency.stop_all cancels the turns of every agent of the
+    # profile and pauses their active rules; event agency.stopped.
+    "agency_stop_all_v1": True,
     # soul.settings.get/set: character intensity (minimal | balanced | full),
     # separate from Soul selection; bundled default Soul 4.0.
     "soul_character_intensity_v1": True,

@@ -237,6 +237,46 @@ class AgencyMethods:
         threading.Thread(target=run, name="agency-draft", daemon=True).start()
         return {"status": "started", "job_id": job_id}
 
+    def stop_all(self, params: dict[str, Any]) -> dict[str, Any]:
+        """«Detener a todos» (section 8): stop every agent of the profile now.
+
+        Cancels the turns running in their conversations and pauses their
+        active rules, so nothing starts again on its own. Nothing is lost:
+        the owner turns the rules back on in «Reglas». Rinari's own
+        conversations are not touched.
+        """
+        profile = self._server._profile_filter(params)
+        agents = {agent["id"] for agent in self.agency.list(profile)}
+        sessions = {
+            session_id
+            for agent_id in agents
+            for session_id in self._services.ctx.agency_repo.session_ids(agent_id)
+        }
+        cancelled = []
+        for turn in self._turns.runtime_state()["active_turns"]:
+            if turn["session_id"] in sessions and turn["session_id"] not in cancelled:
+                try:
+                    self._turns.cancel_turn(turn["session_id"])
+                    cancelled.append(turn["session_id"])
+                except Exception:  # already finishing: nothing left to stop
+                    continue
+        paused = []
+        for task in self._services.ctx.schedule_repo.list():
+            if task.get("agent_id") in agents and task.get("enabled"):
+                self._services.schedules.update(task["id"], {"enabled": False})
+                paused.append(task["id"])
+        self._turns.emit_external(
+            event(
+                "agency.stopped",
+                {"cancelled_sessions": cancelled, "paused_rules": paused},
+            )
+        )
+        for task_id in paused:
+            self._turns.emit_external(
+                event("schedule.changed", {"task_id": task_id, "change": "updated"})
+            )
+        return {"cancelled_turns": len(cancelled), "paused_rules": len(paused)}
+
     def status(self, params: dict[str, Any]) -> dict[str, Any]:
         """What the Agency card says: how many agents, working and waiting."""
         profile = self._server._profile_filter(params)

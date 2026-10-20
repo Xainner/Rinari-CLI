@@ -680,3 +680,35 @@ def test_new_destinations_follow_the_agents_card_and_its_external_triggers(serve
         )
     )
     assert _ask_new_destinations(services, show(agent["session_id"])) is True
+
+
+def test_stop_all_stops_the_agents_and_only_them(server, monkeypatch) -> None:
+    agent = _ok(_call(server, "agency.agent.create", {"agent": {"name": "Emails"}}))["agent"]
+    rinari = _ok(_call(server, "session.create", {"chat": True}))["session"]
+    services = server._services
+    own_rule = services.schedules.create({**_rule(), "agent_id": agent["id"]})
+    rinari_task = services.schedules.create(
+        {
+            "name": "Recordatorio",
+            "kind": "reminder",
+            "schedule": {"kind": "daily", "time": "08:00"},
+            "prompt": "Agua",
+        }
+    )
+    state = {
+        "active_turns": [
+            {"session_id": agent["session_id"], "turn_id": "t1"},
+            {"session_id": rinari["id"], "turn_id": "t2"},
+        ],
+        "pending_approvals": [],
+    }
+    monkeypatch.setattr(server._turns, "runtime_state", lambda: state)
+    cancelled = []
+    monkeypatch.setattr(server._turns, "cancel_turn", lambda sid: cancelled.append(sid) or {})
+    result = _ok(_call(server, "agency.stop_all", {"rinari_profile_id": "active"}))
+    assert result == {"cancelled_turns": 1, "paused_rules": 1}
+    assert cancelled == [agent["session_id"]]
+    assert services.schedules.get(own_rule["id"])["enabled"] is False
+    assert services.schedules.get(rinari_task["id"])["enabled"] is True
+    stopped = [evt for evt in server.drain_events() if evt.get("event") == "agency.stopped"]
+    assert stopped[-1]["payload"]["paused_rules"] == [own_rule["id"]]
