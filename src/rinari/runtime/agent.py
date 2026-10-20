@@ -223,6 +223,44 @@ def _prefix_hashes(request: ModelRequest) -> dict[str, str]:
     return {"system": digest(system), "tools": digest(tools)}
 
 
+def _message_digests(request: ModelRequest) -> list[str]:
+    """One short hash per conversation message, the volatile turn note left out.
+
+    Covers what a provider replays: role, text, tool calls and the provider's
+    own continuation (reasoning, signatures), so a message sent differently
+    from one request to the next shows up even when its text is the same.
+    """
+    import hashlib
+
+    digests = []
+    for message in request.messages:
+        if message.role == "system" or message.is_turn_context:
+            continue
+        raw = json.dumps(
+            [
+                message.role,
+                message.content,
+                [[tc.id, tc.name, tc.arguments] for tc in message.tool_calls],
+                message.tool_call_id,
+                message.name,
+                message.continuation,
+            ],
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        digests.append(hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12])
+    return digests
+
+
+def _first_divergence(before: list[str], after: list[str]) -> int | None:
+    """Index of the first earlier message the new request no longer repeats."""
+    for index, digest in enumerate(before):
+        if index >= len(after) or after[index] != digest:
+            return index
+    return None
+
+
 def _watch_prefix(ctx: AgentContext, request: ModelRequest) -> dict[str, Any]:
     """Hash the part of the request providers cache; warn when it moves (F42).
 
@@ -235,11 +273,29 @@ def _watch_prefix(ctx: AgentContext, request: ModelRequest) -> dict[str, Any]:
 
     exposure = getattr(ctx.tool_ctx, "exposure", None)
     key = getattr(exposure, "key", None)
-    current = {**_prefix_hashes(request), "key": key, "segments": ctx.prompt_segments or {}}
+    current = {
+        **_prefix_hashes(request),
+        "key": key,
+        "segments": ctx.prompt_segments or {},
+        "messages": _message_digests(request),
+    }
     previous = ctx.prefix_hashes
     if previous is None and ctx.session_state is not None:
         previous = ctx.session_state.get("prefix")
     if isinstance(previous, dict) and previous != current:
+        # The conversation itself: the next request repeats every earlier
+        # message as it was sent, or the cache stops at the first that moved.
+        diverged = _first_divergence(list(previous.get("messages") or ()), current["messages"])
+        if diverged is not None and previous.get("key") == key:
+            roles = [
+                m.role for m in request.messages if m.role != "system" and not m.is_turn_context
+            ]
+            logging.getLogger("rinari.cache").warning(
+                "Conversation resent differently in session %s from message %d (%s)",
+                ctx.session_id,
+                diverged,
+                roles[diverged] if diverged < len(roles) else "gone",
+            )
         changed = [part for part in ("system", "tools") if previous.get(part) != current[part]]
         if changed:
             expected = previous.get("key") != key
