@@ -185,6 +185,11 @@ CAPABILITIES: dict[str, bool] = {
     # env/header secrets in the CredentialStore, mcp.update, mcp.probe and the
     # structured mcp.test diagnosis (code, http_status, hint, latency_ms).
     "mcp_remote_v1": True,
+    # OAuth for remote MCP servers (plan de conectores C1): auth.kind "oauth",
+    # mcp.auth.start/status/cancel/signout, mcp.auth.progress/finished, the
+    # `oauth` support block in mcp.test/mcp.probe, hints oauth_required and
+    # reauth_required, and MCP 2025-06-18 with negotiation down.
+    "mcp_oauth_v1": True,
     # soul.settings.get/set: character intensity (minimal | balanced | full),
     # separate from Soul selection; bundled default Soul 4.0.
     "soul_character_intensity_v1": True,

@@ -15,6 +15,17 @@ TLS verification is always on. The legacy HTTP+SSE transport (2024-11-05:
 speaks it is reported as ``TRANSPORT_UNSUPPORTED`` (hint
 ``legacy_sse_unsupported``).
 
+Version: ``initialize`` asks for the latest version this client speaks
+(2025-06-18) and follows the server down to an older supported one; a server
+that answers with a version Rinari does not speak is refused
+(``TRANSPORT_PROTOCOL``, hint ``protocol_version_unsupported``).
+
+OAuth (plan de conectores C1): with an ``auth`` session (``oauth.OAuthSession``)
+every request carries its bearer token, refreshed before it expires. A 401
+refreshes it and retries the request once; when that is impossible the error
+carries the hint ``reauth_required`` (``oauth_required`` if the server was
+never signed in).
+
 Secrets: header values (``Authorization`` etc.) are never part of any error
 message, and URLs in messages are reduced to scheme://host[:port]/path so a
 token in a query string never leaks either.
@@ -29,18 +40,23 @@ import threading
 import time
 from collections.abc import Iterator, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 import httpx
 
-from .protocol import McpMessage, parse_message
+from .protocol import (
+    LATEST_PROTOCOL_VERSION,
+    SUPPORTED_PROTOCOL_VERSIONS,
+    McpMessage,
+    parse_message,
+)
 from .transport import McpTransport, TransportError
 
 SESSION_HEADER = "Mcp-Session-Id"
 PROTOCOL_HEADER = "MCP-Protocol-Version"
-#: Version requested on `initialize` over HTTP (Streamable HTTP appeared in it).
-HTTP_PROTOCOL_VERSION = "2025-03-26"
+#: Version requested on `initialize` over HTTP (the server may answer an older one).
+HTTP_PROTOCOL_VERSION = LATEST_PROTOCOL_VERSION
 _ACCEPT = "application/json, text/event-stream"
 # A call that keeps reporting progress may wait this long in all.
 MAX_PROGRESS_WAIT_S = 30 * 60.0
@@ -77,6 +93,16 @@ def _is_tls_error(exc: BaseException) -> bool:
     return False
 
 
+class AuthSession(Protocol):
+    """Bearer tokens for a transport (`oauth.OAuthSession`)."""
+
+    def authorization(self) -> str | None: ...
+
+    def recover(self, sent: str | None) -> bool: ...
+
+    def failure_hint(self) -> str: ...
+
+
 class StreamableHttpTransport(McpTransport):
     preferred_protocol_version = HTTP_PROTOCOL_VERSION
 
@@ -89,9 +115,13 @@ class StreamableHttpTransport(McpTransport):
         verify: bool | ssl.SSLContext | None = None,
         client: httpx.Client | None = None,
         home: Path | str | None = None,
+        auth: AuthSession | None = None,
     ) -> None:
         self._url = url
         self._headers = dict(headers or {})
+        self._auth = auth
+        # The `Authorization` value of the last request (from `auth`).
+        self._auth_header: str | None = None
         self._timeout_s = timeout_s
         # None: the certificates of the owner's network settings (network.json).
         self._verify = verify
@@ -174,6 +204,8 @@ class StreamableHttpTransport(McpTransport):
             "Accept": _ACCEPT,
             "Content-Type": "application/json",
         }
+        if self._auth_header is not None:
+            headers["Authorization"] = self._auth_header
         if self._session_id is not None:
             headers[SESSION_HEADER] = self._session_id
         if self._protocol_version is not None:
@@ -192,12 +224,51 @@ class StreamableHttpTransport(McpTransport):
         expected = sent.get("id") if isinstance(sent, dict) else None
         method = sent.get("method") if isinstance(sent, dict) else None
         with self._lock:
-            message = self._post_request(payload, expected, timeout_s)
+            message = self._post_authorized(payload, expected, timeout_s)
         if method == "initialize" and isinstance(message.result, dict):
             version = message.result.get("protocolVersion")
             if isinstance(version, str) and version:
+                if version not in SUPPORTED_PROTOCOL_VERSIONS:
+                    raise TransportError(
+                        "TRANSPORT_PROTOCOL",
+                        f"the server speaks MCP {version[:32]!r}, which Rinari does not support "
+                        f"(it speaks {', '.join(SUPPORTED_PROTOCOL_VERSIONS)})",
+                        hint="protocol_version_unsupported",
+                    )
                 self._protocol_version = version
         return message
+
+    def _post_authorized(self, payload: str, expected: Any, timeout_s: float) -> McpMessage:
+        """One request; with OAuth, a 401 refreshes the token and retries once."""
+        if self._auth is None:
+            return self._post_request(payload, expected, timeout_s)
+        self._auth_header = self._auth.authorization()
+        try:
+            return self._post_request(payload, expected, timeout_s)
+        except TransportError as exc:
+            if exc.http_status != 401:
+                raise
+            if not self._auth.recover(self._auth_header):
+                raise TransportError(
+                    "TRANSPORT_AUTH",
+                    "the server needs you to sign in again (HTTP 401)"
+                    if self._auth.failure_hint() == "reauth_required"
+                    else "the server needs you to sign in (HTTP 401)",
+                    http_status=401,
+                    hint=self._auth.failure_hint(),
+                ) from exc
+        self._auth_header = self._auth.authorization()
+        try:
+            return self._post_request(payload, expected, timeout_s)
+        except TransportError as exc:
+            if exc.http_status != 401:
+                raise
+            raise TransportError(
+                "TRANSPORT_AUTH",
+                "the server rejected the renewed sign-in (HTTP 401); sign in again",
+                http_status=401,
+                hint="reauth_required",
+            ) from exc
 
     def notify(self, payload: str) -> None:
         if self._closed:
@@ -302,7 +373,9 @@ class StreamableHttpTransport(McpTransport):
             return
         if status in (401, 403):
             challenge = response.headers.get("www-authenticate", "")
-            sent_auth = any(k.lower() == "authorization" for k in self._headers)
+            sent_auth = self._auth_header is not None or any(
+                k.lower() == "authorization" for k in self._headers
+            )
             hint = (
                 "oauth_required"
                 if "resource_metadata" in challenge and not sent_auth
@@ -450,6 +523,7 @@ __all__ = [
     "HTTP_PROTOCOL_VERSION",
     "PROTOCOL_HEADER",
     "SESSION_HEADER",
+    "AuthSession",
     "StreamableHttpTransport",
     "safe_url",
 ]

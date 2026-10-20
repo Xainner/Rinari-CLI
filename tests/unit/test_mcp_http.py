@@ -231,7 +231,8 @@ def test_json_response_session_and_protocol_headers(remote) -> None:
     assert [t.name for t in tools] == ["echo", "sum"]
     init = remote.requests[0]
     assert init["body"]["method"] == "initialize"
-    assert init["body"]["params"]["protocolVersion"] == "2025-03-26"
+    # Rinari asks for 2025-06-18 and follows the server down to 2025-03-26.
+    assert init["body"]["params"]["protocolVersion"] == "2025-06-18"
     assert "application/json" in init["headers"]["Accept"]
     assert "text/event-stream" in init["headers"]["Accept"]
     assert "Mcp-Session-Id" not in init["headers"]
@@ -494,7 +495,7 @@ def test_stdio_env_values_are_stored_as_secrets(services, app_ctx) -> None:
         {"url": "https://example.com/mcp", "auth": {"kind": "bearer"}},
         {"url": "https://example.com/mcp", "auth": {"kind": "bearer", "token": "keyring://x"}},
         {"url": "https://example.com/mcp", "headers": {"Mcp-Session-Id": "x"}},
-        {"url": "https://example.com/mcp", "auth": {"kind": "oauth"}},
+        {"url": "https://example.com/mcp", "auth": {"kind": "oauth", "client_secret": "pw"}},
     ],
 )
 def test_invalid_remote_configs_are_rejected(services, kwargs) -> None:

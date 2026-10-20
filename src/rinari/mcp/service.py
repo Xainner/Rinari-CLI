@@ -27,10 +27,12 @@ from rinari.shared.clock import now_iso
 from rinari.shared.errors import RinariError
 from rinari.trust import TrustService
 
+from . import oauth
 from .adapter import mcp_tool_definitions
 from .client import McpClient, McpError, McpToolInfo
 from .config import (
     AUTH_BEARER,
+    AUTH_OAUTH,
     DEFAULT_TIMEOUT_S,
     TRANSPORT_HTTP,
     TRANSPORT_STDIO,
@@ -207,6 +209,8 @@ class McpService:
 
         if draft.auth_kind == AUTH_BEARER:
             store(draft.auth_token, "auth-token")
+        if draft.auth_kind == AUTH_OAUTH and draft.oauth is not None:
+            store(draft.oauth.client_secret, "oauth-client-secret")
         for header_name, header in draft.headers.items():
             store(header.secret, f"header-{header_name.lower()}")
         for env_name, slot in draft.env.items():
@@ -223,6 +227,11 @@ class McpService:
         row = self._ctx.mcp_server_repo.find(name, scope)
         removed = self._ctx.mcp_server_repo.delete(name, scope)
         if removed and row is not None:
+            # OAuth tokens: revoked when possible, then deleted (before the
+            # client secret they may need is retired).
+            oauth.forget_server(
+                self._credentials, row["id"], draft_from_row(row), home=self._ctx.home
+            )
             self._retire_refs(config_refs(stored_config(row)))
         return removed
 
@@ -272,9 +281,11 @@ class McpService:
             ) from exc
 
     def _transport_for(self, row: dict) -> McpTransport:
-        return self._transport_from_draft(draft_from_row(row))
+        return self._transport_from_draft(draft_from_row(row), row.get("id"))
 
-    def _transport_from_draft(self, draft: ServerDraft) -> McpTransport:
+    def _transport_from_draft(
+        self, draft: ServerDraft, server_id: str | None = None
+    ) -> McpTransport:
         timeout = draft.timeout_s or DEFAULT_TIMEOUT_S
         if draft.transport == TRANSPORT_STDIO:
             env: dict[str, str] = {}
@@ -299,7 +310,14 @@ class McpService:
                 token = self._resolve(draft.auth_token, "auth.token")
                 headers["Authorization"] = f"Bearer {token}"
             return StreamableHttpTransport(
-                draft.url, headers=headers, timeout_s=timeout, home=self._ctx.home
+                draft.url,
+                headers=headers,
+                timeout_s=timeout,
+                home=self._ctx.home,
+                # Saved OAuth servers only: tokens are kept per server id.
+                auth=oauth.session_for(
+                    self._credentials, server_id or "", draft, home=self._ctx.home
+                ),
             )
         raise McpError(
             "MCP_TRANSPORT_UNSUPPORTED",
@@ -439,7 +457,7 @@ class McpService:
             )
         draft = draft_from_row(row)
         try:
-            transport = self._transport_from_draft(draft)
+            transport = self._transport_from_draft(draft, row.get("id"))
         except McpError as exc:
             return _failure(name, draft.transport, exc)
         timeout = min(draft.timeout_s or DEFAULT_TIMEOUT_S, TEST_TIMEOUT_CAP_S)
@@ -464,17 +482,19 @@ class McpService:
         re-typing a stored token. Raises ValueError/LookupError on invalid
         input; connection failures are reported in the result.
         """
+        server_id: str | None = None
         if name is not None:
             existing = self._ctx.mcp_server_repo.find(name, scope)
             if existing is None:
                 raise LookupError(name)
             draft = draft_from_row(existing)
+            server_id = existing.get("id")
         else:
             draft = ServerDraft()
         draft = apply_patch(draft, params)
         validate_draft(draft)
         try:
-            transport = self._transport_from_draft(draft)
+            transport = self._transport_from_draft(draft, server_id)
         except McpError as exc:
             return _failure(name, draft.transport, exc)
         timeout = min(draft.timeout_s or DEFAULT_TIMEOUT_S, TEST_TIMEOUT_CAP_S)
