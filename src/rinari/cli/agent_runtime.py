@@ -54,7 +54,7 @@ from rinari.storage.records import (
 from rinari.tools.activity import activity_output_sink as _activity_output_sink
 from rinari.tools.definition import ToolContext
 from rinari.tools.exposure import ToolExposure
-from rinari.tools.index import deferred_index
+from rinari.tools.index import connected_index, deferred_index
 from rinari.tools.native import all_native_tools
 from rinari.tools.native.process import ProcessRegistry
 from rinari.tools.registry import ToolRegistry
@@ -315,9 +315,7 @@ def build_assembler_context(
         project_instructions=instructions,
         skill_catalog=catalog,
         tool_index=deferred_index(registry) if registry is not None else None,
-        connected_index=(
-            deferred_index(registry, connected=True) if registry is not None else None
-        ),
+        connected_index=(connected_index(registry, services.mcp) if registry is not None else None),
         skills=skills_tuple,
         task_state=task_state,
         memory=_memory_text(services, root, record=record),
@@ -1056,8 +1054,9 @@ def build_agent_session(
         model_ref=record.model_id,
         tool_ctx=tool_ctx,
         assembler_base=build_assembler_context(services, record, profile, tools.registry),
-        # What is connected, from the live registry on every request (C2).
-        connected_index=lambda: deferred_index(tools.registry, connected=True),
+        # What is connected, from the live registry and the MCP servers'
+        # state on every request (C2, C6).
+        connected_index=lambda: connected_index(tools.registry, services.mcp),
         history=_restore_history(services, record),
         collect_subagent_results=orchestrator.collect_for_final,
         collect_agent_notices=orchestrator.completion_notices,

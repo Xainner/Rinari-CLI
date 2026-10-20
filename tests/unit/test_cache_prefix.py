@@ -206,7 +206,7 @@ def _late_server_conversation(tmp_path, app_ctx) -> tuple[list[ModelRequest], st
 
     from rinari.application.services import build_services
     from rinari.mcp.transport import InProcessTransport
-    from rinari.tools.index import deferred_index
+    from rinari.tools.index import connected_index
 
     gate, connected = threading.Event(), threading.Event()
 
@@ -261,7 +261,8 @@ def _late_server_conversation(tmp_path, app_ctx) -> tuple[list[ModelRequest], st
             constitution="You are RINARI.",
             environment={"cwd": str(root)},
         ),
-        connected_index=lambda: deferred_index(registry, connected=True),
+        # The MCP servers' state of each request (C6): connecting, then connected.
+        connected_index=lambda: connected_index(registry, services.mcp),
     )
 
     class ConnectsMidTurn(FakeModel):
@@ -302,7 +303,9 @@ def test_a_server_that_connects_late_changes_neither_the_list_nor_the_prefix(
         assert tools_after == tools_before
         kept = _strip(messages_before[:-1])
         assert _strip(messages_after[: len(kept)]) == kept
-    # The late server reached the turn note, never the tool list.
+    # The late server reached the turn note, never the tool list: first as
+    # still connecting (C6), then with its tools.
     assert late_tool not in str(wire(requests[0]))
+    assert "mcp.tracker (connecting)" in str(wire(requests[0])[1])
     assert late_tool in str(wire(requests[-1])[1])
     assert late_tool not in str(wire(requests[-1])[0])

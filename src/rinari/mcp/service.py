@@ -149,6 +149,9 @@ class _ServerState:
     attempt: threading.Event | None = None
     # Bumped by disconnect/reconfigure: an older attempt's result is dropped.
     generation: int = 0
+    # What the server says it is for (`serverInfo`, `instructions`) at its
+    # last connection; kept while it reconnects (C6: the model's index).
+    about: dict[str, str] | None = None
 
 
 class _Follower:
@@ -174,6 +177,33 @@ def _unavailable(name: str, state: _ServerState, now: float) -> McpError:
         http_status=error.http_status if error is not None else None,
         hint=(error.hint or _HINTS.get(error.code)) if error is not None else None,
     )
+
+
+def _plain(exc: McpError, name: str) -> McpError:
+    """A failed sign-in renewal said so the model tells the owner (C6)."""
+    if (exc.hint or "") not in _REAUTH_HINTS:
+        return exc
+    return McpError(
+        exc.code,
+        f"MCP server {name}: {exc.message.rstrip('.')}. Its sign-in has to be renewed in "
+        "Settings → Connectors (Reconnect); tell the owner instead of trying another way.",
+        http_status=exc.http_status,
+        hint=exc.hint,
+    )
+
+
+def _about(client: McpClient) -> dict[str, str]:
+    """`serverInfo.description`/`title` and `instructions`, as the server sent them."""
+    info = client.server_info or {}
+    about = {
+        key: info[key]
+        for key in ("description", "title")
+        if isinstance(info.get(key), str) and info[key].strip()
+    }
+    note = getattr(client, "instructions", None)
+    if isinstance(note, str) and note.strip():
+        about["instructions"] = note
+    return about
 
 
 class McpService:
@@ -626,6 +656,7 @@ class McpService:
                     state.tools = definitions
                     state.resources = resources
                     state.scope = scope
+                    state.about = _about(client)
                     state.attempts = 0
                     state.retry_at = None
                     self._set(name, state, STATUS_CONNECTED, None)
@@ -723,7 +754,7 @@ class McpService:
             claimed = None
             if joining is None:
                 if not force and state.status == STATUS_REAUTH and state.error is not None:
-                    raise state.error
+                    raise _plain(state.error, name)
                 if (
                     not force
                     and state.status == STATUS_ERROR
@@ -751,7 +782,7 @@ class McpService:
             if failure is None and state is not None:
                 failure = state.error
         if failure is not None:
-            raise failure
+            raise _plain(failure, name)
         raise McpError("MCP_NOT_CONNECTED", f"server {name} is not connected", retryable=True)
 
     def _join_timeout(self, name: str) -> float:
@@ -1000,6 +1031,46 @@ class McpService:
             and self._visible(state.scope, project)
         )
 
+    def connectors(self, project: Path | None = None) -> list[dict[str, Any]]:
+        """The servers a session in `project` can see, with their state now (C6).
+
+        `{name, status, hint}` plus what the server said it is for at its
+        last connection (`description`, `title`, `instructions`), sorted by
+        name and never a secret. For the model's index of what is connected.
+        """
+        with self._lock:
+            return [
+                {
+                    "name": name,
+                    "status": state.status,
+                    "hint": (
+                        (state.error.hint or _HINTS.get(state.error.code))
+                        if state.error is not None
+                        else None
+                    ),
+                    **(state.about or {}),
+                }
+                for name, state in sorted(self._states.items())
+                if self._visible(state.scope, project)
+            ]
+
+    def connectors_for(self, registry: Any) -> list[dict[str, Any]] | None:
+        """`connectors` for a registry that follows the service, else None.
+
+        A registry that never followed (a remote target's runtime) gets no
+        MCP server in its index: none of their tools can reach it.
+        """
+        with self._lock:
+            follower = next(
+                (
+                    f
+                    for f in getattr(registry, "followers", ())
+                    if isinstance(f, _Follower) and f in self._followers
+                ),
+                None,
+            )
+        return self.connectors(follower.project) if follower is not None else None
+
     def resource_servers(self, project: Path | None = None) -> list[str]:
         """Connected servers that offer resources, for a session in `project`."""
         with self._lock:
@@ -1125,7 +1196,7 @@ class McpService:
             result = client.call_tool(tool, arguments)
         except McpError as exc:
             self._failed_call(name, client, exc)
-            raise
+            raise _plain(exc, name)  # noqa: B904 - the same error, or said plainly
         payload: dict = {"content": _content_summary(result.get("content"))}
         # Structured output is any JSON value the negotiated version allows;
         # never restrict it artificially to dict/list (§7).
@@ -1147,7 +1218,7 @@ class McpService:
             return client.list_resources()
         except McpError as exc:
             self._failed_call(name, client, exc)
-            raise
+            raise _plain(exc, name)  # noqa: B904 - the same error, or said plainly
 
     def read_resource(self, name: str, uri: str, project: Path | None = None) -> dict:
         client = self._resources_client(name, project)
@@ -1155,7 +1226,7 @@ class McpService:
             return client.read_resource(uri)
         except McpError as exc:
             self._failed_call(name, client, exc)
-            raise
+            raise _plain(exc, name)  # noqa: B904 - the same error, or said plainly
 
     def logs(self, name: str | None = None, limit: int = 50) -> list[dict]:
         with self._lock:

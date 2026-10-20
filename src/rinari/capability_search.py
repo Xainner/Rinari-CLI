@@ -136,7 +136,9 @@ def search_capabilities(
             # skill's or an MCP server's tool that does the same.
             score += 5
         scored.append((score, tool.name, tool))
-    scored.sort(key=lambda item: (-item[0], item[1]))
+    # By match, then by name: never by which server connected or registered
+    # first (C6). Rounded so float noise cannot break a tie.
+    scored.sort(key=lambda item: (-round(item[0], 6), item[1]))
     results: list[dict] = []
     for score, _, tool in scored[: max(1, limit)]:
         row = {
@@ -179,6 +181,39 @@ def _add_calls(results: list[dict], ctx, registry: ToolRegistry) -> int:
             item["how_to_call"] = how_to_call(tool)
             given += 1
     return given
+
+
+def _mark_waiting_servers(results: list[dict], ctx) -> set[str]:
+    """Mark the results of MCP servers waiting for a new sign-in (C6).
+
+    Their tools stay findable so the model can tell the owner what is wrong,
+    but they come back unavailable and without a call. Returns those servers.
+    """
+    from rinari.tools.index import unavailable_reason
+
+    service = getattr(ctx, "mcp", None)
+    if service is None or not hasattr(service, "connectors"):
+        return set()
+    try:
+        rows = {
+            str(row["name"]): row for row in service.connectors(getattr(ctx, "project_root", None))
+        }
+    except Exception:
+        return set()
+    reauth: set[str] = set()
+    for item in results:
+        row = rows.get(str(item.get("server") or ""))
+        if row is None or row.get("status") != "reauth_required":
+            continue
+        reauth.add(str(row["name"]))
+        item.update(
+            {
+                "available": False,
+                "reason": unavailable_reason(str(row["name"]), "reauth_required"),
+                "requires": ["reconnect"],
+            }
+        )
+    return reauth
 
 
 def search_skills(skills, query: str, limit: int = 5) -> list[dict]:
@@ -232,6 +267,7 @@ def capability_search_tool(registry: ToolRegistry, skills=None) -> ToolDefinitio
 
         for item in results:
             item.update(availability(item["name"], ctx))
+        reconnect = _mark_waiting_servers(results, ctx)
         # The tool list never changes (F42): what is outside it comes back
         # with its schema and the exact tool.call to run it.
         given = _add_calls(results, ctx, registry)
@@ -264,6 +300,11 @@ def capability_search_tool(registry: ToolRegistry, skills=None) -> ToolDefinitio
             )
             if native:
                 guidance += " Typed tools that match: " + ", ".join(native) + "."
+        elif reconnect and results[0].get("server") in reconnect:
+            guidance = (
+                f"The best match needs its MCP server {results[0]['server']} reconnected: tell "
+                "the owner to reconnect it in Settings → Connectors instead of trying another way."
+            )
         elif results:
             guidance = (
                 "Call a tool marked in_list directly; run any other through tool.call exactly "

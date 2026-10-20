@@ -140,6 +140,38 @@ def _error(message: str, details: dict[str, Any]) -> ToolResult:
     )
 
 
+def _not_connected(name: str, registry) -> ToolResult | None:
+    """Why an MCP tool that is not registered cannot run yet (C6), or None.
+
+    A server still connecting, failing or waiting for a new sign-in has no
+    tools in the registry; the model is told that instead of "unknown tool".
+    """
+    from rinari.tools.index import server_of, unavailable_reason
+
+    service = getattr(getattr(registry, "context", None), "mcp", None)
+    if not name.startswith("mcp.") or service is None or not hasattr(service, "connectors_for"):
+        return None
+    rows = {str(row["name"]): row for row in service.connectors_for(registry) or ()}
+    server = server_of(name, rows)
+    if server is None:
+        return None
+    row = rows[server]
+    reason = unavailable_reason(server, str(row.get("status")), row.get("hint"))
+    if reason is None:
+        return None
+    reauth = row.get("status") == "reauth_required"
+    return ToolResult(
+        ok=False,
+        error=ToolErrorInfo(
+            ToolErrorCode.AUTH_EXPIRED if reauth else ToolErrorCode.DEPENDENCY_ERROR,
+            reason,
+            retryable=row.get("status") == "connecting",
+            details={"server": server, "status": row.get("status")},
+        ),
+        origin="mcp",
+    )
+
+
 def unwrap(call: ToolCall, registry) -> tuple[ToolCall, ToolResult | None]:
     """The real call a `tool.call` carries, or the error that explains how to fix it.
 
@@ -163,6 +195,8 @@ def unwrap(call: ToolCall, registry) -> tuple[ToolCall, ToolResult | None]:
     if tool is None:
         resolved = resolve_tool_name(requested, registry.names())
         tool = registry.get(resolved) if resolved else None
+    if tool is None and (waiting := _not_connected(requested, registry)) is not None:
+        return failed, waiting
     if tool is None or tool.name == DOOR_TOOL:
         matches = _matches(requested, registry)
         found = [registry.get(n) for n in matches if registry.get(n) is not None]
