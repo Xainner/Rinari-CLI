@@ -1110,6 +1110,31 @@ token; OAuth is not implemented), `check_url_or_network`,
 `session_expired`, `check_command_installed`, `server_exited`,
 `secret_missing`, `server_disabled`, `project_not_trusted`. Messages carry no
 header values, tokens or query strings.
+Background connections (`mcp_background_connect_v1`, connectors plan C2):
+the Engine connects every enabled global server when it starts, in parallel,
+each on its own thread; a project server connects when a session of a
+trusted project builds its runtime. No turn waits for any server: a server
+that arrives later joins the running turn's registry (`capability.search`,
+`tool.call`) and the turn note's index of what is connected, never the
+model's tool list (F42). The connection, its client and its `tools/list`
+live in the Engine process and are shared by every session; `tools/list` is
+read again only when the server sends `notifications/tools/list_changed`
+(over Streamable HTTP, only when it arrives on a POST's event stream: the
+standalone GET stream is not opened). Views add `status` (`idle` before any
+attempt, `connecting`, `connected`, `reauth_required`, `error`, `disabled`)
+and `connection {code, hint, message, tools, resources, attempts,
+retry_in_s, changed_at}`; `mcp.status.changed {name, status, connection}`
+is emitted on every change, and `engine.diagnostics` carries the same per
+server. A failed server is retried with a growing wait (2 s, 4 s, 8 s… up to
+5 min; six timer retries in a serving Engine), by a call to one of its tools
+once the wait is over, or at once with `mcp.reconnect {name}` (returns
+`{server}`, usually `connecting`; the outcome arrives as the event). A call
+inside the wait fails at once with the stored reason instead of waiting for
+a timeout. `reauth_required` (renewing a sign-in failed) and failures the
+owner must fix (`check_credentials`, `secret_missing`, …) are never retried
+on a timer. Connected servers that offer resources add two on-demand reads
+for the model, `mcp.resources.list {server?}` and `mcp.resources.read
+{server, uri}` (`mcp.read`); binary contents are described, not inlined.
 The envelope contract is unchanged across slices.
 
 ---

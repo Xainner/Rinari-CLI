@@ -1056,6 +1056,8 @@ def build_agent_session(
         model_ref=record.model_id,
         tool_ctx=tool_ctx,
         assembler_base=build_assembler_context(services, record, profile, tools.registry),
+        # What is connected, from the live registry on every request (C2).
+        connected_index=lambda: deferred_index(tools.registry, connected=True),
         history=_restore_history(services, record),
         collect_subagent_results=orchestrator.collect_for_final,
         collect_agent_notices=orchestrator.completion_notices,
@@ -1273,19 +1275,13 @@ def _plugin_tools(services: ServiceContainer, root: Path | None) -> list:
 
 
 def _mcp_tools(services: ServiceContainer, root: Path | None) -> list:
-    """Connect enabled MCP servers and contribute their normalized tools."""
-    from rinari.mcp.client import McpError
+    """The MCP tools known now; servers not tried yet connect in the background.
 
-    collected = []
-    for row in services.mcp.list():
-        if not row.get("enabled"):
-            continue
-        try:
-            collected.extend(services.mcp.tools(row["name"], root))
-        except McpError:
-            # A server that can't be reached must not break the session.
-            continue
-    return collected
+    Never waits for a server (plan de conectores, C2): the connections live
+    in the Engine process, so a slow or dead server costs no turn anything.
+    """
+    services.mcp.start(root)
+    return services.mcp.available_tools(root)
 
 
 def _build_hook_engine(
@@ -1332,7 +1328,10 @@ def _build_tools(
         with registry.loading("plugins"):
             registry.register_all(_plugin_tools(services, root))
         with registry.loading("mcp"):
-            registry.register_all(_mcp_tools(services, root))
+            # Servers that connect while the turn runs join this registry
+            # (capability.search, tool.call); the model's list never changes.
+            services.mcp.start(root)
+            services.mcp.follow(registry, root)
         with registry.loading("openapi"):
             for row in services.api.list():
                 if row.get("enabled"):

@@ -205,6 +205,9 @@ class AgentContext:
     prefix_hashes: dict | None = None
     # Digest of each system segment of the last built request.
     prompt_segments: dict | None = None
+    # The index of what is connected, read again for each request: an MCP
+    # server that connects mid-turn shows in the turn note (C2).
+    connected_index: Callable[[], str | None] | None = None
 
 
 def _prefix_hashes(request: ModelRequest) -> dict[str, str]:
@@ -1399,6 +1402,8 @@ class AgentLoop:
             history=tuple(ctx.history),
             compact_state=ctx.compact_state_text,
         )
+        if ctx.connected_index is not None:
+            context = replace(context, connected_index=ctx.connected_index())
         bundle = self._assembler.build(context)
         # Which system segments this request carries, for the prefix guard.
         ctx.prompt_segments = {

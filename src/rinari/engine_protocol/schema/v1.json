@@ -61,6 +61,8 @@
     "turnTokenUsage",
     "mcpSecretState",
     "mcpServer",
+    "mcpConnectionStatus",
+    "mcpConnection",
     "mcpTestResult",
     "soulSettings",
     "networkSettings",
@@ -408,6 +410,7 @@
         "soul.settings.set",
         "session.soul.set",
         "session.soul.clear",
+        "mcp.reconnect",
         "mcp.list",
         "mcp.get",
         "mcp.create",
@@ -637,6 +640,7 @@
         "model.tool_input",
         "model.changed",
         "session.renamed",
+        "mcp.status.changed",
         "tool.requested",
         "tool.started",
         "tool.output.delta",
@@ -3712,7 +3716,7 @@
     },
     "mcpServer": {
       "type": "object",
-      "description": "mcp.list/get/create/update/enable/disable view. Secrets appear only as mcpSecretState (configured/source/env_var), never as values.",
+      "description": "mcp.list/get/create/update/enable/disable/reconnect view. Secrets appear only as mcpSecretState (configured/source/env_var), never as values. `status` and `connection` come from the Engine's live connection (mcp_background_connect_v1).",
       "properties": {
         "name": {
           "type": "string"
@@ -3849,6 +3853,12 @@
               "plain_http_remote"
             ]
           }
+        },
+        "status": {
+          "$ref": "#/$defs/mcpConnectionStatus"
+        },
+        "connection": {
+          "$ref": "#/$defs/mcpConnection"
         }
       },
       "required": [
@@ -3857,6 +3867,68 @@
         "scope",
         "enabled",
         "connected"
+      ]
+    },
+    "mcpConnectionStatus": {
+      "type": "string",
+      "description": "idle: enabled, not tried yet (a project server waits for its trusted project). reauth_required: renewing the sign-in failed; the owner reconnects it.",
+      "enum": [
+        "idle",
+        "connecting",
+        "connected",
+        "reauth_required",
+        "error",
+        "disabled"
+      ]
+    },
+    "mcpConnection": {
+      "type": "object",
+      "description": "Why a server is in its state. Also the payload of mcp.status.changed, with `name` and `status`. `message` never carries a secret.",
+      "properties": {
+        "code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tools": {
+          "type": "integer"
+        },
+        "resources": {
+          "type": "boolean"
+        },
+        "attempts": {
+          "type": "integer"
+        },
+        "retry_in_s": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "changed_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "tools",
+        "resources",
+        "attempts"
       ]
     },
     "mcpTestResult": {
@@ -5163,6 +5235,16 @@
                   },
                   "connected": {
                     "type": "boolean"
+                  },
+                  "status": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/mcpConnectionStatus"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 }
               }

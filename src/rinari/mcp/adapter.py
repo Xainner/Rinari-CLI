@@ -18,6 +18,9 @@ from rinari.tools.definition import (
     SIDE_EFFECT_REMOTE_REVERSIBLE,
     ClassifiedAction,
     ToolDefinition,
+    ToolErrorCode,
+    ToolErrorInfo,
+    ToolResult,
 )
 
 from .client import McpToolInfo
@@ -70,46 +73,58 @@ def _is_read_only(info: McpToolInfo) -> bool:
     return hint is True
 
 
+_ERROR_CODES = {
+    "MCP_TIMEOUT": ToolErrorCode.TIMEOUT,
+    "MCP_NOT_CONNECTED": ToolErrorCode.DEPENDENCY_ERROR,
+    "MCP_DEPENDENCY": ToolErrorCode.DEPENDENCY_ERROR,
+    "MCP_UNREACHABLE": ToolErrorCode.NETWORK_ERROR,
+    "MCP_AUTH_REJECTED": ToolErrorCode.AUTH_REQUIRED,
+    "MCP_PROTOCOL": ToolErrorCode.UNKNOWN,
+    "MCP_TOOL_FAILED": ToolErrorCode.UNKNOWN,
+    "MCP_NOT_FOUND": ToolErrorCode.NOT_FOUND,
+}
+
+
+def tool_error(exc: Exception) -> ToolErrorInfo:
+    """A failed MCP call as a tool error; the server's hint goes in `details`.
+
+    `reauth_required` (C1: renewing the sign-in failed) is said plainly, so
+    the model tells the owner to reconnect instead of trying another way.
+    """
+    from rinari.mcp.client import McpError
+
+    if not isinstance(exc, McpError):
+        return ToolErrorInfo(ToolErrorCode.UNKNOWN, str(exc))
+    if exc.hint == "reauth_required":
+        return ToolErrorInfo(
+            ToolErrorCode.AUTH_EXPIRED,
+            f"{exc.message} The owner has to reconnect this MCP server in Settings.",
+            details={"hint": exc.hint},
+        )
+    return ToolErrorInfo(
+        _ERROR_CODES.get(exc.code, ToolErrorCode.UNKNOWN),
+        exc.message,
+        retryable=exc.retryable,
+        details={"hint": exc.hint} if exc.hint else None,
+    )
+
+
 def _make_handler(server: str, raw_tool: str):
     def handler(arguments: dict, ctx) -> object:
         service = getattr(ctx, "mcp", None)
         if service is None:
-            from rinari.tools.definition import ToolErrorCode, ToolErrorInfo, ToolResult
-
             return ToolResult(
                 ok=False,
                 error=ToolErrorInfo(ToolErrorCode.DEPENDENCY_ERROR, "MCP runtime is not available"),
                 origin="mcp",
             )
-        from rinari.tools.definition import ToolErrorCode, ToolErrorInfo, ToolResult
-
         try:
             payload = service.invoke(server, raw_tool, arguments or {}, project=ctx.project_root)
         except Exception as exc:  # McpError + transport errors
-            from rinari.mcp.client import McpError
-
-            if isinstance(exc, McpError):
-                code = {
-                    "MCP_TIMEOUT": ToolErrorCode.TIMEOUT,
-                    "MCP_NOT_CONNECTED": ToolErrorCode.DEPENDENCY_ERROR,
-                    "MCP_DEPENDENCY": ToolErrorCode.DEPENDENCY_ERROR,
-                    "MCP_PROTOCOL": ToolErrorCode.UNKNOWN,
-                    "MCP_TOOL_FAILED": ToolErrorCode.UNKNOWN,
-                    "MCP_NOT_FOUND": ToolErrorCode.NOT_FOUND,
-                }.get(exc.code, ToolErrorCode.UNKNOWN)
-                return ToolResult(
-                    ok=False,
-                    error=ToolErrorInfo(code, exc.message, retryable=exc.retryable),
-                    origin="mcp",
-                )
-            return ToolResult(
-                ok=False,
-                error=ToolErrorInfo(ToolErrorCode.UNKNOWN, str(exc)),
-                origin="mcp",
-            )
+            return ToolResult(ok=False, error=tool_error(exc), origin="mcp")
         return ToolResult(ok=True, data=payload, origin="mcp")
 
     return handler
 
 
-__all__ = ["mcp_tool_definitions", "tool_name"]
+__all__ = ["mcp_tool_definitions", "tool_error", "tool_name"]

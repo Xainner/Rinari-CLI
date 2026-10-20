@@ -172,10 +172,17 @@ def _connectors(server: Any, record: Any) -> dict[str, Any]:
             continue
         try:
             connected = bool(server._mcp_connected(row["name"]))
+            status = server._services.mcp.status(row)["status"]
         except Exception:
-            connected = False
+            connected, status = False, None
         servers.append(
-            {"name": row.get("name"), "scope": row.get("scope") or "global", "connected": connected}
+            {
+                "name": row.get("name"),
+                "scope": row.get("scope") or "global",
+                "connected": connected,
+                # The connection state (C2): connecting, error, reauth_required…
+                "status": status,
+            }
         )
     skills = [{"name": name, "version": version} for name, version in (record.active_skills or ())]
     return {"mcp": servers, "skills": skills}

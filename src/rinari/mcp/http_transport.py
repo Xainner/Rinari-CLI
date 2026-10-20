@@ -391,7 +391,11 @@ class StreamableHttpTransport(McpTransport):
                 self._answer_server_request(message)
             elif message.method == "notifications/progress":
                 deadline = min(max(deadline, time.monotonic() + timeout_s), ceiling)
-            # Other notifications (logging…) are ignored.
+            elif message.method and self.on_notification is not None:
+                # list_changed and the like reach the client (C2); the
+                # client hands them off without blocking this stream.
+                with contextlib.suppress(Exception):
+                    self.on_notification(message)
         raise TransportError(
             "TRANSPORT_IO",
             "the server closed the event stream before answering",
