@@ -1295,7 +1295,9 @@ package, `~/Library/Application Support/Claude/…`,
 `cursor` (`~/.cursor/mcp.json`), `vscode` (`Code` and `Code - Insiders`
 `User/mcp.json` and `User/settings.json` → `mcp.servers`, JSON with
 comments) and `codex` (`$CODEX_HOME/config.toml` or `~/.codex/config.toml`,
-`[mcp_servers.*]`) — or the servers of a pasted `json` (`{"mcpServers":
+`[mcp_servers.*]`; with `RINARI_IMPORT_HOME`, for tests and sandboxes, that
+folder stands in for `~` and `APPDATA`, `LOCALAPPDATA` and `XDG_CONFIG_HOME`
+are ignored, so nothing of the owner's is read) — or the servers of a pasted `json` (`{"mcpServers":
 …}`, `{"servers": …}` or a bare map). → `{sources [{source, label, path,
 found, servers, error}], candidates [{key, name, source, source_label, path,
 project_root, transport, command, url, secrets [{where: env | header | url,

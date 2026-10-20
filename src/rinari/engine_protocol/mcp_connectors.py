@@ -49,6 +49,10 @@ _ADD_INPUTS = (
 )
 
 
+#: A folder that stands in for the owner's home when looking for other apps' configs.
+IMPORT_HOME_ENV = "RINARI_IMPORT_HOME"
+
+
 class McpConnectorMethods:
     def __init__(
         self,
@@ -144,9 +148,23 @@ class McpConnectorMethods:
                 return parse_pasted(params["json"]), []
             except McpConfigError as exc:
                 raise EngineProtocolError(INVALID_PARAMS, str(exc)) from exc
-        return scan_apps(
-            self._home(), self._env(), platform=self._platform, sources=self._sources(params)
-        )
+        home, env = self._scan_place()
+        return scan_apps(home, env, platform=self._platform, sources=self._sources(params))
+
+    def _scan_place(self) -> tuple[Path, Mapping[str, str]]:
+        """Where other apps' configurations are looked for.
+
+        `RINARI_IMPORT_HOME` (tests, sandboxes) puts that folder in place of
+        the owner's home and drops the folders derived from the system
+        (`APPDATA`, `LOCALAPPDATA`, `XDG_CONFIG_HOME`), so nothing of the
+        owner's is read. Without it, the owner's home and environment.
+        """
+        env = self._env()
+        root = env.get(IMPORT_HOME_ENV)
+        if not root:
+            return self._home(), env
+        dropped = {"APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME"}
+        return Path(root), {key: value for key, value in env.items() if key not in dropped}
 
     def import_scan(self, params: dict[str, Any]) -> dict[str, Any]:
         params = params or {}

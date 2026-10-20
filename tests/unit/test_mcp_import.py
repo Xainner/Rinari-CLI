@@ -562,3 +562,21 @@ def test_project_scan_skips_a_repeated_name_in_a_later_file(tmp_path) -> None:
     lint = next(c for c in candidates if c.key == "lint")
     assert lint.path == ".mcp.json" and lint.command[0] == "npx"
     assert [r.path for r in reports if r.found] == [".mcp.json", ".vscode/mcp.json"]
+
+
+def test_rinari_import_home_reads_nothing_of_the_owner(services, fake_pc, tmp_path) -> None:
+    # Tests and sandboxes: only the stand-in folder is read, never the owner's
+    # home nor the folders the system environment points to (APPDATA…).
+    home, env = fake_pc
+    stand_in = tmp_path / "stand-in"
+    (stand_in / ".cursor").mkdir(parents=True)
+    env = {**env, "RINARI_IMPORT_HOME": str(stand_in)}
+    methods = McpConnectorMethods(services, home=lambda: home, env=lambda: env, platform="win32")
+    assert methods.import_scan({})["candidates"] == []
+
+    (stand_in / ".cursor" / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"own": {"command": "own-mcp"}}}), encoding="utf-8"
+    )
+    scanned = methods.import_scan({})
+    assert [c["key"] for c in scanned["candidates"]] == ["cursor:own"]
+    assert all(str(home) not in report["path"] for report in scanned["sources"])
