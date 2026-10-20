@@ -747,3 +747,18 @@ def test_an_agents_memory_is_listed_written_and_named_in_the_agency_settings(ser
         server, "agency.agent.memory.add", {"agent_id": writer["id"], "topic": "", "text": "x"}
     )
     assert bad["ok"] is False
+
+
+def test_a_catalog_account_can_belong_to_one_agent(server) -> None:
+    agent = _ok(_call(server, "agency.agent.create", {"agent": {"name": "Notas"}}))["agent"]
+    added = _ok(
+        _call(
+            server,
+            "mcp.catalog.add",
+            {"id": "notion", "name": "notion-de-notas", "owner": f"agent:{agent['id']}"},
+        )
+    )
+    assert added["server"]["owner"] == f"agent:{agent['id']}"
+    refused = _call(server, "mcp.catalog.add", {"id": "notion", "owner": "agent:nadie"})
+    assert refused["ok"] is False
+    assert server._services.mcp.show("notion-2") is None

@@ -25,6 +25,22 @@ if TYPE_CHECKING:
     from rinari.engine_protocol.server import EngineServer
 
 
+def checked_owner(services: Any, owner: Any) -> str | None:
+    """`owner` of a new connector account: None, or "agent:<id>" of an existing agent."""
+    if owner is None:
+        return None
+    agent_id = owner[len("agent:") :] if isinstance(owner, str) else ""
+    if (
+        not isinstance(owner, str)
+        or not owner.startswith("agent:")
+        or services.ctx.agency_repo.get(agent_id) is None
+    ):
+        raise EngineProtocolError(
+            INVALID_PARAMS, "Param 'owner' must be 'agent:<id>' of an existing agent."
+        )
+    return owner
+
+
 def spend_today(services: Any, agent: dict[str, Any]) -> dict[str, Any]:
     """Today's spend of an agent and whether it is over its daily cap."""
     from rinari.engine_protocol.usage_report import build_report
