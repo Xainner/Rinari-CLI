@@ -1,0 +1,204 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rinari.dev/schemas/mcp-catalog/v1.json",
+  "title": "Rinari connector catalog v1",
+  "description": "Connectors the Engine ships (plan de conectores C4). Data, not code: choosing an entry fills mcp.create. Kept to the subset of JSON Schema that rinari.tools.schema.validate_against understands (no $ref, no const).",
+  "type": "object",
+  "required": ["version", "entries"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {"type": "integer", "minimum": 1, "maximum": 1},
+    "verified_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "logo", "category", "description", "docs_url", "server", "setup"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,47}$"},
+          "name": {"type": "string", "minLength": 1, "maxLength": 64},
+          "logo": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,47}$"},
+          "category": {"enum": ["google", "work", "dev", "design", "files", "crm", "media", "data"]},
+          "group": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,47}$"},
+          "preview": {"type": "boolean"},
+          "description": {
+            "type": "object",
+            "required": ["es", "en"],
+            "additionalProperties": false,
+            "properties": {
+              "es": {"type": "string", "minLength": 1, "maxLength": 300},
+              "en": {"type": "string", "minLength": 1, "maxLength": 300}
+            }
+          },
+          "notes": {
+            "type": "object",
+            "required": ["es", "en"],
+            "additionalProperties": false,
+            "properties": {
+              "es": {"type": "string", "minLength": 1, "maxLength": 600},
+              "en": {"type": "string", "minLength": 1, "maxLength": 600}
+            }
+          },
+          "docs_url": {"type": "string", "pattern": "^https://[^\\s]+$"},
+          "tools": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1, "maxLength": 128}
+          },
+          "server": {
+            "oneOf": [
+              {
+                "type": "object",
+                "required": ["transport", "url", "auth"],
+                "additionalProperties": false,
+                "properties": {
+                  "transport": {"enum": ["http"]},
+                  "url": {"type": "string", "pattern": "^https://[^\\s?#]+$"},
+                  "auth": {
+                    "type": "object",
+                    "required": ["kind"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "kind": {"enum": ["oauth", "bearer", "none"]},
+                      "scopes": {"type": "array", "items": {"type": "string", "minLength": 1}},
+                      "authorize_params": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string", "minLength": 1}
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "required": ["transport", "command"],
+                "additionalProperties": false,
+                "properties": {
+                  "transport": {"enum": ["stdio"]},
+                  "command": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {"type": "string", "minLength": 1}
+                  },
+                  "env": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": ["name", "label", "secret", "required"],
+                      "additionalProperties": false,
+                      "properties": {
+                        "name": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"},
+                        "label": {
+                          "type": "object",
+                          "required": ["es", "en"],
+                          "additionalProperties": false,
+                          "properties": {
+                            "es": {"type": "string", "minLength": 1},
+                            "en": {"type": "string", "minLength": 1}
+                          }
+                        },
+                        "secret": {"type": "boolean"},
+                        "required": {"type": "boolean"},
+                        "default": {"type": "string"}
+                      }
+                    }
+                  },
+                  "connection_string": {
+                    "type": "object",
+                    "required": ["schemes", "env"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "schemes": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {"type": "string", "pattern": "^[a-z][a-z0-9+.-]*$"}
+                      },
+                      "env": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "host": {"type": "string"},
+                          "port": {"type": "string"},
+                          "database": {"type": "string"},
+                          "user": {"type": "string"},
+                          "password": {"type": "string"},
+                          "query": {"type": "string"},
+                          "path": {"type": "string"}
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "setup": {
+            "type": "object",
+            "required": ["kind", "help"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {"enum": ["registration", "client_metadata", "own_client", "token", "secrets"]},
+              "fields": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["name", "required"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "name": {"enum": ["client_id", "client_secret", "redirect_port", "token", "connection_string"]},
+                    "required": {"type": "boolean"}
+                  }
+                }
+              },
+              "console_url": {"type": "string", "pattern": "^https://[^\\s]+$"},
+              "help": {
+                "type": "object",
+                "required": ["es", "en"],
+                "additionalProperties": false,
+                "properties": {
+                  "es": {"type": "string", "minLength": 1, "maxLength": 1500},
+                  "en": {"type": "string", "minLength": 1, "maxLength": 1500}
+                }
+              },
+              "alternatives": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["kind", "help"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {"enum": ["own_client", "token"]},
+                    "fields": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": ["name", "required"],
+                        "additionalProperties": false,
+                        "properties": {
+                          "name": {"enum": ["client_id", "client_secret", "redirect_port", "token"]},
+                          "required": {"type": "boolean"}
+                        }
+                      }
+                    },
+                    "console_url": {"type": "string", "pattern": "^https://[^\\s]+$"},
+                    "help": {
+                      "type": "object",
+                      "required": ["es", "en"],
+                      "additionalProperties": false,
+                      "properties": {
+                        "es": {"type": "string", "minLength": 1, "maxLength": 1500},
+                        "en": {"type": "string", "minLength": 1, "maxLength": 1500}
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

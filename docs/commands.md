@@ -1196,6 +1196,87 @@ registration | metadata_document | required, issuer, resource,
 resource_metadata, registration, client_metadata_document, revocation}` or
 null. No token, code, verifier or client secret is ever in a view, an event,
 a log line or an error message.
+
+Connector catalog and imports (`mcp_catalog_v1`, plan de conectores C4).
+The catalog is data shipped with the Engine (`src/rinari/mcp/catalog.json`,
+validated against `catalog.schema.json`). `mcp.catalog.list` → `{version,
+verified_at, entries}`; each entry: `id`, `name`, `logo` (an identifier: the
+Engine ships no images), `category` (`google`, `work`, `dev`, `design`,
+`files`, `crm`, `media`, `data`), `group?`, `preview?`, `description {es,
+en}`, `notes? {es, en}`, `docs_url`, `tools?` (expected names, when known),
+`server` (`{transport: "http", url, auth {kind: oauth | bearer, scopes?,
+authorize_params?}}` or `{transport: "stdio", command, env [{name, label,
+secret, required, default?}], connection_string? {schemes, env}}`), `setup
+{kind, fields [{name, required}], console_url?, help {es, en},
+alternatives?}` and `added` plus `servers [{name, scope, enabled, status}]`
+(saved servers with the same URL — scheme, host and path — or the same
+command, however they were added). `setup.kind`: `registration` (dynamic
+client registration: nothing to type), `client_metadata` (Rinari's client
+metadata document; alternative: an own `client_id`), `own_client`
+(`client_id`, often `client_secret`, and `redirect_port` when the app needs
+an exact redirect; Google, Slack, Asana, HubSpot), `token` (sent as Bearer;
+GitHub, alternative: an own OAuth app) or `secrets` (a local server's
+environment). `mcp.catalog.add {id, name?, client_id?, client_secret?,
+redirect_port?, token?, secrets? {ENV: value}, connection_string?}` creates
+the global server the entry describes (`name` defaults to the id, with `-2`,
+`-3`… when taken; a taken `name` is `INVALID_PARAMS` with `details.hint`
+`name_taken`, never a replacement) and returns `{server, entry_id, next}`:
+`sign_in` (call `mcp.auth.start`) or `connect` (already connecting). A
+missing required field, or one the entry does not use, is `INVALID_PARAMS`
+naming the field, never its value. `connection_string` is split into the
+entry's env names (`postgresql://user:password@host:port/db?query` →
+`POSTGRES_*`; a path, `sqlite:///relative.db`, `sqlite:////absolute.db` or
+`file:///C:/x.db` → `SQLITE_DATABASE`); every env value goes to the
+credential store like any other.
+`mcp.import.scan {sources?, json?}` lists, without creating anything, the
+servers other apps on this PC declare — `claude_desktop`
+(`%APPDATA%\Claude\claude_desktop_config.json` and the Microsoft Store
+package, `~/Library/Application Support/Claude/…`,
+`$XDG_CONFIG_HOME/Claude/…`), `claude_code` (`~/.claude.json` or
+`$CLAUDE_CONFIG_DIR/.claude.json`: user servers and per-project ones),
+`cursor` (`~/.cursor/mcp.json`), `vscode` (`Code` and `Code - Insiders`
+`User/mcp.json` and `User/settings.json` → `mcp.servers`, JSON with
+comments) and `codex` (`$CODEX_HOME/config.toml` or `~/.codex/config.toml`,
+`[mcp_servers.*]`) — or the servers of a pasted `json` (`{"mcpServers":
+…}`, `{"servers": …}` or a bare map). → `{sources [{source, label, path,
+found, servers, error}], candidates [{key, name, source, source_label, path,
+project_root, transport, command, url, secrets [{where: env | header | url,
+name, kind: value | env_ref}], warnings, importable, reason, existing,
+suggested_name}]}`. Only names of secrets: values never leave the Engine.
+`${VAR}` and `${env:VAR}` become `env://VAR`; `Authorization: Bearer
+${VAR}` and Codex's `bearer_token_env_var` become bearer auth from that
+variable; a URL's user and password become a Basic `Authorization` header;
+secret-looking query values (`api_key`, `token`, …) keep the whole URL in the
+credential store (`url_secret` in the view, `***` in `url`). Every imported
+header value is stored as a secret. Not importable (`reason`):
+`legacy_sse_unsupported`, `secret_in_command` (a secret on the command line
+would stay in the row and the views: move it to `env`), `unresolved_variable`
+(a variable in the URL), `invalid_url`, `invalid_definition`. Warnings:
+`disabled_in_source`, `unresolved_variable:<field>` (that value is left
+out: `${input:…}`, `${workspaceFolder}`…), `invalid_env_name`,
+`cwd_ignored`, `env_file_ignored`. `existing` names a saved server with the
+same definition. `mcp.import.apply {keys, names? {key: name}, sources?,
+json?}` scans again (secrets never travel to the client and back) and
+creates only the marked `keys`, each on its own, never replacing a server:
+`{created [{key, server}], failed [{key, code, message}]}`. Claude Code's
+per-project servers are created with project scope tied to their folder.
+`mcp.project_offers.list {path}` → `{project, trusted, offers, answered,
+files}`: the servers a trusted folder brings in `.mcp.json`,
+`.rinari/mcp.json`, `.vscode/mcp.json` or `.cursor/mcp.json` (a name repeated
+in a later file is skipped) that the owner has not answered, as candidates
+(`key` is the name) with `changed` and `previous_decision`. An untrusted
+folder offers nothing (`trusted: false`). `mcp.project_offers.decide {path,
+decisions [{key, accept, name?}]}` records each answer for that folder
+(`mcp_project_offers`, migration 0061), so each server is asked about once;
+an accepted one is created with project scope tied to the folder
+(`mcpServer.project_root`; it never runs in another project, even a trusted
+one) and its secrets in the credential store. A definition that changes
+later (command, URL without its query values, env or header names) is
+offered again. → `{project, created [{key, server}], rejected, failed}`; an
+untrusted folder is `INVALID_PARAMS` with `details.hint`
+`project_not_trusted`, a key the folder no longer declares `NOT_FOUND`.
+Project servers saved before 0061 (`project_root` null) stay visible in every
+trusted project.
 The envelope contract is unchanged across slices.
 
 ---

@@ -31,6 +31,10 @@ def test_protocol_schema_matches_server_method_inventory() -> None:
     registered.update(re.findall(r'dispatcher\.register\(\s*"([^"]+)"', speech_source))
     mcp_auth_source = (root / "src/rinari/engine_protocol/mcp_auth.py").read_text(encoding="utf-8")
     registered.update(re.findall(r'dispatcher\.register\(\s*"([^"]+)"', mcp_auth_source))
+    connectors_source = (root / "src/rinari/engine_protocol/mcp_connectors.py").read_text(
+        encoding="utf-8"
+    )
+    registered.update(re.findall(r'dispatcher\.register\(\s*"([^"]+)"', connectors_source))
     advanced_source = (root / "src/rinari/engine_protocol/advanced.py").read_text(encoding="utf-8")
     registered.update(re.findall(r'dispatcher\.register\(\s*"([^"]+)"', advanced_source))
     tree_source = (root / "src/rinari/engine_protocol/workspace_tree.py").read_text(
