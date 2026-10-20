@@ -1,3 +1,4 @@
+from rinari.storage.repositories.agency import AgencyRepository
 from rinari.storage.repositories.api_specs import ApiSpecRepository
 from rinari.storage.repositories.changes import TurnChangeRepository
 from rinari.storage.repositories.checkpoints import CheckpointRepository
@@ -26,6 +27,7 @@ from rinari.storage.repositories.validation import ValidationRecordRepository
 
 __all__ = [
     "PIN_SOURCES",
+    "AgencyRepository",
     "ApiSpecRepository",
     "CheckpointRepository",
     "ConfigValueRepository",

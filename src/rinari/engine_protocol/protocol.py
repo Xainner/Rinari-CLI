@@ -212,6 +212,13 @@ CAPABILITIES: dict[str, bool] = {
     # mcp.project_offers.list/decide (a trusted folder's .mcp.json asked once
     # per server), mcpServer.project_root and url_secret.
     "mcp_catalog_v1": True,
+    # Rinari Agency A1: agents with a card (role, instructions, model,
+    # permission mode, connectors, daily budget in USD or tokens) and a direct
+    # chat (a CHAT session with agent_id, left out of session.list unless
+    # asked for by agent_id). agency.agent.list/get/create/update/archive,
+    # agency.status (what the Agency card says), agency.agent.changed and
+    # usage.report scope "agent" (today's spend over its conversations).
+    "agency_agents_v1": True,
     # soul.settings.get/set: character intensity (minimal | balanced | full),
     # separate from Soul selection; bundled default Soul 4.0.
     "soul_character_intensity_v1": True,

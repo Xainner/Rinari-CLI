@@ -623,6 +623,12 @@
         "schedule.runs",
         "schedule.run_now",
         "schedule.grant",
+        "agency.agent.list",
+        "agency.agent.get",
+        "agency.agent.create",
+        "agency.agent.update",
+        "agency.agent.archive",
+        "agency.status",
         "project.move_profile",
         "session.move_profile",
         "followup.list",
@@ -728,6 +734,7 @@
         "skill.proposed",
         "skill.proposal.resolved",
         "schedule.changed",
+        "agency.agent.changed",
         "schedule.run.started",
         "schedule.run.needs_you",
         "schedule.run.completed",
@@ -1036,6 +1043,12 @@
         },
         "rinari_profile_id": {
           "type": "string"
+        },
+        "agent_id": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "parent_session_id": {
           "type": [

@@ -77,6 +77,8 @@ def session_dict(record: SessionRecord) -> dict[str, Any]:
         "soul_id": record.soul_id,
         "pinned_at": record.pinned_at,
         "rinari_profile_id": record.rinari_profile_id,
+        # Rinari Agency: the agent whose direct chat this is (None: Rinari's).
+        "agent_id": record.agent_id,
         "active_skills": (
             [list(pair) for pair in record.active_skills] if record.active_skills else None
         ),

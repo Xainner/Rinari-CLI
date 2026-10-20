@@ -115,12 +115,19 @@ class SessionRepository:
         state: str | None = None,
         limit: int | None = None,
         rinari_profile_id: str | None = None,
+        agent_id: str | None = None,
+        exclude_agents: bool = False,
     ) -> list[SessionRecord]:
         sql = "SELECT * FROM sessions WHERE 1=1"
         params: list[object] = []
         if rinari_profile_id is not None:
             sql += " AND rinari_profile_id = ?"
             params.append(rinari_profile_id)
+        if agent_id is not None:
+            sql += " AND agent_id = ?"
+            params.append(agent_id)
+        elif exclude_agents:
+            sql += " AND agent_id IS NULL"
         if kind is not None:
             sql += " AND kind = ?"
             params.append(kind)
@@ -213,6 +220,7 @@ def _session_to_record(row: dict) -> SessionRecord:
         parent_session_id=_column(row, "parent_session_id"),
         lineage_kind=_column(row, "lineage_kind"),
         brief=_brief(_column(row, "brief_json")),
+        agent_id=_column(row, "agent_id"),
     )
 
 

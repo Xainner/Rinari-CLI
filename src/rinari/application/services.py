@@ -8,6 +8,7 @@ from pathlib import Path
 
 import httpx
 
+from rinari.agency import AgencyService
 from rinari.agents.config import AgentConfigStore
 from rinari.agents.registry import AgentRegistry
 from rinari.application.context import AppContext
@@ -72,6 +73,7 @@ class ServiceContainer:
     goals: GoalService = None
     resumes: ResumeService = None
     followups: FollowupService = None
+    agency: AgencyService = None
 
 
 def build_services(
@@ -151,7 +153,23 @@ def build_services(
         goals=GoalService(ctx),
         resumes=ResumeService(ctx),
         followups=FollowupService(ctx),
+        agency=AgencyService(
+            ctx.agency_repo,
+            ctx.clock,
+            ctx.ids,
+            resolve_model=lambda model: _model_id(models, model),
+            connector_exists=lambda name: any(
+                row.get("name") == name for row in ctx.mcp_server_repo.list(None)
+            ),
+        ),
     )
+
+
+def _model_id(models, ref: str) -> str | None:
+    try:
+        return models.resolve(ref).id
+    except Exception:
+        return None
 
 
 def _exists(lookup, ref: str) -> bool:

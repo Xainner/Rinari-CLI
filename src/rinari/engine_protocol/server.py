@@ -328,6 +328,15 @@ class EngineServer:
         from rinari.engine_protocol.schedule import ScheduleRunner
 
         self._schedule = ScheduleRunner(self)
+        from rinari.engine_protocol.agency import AgencyMethods
+
+        self._agency = AgencyMethods(self)
+        self._dispatcher.register("agency.agent.list", self._agency.list)
+        self._dispatcher.register("agency.agent.get", self._agency.get)
+        self._dispatcher.register("agency.agent.create", self._agency.create)
+        self._dispatcher.register("agency.agent.update", self._agency.update)
+        self._dispatcher.register("agency.agent.archive", self._agency.archive)
+        self._dispatcher.register("agency.status", self._agency.status)
         from rinari.engine_protocol.resume import ResumeRunner
 
         self._resume = ResumeRunner(self)
@@ -880,12 +889,19 @@ class EngineServer:
             raise EngineProtocolError(INVALID_PARAMS, "Param 'project_id' must be a string.")
         if state is not None and (not isinstance(state, str) or not state):
             raise EngineProtocolError(INVALID_PARAMS, "Param 'state' must be a string.")
+        agent_id = params.get("agent_id")
+        if agent_id is not None and (not isinstance(agent_id, str) or not agent_id):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'agent_id' must be a string.")
+        # Rinari Agency: an agent's conversations are not Rinari's. They are
+        # listed only when asked for by agent.
         records = self._services.sessions.list(
             kind=kind,
             project_id=project_id,
             state=state,
             limit=limit,
             rinari_profile_id=self._profile_filter(params),
+            agent_id=agent_id,
+            exclude_agents=agent_id is None,
         )
         if not params.get("include_closed", False) and state is None:
             records = [

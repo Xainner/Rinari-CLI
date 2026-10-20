@@ -20,7 +20,7 @@ from typing import Any
 from rinari.engine_protocol.errors import INVALID_PARAMS, EngineProtocolError
 from rinari.shared.clock import now_iso
 
-SCOPES = ("session", "today", "project", "all")
+SCOPES = ("session", "today", "project", "all", "agent")
 REPORT_EVENT = "usage.reported"
 #: A conversation keeps its latest snapshots, not an unbounded list.
 MAX_SAVED = 50
@@ -65,6 +65,15 @@ def _sessions(services: Any, scope: str, ref: str | None) -> tuple[list[str] | N
             "SELECT id FROM sessions WHERE project_id = ?", (record.project_id,)
         )
         return [str(row["id"]) for row in rows], None
+    if scope == "agent":
+        # Rinari Agency: what an agent spent today, over its conversations.
+        if not ref:
+            raise EngineProtocolError(INVALID_PARAMS, "An agent report needs 'ref'.")
+        start = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+        return (
+            list(services.ctx.agency_repo.session_ids(ref)),
+            start.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S"),
+        )
     return None, None
 
 
@@ -108,7 +117,8 @@ def build_report(
             INVALID_PARAMS, f"Param 'scope' must be one of: {', '.join(SCOPES)}."
         )
     sessions, since = _sessions(services, scope, ref)
-    if sessions == []:
+    # An agent without conversations spent nothing (never «every session»).
+    if sessions == [] and scope != "agent":
         sessions = None
 
     models: dict[str, dict[str, Any]] = {}
