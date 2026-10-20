@@ -26,7 +26,7 @@ extra column and also covers a server added by hand or imported.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -173,6 +173,15 @@ def catalog_description_for(mcp: Any, name: str, lang: str = "en") -> str | None
     """`catalog_description` of the saved server called `name` (any scope)."""
     row = mcp.show(name) or mcp.show(name, "project")
     return catalog_description(row, lang) if row is not None else None
+
+
+def catalog_lookup(mcp: Any, lang: str = "en") -> Callable[[Mapping[str, Any]], str | None]:
+    """C6's `catalog` hook for `McpService.connectors()` rows.
+
+    Those rows carry the server's name and state, not its saved config, so
+    the entry is found through the saved server of that name.
+    """
+    return lambda row: catalog_description_for(mcp, str(row.get("name") or ""), lang)
 
 
 def list_view(rows: list[Mapping[str, Any]], status: Any = None) -> list[dict[str, Any]]:

@@ -1073,7 +1073,7 @@ class McpService:
                     **(state.about or {}),
                 }
                 for name, state in sorted(self._states.items())
-                if self._visible(state.scope, project)
+                if self._visible(state.scope, project, state.root)
             ]
 
     def connectors_for(self, registry: Any) -> list[dict[str, Any]] | None:

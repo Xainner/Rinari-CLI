@@ -16,6 +16,7 @@ from rinari.application.services import build_services
 from rinari.engine_protocol.protocol import CAPABILITIES
 from rinari.engine_protocol.server import EngineServer
 from rinari.mcp import catalog
+from rinari.tools.index import connectors_from
 
 GOOGLE_HOSTS = {
     "google-workspace": "https://workspacemcp.googleapis.com/mcp/v1",
@@ -370,3 +371,41 @@ def test_catalog_description_of_an_added_server(services) -> None:
 
 def test_the_catalog_capability_is_advertised() -> None:
     assert CAPABILITIES["mcp_catalog_v1"] is True
+
+
+def test_the_index_hook_finds_the_entry_from_a_connector_row(services) -> None:
+    # McpService.connectors() rows carry the name and state, not the saved config.
+    services.mcp.add(
+        "work-notes", transport="http", url="https://mcp.notion.com/mcp/", auth={"kind": "oauth"}
+    )
+    services.mcp.add("mine", transport="http", url="https://mcp.example.com/mcp")
+    hook = catalog.catalog_lookup(services.mcp)
+    notion = catalog.entry("notion")["description"]["en"]
+    assert hook({"name": "work-notes", "status": "connecting", "hint": None}) == notion
+    assert hook({"name": "mine", "status": "connecting", "hint": None}) is None
+    assert hook({"name": "gone", "status": "error", "hint": None}) is None
+
+    connectors = connectors_from(
+        [{"name": "work-notes", "status": "connecting", "hint": None}], catalog=hook
+    )
+    assert connectors[0].catalog_description == notion
+
+
+def test_the_index_shows_a_project_server_only_in_its_own_folder(services, tmp_path) -> None:
+    home, other = tmp_path / "proj-a", tmp_path / "proj-b"
+    home.mkdir()
+    other.mkdir()
+    services.trust.add(home)
+    services.trust.add(other)
+    services.mcp.add(
+        "local-notes",
+        transport="http",
+        url="http://127.0.0.1:9/mcp",
+        scope="project",
+        project_root=home,
+    )
+    services.mcp.reconnect("local-notes", project=home)
+
+    assert "local-notes" in [c["name"] for c in services.mcp.connectors(home)]
+    assert "local-notes" not in [c["name"] for c in services.mcp.connectors(other)]
+    assert "local-notes" not in [c["name"] for c in services.mcp.connectors(None)]

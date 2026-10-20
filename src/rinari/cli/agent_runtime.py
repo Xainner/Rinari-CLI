@@ -24,6 +24,7 @@ from rinari import __version__
 from rinari.agents.config import AgentAssignment, coerce_assignment
 from rinari.application.services import ServiceContainer
 from rinari.instructions.resolver import provenance_for, resolve_project_instructions
+from rinari.mcp.catalog import catalog_lookup
 from rinari.models.router import ModelRouter
 from rinari.models.types import ChatMessage, ToolCall
 from rinari.policy.approvals import AnswerPrompt, ApprovalEngine
@@ -315,7 +316,11 @@ def build_assembler_context(
         project_instructions=instructions,
         skill_catalog=catalog,
         tool_index=deferred_index(registry) if registry is not None else None,
-        connected_index=(connected_index(registry, services.mcp) if registry is not None else None),
+        connected_index=(
+            connected_index(registry, services.mcp, catalog=catalog_lookup(services.mcp))
+            if registry is not None
+            else None
+        ),
         skills=skills_tuple,
         task_state=task_state,
         memory=_memory_text(services, root, record=record),
@@ -1056,7 +1061,9 @@ def build_agent_session(
         assembler_base=build_assembler_context(services, record, profile, tools.registry),
         # What is connected, from the live registry and the MCP servers'
         # state on every request (C2, C6).
-        connected_index=lambda: connected_index(tools.registry, services.mcp),
+        connected_index=lambda: connected_index(
+            tools.registry, services.mcp, catalog=catalog_lookup(services.mcp)
+        ),
         history=_restore_history(services, record),
         collect_subagent_results=orchestrator.collect_for_final,
         collect_agent_notices=orchestrator.completion_notices,
