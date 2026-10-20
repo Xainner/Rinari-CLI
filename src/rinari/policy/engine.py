@@ -28,6 +28,20 @@ asks for this session at most. In full-access it is the owner's switch «Ask
 before sending data to new destinations» (off by default): on, it asks only
 to send to a destination that is not trusted (registered MCP servers, the
 project's git remote, localhost and the LAN are).
+
+MCP tools (plan de conectores, C5; `policy/mcp_tools.py`). The server's
+annotations count: a declared read is `mcp.read`, `destructiveHint` asks in
+workspace and `openWorldHint` marks a call that sends data out. The owner's
+Allow / Ask / Block per tool (or per server) wins over the mode's rule; Block
+holds in every mode, full access asks for nothing else. Same connector, same
+destination: in workspace, a call that sends out asks after external content
+only when that content came from somewhere else (a page, another connector);
+reading from a connector and calling the same connector again does not.
+
+Docker (C7). `docker` and `docker compose` are classified: reads run in every
+mode (also read-only), running containers and builds is a local command, and
+removing containers, images, volumes or networks asks in workspace (it is
+refused in read-only). `docker push` publishes like any other send.
 """
 
 from __future__ import annotations
@@ -37,6 +51,16 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from rinari.policy.mcp_tools import (
+    DECISION_ALLOW,
+    DECISION_ASK,
+    DECISION_DENY,
+    RULE_BLOCKED,
+    RULE_DESTRUCTIVE,
+    RULE_TOOL_ASK,
+    McpToolFacts,
+)
 
 if TYPE_CHECKING:
     from rinari.policy.network import NetworkPolicy
@@ -105,6 +129,10 @@ class SessionScope:
     # Full access asks before sending to a new destination after external
     # content (the owner's switch, off by default).
     ask_new_destinations: bool = False
+    # Where this turn's external content came from (`mcp:<server>` for a
+    # connector, a host or a label otherwise). Empty with external_content
+    # means "unknown": treated as foreign to every connector.
+    external_origins: frozenset[str] = frozenset()
     # Folder a shell-like command runs in when the call names its own `cwd`;
     # None means it runs in the session's cwd.
     command_cwd: Path | None = None
@@ -292,6 +320,20 @@ def shell_sends_data(command: str) -> bool:
     return bool(_SHELL_SENDS.search(command or ""))
 
 
+def foreign_content(scope: SessionScope, origin: str) -> bool:
+    """This turn read external content from somewhere other than `origin`.
+
+    Same connector, same destination (C5): what came from a connector going
+    back to that connector is not a new destination. Without known origins
+    the content counts as foreign (a caller that only set the flag).
+    """
+    if not scope.external_content:
+        return False
+    if not scope.external_origins:
+        return True
+    return any(seen != origin for seen in scope.external_origins)
+
+
 def is_sensitive_file(path: Path) -> bool:
     name = path.name
     return bool(SENSITIVE_FILE.search(name)) or bool(SENSITIVE_FILE.search(str(path)))
@@ -375,7 +417,10 @@ def _local_part(command: str) -> str:
 
 def _is_inspection(command: str) -> bool:
     command = _local_part(command)
-    return bool(_INSPECTION_SHELL.match(command)) and not _CHAINING.search(command)
+    if _INSPECTION_SHELL.match(command) and not _CHAINING.search(command):
+        return True
+    docker = docker_intent(command)
+    return docker is not None and docker.kind == DOCKER_READ
 
 
 # ssh options that take a value (`ssh -p 22 -i key host cmd`): the host is the
@@ -464,6 +509,159 @@ def remote_actions(command: str) -> list[RemoteAction]:
             ):
                 source = next(p for p in paths[:-1] if _REMOTE_PATH.match(p))
                 found.append(RemoteAction("fetch", source.split(":", 1)[0]))
+    return found
+
+
+# -- docker (connectors plan, C7) ------------------------------------------------
+
+DOCKER_READ = "read"
+DOCKER_EXEC = "exec"
+DOCKER_PUSH = "push"
+DOCKER_DESTRUCTIVE = "destructive"
+_DOCKER_SEVERITY = {DOCKER_READ: 0, DOCKER_EXEC: 1, DOCKER_PUSH: 2, DOCKER_DESTRUCTIVE: 3}
+
+# Global options of the docker CLI that take a value (`docker -H host ps`).
+_DOCKER_VALUE_OPTIONS = frozenset(
+    {"-H", "--host", "-c", "--context", "--config", "-l", "--log-level"}
+    | {"--tlscacert", "--tlscert", "--tlskey"}
+)
+# `docker compose` options before its subcommand that take a value.
+_COMPOSE_VALUE_OPTIONS = frozenset(
+    {"-f", "--file", "-p", "--project-name", "--profile", "--env-file"}
+    | {"--project-directory", "--ansi", "--progress", "--parallel"}
+)
+_DOCKER_READS = frozenset(
+    {"ps", "logs", "inspect", "images", "version", "info", "top", "stats", "port", "diff"}
+    | {"history", "events", "search"}
+)
+_DOCKER_DESTRUCTIVE = frozenset({"rm", "rmi"})
+# `docker <object> <verb>`: the verbs that read, and the ones that delete.
+_DOCKER_OBJECTS = frozenset(
+    {"container", "image", "volume", "network", "system", "builder", "buildx", "context"}
+)
+_DOCKER_OBJECT_READS = frozenset(
+    {"ls", "list", "ps", "inspect", "logs", "top", "stats", "port", "diff", "history", "df"}
+    | {"info", "events", "show", "version"}
+)
+_DOCKER_OBJECT_DESTRUCTIVE = frozenset({"rm", "remove", "prune", "rmi"})
+_COMPOSE_READS = frozenset({"ps", "logs", "ls", "config", "images", "top", "version", "port"})
+# Filters after a docker read that keep it a read (`docker logs app | grep error`).
+_READ_FILTERS = frozenset(
+    {"grep", "findstr", "head", "tail", "wc", "sort", "uniq", "less", "more", "jq"}
+    | {"select-string", "select-object", "sls"}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class DockerIntent:
+    """What a docker command line does, at its most severe command."""
+
+    kind: str  # read | exec | push | destructive
+    verb: str  # what it runs, e.g. "ps", "compose down -v", "system prune"
+
+
+def _skip_options(tokens: list[str], index: int, with_value: frozenset[str]) -> int:
+    while index < len(tokens) and tokens[index].startswith("-") and len(tokens[index]) > 1:
+        option = tokens[index]
+        index += 1
+        if "=" not in option and option in with_value:
+            index += 1  # its value is the next token
+    return index
+
+
+def _docker_segment(tokens: list[str]) -> DockerIntent | None:
+    """One simple command: docker or docker-compose, None for anything else.
+
+    Whatever is not a known read, push or deletion is something that runs
+    (`run`, `build`, `exec`, `start`, `stop`, `restart`, `pull`, plugins…).
+    """
+    program = _program(tokens[0]) if tokens else ""
+    if program == "docker-compose":
+        return _compose_intent(tokens, 1)
+    if program != "docker":
+        return None
+    index = _skip_options(tokens, 1, _DOCKER_VALUE_OPTIONS)
+    if index >= len(tokens):
+        return DockerIntent(DOCKER_READ, "help")
+    verb = tokens[index].lower()
+    if verb == "compose":
+        return _compose_intent(tokens, index + 1)
+    if verb in _DOCKER_READS:
+        return DockerIntent(DOCKER_READ, verb)
+    if verb in _DOCKER_DESTRUCTIVE:
+        return DockerIntent(DOCKER_DESTRUCTIVE, verb)
+    if verb == "push":
+        return DockerIntent(DOCKER_PUSH, verb)
+    if verb in _DOCKER_OBJECTS:
+        sub = _skip_options(tokens, index + 1, frozenset())
+        action = tokens[sub].lower() if sub < len(tokens) else ""
+        label = f"{verb} {action}".strip()
+        if not action or action in _DOCKER_OBJECT_READS:
+            return DockerIntent(DOCKER_READ, label)
+        if action in _DOCKER_OBJECT_DESTRUCTIVE:
+            return DockerIntent(DOCKER_DESTRUCTIVE, label)
+        if action == "push":
+            return DockerIntent(DOCKER_PUSH, label)
+        return DockerIntent(DOCKER_EXEC, label)
+    return DockerIntent(DOCKER_EXEC, verb)
+
+
+def _compose_intent(tokens: list[str], index: int) -> DockerIntent:
+    index = _skip_options(tokens, index, _COMPOSE_VALUE_OPTIONS)
+    if index >= len(tokens):
+        return DockerIntent(DOCKER_READ, "compose")
+    verb = tokens[index].lower()
+    flags = {token.lower() for token in tokens[index + 1 :] if token.startswith("-")}
+    deleting = flags & {"-v", "--volumes", "--rmi"} or {
+        flag for flag in flags if flag.startswith("--rmi=")
+    }
+    if verb == "down" and deleting:
+        # Volumes hold the data (a database); --rmi deletes the images.
+        return DockerIntent(DOCKER_DESTRUCTIVE, f"compose down {sorted(deleting)[0]}")
+    if verb == "rm":
+        return DockerIntent(DOCKER_DESTRUCTIVE, "compose rm")
+    if verb in _COMPOSE_READS:
+        return DockerIntent(DOCKER_READ, f"compose {verb}")
+    if verb == "push":
+        return DockerIntent(DOCKER_PUSH, "compose push")
+    return DockerIntent(DOCKER_EXEC, f"compose {verb}")
+
+
+# A redirection to a file, or a command substitution: more than a read.
+_WRITES_OR_SUBSTITUTES = re.compile(r"(?<![<>&0-9])>|`|\$\(")
+
+
+def docker_intent(command: str) -> DockerIntent | None:
+    """How `command` uses docker (`docker`, `docker compose`, `docker-compose`).
+
+    None when no command of the line is docker. Several commands chained:
+    the most severe wins. A read stays a read only when nothing runs with it
+    but filters of its output; a redirection or any other command makes it
+    an `exec`.
+    """
+    text = command or ""
+    if "docker" not in text.lower():
+        return None
+    try:
+        segments = _segments(text)
+    except ValueError:
+        return None
+    found: DockerIntent | None = None
+    others = bool(_WRITES_OR_SUBSTITUTES.search(text))
+    for tokens in segments:
+        while tokens and _program(tokens[0]) in {"sudo", "env", "nohup", "time"}:
+            tokens = tokens[1:]
+        if not tokens:
+            continue
+        intent = _docker_segment(tokens)
+        if intent is None:
+            if _program(tokens[0]) not in _READ_FILTERS:
+                others = True
+            continue
+        if found is None or _DOCKER_SEVERITY[intent.kind] > _DOCKER_SEVERITY[found.kind]:
+            found = intent
+    if found is not None and found.kind == DOCKER_READ and others:
+        return DockerIntent(DOCKER_EXEC, found.verb)
     return found
 
 
@@ -590,9 +788,33 @@ class PolicyEngine:
         target: str | None = None,
         network_mode: str = "read",
         cost_basis: str | None = None,
+        mcp: McpToolFacts | None = None,
     ) -> PolicyDecision:
         read_only = scope.profile is PermissionProfile.READ_ONLY
         if read_only and capability == CAPABILITY_SHELL:
+            docker = docker_intent(command or "")
+            reads = docker is not None and docker.kind == DOCKER_READ
+            if reads and not catastrophic(command or ""):
+                # `docker ps`, `logs`, `inspect`…: reading, as read-only allows.
+                return self._allow(capability, f"docker {docker.verb} only reads", risk, risk_class)
+            if docker is not None and docker.kind == DOCKER_DESTRUCTIVE:
+                return self._deny(
+                    capability,
+                    f"read-only mode: docker {docker.verb} deletes containers, images or data",
+                    target=command,
+                    risk="high",
+                    risk_class="local-destructive",
+                    rule_id="docker_destructive",
+                )
+            if docker is not None and docker.kind == DOCKER_PUSH:
+                return self._deny(
+                    capability,
+                    f"read-only mode: docker {docker.verb} publishes an image to a registry",
+                    target=command,
+                    risk="high",
+                    risk_class="remote-reversible",
+                    rule_id="docker_push",
+                )
             # A review re-runs the tests; a command can also change files, so
             # read-only asks for each one and never keeps the answer (as
             # Codex's read-only sandbox does).
@@ -636,6 +858,8 @@ class PolicyEngine:
             return self._allow(capability, "local validation evidence", risk, risk_class)
         if capability == CAPABILITY_FS_WRITE:
             return self._fs_write(scope, path, risk, risk_class)
+        if capability in (CAPABILITY_MCP_READ, CAPABILITY_MCP_WRITE) and mcp is not None:
+            return self._mcp_tool(scope, capability, mcp, risk, risk_class)
         if capability in (CAPABILITY_BROWSER_READ, CAPABILITY_BROWSER_WRITE, CAPABILITY_MCP_READ):
             if read_only:
                 return self._deny(
@@ -887,6 +1111,96 @@ class PolicyEngine:
             risk_class=risk_class,
             rule_id=rule_id,
             binding_mode=binding_mode,
+        )
+
+    # -- MCP tools (connectors plan, C5) -----------------------------------------
+
+    def _mcp_tool(
+        self,
+        scope: SessionScope,
+        capability: str,
+        facts: McpToolFacts,
+        risk: str,
+        risk_class: str,
+    ) -> PolicyDecision:
+        """One MCP tool call: the owner's setting, the annotations and the mode.
+
+        Block holds in every mode. Read-only calls no MCP tool. Full access
+        asks for nothing else (a registered server is a trusted destination).
+        In workspace the owner's Ask, or a destructive tool without Allow,
+        asks with «always» (which saves Allow for the tool); a call that can
+        send data out after external content from another source asks for
+        this session at most, whatever the setting.
+        """
+        name = f"{facts.server}/{facts.tool}"
+        by = "for this tool" if facts.decision_source == "tool" else "for this server"
+        if facts.decision == DECISION_DENY:
+            return self._deny(
+                capability,
+                f"the owner blocked {name} ({by}) in Settings",
+                target=name,
+                risk=risk,
+                risk_class=risk_class,
+                rule_id=RULE_BLOCKED,
+            )
+        if scope.profile is PermissionProfile.READ_ONLY:
+            return self._deny(
+                capability,
+                "read-only profile does not call MCP tools",
+                target=name,
+                risk=risk,
+                risk_class=risk_class,
+            )
+        if facts.destructive:
+            risk, risk_class = "high", "remote-destructive"
+        if scope.profile is PermissionProfile.FULL_ACCESS:
+            return self._allow(
+                capability, f"full-access: {name}, a server the owner registered", risk, risk_class
+            )
+        guard = facts.sends_out and scope.external_content and foreign_content(scope, facts.origin)
+        asks = facts.decision == DECISION_ASK or (
+            facts.destructive and facts.decision != DECISION_ALLOW
+        )
+        if asks:
+            reason = (
+                f"the owner asked to be asked before {name} ({by})"
+                if facts.decision == DECISION_ASK
+                else f"{name} says it is destructive (deletes or overwrites)"
+            )
+        if guard:
+            reason = (
+                f"{reason}; " if asks else f"{name} can send data out; "
+            ) + "after reading external content from another source in this turn"
+            return self._ask(
+                capability,
+                reason,
+                target=name,
+                risk="high",
+                risk_class=risk_class if facts.destructive else "communication",
+                rule_id="external_content_send",
+                choices=CHOICES_SESSION,
+                binding_mode="exact",
+            )
+        if asks:
+            return self._ask(
+                capability,
+                reason,
+                target=name,
+                risk="high" if facts.destructive else risk,
+                risk_class=risk_class,
+                rule_id=RULE_TOOL_ASK if facts.decision == DECISION_ASK else RULE_DESTRUCTIVE,
+                choices=CHOICES_LASTING,
+                binding_mode="exact",
+            )
+        if facts.decision == DECISION_ALLOW:
+            return self._allow(capability, f"the owner allowed {name} ({by})", risk, risk_class)
+        return self._allow(
+            capability,
+            "a read-only MCP call"
+            if facts.read_only
+            else "a tool from an MCP server the owner registered",
+            risk,
+            risk_class,
         )
 
     # -- network ---------------------------------------------------------------
@@ -1172,7 +1486,12 @@ class PolicyEngine:
                         rule_id="catastrophic",
                     )
             if any(
-                action.payload and _DESTRUCTIVE_SHELL.search(action.payload) for action in machines
+                action.payload
+                and (
+                    _DESTRUCTIVE_SHELL.search(action.payload)
+                    or getattr(docker_intent(action.payload), "kind", None) == DOCKER_DESTRUCTIVE
+                )
+                for action in machines
             ):
                 return self._hard(
                     scope,
@@ -1208,6 +1527,37 @@ class PolicyEngine:
                     risk_class="communication",
                     rule_id="shell_send",
                 )
+        docker = docker_intent(command or "") if not machines else None
+        if docker is not None and docker.kind == DOCKER_DESTRUCTIVE:
+            # Containers, images, volumes and networks live outside the
+            # project, and a volume holds data no checkpoint brings back.
+            if scope.profile is PermissionProfile.FULL_ACCESS:
+                return self._allow(
+                    CAPABILITY_SHELL,
+                    f"full-access: docker {docker.verb}",
+                    "high",
+                    "local-destructive",
+                )
+            return self._ask(
+                CAPABILITY_SHELL,
+                f"docker {docker.verb} deletes containers, images, volumes or networks",
+                target=command,
+                risk="high",
+                risk_class="local-destructive",
+                rule_id="docker_destructive",
+                choices=CHOICES_SESSION,
+                binding_mode="exact",
+            )
+        if docker is not None and docker.kind == DOCKER_PUSH:
+            return self._outbound(
+                scope,
+                CAPABILITY_SHELL,
+                f"docker {docker.verb} publishes an image to a registry",
+                target=command,
+                risk="high",
+                risk_class="remote-reversible",
+                rule_id="docker_push",
+            )
         if shell_risk.destructive and shell_risk.external_path_targets:
             return self._hard(
                 scope,

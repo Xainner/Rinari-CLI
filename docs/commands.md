@@ -1196,6 +1196,64 @@ registration | metadata_document | required, issuer, resource,
 resource_metadata, registration, client_metadata_document, revocation}` or
 null. No token, code, verifier or client secret is ever in a view, an event,
 a log line or an error message.
+
+Permissions per connector and per tool (`mcp_tool_permissions_v1`, plan de
+conectores C5), on top of the three modes. The server's annotations count:
+`readOnlyHint: true` is a read (`mcp.read`), `destructiveHint: true` on a
+tool that writes asks in project mode (risk high, with «always»), and a tool
+that writes without `openWorldHint: false` may send data outside. They are
+hints, not guarantees: only an explicit `true`/`false` counts, and the owner
+can correct them per tool. Allow / Ask / Block per tool wins over the
+server's default, which wins over the mode's rule. Block (`deny`) holds in
+every mode; read-only calls no MCP tool; full access asks for nothing else
+(Ask included). «Always» on an MCP tool's card (`allow_project`, also in a
+loose chat; `approval.requested` says `grant_scope: "mcp_tool"`) saves Allow
+for that tool instead of a project grant. Same connector, same destination:
+after external content, a call that may send data out asks in project mode
+(once or for this session, rule `external_content_send`) only when the
+content came from somewhere else (a page, another connector); results of a
+connector going back to that connector ask nothing, and Allow does not lift
+this guard. Settings live in the server's `config_json` (`permissions
+{default?, tools {<tool> {decision?, annotations?}}}`), survive `mcp.update`
+and never hold a secret; changing them re-classifies the live tools without
+reconnecting.
+- `mcp.tools.list {name, scope?}` → `{server {name, scope, status, default,
+  tools[]}}` from the server's last `tools/list` (nothing connects). Each
+  tool: `{name, tool, title, description, listed, annotations {server, owner,
+  effective}, kind (read | write | destructive), sends_out, setting, decision,
+  decision_source (tool | server | mode), by_mode {read-only, workspace,
+  full-access}}`; `by_mode` is what each mode does before any external
+  content, and a saved setting for a tool the server no longer lists comes
+  with `listed: false`.
+- `mcp.tools.set {name, tool, decision?, annotations?, scope?}`: `decision`
+  `allow` | `ask` | `deny` | `null` (back to the server's default);
+  `annotations {readOnlyHint?, destructiveHint?, openWorldHint?}` with `true`,
+  `false` or `null` (back to the server's hint) per key, or `null` to drop
+  every correction. Marking a tool destructive also makes it a write. →
+  `{server, tool}`. Anything else is `INVALID_PARAMS`; an unknown server is
+  `NOT_FOUND`.
+- `mcp.tools.set_default {name, decision, scope?}`: the server's Allow / Ask /
+  Block for tools without their own setting (`null`: the mode decides) →
+  `{server}`.
+
+Docker in the console policy (plan de conectores C7), for every user with or
+without a connector. `docker`, `docker compose` and `docker-compose` (after
+`sudo`/`env`, with global options such as `-H`/`--context` and compose's
+`-f`/`-p`): reads (`ps`, `logs`, `inspect`, `images`, `version`, `info`,
+`top`, `stats`, `compose ps`/`logs`, `<object> ls`/`inspect`, `system df`)
+run in every mode, also read-only, and from a folder outside the project;
+piped only into filters (`grep`, `head`, `tail`…) they stay reads, while a
+redirection or another command makes them commands that run. `run`, `build`,
+`exec`, `compose up`/`down` (without `-v`), `start`, `stop`, `restart`,
+`pull` and the rest are local commands (asked in read-only, free in project
+mode inside the project). Deletions (`rm`, `rmi`, `container`/`image`/
+`volume`/`network rm`, `system`/`image`/`container`/`volume`/`network`/
+`builder prune`, `compose down -v`/`--volumes`/`--rmi`, `compose rm`, with
+`-f`, `--force` and `-a` alike) are refused in read-only, ask in project mode
+(once or for this session, rule `docker_destructive`, bound to the exact
+command) and run in full access; on another machine over `ssh` they ask every
+time. `docker push` sends like any other send (rule `docker_push`; refused in
+read-only). The catastrophic list still wins.
 The envelope contract is unchanged across slices.
 
 ---

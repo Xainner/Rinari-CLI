@@ -197,6 +197,14 @@ CAPABILITIES: dict[str, bool] = {
     # `oauth` support block in mcp.test/mcp.probe, hints oauth_required and
     # reauth_required, and MCP 2025-06-18 with negotiation down.
     "mcp_oauth_v1": True,
+    # Permissions per connector and per tool (plan de conectores C5): the
+    # server's annotations count (readOnlyHint, destructiveHint, openWorldHint),
+    # Allow / Ask / Block per tool and per server, corrected annotations,
+    # mcp.tools.list/set/set_default, «always» on an MCP tool's approval saves
+    # Allow for it (approval.requested grant_scope "mcp_tool"), and the guard
+    # of external content treats a connector's own results as the same
+    # destination.
+    "mcp_tool_permissions_v1": True,
     # soul.settings.get/set: character intensity (minimal | balanced | full),
     # separate from Soul selection; bundled default Soul 4.0.
     "soul_character_intensity_v1": True,

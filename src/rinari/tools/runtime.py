@@ -108,22 +108,31 @@ def scope_from_context(ctx: ToolContext) -> SessionScope:
         private_roots=ctx.private_roots,
         read_profile=ctx.read_profile,
         external_content=bool(getattr(ctx.turn_state, "external_content", False)),
+        external_origins=frozenset(getattr(ctx.turn_state, "origins", None) or ()),
         ask_new_destinations=bool(getattr(ctx, "ask_new_destinations", False)),
         extra_roots=tuple(getattr(ctx, "extra_project_roots", ()) or ()),
     )
 
 
-def _external_source(action, tool) -> str | None:
-    """What makes this action's result untrusted outside content, if anything."""
+def _external_source(action, tool) -> tuple[str, str] | None:
+    """What makes this action's result untrusted outside content, if anything:
+    `(source, origin)`, where an MCP result's origin is its server (C5)."""
     from rinari.policy.engine import CAPABILITY_MCP_READ, CAPABILITY_MCP_WRITE, is_local_host
+    from rinari.policy.mcp_tools import mcp_origin
     from rinari.policy.network import normalize_host
 
     if action.capability in (CAPABILITY_MCP_READ, CAPABILITY_MCP_WRITE):
-        return f"mcp:{tool.name}"
+        facts = getattr(action, "mcp", None)
+        server = (
+            facts.server
+            if facts is not None
+            else (action.target or (tool.manifest or {}).get("server") or "*")
+        )
+        return f"mcp:{tool.name}", mcp_origin(str(server))
     if action.capability == CAPABILITY_NETWORK:
         host = normalize_host(action.target)
         if host and not is_local_host(host):
-            return host
+            return host, host
     return None
 
 
@@ -452,6 +461,7 @@ class ToolRuntime:
                 ),
                 network_mode=getattr(action, "mode", None) or "read",
                 cost_basis=getattr(action, "cost_basis", None),
+                mcp=getattr(action, "mcp", None),
             )
             self._event(
                 "PolicyDecision",
@@ -474,7 +484,9 @@ class ToolRuntime:
             if decision.action is PolicyAction.DENY:
                 return self._error(ctx, ToolErrorCode.POLICY_DENIED, decision.reason)
             if decision.action is PolicyAction.ASK:
-                granted, ctx = self._request_approval(tool, decision, ctx, tool_call_id)
+                granted, ctx = self._request_approval(
+                    tool, decision, ctx, tool_call_id, mcp=getattr(action, "mcp", None)
+                )
                 if not granted:
                     return self._error(ctx, ToolErrorCode.APPROVAL_DENIED, decision.reason)
 
@@ -487,8 +499,8 @@ class ToolRuntime:
                 return self._execute_authorized(tool, arguments, ctx, tool_call_id)
             finally:
                 # Whatever came back (even an error page) is outside content.
-                for source in sources:
-                    ctx.turn_state.mark_external(source)
+                for source, origin in sources:
+                    ctx.turn_state.mark_external(source, origin)
 
         return run_and_mark
 
@@ -725,8 +737,11 @@ class ToolRuntime:
         decision,
         ctx: ToolContext,
         tool_call_id: str,
+        *,
+        mcp=None,
     ) -> tuple[bool, ToolContext]:
         scope_key = grant_scope_key(ctx)
+        on_always = self._save_tool_allow(decision, ctx, mcp)
         request = ApprovalRequest(
             capability=decision.capability,
             description=f"{tool.name}: {decision.reason}",
@@ -740,10 +755,11 @@ class ToolRuntime:
             # not reach the others (#56).
             choices=(
                 decision.choices
-                if scope_key != LOOSE_CHATS
+                if scope_key != LOOSE_CHATS or on_always is not None
                 else tuple(c for c in decision.choices if c != "allow_project")
             ),
             binding_mode=decision.binding_mode,
+            on_always=on_always,
         )
         outcome = self.approvals.check(request)
         self._event(
@@ -782,6 +798,26 @@ class ToolRuntime:
                 )
                 return True, dataclasses.replace(ctx, sandbox=sandbox)
         return True, ctx
+
+    @staticmethod
+    def _save_tool_allow(decision, ctx: ToolContext, mcp):
+        """«Siempre» on an MCP tool's card: Allow saved for that tool (C5).
+
+        Only for the asks the tool's setting can lift (the owner's Ask, a
+        destructive tool); the guard of external content never offers it.
+        """
+        from rinari.policy.mcp_tools import DECISION_ALLOW, LASTING_TOOL_RULES
+
+        service = getattr(ctx, "mcp", None)
+        if mcp is None or decision.rule_id not in LASTING_TOOL_RULES or service is None:
+            return None
+        if not hasattr(service, "set_tool_permission"):
+            return None
+
+        def save() -> None:
+            service.set_tool_permission(mcp.server, mcp.tool, decision=DECISION_ALLOW)
+
+        return save
 
     @staticmethod
     def _inside_any(path: Path, roots: tuple[Path, ...]) -> bool:
