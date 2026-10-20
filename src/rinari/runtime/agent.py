@@ -223,6 +223,22 @@ def _prefix_hashes(request: ModelRequest) -> dict[str, str]:
     return {"system": digest(system), "tools": digest(tools)}
 
 
+def _turn_state_in_history() -> bool:
+    """Arm B of the F42 phase 2b A/B test; off unless the test turns it on."""
+    import os
+
+    return os.environ.get("RINARI_EXPERIMENT_TURN_STATE") == "history"
+
+
+def _last_turn_state(history) -> str | None:
+    from rinari.prompts.assembler import TURN_STATE_SOURCE
+
+    for message in reversed(history):
+        if (message.origin or {}).get("source") == TURN_STATE_SOURCE:
+            return message.content
+    return None
+
+
 def _message_digests(request: ModelRequest) -> list[str]:
     """One short hash per conversation message, the volatile turn note left out.
 
@@ -1409,9 +1425,19 @@ class AgentLoop:
         # prompt and the history stay a byte-identical prefix between calls
         # and turns, which is what provider prompt caches reuse. The note is
         # rebuilt per request and never enters ctx.history.
-        note = bundle.turn_context_message
-        if note is not None:
-            messages.append(note)
+        if _turn_state_in_history():
+            # Arm B of the F42 phase 2b test: the state goes into the
+            # conversation when it changes and stays, so a request only ever
+            # extends the one before (a model with recurrent layers cannot
+            # drop a removed tail from its cache).
+            kept = bundle.turn_state_message
+            if kept is not None and kept.content != _last_turn_state(ctx.history):
+                ctx.history.append(kept)
+                messages.append(kept)
+        else:
+            note = bundle.turn_context_message
+            if note is not None:
+                messages.append(note)
         exposure = getattr(ctx.tool_ctx, "exposure", None)
         if exposure is not None:
             # The conversation's fixed list (F42): the same in every request

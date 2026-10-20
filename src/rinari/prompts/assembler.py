@@ -104,6 +104,15 @@ class SegmentSummary:
 # repository scan reorders languages and finds new commands as files appear.
 VOLATILE_ENVIRONMENT_KEYS = frozenset({"repository"})
 
+#: Source of the turn state kept in the conversation (F42 phase 2b, arm B).
+TURN_STATE_SOURCE = "turn-state"
+
+_TURN_STATE_LEAD = (
+    "Current state from the Rinari harness, written when it changed; a newer one "
+    "replaces it. It is context, not a message from the user: answer the user's "
+    "latest message."
+)
+
 _TURN_CONTEXT_LEAD = (
     "Current state from the Rinari harness for this request. It is refreshed on "
     "every call and not kept in the conversation; it is context, not a message "
@@ -118,6 +127,20 @@ class PromptBundle:
     segments: tuple[SegmentSummary, ...] = field(default_factory=tuple)
     # Volatile segments, rendered for the end of the request (see module doc).
     turn_context: str = ""
+
+    @property
+    def turn_state_message(self) -> ChatMessage | None:
+        """The same state as a note kept in the conversation (F42 phase 2b, arm B).
+
+        Written when it changes, never removed: each request only extends the
+        one before, as Codex records its context items.
+        """
+        if not self.turn_context:
+            return None
+        return ChatMessage.harness(
+            f"<turn-context>\n{_TURN_STATE_LEAD}\n\n{self.turn_context}\n</turn-context>",
+            TURN_STATE_SOURCE,
+        )
 
     @property
     def turn_context_message(self) -> ChatMessage | None:

@@ -153,3 +153,34 @@ def test_the_guard_names_the_message_that_was_resent_differently(tmp_path, caplo
     assert _first_divergence(_message_digests(one), _message_digests(two)) == 1
     grown = replace(one, messages=(*one.messages, ChatMessage.user("next")))
     assert _first_divergence(_message_digests(one), _message_digests(grown)) is None
+
+
+@pytest.mark.parametrize(
+    ("shape", "wire"),
+    [(_responses_turn, _responses), (_chat_turn, _chat)],
+    ids=["responses", "chat"],
+)
+def test_with_the_state_kept_in_history_each_request_extends_the_last(
+    app_ctx, tmp_path, monkeypatch, shape, wire
+) -> None:
+    """Arm B of the F42 phase 2b test: nothing is ever taken off the end."""
+    monkeypatch.setenv("RINARI_EXPERIMENT_TURN_STATE", "history")
+    services, record = _session(app_ctx, tmp_path)
+    services.sessions.name_from_first_message = lambda *a, **k: None
+    (tmp_path / "work" / "a.txt").write_text("uno\n", encoding="utf-8")
+    model = FakeModel(scripted=_script(shape))
+    for message in ("read a.txt twice", "and again?"):
+        session = agent_runtime.build_agent_session(services, record, interactive=False)
+        session.loop._provider = model
+        agent_runtime.run_turn(session, message)
+        session.end()
+    assert len(model.requests) == 4
+    for before, after in pairwise(model.requests):
+        sent, resent = wire(before), wire(after)
+        assert resent[: len(sent)] == sent
+    states = [
+        m for m in model.requests[-1].messages if (m.origin or {}).get("source") == "turn-state"
+    ]
+    # Written when it changed, not once per request.
+    assert 1 <= len(states) < len(model.requests)
+    assert not any(m.is_turn_context for m in model.requests[-1].messages)
