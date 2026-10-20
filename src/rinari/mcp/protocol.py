@@ -22,7 +22,12 @@ METHOD_RESOURCES_READ = "resources/read"
 METHOD_PROMPTS_LIST = "prompts/list"
 METHOD_PROMPTS_GET = "prompts/get"
 
-_PROTOCOL_VERSION = "2024-11-05"
+#: Asked for on `initialize` (MCP authorization is normative since 2025-06-18).
+LATEST_PROTOCOL_VERSION = "2025-06-18"
+#: Versions this client speaks, newest first: a server may answer `initialize`
+#: with an older one (negotiation down) and the client follows it.
+SUPPORTED_PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
+_PROTOCOL_VERSION = LATEST_PROTOCOL_VERSION
 _CLIENT_INFO = {"name": "rinari", "version": "1.0.0"}
 
 # Monotonic request id source.
@@ -125,6 +130,7 @@ def initialize_params(protocol_version: str | None = None) -> dict[str, Any]:
 
 
 __all__ = [
+    "LATEST_PROTOCOL_VERSION",
     "METHOD_INITIALIZE",
     "METHOD_INITIALIZED",
     "METHOD_PROMPTS_GET",
@@ -133,6 +139,7 @@ __all__ = [
     "METHOD_RESOURCES_READ",
     "METHOD_TOOLS_CALL",
     "METHOD_TOOLS_LIST",
+    "SUPPORTED_PROTOCOL_VERSIONS",
     "McpMessage",
     "initialize_params",
     "next_id",

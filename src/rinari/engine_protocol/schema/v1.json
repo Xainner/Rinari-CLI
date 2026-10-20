@@ -64,6 +64,12 @@
     "mcpConnectionStatus",
     "mcpConnection",
     "mcpTestResult",
+    "mcpAuthError",
+    "mcpOAuthSupport",
+    "mcpAuthStart",
+    "mcpAuthOutcome",
+    "mcpAuthStatus",
+    "mcpAuthSignout",
     "soulSettings",
     "networkSettings",
     "networkEffective",
@@ -420,6 +426,10 @@
         "mcp.disable",
         "mcp.test",
         "mcp.probe",
+        "mcp.auth.start",
+        "mcp.auth.status",
+        "mcp.auth.cancel",
+        "mcp.auth.signout",
         "plugin.list",
         "plugin.get",
         "plugin.enable",
@@ -726,7 +736,9 @@
         "media.generated",
         "speech.setup_needed",
         "steer.updated",
-        "steer.cancelled"
+        "steer.cancelled",
+        "mcp.auth.progress",
+        "mcp.auth.finished"
       ]
     },
     "attachment": {
@@ -3773,16 +3785,51 @@
               "enum": [
                 "none",
                 "bearer",
-                "headers"
+                "headers",
+                "oauth"
               ]
             },
             "token": {
               "$ref": "#/$defs/mcpSecretState"
+            },
+            "client_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "client_secret": {
+              "$ref": "#/$defs/mcpSecretState"
+            },
+            "scopes": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "redirect_port": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "client_metadata_url": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "authorize_params": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
             }
           },
           "required": [
             "kind"
-          ]
+          ],
+          "description": "kind oauth adds client_id (public), client_secret (state only), scopes, redirect_port, client_metadata_url and authorize_params; tokens are never part of the view (mcp.auth.status)."
         },
         "headers": {
           "type": "array",
@@ -4059,6 +4106,17 @@
         },
         "retryable": {
           "type": "boolean"
+        },
+        "oauth": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/mcpOAuthSupport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "http servers with auth none/oauth: OAuth found even without a 401 (null: none)."
         }
       },
       "required": [
@@ -5456,6 +5514,300 @@
           "description": "MCP: tool per operation and its argument names."
         }
       }
+    },
+    "mcpAuthError": {
+      "type": "object",
+      "description": "An OAuth failure: stable code and hint, never a token, code or secret.",
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "OAUTH_DISCOVERY_FAILED",
+            "OAUTH_CLIENT_REQUIRED",
+            "OAUTH_REGISTRATION_FAILED",
+            "OAUTH_PORT_IN_USE",
+            "OAUTH_DENIED",
+            "OAUTH_TOKEN_REJECTED",
+            "OAUTH_SERVER_ERROR",
+            "OAUTH_UNREACHABLE",
+            "OAUTH_TIMEOUT",
+            "OAUTH_CANCELLED",
+            "OAUTH_REAUTH_REQUIRED",
+            "OAUTH_SECRET_MISSING",
+            "OAUTH_STORE_FAILED"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "hint": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "hint"
+      ]
+    },
+    "mcpOAuthSupport": {
+      "type": "object",
+      "description": "What OAuth discovery found for a remote MCP server (mcp.test/mcp.probe `oauth`, mcp.auth.start). `client` says what signing in needs: configured (the owner's client is set), registration (RFC 7591), metadata_document (CIMD) or required (the owner must add a client ID).",
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "client": {
+          "type": "string",
+          "enum": [
+            "configured",
+            "registration",
+            "metadata_document",
+            "required"
+          ]
+        },
+        "issuer": {
+          "type": "string"
+        },
+        "resource": {
+          "type": "string"
+        },
+        "resource_metadata": {
+          "type": "boolean"
+        },
+        "registration": {
+          "type": "boolean"
+        },
+        "client_metadata_document": {
+          "type": "boolean"
+        },
+        "revocation": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "available",
+        "client",
+        "issuer",
+        "resource"
+      ]
+    },
+    "mcpAuthStart": {
+      "type": "object",
+      "description": "mcp.auth.start result. The sign-in goes on in the browser; it ends with mcp.auth.finished.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "flow_id": {
+          "type": "string"
+        },
+        "authorize_url": {
+          "type": "string"
+        },
+        "redirect_uri": {
+          "type": "string"
+        },
+        "browser_opened": {
+          "type": "boolean"
+        },
+        "expires_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "client": {
+          "type": "string",
+          "enum": [
+            "configured",
+            "registered",
+            "metadata_document"
+          ]
+        },
+        "issuer": {
+          "type": "string"
+        },
+        "resource": {
+          "type": "string"
+        },
+        "resource_metadata": {
+          "type": "boolean"
+        },
+        "registration": {
+          "type": "boolean"
+        },
+        "client_metadata_document": {
+          "type": "boolean"
+        },
+        "revocation": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "flow_id",
+        "authorize_url",
+        "redirect_uri",
+        "browser_opened",
+        "client"
+      ]
+    },
+    "mcpAuthOutcome": {
+      "type": "object",
+      "description": "How a sign-in ended (mcp.auth.finished payload without `name`; mcp.auth.status `last`).",
+      "properties": {
+        "flow_id": {
+          "type": "string"
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "signed_in",
+            "failed",
+            "cancelled",
+            "timed_out"
+          ]
+        },
+        "finished_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "$ref": "#/$defs/mcpAuthError"
+        }
+      },
+      "required": [
+        "flow_id",
+        "outcome"
+      ]
+    },
+    "mcpAuthStatus": {
+      "type": "object",
+      "description": "mcp.auth.status: sign-in flags, expiry and scopes; never a token.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "none",
+            "bearer",
+            "headers",
+            "oauth"
+          ]
+        },
+        "signed_in": {
+          "type": "boolean"
+        },
+        "reauth_required": {
+          "type": "boolean"
+        },
+        "expires_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "has_refresh_token": {
+          "type": "boolean"
+        },
+        "scopes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "issuer": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "client": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "configured",
+            "registered",
+            "metadata_document",
+            null
+          ]
+        },
+        "pending": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "flow_id": {
+              "type": "string"
+            },
+            "authorize_url": {
+              "type": "string"
+            },
+            "started_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "expires_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "last": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/mcpAuthOutcome"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "signed_in",
+        "reauth_required",
+        "has_refresh_token",
+        "scopes"
+      ]
+    },
+    "mcpAuthSignout": {
+      "type": "object",
+      "description": "mcp.auth.signout: tokens revoked (when the server can) and deleted.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "revoked": {
+          "type": "boolean"
+        },
+        "removed": {
+          "type": "boolean"
+        },
+        "cancelled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "revoked",
+        "removed",
+        "cancelled"
+      ]
     }
   }
 }

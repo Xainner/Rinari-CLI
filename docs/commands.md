@@ -1102,8 +1102,9 @@ name), `MCP_UNREACHABLE`, `MCP_TLS`, `MCP_TIMEOUT`, `MCP_PROTOCOL`,
 `MCP_HTTP_ERROR`, `MCP_TRANSPORT_UNSUPPORTED`, `MCP_SESSION_EXPIRED`,
 `MCP_SPAWN_FAILED`, `MCP_SECRET_MISSING`, `MCP_NOT_CONNECTED`,
 `MCP_DEPENDENCY` (a stdio server that exited). Hint keys: `check_credentials`,
-`oauth_required` (401 with an OAuth `resource_metadata` challenge and no
-token; OAuth is not implemented), `check_url_or_network`,
+`oauth_required` (a 401 and no OAuth sign-in: sign in, see `mcp_oauth_v1`),
+`reauth_required` (the OAuth sign-in expired and could not be renewed),
+`protocol_version_unsupported`, `check_url_or_network`,
 `check_tls_certificate`, `server_slow_or_unresponsive`, `check_endpoint_path`,
 `server_not_registered`, `not_an_mcp_endpoint`, `initialize_rejected`,
 `server_error`, `request_rejected`, `legacy_sse_unsupported`,
@@ -1135,6 +1136,66 @@ owner must fix (`check_credentials`, `secret_missing`, …) are never retried
 on a timer. Connected servers that offer resources add two on-demand reads
 for the model, `mcp.resources.list {server?}` and `mcp.resources.read
 {server, uri}` (`mcp.read`); binary contents are described, not inlined.
+
+OAuth for remote MCP (`mcp_oauth_v1`, plan de conectores C1): `initialize`
+asks for MCP `2025-06-18` and follows the server down to `2025-03-26` or
+`2024-11-05` (any other answer: `MCP_PROTOCOL`, hint
+`protocol_version_unsupported`). `auth = {kind: "oauth", client_id?,
+client_secret?, scopes?, redirect_port?, client_metadata_url?,
+authorize_params?}` on `mcp.create`/`mcp.update` (merged over the stored one;
+`null` clears a key): `client_id` is the owner's own OAuth client (public, kept
+in the row), `client_secret` a secret like any other (credential store, slot
+`oauth-client-secret`), `scopes` a list or a space-separated string,
+`redirect_port` 1024..65535 for clients that need an exact redirect,
+`client_metadata_url` an https URL with a path (a client ID metadata
+document; the process default is `RINARI_MCP_CLIENT_METADATA_URL`), and
+`authorize_params` extra authorization-request parameters (never
+`response_type`, `client_id`, `redirect_uri`, `state`, `code_challenge*`,
+`resource` or `scope`). Views add `client_id`, `client_secret` (state),
+`scopes`, `redirect_port`, `client_metadata_url` and `authorize_params`.
+`mcp.auth.start {name, open_browser?: true, timeout_s?: 300}` (oauth servers
+only, otherwise `INVALID_PARAMS` with `details.hint` `oauth_not_configured`)
+discovers the authorization server — protected resource metadata (RFC 9728)
+at `/.well-known/oauth-protected-resource<path>` even without a 401, else the
+`resource_metadata` of an anonymous `initialize`'s 401, else the authorization
+server on the MCP origin (RFC 8414 / OpenID discovery) — picks the client
+(the configured `client_id`; else dynamic registration, RFC 7591, kept per
+server and reused on its port; else the client metadata document when the
+server accepts them; else `MCP_AUTH_FAILED` with `details.hint`
+`oauth_client_required`), opens a listener on
+`http://127.0.0.1:<free or redirect_port>/callback` for that sign-in only, and
+returns at once `{name, flow_id, authorize_url, redirect_uri, browser_opened,
+expires_at, client, issuer, resource, resource_metadata, registration,
+client_metadata_document, revocation}`; the URL carries PKCE S256, `state` and
+`resource` (RFC 8707), plus `access_type=offline` (and `prompt=consent` while
+no refresh token is kept) for Google. Errors before the browser step are
+`MCP_AUTH_FAILED` with `details {code, message, hint}` (`OAUTH_DISCOVERY_FAILED`
+`oauth_metadata_missing` / `oauth_metadata_invalid` / `oauth_pkce_unsupported`,
+`OAUTH_CLIENT_REQUIRED`, `OAUTH_REGISTRATION_FAILED`
+`oauth_registration_rejected`, `OAUTH_PORT_IN_USE` `redirect_port_busy`,
+`OAUTH_UNREACHABLE`). A callback with another `state` is refused (400) and the
+sign-in keeps waiting. Events: `mcp.auth.progress {name, flow_id, stage}`
+(`discovering`, `registering`, `waiting_for_browser`, `exchanging_code`) and
+`mcp.auth.finished {name, flow_id, outcome, finished_at, error?}` with
+`outcome` `signed_in`, `failed` (`OAUTH_DENIED`, `OAUTH_TOKEN_REJECTED`…),
+`cancelled` or `timed_out`. `mcp.auth.status {name}` → `{name, kind,
+signed_in, reauth_required, expires_at, has_refresh_token, scopes, issuer,
+client, pending {flow_id, authorize_url, started_at, expires_at} | null, last
+{flow_id, outcome, finished_at, error?} | null}`; `mcp.auth.cancel {name}` →
+`{name, cancelled}`; `mcp.auth.signout {name}` revokes the tokens when the
+server has a revocation endpoint (RFC 7009), deletes them and drops the cached
+connection → `{name, revoked, removed, cancelled}`. Tokens (access, refresh,
+expiry, scopes) live only in the credential store under `mcp/<server
+id>/oauth` (a registered client under `mcp/<server id>/oauth-client`); the
+transport refreshes a token about to expire and, after a 401, refreshes and
+retries once. When that is impossible the error is `MCP_AUTH_REJECTED` with
+hint `reauth_required` (`oauth_required` if never signed in). `mcp.remove`
+revokes and deletes them too. `mcp.test`/`mcp.probe` add `oauth` for http
+servers with auth `none` or `oauth`: `{available, client: configured |
+registration | metadata_document | required, issuer, resource,
+resource_metadata, registration, client_metadata_document, revocation}` or
+null. No token, code, verifier or client secret is ever in a view, an event,
+a log line or an error message.
 The envelope contract is unchanged across slices.
 
 ---
@@ -2859,11 +2920,14 @@ mcp resources
 mcp prompts
 mcp test
 mcp logs
+mcp login
+mcp logout
 ```
 
 Project-local MCP definitions require project trust.
 
-Transports: `stdio` (a command) and `http` (Streamable HTTP, MCP 2025-03-26):
+Transports: `stdio` (a command) and `http` (Streamable HTTP; MCP 2025-06-18,
+following the server down to 2025-03-26 or 2024-11-05):
 
 ```text
 rinari mcp add github --url https://example.com/mcp --bearer          # token asked hidden
@@ -2871,6 +2935,11 @@ rinari mcp add github --url https://example.com/mcp --bearer-env GH_MCP_TOKEN
 rinari mcp add api --url https://example.com/mcp \
     --header "X-Team: core" --secret-header X-Api-Key                   # value asked hidden
 rinari mcp add local -- npx -y some-mcp-server
+rinari mcp add notion --url https://mcp.example.com/mcp --oauth        # registers itself
+rinari mcp add work --url https://mcp.example.com/mcp --oauth \
+    --client-id <your client id> --client-secret --oauth-scope read    # your own OAuth app
+rinari mcp login notion                 # signs in in your default browser
+rinari mcp logout notion                # revokes (if the server can) and deletes the tokens
 ```
 
 Tokens, secret headers and stdio env values never reach the database or the
@@ -2878,7 +2947,19 @@ config file: they are stored in the OS credential store (file fallback) or
 kept as `env://NAME` references. `rinari mcp show` reports whether each one is
 configured, never its value. `rinari mcp test` reports the failure code, the
 HTTP status and a hint key (see the `engine` section, `mcp_remote_v1`). The
-legacy HTTP+SSE transport and OAuth authorization are not supported.
+legacy HTTP+SSE transport is not supported.
+
+OAuth (`--oauth`, see the `engine` section, `mcp_oauth_v1`): `--client-id`,
+`--client-secret` (asked hidden) or `--client-secret-env VAR`, `--oauth-scope`
+(repeatable), `--redirect-port` (a fixed loopback port, for OAuth clients that
+need an exact redirect such as a Google "web" client) and
+`--client-metadata-url` (a client ID metadata document). Without a client ID,
+Rinari registers itself when the server allows it. `rinari mcp login <name>
+[--no-browser] [--timeout 300]` prints the authorization URL on stderr, opens
+the default browser and waits for the redirect to
+`http://127.0.0.1:<port>/callback`; the tokens go to the credential store and
+renew themselves. `rinari mcp show` says whether the server is signed in and
+until when, never a token. `rinari mcp logout <name>` revokes and deletes them.
 
 All MCP calls should still pass through Rinari policy, tracing, schema validation, and result normalization where possible.
 

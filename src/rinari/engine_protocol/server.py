@@ -504,6 +504,10 @@ class EngineServer:
         from rinari.engine_protocol.speech import SpeechMethods
 
         SpeechMethods(self._services, self._turns.emit_external).register(self._dispatcher)
+        from rinari.engine_protocol.mcp_auth import McpAuthMethods
+
+        self._mcp_auth = McpAuthMethods(self._services, self._turns.emit_external)
+        self._mcp_auth.register(self._dispatcher)
         from rinari.engine_protocol.skills import SkillMethods
 
         self._skills = SkillMethods(
@@ -677,6 +681,8 @@ class EngineServer:
         self._services.mcp.start_background()
 
     def close(self) -> None:
+        if hasattr(self, "_mcp_auth"):
+            self._mcp_auth.close()
         self._schedule.close()
         self._resume.close()
         self._services.mcp.stop_background()
@@ -3647,7 +3653,45 @@ class EngineServer:
     def _mcp_test(self, params: dict[str, Any]) -> dict[str, Any]:
         name = (params or {}).get("name", "")
         # Connection problems are the diagnosis: reported, never raised.
-        return {"test": self._services.mcp.test(name)}
+        result = self._services.mcp.test(name)
+        row = self._services.mcp.show(name) or self._services.mcp.show(name, "project")
+        if row is not None:
+            from rinari.mcp.config import draft_from_row
+
+            self._mcp_oauth_support(result, draft_from_row(row))
+        return {"test": result}
+
+    def _mcp_oauth_support(self, result: dict[str, Any], draft) -> None:
+        """«Probar» also says whether the server signs in with OAuth (plan C1).
+
+        Some servers answer `initialize` and `tools/list` anonymously and
+        only ask for a token on `tools/call`, so this looks for OAuth metadata
+        even without a 401. Never raises; `oauth` is null when there is none.
+        """
+        from rinari.mcp.config import AUTH_NONE, AUTH_OAUTH, TRANSPORT_HTTP
+
+        if draft.transport != TRANSPORT_HTTP or draft.auth_kind not in (AUTH_NONE, AUTH_OAUTH):
+            return
+        if not result.get("ok") and result.get("hint") not in (
+            "oauth_required",
+            "reauth_required",
+            "check_credentials",
+        ):
+            return
+        from rinari.mcp.oauth import default_http_factory, describe_support
+
+        support = None
+        with (
+            contextlib.suppress(Exception),
+            default_http_factory(self._services.ctx.home)() as http,
+        ):
+            support = describe_support(
+                draft.url,
+                http,
+                oauth=draft.oauth,
+                client_metadata_url=self._mcp_auth.manager.client_metadata_url,
+            )
+        result["oauth"] = support
 
     def _mcp_probe(self, params: dict[str, Any]) -> dict[str, Any]:
         """Test an unsaved configuration (optionally a patch over `name`)."""
@@ -3660,6 +3704,12 @@ class EngineServer:
             raise NotFoundError(f"Unknown MCP server: {name}.") from None
         except ValueError as exc:
             raise EngineProtocolError(INVALID_PARAMS, str(exc)) from exc
+        from rinari.mcp.config import ServerDraft, apply_patch, draft_from_row
+
+        existing = self._services.mcp.show(name) if name is not None else None
+        draft = draft_from_row(existing) if existing is not None else ServerDraft()
+        with contextlib.suppress(ValueError):
+            self._mcp_oauth_support(result, apply_patch(draft, fields))
         return {"test": result}
 
     def _plugin_list(self, params: dict[str, Any]) -> dict[str, Any]:

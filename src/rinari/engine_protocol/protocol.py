@@ -192,6 +192,11 @@ CAPABILITIES: dict[str, bool] = {
     # mcp.status.changed event, mcp.reconnect, tools refreshed on the
     # server's list_changed, and mcp.resources.list/read for the model.
     "mcp_background_connect_v1": True,
+    # OAuth for remote MCP servers (plan de conectores C1): auth.kind "oauth",
+    # mcp.auth.start/status/cancel/signout, mcp.auth.progress/finished, the
+    # `oauth` support block in mcp.test/mcp.probe, hints oauth_required and
+    # reauth_required, and MCP 2025-06-18 with negotiation down.
+    "mcp_oauth_v1": True,
     # soul.settings.get/set: character intensity (minimal | balanced | full),
     # separate from Soul selection; bundled default Soul 4.0.
     "soul_character_intensity_v1": True,
