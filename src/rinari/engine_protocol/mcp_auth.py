@@ -55,6 +55,11 @@ class McpAuthMethods:
 
     def _on_event(self, name: str, payload: dict[str, Any]) -> None:
         self._emit(event(name, payload))
+        if name == "mcp.auth.finished" and payload.get("outcome") == "signed_in":
+            # A server waiting for this sign-in (oauth_required, reauth_required)
+            # is never retried on a timer (C2): connect it now with the new token.
+            with contextlib.suppress(LookupError):
+                self._mcp.reconnect(payload["name"])
 
     # -- helpers ---------------------------------------------------------------------
 

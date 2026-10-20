@@ -1076,6 +1076,37 @@ def test_protocol_sign_in_status_and_sign_out(engine, fake) -> None:
         assert token not in text
 
 
+def test_signing_in_connects_a_server_that_was_waiting_for_it(engine, fake, services) -> None:
+    created = _call(
+        engine, "mcp.create", {"name": "remote", "url": fake.mcp_url, "auth": {"kind": "oauth"}}
+    )
+    assert created["ok"] is True, created
+    row = services.mcp.show("remote")
+
+    def status() -> str:
+        return services.mcp.status(row)["status"]
+
+    # Before signing in the background connection fails with oauth_required,
+    # which waits for the owner: no timer retries it.
+    services.mcp.reconnect("remote")
+    assert _wait_for(lambda: status() == "error")
+    assert services.mcp.status(row)["connection"]["hint"] == "oauth_required"
+
+    flow = _call(engine, "mcp.auth.start", {"name": "remote"})["result"]
+    _browser(flow["authorize_url"])
+    assert engine.emitted[-1]["payload"]["outcome"] == "signed_in"
+    assert _wait_for(lambda: status() == "connected")
+
+
+def _wait_for(predicate, timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
+
+
 def test_protocol_cancel_and_errors(engine, fake) -> None:
     fake.registration = False
     _call(engine, "mcp.create", {"name": "remote", "url": fake.mcp_url, "auth": {"kind": "oauth"}})
