@@ -18,6 +18,7 @@ only the note itself, not the whole conversation behind it.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -95,6 +96,8 @@ class SegmentSummary:
     trust: str
     cache_policy: str
     length: int
+    # Short content hash: says which segment moved when the prefix does.
+    digest: str = ""
 
 
 # Environment facts that follow the work rather than the session: the
@@ -160,6 +163,7 @@ class PromptAssembler:
                     trust=seg.trust.value,
                     cache_policy=seg.cache_policy.value,
                     length=len(seg.content),
+                    digest=hashlib.sha256(seg.content.encode("utf-8")).hexdigest()[:12],
                 )
                 for seg in segments
             ),

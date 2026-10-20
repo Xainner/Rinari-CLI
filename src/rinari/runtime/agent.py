@@ -203,6 +203,8 @@ class AgentContext:
     session_state: Any = None
     # Hashes of the last request's system prompt and tools (F42 guard).
     prefix_hashes: dict | None = None
+    # Digest of each system segment of the last built request.
+    prompt_segments: dict | None = None
 
 
 def _prefix_hashes(request: ModelRequest) -> dict[str, str]:
@@ -233,7 +235,7 @@ def _watch_prefix(ctx: AgentContext, request: ModelRequest) -> dict[str, Any]:
 
     exposure = getattr(ctx.tool_ctx, "exposure", None)
     key = getattr(exposure, "key", None)
-    current = {**_prefix_hashes(request), "key": key}
+    current = {**_prefix_hashes(request), "key": key, "segments": ctx.prompt_segments or {}}
     previous = ctx.prefix_hashes
     if previous is None and ctx.session_state is not None:
         previous = ctx.session_state.get("prefix")
@@ -241,11 +243,17 @@ def _watch_prefix(ctx: AgentContext, request: ModelRequest) -> dict[str, Any]:
         changed = [part for part in ("system", "tools") if previous.get(part) != current[part]]
         if changed:
             expected = previous.get("key") != key
+            before = previous.get("segments") or {}
+            after = current["segments"]
+            moved = sorted(
+                seg for seg in set(before) | set(after) if before.get(seg) != after.get(seg)
+            )
             logging.getLogger("rinari.cache").log(
                 logging.INFO if expected else logging.WARNING,
-                "Cached prefix changed in session %s: %s%s",
+                "Cached prefix changed in session %s: %s%s%s",
                 ctx.session_id,
                 " and ".join(changed),
+                f" (segments: {', '.join(moved)})" if "system" in changed and moved else "",
                 " (new model or compaction)" if expected else "",
             )
     if previous != current:
@@ -1318,6 +1326,10 @@ class AgentLoop:
             compact_state=ctx.compact_state_text,
         )
         bundle = self._assembler.build(context)
+        # Which system segments this request carries, for the prefix guard.
+        ctx.prompt_segments = {
+            seg.id: seg.digest for seg in bundle.segments if seg.cache_policy != "turn"
+        }
         messages: list[ChatMessage] = []
         if bundle.system_prompt:
             messages.append(ChatMessage.system(bundle.system_prompt))

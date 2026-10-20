@@ -187,3 +187,13 @@ def test_a_changed_prefix_is_logged_with_what_changed(tmp_path, caplog) -> None:
         assert (
             expected.levelno == logging.INFO and "new model or compaction" in expected.getMessage()
         )
+        # A system change names the segments that moved.
+        caplog.clear()
+        ctx.prompt_segments = {"constitution": "c1", "environment": "e1"}
+        _watch_prefix(ctx, one)
+        caplog.clear()
+        ctx.prompt_segments = {"constitution": "c1", "environment": "e2"}
+        moved = replace(one, messages=(ChatMessage.system("rules, cwd moved"),))
+        _watch_prefix(ctx, moved)
+        (named,) = caplog.records
+        assert "system (segments: environment)" in named.getMessage()
