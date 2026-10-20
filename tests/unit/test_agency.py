@@ -216,3 +216,26 @@ def test_the_usage_report_has_an_agent_scope(server) -> None:
     report = _ok(_call(server, "usage.report", {"scope": "agent", "ref": agent["id"]}))["report"]
     assert report["totals"]["calls"] == 0
     assert _call(server, "usage.report", {"scope": "agent"})["ok"] is False
+
+
+# -- memory (D-7) -----------------------------------------------------------------
+
+
+def test_what_an_agent_learns_is_its_own_memory(server) -> None:
+    memory = server._services.memory
+    agent = _ok(_call(server, "agency.agent.create", {"agent": {"name": "Writer"}}))["agent"]
+    other = _ok(_call(server, "agency.agent.create", {"agent": {"name": "Video"}}))["agent"]
+    rinari = _ok(_call(server, "session.create", {"chat": True}))["session"]
+    chat = agent["session_id"]
+    assert memory.place_for("general", chat) == ("agent", agent["id"])
+    assert memory.place_for("profile", chat) == ("agent", agent["id"])
+    assert memory.place_for("chat", chat) == ("chat", chat)
+    assert memory.place_for("general", rinari["id"]) == ("general", None)
+    memory.remember_user("Historias de 30 s", topic="estilo", place="agent", place_ref=agent["id"])
+    memory.remember_user("Formato vertical", topic="video", place="agent", place_ref=other["id"])
+    memory.remember_user("El dueño vive en Costa Rica", topic="dueño")
+    seen = {row["text"] for row in memory.visible_user_rows("default", chat)}
+    assert seen == {"Historias de 30 s", "El dueño vive en Costa Rica"}
+    assert {row["text"] for row in memory.visible_user_rows("default", rinari["id"])} == {
+        "El dueño vive en Costa Rica"
+    }

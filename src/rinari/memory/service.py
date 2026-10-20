@@ -532,18 +532,38 @@ class MemoryService:
         return place, place_ref
 
     def place_ref_for(self, place: str, session_id: str | None) -> str | None:
-        """The profile or chat a place points at, from the conversation."""
+        """The profile, chat or agent a place points at, from the conversation."""
         if place == "chat":
             return session_id
         if place == "profile" and session_id:
             record = self._ctx.session_repo.get(session_id)
             return getattr(record, "rinari_profile_id", None) or "default"
+        if place == "agent":
+            return self._agent_of(session_id)
         return None
+
+    def place_for(self, place: str, session_id: str | None) -> tuple[str, str | None]:
+        """Where something learned in this conversation goes.
+
+        Rinari Agency (D-7): what an agent learns in its direct chat is its
+        own memory, never the owner's general or profile memory.
+        """
+        agent_id = self._agent_of(session_id)
+        if agent_id and place in ("general", "profile"):
+            return "agent", agent_id
+        return place, self.place_ref_for(place, session_id)
+
+    def _agent_of(self, session_id: str | None) -> str | None:
+        if not session_id:
+            return None
+        record = self._ctx.session_repo.get(session_id)
+        return getattr(record, "agent_id", None)
 
     def visible_user_rows(
         self, profile_id: str | None = None, session_id: str | None = None
     ) -> list[dict]:
-        """General memory, plus this profile's and this chat's (#75)."""
+        """General memory, plus this profile's, this chat's and its agent's (#75)."""
+        agent_id = self._agent_of(session_id)
         rows = []
         for row in self.repo.user_live():
             place = row.get("place") or "general"
@@ -551,6 +571,7 @@ class MemoryService:
                 place == "general"
                 or (place == "profile" and profile_id and row.get("place_ref") == profile_id)
                 or (place == "chat" and session_id and row.get("place_ref") == session_id)
+                or (place == "agent" and agent_id and row.get("place_ref") == agent_id)
             ):
                 rows.append(row)
         return rows

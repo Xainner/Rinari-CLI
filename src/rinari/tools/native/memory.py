@@ -253,7 +253,7 @@ def memory_remember(input: dict, ctx: ToolContext) -> ToolResult:
             "memory is excluded for this conversation; the owner must re-enable it. Do not retry.",
         )
     if scope in _PERSONAL:
-        place = _PERSONAL[scope]
+        place, place_ref = service.place_for(_PERSONAL[scope], ctx.session_id)
         return _remember_for_owner(
             service,
             input,
@@ -261,7 +261,7 @@ def memory_remember(input: dict, ctx: ToolContext) -> ToolResult:
             topic.strip(),
             text.strip(),
             place,
-            service.place_ref_for(place, ctx.session_id),
+            place_ref,
         )
     provenance = input.get("provenance")
     if provenance is not None and not isinstance(provenance, str):
@@ -376,7 +376,7 @@ def memory_propose(input: dict, ctx: ToolContext) -> ToolResult:
     scope = input.get("scope", "user")
     if scope not in ("user", "profile", "project", "chat"):
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "scope must be user, profile, project or chat")
-    place = _PERSONAL.get(scope, "general")
+    place, place_ref = service.place_for(_PERSONAL.get(scope, "general"), ctx.session_id)
     if scope in ("profile", "chat"):
         scope = "user"
     if not service.session_exists(ctx.session_id):
@@ -419,7 +419,7 @@ def memory_propose(input: dict, ctx: ToolContext) -> ToolResult:
             trusted=trusted,
             untrusted_reason=untrusted_reason,
             place=place,
-            place_ref=service.place_ref_for(place, ctx.session_id),
+            place_ref=place_ref,
         )
     except Exception as exc:
         message = getattr(exc, "message", str(exc))
