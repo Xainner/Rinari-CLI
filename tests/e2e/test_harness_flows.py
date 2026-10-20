@@ -250,7 +250,7 @@ def test_e2e_provider_switch_next_request_goes_to_b(tmp_path) -> None:
     second = loop.turn(env["ctx"], "hi again")
     assert second.content == "from B"
     assert len(model_a.requests) == 1 and len(model_b.requests) == 1
-    roles = [m.role for m in env["ctx"].history]
+    roles = [m.role for m in env["ctx"].history if (m.origin or {}).get("source") != "turn-state"]
     assert roles == ["user", "assistant", "user", "assistant"]
 
 

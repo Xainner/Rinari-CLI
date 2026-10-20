@@ -146,7 +146,10 @@ def test_direct_answer(env) -> None:
     assert "constitution" in first_message.content
     assert "Rinari identity" in first_message.content
     # conversation state: user + assistant appended
-    assert [m.role for m in env["ctx"].history] == ["user", "assistant"]
+    # The turn state is kept in the conversation (F42), as a harness note.
+    assert [
+        m.role for m in env["ctx"].history if (m.origin or {}).get("source") != "turn-state"
+    ] == ["user", "assistant"]
     types = [t for _, t, _ in events]
     assert "AgentTurnStarted" in types
     assert "ModelInvoked" in types
@@ -278,7 +281,16 @@ def test_local_image_visual_delivery(env, app_ctx, vision, confirmed, success, a
     assert loop.turn(env["ctx"], "Mira la imagen").kind == "answer"
     message = next(m for m in model.requests[-1].messages if m.tool_call_id == "image")
     assert bool(message.images) == success
-    assert len([m for m in env["ctx"].history if m.role == "user"]) == 1
+    assert (
+        len(
+            [
+                m
+                for m in env["ctx"].history
+                if m.role == "user" and (m.origin or {}).get("source") != "turn-state"
+            ]
+        )
+        == 1
+    )
     if not success:
         assert '"ok": false' in message.content
         return
@@ -584,7 +596,14 @@ def test_gateway_switch_changes_provider_mid_session(env) -> None:
     assert len(first.requests) == 1
     assert len(second.requests) == 1
     # History is provider-independent and preserved across the switch.
-    assert [m.role for m in env["ctx"].history] == ["user", "assistant", "user", "assistant"]
+    assert [
+        m.role for m in env["ctx"].history if (m.origin or {}).get("source") != "turn-state"
+    ] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
 
 
 def test_malformed_tool_arguments_never_execute(env) -> None:
@@ -905,8 +924,9 @@ def test_first_tool_batch_waits_for_an_opening_sentence(env) -> None:
     reminder = next(m for m in sent if (m.origin or {}).get("source") == "opening")
     assert reminder.origin == {"kind": "harness", "source": "opening"}
     assert "none of those calls ran" in reminder.content
-    # The opening it asks for must follow the owner, not the Soul's examples.
-    assert "The user is writing in Spanish" in (sent[-1].content or "")
+    # The opening it asks for must follow the owner, not the Soul's examples:
+    # the language rides in the turn state the conversation keeps (F42).
+    assert any("The user is writing in Spanish" in (m.content or "") for m in sent)
     assert events.count("OpeningRequested") == 1
 
 

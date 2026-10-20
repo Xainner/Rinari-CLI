@@ -114,6 +114,8 @@ def review_files(services: Any, params: dict[str, Any]) -> dict[str, str]:
                     "content": message.content,
                     "tool_calls": message.tool_calls,
                     "name": message.name,
+                    # Tells the owner's words from runtime notes.
+                    "origin": message.origin,
                 }
             )
             for message in messages

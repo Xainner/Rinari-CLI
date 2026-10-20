@@ -96,7 +96,9 @@ def test_history_restored_across_invocations(env, monkeypatch) -> None:
     result_a = run_turn(session_a, "hello")
     assert result_a.kind == "answer"
 
-    stored = s.ctx.message_repo.list(record.id)
+    # The turn state is kept as a harness note (F42); the owner's turn is
+    # the rest, in order.
+    stored = [r for r in s.ctx.message_repo.list(record.id) if not _state(r)]
     assert [r.role for r in stored] == ["user", "assistant"]
 
     # New invocation (new process equivalent): history must come back.
@@ -105,7 +107,7 @@ def test_history_restored_across_invocations(env, monkeypatch) -> None:
     session_b = build_agent_session(
         s, s.ctx.session_repo.get(record.id), interactive=False, user_home=user_home
     )
-    history = session_b.context.history
+    history = [m for m in session_b.context.history if not _state(m)]
     assert [m.role for m in history] == ["user", "assistant"]
     assert history[0].content == "hello"
     assert history[1].content == "hi there"
@@ -116,13 +118,17 @@ def test_history_restored_across_invocations(env, monkeypatch) -> None:
     contents = [m.content for m in last if m.content]
     assert "hello" in contents and "hi there" in contents and "again" in contents
 
-    # Now 4 messages persisted in order.
-    assert [r.role for r in s.ctx.message_repo.list(record.id)] == [
+    # Now 4 messages persisted in order, besides the state note.
+    assert [r.role for r in s.ctx.message_repo.list(record.id) if not _state(r)] == [
         "user",
         "assistant",
         "user",
         "assistant",
     ]
+
+
+def _state(message) -> bool:
+    return (message.origin or {}).get("source") == "turn-state"
 
 
 def test_cancelled_turn_persists_partial_history(env, monkeypatch) -> None:

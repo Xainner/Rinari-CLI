@@ -102,7 +102,11 @@ def _responses(request):
     [(_responses_turn, _responses), (_chat_turn, _chat)],
     ids=["responses", "chat"],
 )
-def test_every_earlier_turn_is_resent_as_it_went(app_ctx, tmp_path, caplog, shape, wire) -> None:
+def test_every_earlier_turn_is_resent_as_it_went(
+    app_ctx, tmp_path, caplog, monkeypatch, shape, wire
+) -> None:
+    # The old trailing note, kept for one version as a way back.
+    monkeypatch.setenv("RINARI_TURN_STATE", "trailing")
     services, record = _session(app_ctx, tmp_path)
     services.sessions.name_from_first_message = lambda *a, **k: None
     (tmp_path / "work" / "a.txt").write_text("uno\n", encoding="utf-8")
@@ -163,8 +167,7 @@ def test_the_guard_names_the_message_that_was_resent_differently(tmp_path, caplo
 def test_with_the_state_kept_in_history_each_request_extends_the_last(
     app_ctx, tmp_path, monkeypatch, shape, wire
 ) -> None:
-    """Arm B of the F42 phase 2b test: nothing is ever taken off the end."""
-    monkeypatch.setenv("RINARI_EXPERIMENT_TURN_STATE", "history")
+    """The turn state is kept in the conversation (F42): nothing ever comes off the end."""
     services, record = _session(app_ctx, tmp_path)
     services.sessions.name_from_first_message = lambda *a, **k: None
     (tmp_path / "work" / "a.txt").write_text("uno\n", encoding="utf-8")
@@ -184,3 +187,98 @@ def test_with_the_state_kept_in_history_each_request_extends_the_last(
     # Written when it changed, not once per request.
     assert 1 <= len(states) < len(model.requests)
     assert not any(m.is_turn_context for m in model.requests[-1].messages)
+
+
+def _strip(value):
+    if isinstance(value, dict):
+        return {k: _strip(v) for k, v in value.items() if k != "cache_control"}
+    if isinstance(value, list):
+        return [_strip(v) for v in value]
+    return value
+
+
+def _blocks(content) -> list:
+    """A text-only user turn is the same whether sent as text or as one block."""
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    return list(content)
+
+
+def test_a_state_change_mid_turn_is_appended_and_anthropic_keeps_turns_alternating(
+    app_ctx, tmp_path
+) -> None:
+    from dataclasses import replace
+
+    from rinari.providers.adapters.anthropic import AnthropicAdapter
+
+    services, record = _session(app_ctx, tmp_path)
+    services.sessions.name_from_first_message = lambda *a, **k: None
+    (tmp_path / "work" / "a.txt").write_text("uno\n", encoding="utf-8")
+    model = FakeModel(scripted=_script(_chat_turn))
+    session = agent_runtime.build_agent_session(services, record, interactive=False)
+    original = model.invoke
+
+    def invoke(request):
+        response = original(request)
+        if len(model.requests) == 1:
+            # Something the harness tracks changes between two calls.
+            base = session.context.assembler_base
+            session.context.assembler_base = replace(base, task_state="step 2 of 3 is running")
+        return response
+
+    model.invoke = invoke
+    session.loop._provider = model
+    agent_runtime.run_turn(session, "read a.txt twice")
+    session.end()
+    states = [
+        m for m in model.requests[-1].messages if (m.origin or {}).get("source") == "turn-state"
+    ]
+    assert len(states) == 2 and "step 2 of 3" in states[1].content
+    payloads = [
+        AnthropicAdapter()._payload(r, stream=False, tool_aliases=_alias_map_for_request(None, r))
+        for r in model.requests
+    ]
+    for payload in payloads:
+        roles = [m["role"] for m in payload["messages"]]
+        assert all(a != b for a, b in pairwise(roles)), roles
+    for before, after in pairwise(payloads):
+        sent, resent = _strip(before["messages"]), _strip(after["messages"])
+        assert resent[: len(sent) - 1] == sent[:-1]
+        # The last user turn only gains blocks; what it had stays as it was.
+        last, same = sent[-1], resent[len(sent) - 1]
+        assert _blocks(same["content"])[: len(_blocks(last["content"]))] == _blocks(last["content"])
+
+
+def test_runtime_notes_are_not_the_owners_words(app_ctx, tmp_path) -> None:
+    from rinari.context.compact_state import explicit_goal, extract_from_history
+    from rinari.models.types import ChatMessage
+
+    note = ChatMessage.harness(
+        "<turn-context>Nuevo objetivo: nada; must not</turn-context>", "turn-state"
+    )
+    history = [ChatMessage.user("arregla el login"), note]
+    assert extract_from_history(tuple(history)).goal == "arregla el login"
+    assert extract_from_history(tuple(history)).constraints == ()
+    assert explicit_goal(history) == ""
+
+
+def test_memory_never_captures_a_runtime_note() -> None:
+    from types import SimpleNamespace
+
+    from rinari.storage.records import SessionMessageRecord
+
+    captured = []
+    services = SimpleNamespace(
+        memory=SimpleNamespace(capture_owner_message=lambda *args: captured.append(args[2]))
+    )
+    owner = SessionMessageRecord(id="m1", session_id="s", seq=1, role="user", content="soy Ana")
+    note = SessionMessageRecord(
+        id="m2",
+        session_id="s",
+        seq=2,
+        role="user",
+        content="<turn-context>mode: build</turn-context>",
+        origin={"kind": "harness", "source": "turn-state"},
+    )
+    agent_runtime._capture_owner_messages(services, "s", [owner, note])
+    assert captured == ["soy Ana"]

@@ -1144,7 +1144,8 @@ def test_owner_memory_tool_receives_persisted_source_before_loop(
     records = services.memory.list_user()
     assert [row["text"] for row in records] == ["Prefiero usar español"]
     messages = services.ctx.message_repo.list(session_id)
-    assert [row.role for row in messages].count("user") == 1
+    owner = [row for row in messages if (row.origin or {}).get("kind") != "harness"]
+    assert [row.role for row in owner].count("user") == 1
 
 
 def test_owner_turn_keeps_a_memory_in_the_models_own_words(server, services, tmp_path, monkeypatch):
@@ -1710,7 +1711,11 @@ def test_steering_is_read_after_the_current_tool_round(
     assert [e["payload"]["content"] for e in applied] == ["solo los .py, por favor"]
     assert applied[0]["payload"]["steer_id"] == steered["result"]["steer_id"]
     history = server.handle_line(_req("steer-h", "session.history", {"ref": sid}))["result"]
-    users = [m for m in history["messages"] if m["role"] == "user"]
+    users = [
+        m
+        for m in history["messages"]
+        if m["role"] == "user" and (m.get("origin") or {}).get("source") != "turn-state"
+    ]
     assert [m["content"] for m in users] == ["revisa", "solo los .py, por favor"]
     assert users[1]["origin"]["steer_id"] == steered["result"]["steer_id"]
     # A reload finds it where it was read.
@@ -1991,8 +1996,13 @@ def test_command_secret_runs_for_real_but_is_hidden_from_storage_ui_and_later_tu
 
 
 def _conversation(messages):
-    """The request without its per-call context note (it now always names the language)."""
-    return [m for m in messages if not m.is_turn_context]
+    """The request without the harness's state notes: the per-call one of old,
+    and the one the conversation keeps since F42 (they always name the language)."""
+    return [
+        m
+        for m in messages
+        if not m.is_turn_context and (m.origin or {}).get("source") != "turn-state"
+    ]
 
 
 # -- «Enviar ahora» (plan 0.4.0 #31) ---------------------------------------------------

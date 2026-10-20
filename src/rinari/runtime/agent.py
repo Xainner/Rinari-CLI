@@ -224,10 +224,12 @@ def _prefix_hashes(request: ModelRequest) -> dict[str, str]:
 
 
 def _turn_state_in_history() -> bool:
-    """Arm B of the F42 phase 2b A/B test; off unless the test turns it on."""
+    """The turn state lives in the conversation (F42); RINARI_TURN_STATE=trailing
+    brings back the old note sent last and dropped, for one version, as a way
+    back."""
     import os
 
-    return os.environ.get("RINARI_EXPERIMENT_TURN_STATE") == "history"
+    return os.environ.get("RINARI_TURN_STATE") != "trailing"
 
 
 def _last_turn_state(history) -> str | None:
@@ -1423,13 +1425,14 @@ class AgentLoop:
             ctx.session_state.put("settle", ctx.settle_state.to_json())
         # Volatile state closes the request instead of opening it: the system
         # prompt and the history stay a byte-identical prefix between calls
-        # and turns, which is what provider prompt caches reuse. The note is
-        # rebuilt per request and never enters ctx.history.
+        # and turns, which is what provider prompt caches reuse.
         if _turn_state_in_history():
-            # Arm B of the F42 phase 2b test: the state goes into the
-            # conversation when it changes and stays, so a request only ever
-            # extends the one before (a model with recurrent layers cannot
-            # drop a removed tail from its cache).
+            # F42 (phase 2b, measured on five models): the state enters the
+            # conversation when it changes and stays there, as Codex records
+            # its context, so every request only extends the one before. A
+            # note sent last and dropped by the next request cut the cache at
+            # the first assistant turn on luna and on a local model with
+            # recurrent layers, which cannot trim the end of its cache.
             kept = bundle.turn_state_message
             if kept is not None and kept.content != _last_turn_state(ctx.history):
                 ctx.history.append(kept)

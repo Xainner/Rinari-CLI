@@ -107,7 +107,11 @@ def test_implement_runs_in_build_with_the_plan_steps_and_no_typed_message(
         "Añadir POST /api/tarjetas.",
         "Pantalla de venta.",
     ]
-    asked = next(m for m in model.requests[0].messages if (m.origin or {}).get("source"))
+    asked = next(
+        m
+        for m in model.requests[0].messages
+        if (m.origin or {}).get("source") not in (None, "turn-state")
+    )
     assert "Implement the plan" in (asked.content or "")
     assert "## Pasos" in (asked.content or "")
 
@@ -131,7 +135,11 @@ def test_adjust_stays_in_plan_and_carries_the_comment(server, tmp_path, monkeypa
     assert started["message"] == "usa la tabla existente"
     reasons = [e["payload"]["reason"] for e in seen if e["event"] == "checklist.updated"]
     assert "plan" not in reasons
-    asked = next(m for m in model.requests[0].messages if (m.origin or {}).get("source"))
+    asked = next(
+        m
+        for m in model.requests[0].messages
+        if (m.origin or {}).get("source") not in (None, "turn-state")
+    )
     assert "usa la tabla existente" in (asked.content or "")
 
 

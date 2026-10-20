@@ -104,7 +104,7 @@ class SegmentSummary:
 # repository scan reorders languages and finds new commands as files appear.
 VOLATILE_ENVIRONMENT_KEYS = frozenset({"repository"})
 
-#: Source of the turn state kept in the conversation (F42 phase 2b, arm B).
+#: Source of the turn state kept in the conversation (F42).
 TURN_STATE_SOURCE = "turn-state"
 
 _TURN_STATE_LEAD = (
@@ -130,10 +130,11 @@ class PromptBundle:
 
     @property
     def turn_state_message(self) -> ChatMessage | None:
-        """The same state as a note kept in the conversation (F42 phase 2b, arm B).
+        """The turn state as a note kept in the conversation (F42).
 
         Written when it changes, never removed: each request only extends the
-        one before, as Codex records its context items.
+        one before, as Codex records its context items. It is a harness note:
+        the timeline, memory and summaries never read it as the owner's.
         """
         if not self.turn_context:
             return None

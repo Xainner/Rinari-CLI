@@ -214,20 +214,25 @@ def test_consecutive_project_turns_share_the_prefix_up_to_the_history(project, m
     second = _turn(services, user_home, record, monkeypatch, "now run pytest", [done])
 
     previous, current = first[-1].messages, second[0].messages
-    # System prompt identical; the history the previous call sent is replayed
-    # unchanged; only the note that closes each request differs.
+    # System prompt identical; everything the previous call sent is replayed
+    # unchanged: the turn state lives in the conversation (F42), so nothing
+    # comes off the end.
     assert previous[0] == current[0]
-    assert previous[-1].is_turn_context and current[-1].is_turn_context
-    assert _wire(current[1 : len(previous) - 1]) == _wire(previous[1:-1])
-    assert sum(m.is_turn_context for m in current) == 1
+    assert not any(m.is_turn_context for m in (*previous, *current))
+    assert _wire(current[1 : len(previous)]) == _wire(previous[1:])
     # Within a turn every call shares it too.
     assert first[0].messages[0] == first[-1].messages[0]
 
-    # The volatile state still reaches the model, in its current version.
-    note = current[-1].content
+    # The changing state still reaches the model, in its current version: a
+    # new note kept after the owner's message when it changed (F42).
+    def states(messages):
+        return [m.content for m in messages if (m.origin or {}).get("source") == "turn-state"]
+
+    note = states(current)[-1]
     assert "Ship the web module" in note and "typescript" in note
     assert "Tests use pytest" in note
-    assert "Ship the web module" not in previous[-1].content
-    # And it never becomes history.
+    assert not any("Ship the web module" in text for text in states(previous))
+    # It is history now, one note per change, never rewritten.
     stored = services.ctx.message_repo.list(record.id)
-    assert not any("<turn-context>" in (row.content or "") for row in stored)
+    kept = [row for row in stored if (row.origin or {}).get("source") == "turn-state"]
+    assert len(kept) == 2 and kept[-1].content == note

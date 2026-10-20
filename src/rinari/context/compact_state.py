@@ -192,6 +192,9 @@ def extract_from_history(
 
     for message in history:
         text = (message.content or "").strip()
+        if (message.origin or {}).get("kind") == "harness":
+            # Runtime notes are not the owner's goal or constraints.
+            continue
         if message.role == ROLE_USER and text:
             if not goal:
                 goal = text[:GOAL_MAX_CHARS]
@@ -221,7 +224,7 @@ def explicit_goal(history: tuple[ChatMessage, ...] | list[ChatMessage]) -> str:
     """The latest goal the user set explicitly ("Nuevo objetivo: ..."), if any."""
     goal = ""
     for message in history:
-        if message.role != ROLE_USER:
+        if message.role != ROLE_USER or (message.origin or {}).get("kind") == "harness":
             continue
         text = (message.content or "").strip()
         lowered = text.lower()

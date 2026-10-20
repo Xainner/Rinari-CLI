@@ -2794,6 +2794,9 @@ def _capture_owner_messages(
     for record in records:
         if record.role != "user" or not record.content:
             continue
+        if (record.origin or {}).get("kind") == "harness":
+            # Runtime notes (turn state, loop nudges) are not the owner's words.
+            continue
         try:
             services.memory.capture_owner_message(session_id, record.id, record.content)
         except Exception:
