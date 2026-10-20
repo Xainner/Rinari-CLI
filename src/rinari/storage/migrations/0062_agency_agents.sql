@@ -36,6 +36,10 @@ ALTER TABLE scheduled_tasks ADD COLUMN agent_id TEXT;
 
 ALTER TABLE scheduled_tasks ADD COLUMN tool_json TEXT;
 
+-- A rule can watch a folder: on each check it runs only when the folder
+-- changed. watch_json holds the folder.
+ALTER TABLE scheduled_tasks ADD COLUMN watch_json TEXT;
+
 -- Plan de conectores C8: an account that belongs to an agent (agent:ID).
 -- Empty means everyone, as before.
 ALTER TABLE mcp_servers ADD COLUMN owner TEXT NOT NULL DEFAULT '';

@@ -528,3 +528,57 @@ def test_an_agent_only_proposes_its_rules_for_the_owner_to_confirm(server) -> No
     [plain] = schedule_tools(ScheduleToolHost(service=services.schedules))
     refused = plain.handler(_rule(), SimpleNamespace(session_id="s", origin_kind="user"))
     assert refused.ok is False
+
+
+def test_a_rule_can_wait_for_a_condition_on_the_result(server, calls) -> None:
+    _seen, answers = calls
+    _connector(server, "github")
+    task = _ok(
+        _call(
+            server,
+            "schedule.create",
+            {"task": _rule(server="github", tool="runs", only_if_contains="FAILURE")},
+        )
+    )["task"]
+    answers["runs"] = "ci: success on main"
+    quiet = _run(server, task["id"])
+    assert quiet["status"] == "skipped" and quiet["reason"] == "condition not met"
+    answers["runs"] = "ci: failure on main"
+    assert _run(server, task["id"])["status"] == "completed"
+
+
+def _tick_run(server, task_id):
+    import time
+
+    due = server._services.schedules.get(task_id)["next_run_at"] + 1
+    [run_id] = server._schedule.tick(due)
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        run = server._services.ctx.schedule_repo.run(run_id)
+        if run["status"] not in ("running", "needs_you"):
+            return run
+        time.sleep(0.02)
+    raise AssertionError("the rule did not finish")
+
+
+def test_a_rule_watching_a_folder_runs_only_when_it_changes(server, calls, tmp_path) -> None:
+    seen, _answers = calls
+    _connector(server, "gmail")
+    folder = tmp_path / "entrada"
+    folder.mkdir()
+    (folder / "a.txt").write_text("uno", encoding="utf-8")
+    task = _ok(
+        _call(server, "schedule.create", {"task": {**_rule(), "watch": {"path": str(folder)}}})
+    )["task"]
+    assert task["watch"] == {"path": str(folder)}
+    first = _tick_run(server, task["id"])
+    assert first["status"] == "skipped" and first["reason"] == "watching the folder from now"
+    second = _tick_run(server, task["id"])
+    assert second["status"] == "skipped" and second["reason"] == "no changes in the folder"
+    (folder / "b.txt").write_text("dos", encoding="utf-8")
+    assert _tick_run(server, task["id"])["status"] == "completed"
+    assert len(seen) == 1
+    refused = _call(
+        server, "schedule.create", {"task": {**_rule(), "watch": {"path": "no/such/folder"}}}
+    )
+    assert refused["ok"] is False

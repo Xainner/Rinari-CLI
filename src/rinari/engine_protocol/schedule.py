@@ -61,6 +61,8 @@ class ScheduleRunner:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._recovered = False
+        # task_id -> fingerprint of its watched folder at its last check.
+        self._fingerprints: dict[str, str] = {}
         self._turns.add_observer(self._observe)
 
     @property
@@ -143,9 +145,40 @@ class ScheduleRunner:
             run_id = self._run(task, trigger="manual", scheduled_for=None)
         return {"run": self._repo.run(run_id)}
 
+    def _unchanged(self, task: dict[str, Any]) -> str | None:
+        """A watched folder that did not change since the last check: why it is skipped.
+
+        The first check after the Engine starts only takes the folder's
+        fingerprint: what changed while it was closed is not known.
+        """
+        watch = task.get("watch")
+        if not watch:
+            return None
+        current = folder_fingerprint(Path(watch["path"]))
+        before = self._fingerprints.get(task["id"])
+        self._fingerprints[task["id"]] = current
+        if before is None:
+            return "watching the folder from now"
+        if before == current:
+            return "no changes in the folder"
+        return None
+
     def _run(self, task: dict[str, Any], *, trigger: str, scheduled_for: float | None) -> str:
         run_id = self._services.ctx.ids.new("run")
         started = self._clock.now()
+        if trigger == "schedule":
+            unchanged = self._unchanged(task)
+            if unchanged:
+                self._repo.save_run(
+                    run_id,
+                    task_id=task["id"],
+                    status="running",
+                    trigger=trigger,
+                    scheduled_for=scheduled_for,
+                    started_at=started,
+                )
+                self._finish(task, run_id, "skipped", reason=unchanged, quiet=True)
+                return run_id
         self._repo.save_run(
             run_id,
             task_id=task["id"],
@@ -244,6 +277,10 @@ class ScheduleRunner:
             text = self._call_rule_tool(spec, allowed, agent_id)
             if not text.strip():
                 self._finish(task, run_id, "skipped", reason="nothing new", quiet=True)
+                return
+            wanted = spec.get("only_if_contains")
+            if wanted and wanted.casefold() not in text.casefold():
+                self._finish(task, run_id, "skipped", reason="condition not met", quiet=True)
                 return
             summary = text[-SUMMARY_CHARS * 4 :]
             on_result = spec.get("on_result") or "notify"
@@ -569,6 +606,33 @@ class ScheduleRunner:
             raise EngineProtocolError(INVALID_PARAMS, str(exc)) from None
         self._changed(task["id"], "updated")
         return {"task": updated}
+
+
+#: A watched folder is fingerprinted by at most this many entries.
+MAX_WATCHED_FILES = 5000
+_SKIPPED_DIRS = {".git", "node_modules", "__pycache__", ".venv"}
+
+
+def folder_fingerprint(folder: Path) -> str:
+    """What a watched folder looks like now: names, sizes and modification times."""
+    import hashlib
+    import os
+
+    digest = hashlib.sha256()
+    seen = 0
+    for base, dirs, files in os.walk(folder):
+        dirs[:] = sorted(d for d in dirs if d not in _SKIPPED_DIRS)
+        for name in sorted(files):
+            path = Path(base) / name
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            digest.update(f"{path}|{stat.st_size}|{stat.st_mtime_ns}\n".encode())
+            seen += 1
+            if seen >= MAX_WATCHED_FILES:
+                return digest.hexdigest()
+    return digest.hexdigest()
 
 
 class RuleBlockedError(Exception):

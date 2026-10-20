@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from rinari.schedule.rules import Schedule, ScheduleError, describe, next_run, parse_schedule
@@ -126,7 +127,29 @@ def _tool(raw: Any) -> dict[str, Any]:
     ):
         raise ScheduledTaskError(f"max_per_day must be 1..{MAX_PER_DAY}.")
     spec["max_per_day"] = max_per_day
+    contains = raw.get("only_if_contains")
+    if contains is not None and (
+        not isinstance(contains, str) or not contains.strip() or len(contains) > 200
+    ):
+        raise ScheduledTaskError("only_if_contains must be text of 1..200 characters.")
+    # An exact condition on the result (CI: «failure»), checked without the model.
+    spec["only_if_contains"] = contains.strip() if contains else None
     return spec
+
+
+def _watch(raw: Any) -> dict[str, Any] | None:
+    """A folder a rule watches: it runs only when the folder changed."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ScheduledTaskError("watch must be {path}.")
+    path = raw.get("path")
+    if not isinstance(path, str) or not path.strip() or len(path) > 1000:
+        raise ScheduledTaskError("A watched folder needs its path.")
+    folder = Path(path.strip()).expanduser()
+    if not folder.is_absolute() or not folder.is_dir():
+        raise ScheduledTaskError(f"The watched folder must be an existing folder: {path}")
+    return {"path": str(folder)}
 
 
 def _grant(raw: Any) -> dict[str, Any]:
@@ -185,6 +208,9 @@ class ScheduleService:
             raise ScheduledTaskError(f"The prompt must be text up to {MAX_PROMPT} characters.")
         command = _command(merged.get("command")) if kind == "command" else None
         tool = _tool(merged.get("tool")) if kind == "tool" else None
+        watch = _watch(merged.get("watch"))
+        if watch is not None and kind == "reminder":
+            raise ScheduledTaskError("A reminder cannot watch a folder.")
         # A command or tool task needs no prompt; with on_result=agent the
         # prompt is what to ask about the output.
         if not prompt.strip() and kind not in ("command", "tool"):
@@ -237,6 +263,7 @@ class ScheduleService:
             "grants": grants,
             "command": command,
             "tool": tool,
+            "watch": watch,
             "agent_id": agent_id,
             "enabled": enabled,
         }

@@ -113,7 +113,9 @@ def schedule_tools(host: ScheduleToolHost):
                 "for the owner to confirm), and kind 'tool' calls one of its connectors with "
                 "fixed arguments and no model: tool = {server, tool, arguments, on_result: "
                 "nothing | notify | agent | deliver, deliver: {server, tool, arguments with "
-                "'{result}'}, max_per_day}."
+                "'{result}'}, max_per_day, only_if_contains: exact text the result must "
+                "contain (e.g. 'failure' for a CI)}. watch = {path} runs it only when that "
+                "folder changed since the last check."
             ),
             input_schema={
                 "type": "object",
@@ -121,6 +123,7 @@ def schedule_tools(host: ScheduleToolHost):
                     "name": {"type": "string", "maxLength": 80},
                     "kind": {"type": "string", "enum": ["agent", "reminder", "tool"]},
                     "tool": {"type": "object"},
+                    "watch": {"type": "object"},
                     "schedule": {"type": "object"},
                     "prompt": {"type": "string", "maxLength": 8000},
                     "mode": {"type": "string", "enum": ["plan", "build", "review"]},
