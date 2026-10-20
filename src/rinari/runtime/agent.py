@@ -195,6 +195,106 @@ class AgentContext:
     # Where the settled part of the request ends (context.settle, F45); kept
     # between calls so the prefix only moves when context pressure asks.
     settle_state: Any = None
+    # Runtime notes that follow the owner's message once (the tools a turn
+    # needs from outside the fixed list, F42); consumed by the next turn.
+    turn_notes: tuple[ChatMessage, ...] = ()
+    # What the conversation keeps between turns (context.session_state):
+    # the settled boundary and the last request's prefix hashes.
+    session_state: Any = None
+    # Hashes of the last request's system prompt and tools (F42 guard).
+    prefix_hashes: dict | None = None
+
+
+def _prefix_hashes(request: ModelRequest) -> dict[str, str]:
+    import hashlib
+
+    def digest(text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+    system = "\n".join(m.content or "" for m in request.messages if m.role == "system")
+    tools = json.dumps(
+        [[t.name, t.description, t.parameters] for t in request.tools],
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+    return {"system": digest(system), "tools": digest(tools)}
+
+
+def _watch_prefix(ctx: AgentContext, request: ModelRequest) -> dict[str, Any]:
+    """Hash the part of the request providers cache; warn when it moves (F42).
+
+    Every request of a conversation should start with the same system prompt
+    and tools. A change is logged with what changed: expected (info) when the
+    tool list was decided again for another model or a compaction, a warning
+    otherwise, since it means the rest of the conversation is read again.
+    """
+    import logging
+
+    exposure = getattr(ctx.tool_ctx, "exposure", None)
+    key = getattr(exposure, "key", None)
+    current = {**_prefix_hashes(request), "key": key}
+    previous = ctx.prefix_hashes
+    if previous is None and ctx.session_state is not None:
+        previous = ctx.session_state.get("prefix")
+    if isinstance(previous, dict) and previous != current:
+        changed = [part for part in ("system", "tools") if previous.get(part) != current[part]]
+        if changed:
+            expected = previous.get("key") != key
+            logging.getLogger("rinari.cache").log(
+                logging.INFO if expected else logging.WARNING,
+                "Cached prefix changed in session %s: %s%s",
+                ctx.session_id,
+                " and ".join(changed),
+                " (new model or compaction)" if expected else "",
+            )
+    if previous != current:
+        ctx.prefix_hashes = current
+        if ctx.session_state is not None:
+            ctx.session_state.put("prefix", current)
+    return {"system": current["system"], "tools": current["tools"]}
+
+
+def _unwrap_door(tool_calls, registry):
+    """(real calls, errors by call id, ids that came through the door)."""
+    from rinari.tools.door import unwrap
+
+    calls: list[ToolCall] = []
+    errors: dict[str, ToolResult] = {}
+    via_door: set[str] = set()
+    for call in tool_calls:
+        real, error = unwrap(call, registry)
+        if real is not call:
+            via_door.add(call.id)
+        if error is not None:
+            errors[call.id] = error
+        calls.append(real)
+    return tuple(calls), errors, via_door
+
+
+def _with_schema(result: ToolResult, tool) -> ToolResult:
+    """An argument error through the door shows the tool's schema and call."""
+    if (
+        result.ok
+        or tool is None
+        or result.error is None
+        or result.error.code is not ToolErrorCode.INVALID_ARGUMENT
+    ):
+        return result
+    from rinari.tools.door import how_to_call
+
+    def add(item: ToolResult) -> ToolResult:
+        details = item.error.details if isinstance(item.error.details, dict) else {}
+        error = replace(
+            item.error, retryable=True, details={**details, "how_to_call": how_to_call(tool)}
+        )
+        return replace(item, error=error)
+
+    full = result.full_observation
+    # The round projection re-derives the observation from this copy.
+    if full is not None and full.error is not None:
+        full = add(full)
+    return replace(add(result), full_observation=full)
 
 
 class AgentLoop:
@@ -286,6 +386,8 @@ class AgentLoop:
                 origin=origin,
             )
         )
+        notes, ctx.turn_notes = ctx.turn_notes, ()
+        ctx.history.extend(notes)
         # Hierarchical ledger (P0.10): the turn's meter becomes the parent
         # budget visible to agent.spawn, so subagent cost aggregates here.
         if (
@@ -379,6 +481,7 @@ class AgentLoop:
             exposure_metrics = getattr(ctx.tool_ctx, "exposure", None)
             if exposure_metrics is not None:
                 before_model_payload["exposure"] = exposure_metrics.metrics(self._tools.registry)
+            before_model_payload["prefix"] = _watch_prefix(ctx, request)
             self._emit_hook("BeforeModel", before_model_payload)
             model_call_id = f"model_{model_index + 1}"
             model_started = time.monotonic()
@@ -550,6 +653,10 @@ class AgentLoop:
                 if type(ctx.context_usage["actual"]) is int
                 else None
             )
+            # The door (F42): a `tool.call` becomes the real call here, so
+            # policy, approvals, the timeline and the logs see the real tool.
+            # The history keeps what the model wrote.
+            calls, door_errors, via_door = _unwrap_door(response.tool_calls, self._tools.registry)
             self._emit(
                 ctx.session_id,
                 EVENT_MODEL_INVOKED,
@@ -559,14 +666,14 @@ class AgentLoop:
                     **({"context_anchor": anchor} if anchor else {}),
                     "provider_id": (response.provider_state or {}).get("provider_id"),
                     "stop_reason": response.stop_reason.value,
-                    "tool_calls": [{"id": tc.id, "name": tc.name} for tc in response.tool_calls],
+                    "tool_calls": [{"id": tc.id, "name": tc.name} for tc in calls],
                     "usage": _usage_dict(response.usage),
                     # Etapa C: execution plan groups (serial baseline; the
                     # plan is traced so a concurrent executor can adopt it).
                     "execution_plan": schedule(
-                        [tc.name for tc in response.tool_calls],
+                        [tc.name for tc in calls],
                         self._tools.registry,
-                        [tc.arguments for tc in response.tool_calls],
+                        [tc.arguments for tc in calls],
                     ),
                 },
             )
@@ -729,9 +836,18 @@ class AgentLoop:
             looping_detected = False
             loop.begin_response()
             round_tool_seq = tool_seq
+            wire_names = {tc.id: tc.name for tc in response.tool_calls}
+
+            def wire_name(call, wire_names=wire_names):
+                return wire_names.get(call.id, call.name)
 
             def prepare_call(
-                call, model_call_id=model_call_id, round_tool_seq=round_tool_seq, response=response
+                call,
+                model_call_id=model_call_id,
+                round_tool_seq=round_tool_seq,
+                response=response,
+                door_errors=door_errors,
+                via_door=via_door,
             ):
                 nonlocal tool_calls_requested, tool_calls_executed, tool_calls_rejected
                 cancel.throw_if_cancelled()
@@ -761,7 +877,20 @@ class AgentLoop:
                 else:
                     allowed = tool_calls_executed < self._max_tool_calls
                 executed = False
-                if call.arguments_invalid:
+                if call.id in door_errors:
+                    # Unknown name or arguments that are not a JSON object:
+                    # never run, never charged; the error shows how to fix it.
+                    result = door_errors[call.id]
+                    self._emit_hook(
+                        "ToolError",
+                        {
+                            "tool": call.name,
+                            "tool_call_id": call.id,
+                            "code": result.error.code.value,
+                            "message": result.error.message,
+                        },
+                    )
+                elif call.arguments_invalid:
                     # Malformed wire arguments are never executed and never
                     # charged: the model gets a retryable observation instead.
                     result = ToolResult(
@@ -841,14 +970,27 @@ class AgentLoop:
                         if is_parallelizable(self._tools.registry.get(call.name), call.arguments)
                         else None
                     )
-                    return executed, lambda: self._tools.execute(
-                        call.name,
-                        call.arguments,
-                        call_context,
-                        tool_call_id=call.id,
+
+                    def run(
+                        call=call,
+                        call_context=call_context,
                         trace=trace,
                         prepared=prepared,
-                    )
+                        via_door=via_door,
+                    ):
+                        result = self._tools.execute(
+                            call.name,
+                            call.arguments,
+                            call_context,
+                            tool_call_id=call.id,
+                            trace=trace,
+                            prepared=prepared,
+                        )
+                        if call.id in via_door:
+                            result = _with_schema(result, self._tools.registry.get(call.name))
+                        return result
+
+                    return executed, run
                 return executed, result
 
             def complete_call(call, result, model_call_id=model_call_id):
@@ -919,7 +1061,7 @@ class AgentLoop:
             round_nudges = []
             try:
                 for call, executed, result, group_end in execute_round(
-                    response.tool_calls,
+                    calls,
                     self._tools.registry,
                     prepare_call,
                     cancellation=cancel,
@@ -1028,7 +1170,9 @@ class AgentLoop:
                         ctx.history.append(
                             replace(
                                 ChatMessage.tool_result(
-                                    call.id, call.name, result.to_model_text(call.name)
+                                    call.id,
+                                    wire_name(call),
+                                    result.to_model_text(call.name),
                                 ),
                                 images=result.images if result.ok else (),
                             )
@@ -1038,7 +1182,7 @@ class AgentLoop:
                     ctx.history.append(
                         replace(
                             ChatMessage.tool_result(
-                                call.id, call.name, result.to_model_text(call.name)
+                                call.id, wire_name(call), result.to_model_text(call.name)
                             ),
                             images=result.images if result.ok else (),
                         )
@@ -1180,7 +1324,9 @@ class AgentLoop:
         from rinari.context.settle import SettleState, plan_boundary, settle_old_observations
 
         if ctx.settle_state is None:
-            ctx.settle_state = SettleState()
+            saved = ctx.session_state.get("settle") if ctx.session_state is not None else None
+            ctx.settle_state = SettleState.from_json(saved)
+        settled_before = ctx.settle_state.to_json()
         window = getattr(self._provider.capabilities(), "max_context_tokens", None)
         boundary = plan_boundary(
             ctx.history,
@@ -1189,6 +1335,8 @@ class AgentLoop:
             fixed_tokens=estimate_tokens(system_prompt=bundle.system_prompt or ""),
         )
         messages.extend(settle_old_observations(ctx.history, boundary=boundary))
+        if ctx.session_state is not None and ctx.settle_state.to_json() != settled_before:
+            ctx.session_state.put("settle", ctx.settle_state.to_json())
         # Volatile state closes the request instead of opening it: the system
         # prompt and the history stay a byte-identical prefix between calls
         # and turns, which is what provider prompt caches reuse. The note is
@@ -1197,14 +1345,17 @@ class AgentLoop:
         if note is not None:
             messages.append(note)
         exposure = getattr(ctx.tool_ctx, "exposure", None)
-        if wire_tools is not None:
-            pass
-        elif exposure is not None:
-            # Dynamic exposure (Etapa B): core + activated + recent, pruned
-            # once per model request so turn-scoped activations decay.
-            exposure.prune()
-            wire_tools = exposure.for_model(self._tools.registry)
-        else:
+        if exposure is not None:
+            # The conversation's fixed list (F42): the same in every request
+            # until another model or a compaction, where the cache is lost
+            # anyway and the list is decided again, in that same request.
+            from rinari.tools.exposure import list_key
+
+            moved = exposure.follow(list_key(ctx.model_ref, ctx.compact_revision))
+            if wire_tools is None or moved:
+                exposure.prune()
+                wire_tools = exposure.for_model(self._tools.registry)
+        elif wire_tools is None:
             wire_tools = self._tools.registry.for_model()
         # A provider that announces no tool support gets none. Sending them
         # anyway means either a hard failure or, worse, a transport that drops

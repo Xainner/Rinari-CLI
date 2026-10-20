@@ -78,23 +78,29 @@ def test_activate_rejects_bad_scope() -> None:
         ToolExposure().activate(["browser.open"], scope="task")
 
 
-def test_turn_scope_decays_but_session_persists(registry: ToolRegistry) -> None:
+def test_the_list_is_decided_at_the_first_request_and_never_changes(
+    registry: ToolRegistry,
+) -> None:
     exp = ToolExposure()
-    exp.activate(["browser.open"], scope="turn", ttl_rounds=2)
-    exp.activate(["mcp.x"], scope="session")
+    first = exp.for_model(registry)
+    exp.activate(["browser.open"], scope="session")
+    exp.note_used("mcp.x")
     exp.prune()
-    assert "browser.open" in exp.exposed_names(registry)
-    exp.prune()
-    assert "browser.open" not in exp.exposed_names(registry)
-    assert "mcp.x" in exp.exposed_names(registry)
+    assert exp.for_model(registry) == first
+    assert exp.exposed_names(registry) == ["capability.search", "fs.read"]
+    # A tool registered later does not join either.
+    registry.register(_tool("fs.stat"))
+    assert exp.for_model(registry) == first
 
 
-def test_recently_used_stays_visible(registry: ToolRegistry) -> None:
+def test_activations_before_the_list_is_decided_are_part_of_it(registry: ToolRegistry) -> None:
     exp = ToolExposure()
-    exp.activate(["browser.open"], scope="turn", ttl_rounds=1)
-    exp.note_used("browser.open")
-    exp.prune()  # activation expired...
-    assert "browser.open" in exp.exposed_names(registry)  # ...but recent keeps it
+    exp.activate(["browser.open"], scope="session")
+    assert [s.name for s in exp.for_model(registry)] == [
+        "browser.open",
+        "capability.search",
+        "fs.read",
+    ]
 
 
 def test_unknown_activations_ignored(registry: ToolRegistry) -> None:
@@ -103,18 +109,53 @@ def test_unknown_activations_ignored(registry: ToolRegistry) -> None:
     assert "nope.missing" not in exp.exposed_names(registry)
 
 
-def test_schema_budget_drops_recent_never_promised(registry: ToolRegistry) -> None:
-    exp = ToolExposure(max_schema_count=2, max_schema_tokens=10**9)
-    exp.activate(["browser.open"], scope="session")
-    exp.note_used("mcp.x")
-    names = exp.exposed_names(registry)
-    # core(fs.read, capability.search)=2 fills count; activated browser.open is
-    # promised and kept; recent mcp.x is dropped.
-    assert "fs.read" in names
-    assert "capability.search" in names
-    assert "browser.open" in names
-    assert "mcp.x" not in names
-    assert exp.metrics(registry)["over_budget"] is True
+def test_search_and_door_are_always_in_the_list() -> None:
+    from rinari.tools.door import door_tool
+
+    reg = ToolRegistry()
+    reg.register_all(
+        [_tool("capability.search", manifest={"source": "plugin"}), _tool("fs.read"), door_tool()]
+    )
+    assert set(ToolExposure().exposed_names(reg)) == {"capability.search", "fs.read", "tool.call"}
+
+
+def test_the_list_is_kept_and_decided_again_only_when_its_key_moves(
+    registry: ToolRegistry,
+) -> None:
+    kept = []
+    key = {"engine": "x", "model": "m1", "compaction": 0}
+    exp = ToolExposure(key=key, on_fix=lambda k, schemas: kept.append((k, schemas)))
+    first = exp.for_model(registry)
+    exp.for_model(registry)
+    assert kept == [(key, first)]
+    assert exp.follow(dict(key)) is False
+    registry.register(_tool("fs.stat"))
+    assert exp.follow({**key, "compaction": 1}) is True
+    assert "fs.stat" in [s.name for s in exp.for_model(registry)]
+    assert len(kept) == 2 and kept[1][0]["compaction"] == 1
+    # A list with no key (a subagent's) never moves.
+    child = ToolExposure()
+    child.for_model(registry)
+    assert child.follow(key) is False
+
+
+def test_a_saved_list_is_sent_as_saved(registry: ToolRegistry) -> None:
+    from rinari.models.types import ToolSchema
+
+    saved = (ToolSchema("fs.read", "an older description", {"type": "object"}),)
+    exp = ToolExposure(fixed=saved, key={"model": "m"})
+    assert exp.for_model(registry) == saved
+    assert exp.exposed_names(registry) == ["fs.read"]
+
+
+def test_the_list_stays_under_the_tool_limit() -> None:
+    from rinari.tools.exposure import MAX_FIXED_TOOLS
+
+    reg = ToolRegistry()
+    reg.register_all([_tool(f"pack.t{i:03d}") for i in range(MAX_FIXED_TOOLS + 20)])
+    reg.register(_tool("capability.search"))
+    names = ToolExposure().exposed_names(reg)
+    assert len(names) == MAX_FIXED_TOOLS and "capability.search" in names
 
 
 def test_for_model_returns_wire_schemas(registry: ToolRegistry) -> None:
@@ -128,6 +169,7 @@ def test_metrics_keys(registry: ToolRegistry) -> None:
     assert m["exposed"] == 2
     assert m["lazy"] == 4
     assert m["activated"] == []
+    assert m["fixed"] is False
     assert m["over_budget"] is False
 
 
@@ -136,25 +178,28 @@ def test_search_exact_match_wins(registry: ToolRegistry) -> None:
     assert results and results[0]["name"] == "browser.open"
 
 
-def test_activation_tools_roundtrip(registry: ToolRegistry) -> None:
+def test_activation_tools_give_the_call_and_leave_the_list(registry: ToolRegistry) -> None:
     tools = {t.name: t for t in capability_activation_tools(registry)}
     assert {"capability.activate", "capability.deactivate"} <= set(tools)
 
     class Ctx:
         exposure = ToolExposure()
 
-    ok = tools["capability.activate"].handler({"names": ["browser.open"]}, Ctx())
-    assert ok.ok and ok.data["activated"] == ["browser.open"]
-    assert "browser.open" in Ctx.exposure.exposed_names(registry)
+    listed = Ctx.exposure.for_model(registry)
+    ok = tools["capability.activate"].handler({"names": ["browser.open", "fs.read"]}, Ctx())
+    assert ok.ok and ok.data["in_list"] == ["fs.read"]
+    (outside,) = ok.data["outside_list"]
+    assert outside["name"] == "browser.open"
+    assert outside["call"] == {
+        "tool": "tool.call",
+        "arguments": {"name": "browser.open", "arguments": "{}"},
+    }
+    assert Ctx.exposure.for_model(registry) == listed
 
     bad = tools["capability.activate"].handler({"names": ["nope.missing"]}, Ctx())
     assert not bad.ok
-
-    class NoExposure:
-        pass
-
-    err = tools["capability.activate"].handler({"names": ["browser.open"]}, NoExposure())
-    assert not err.ok
+    gone = tools["capability.deactivate"].handler({"names": ["fs.read"]}, Ctx())
+    assert gone.ok and gone.data["deactivated"] == []
 
 
 def test_schema_cost_counts_the_description_the_provider_also_receives() -> None:
@@ -186,9 +231,13 @@ def test_rarely_used_native_packs_are_on_demand_but_searchable() -> None:
         exposure = ToolExposure()
         lsp = object()  # a session with a language server
 
-    found = reg.get("capability.search").handler({"query": "lsp definition", "load": True}, Ctx())
-    assert "lsp.definition" in found.data["loaded"]
-    assert "lsp.definition" in Ctx.exposure.exposed_names(reg)
+    listed = Ctx.exposure.for_model(reg)
+    found = reg.get("capability.search").handler({"query": "lsp definition"}, Ctx())
+    row = next(r for r in found.data["results"] if r["name"] == "lsp.definition")
+    assert row["in_list"] is False
+    assert row["how_to_call"]["call"]["tool"] == "tool.call"
+    assert row["how_to_call"]["parameters"] == reg.get("lsp.definition").input_schema
+    assert Ctx.exposure.for_model(reg) == listed
 
 
 def test_a_child_agent_sees_the_on_demand_tools_its_definition_names() -> None:

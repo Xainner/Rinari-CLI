@@ -93,29 +93,44 @@ def test_references_are_read_by_page_and_never_outside_the_skill(app_ctx):
     assert "references/recipes.md" in missing.error.message
 
 
-def test_activating_the_skill_exposes_its_tools_in_the_same_call(app_ctx, tmp_path):
+def test_activating_the_skill_gives_the_call_of_its_tools_in_the_same_call(app_ctx, tmp_path):
+    from rinari.tools.door import door_tool
+
     services, record = _session(app_ctx, tmp_path)
     tools = {t.name: t for t in skill_tools(SkillToolHost(service=services.skills))}
+    registry = builtin_catalog()
+    registry.register(door_tool())
     ctx = _Ctx(record.id)
+    listed = ctx.exposure.for_model(registry)
     result = tools["skills.activate"].handler({"name": "rinari-handbook"}, ctx)
-    assert result.ok and set(result.data["tools_activated"]) == HANDBOOK_TOOLS
     # F43: the procedure comes back in the result, into the conversation.
-    assert result.data["procedure"] and "follow it" in result.data["note"]
-    assert set(ctx.exposure.activated) >= HANDBOOK_TOOLS
-    assert all(ctx.exposure.activated[n].scope == "session" for n in HANDBOOK_TOOLS)
+    assert result.ok and result.data["procedure"] and "follow it" in result.data["note"]
+    # F42: its tools outside the list come with their exact tool.call, and the
+    # list does not change.
+    door = result.data["tools_through_door"]
+    outside = {name for name in HANDBOOK_TOOLS if not ctx.exposure.in_list(name, registry)}
+    assert outside == HANDBOOK_TOOLS - {"skills.read"}
+    assert all(f"- {name}:" in door for name in outside)
+    assert "- skills.read:" not in door and "call: tool.call {" in door
+    assert ctx.exposure.for_model(registry) == listed
+    again = tools["skills.activate"].handler({"name": "rinari-handbook"}, ctx)
+    assert again.data["tools_through_door"] == door
 
 
-def test_a_pinned_skill_keeps_its_tools_on_every_new_runtime(app_ctx, tmp_path):
-    # The desktop builds a runtime per turn; the pin, not the old exposure,
-    # decides what the next turn sees.
+def test_a_pinned_skill_names_its_tools_on_every_new_runtime(app_ctx, tmp_path):
+    from rinari.cli.agent_runtime import _pinned_skill_tools
+
+    # The desktop builds a runtime per turn; the pin decides which tools the
+    # next turn announces, and the list itself carries no activation.
     services, record = _session(app_ctx, tmp_path)
-    assert not set(_exposure_for(services, record, None).activated) & HANDBOOK_TOOLS
+    assert not set(_pinned_skill_tools(services, record)) & HANDBOOK_TOOLS
     services.skills.activate("rinari-handbook", record.id)
     pinned = services.ctx.session_repo.get(record.id)
-    assert set(_exposure_for(services, pinned, None).activated) >= HANDBOOK_TOOLS
+    assert set(_pinned_skill_tools(services, pinned)) >= HANDBOOK_TOOLS
+    assert _exposure_for(services, pinned, None).activated == {}
     # A pinned skill that no longer exists is skipped, not an error.
     ghost = replace(pinned, active_skills=(("gone-skill", "1.0.0"),))
-    assert _exposure_for(services, ghost, None).activated == {}
+    assert _pinned_skill_tools(services, ghost) == ()
 
 
 @pytest.mark.parametrize(

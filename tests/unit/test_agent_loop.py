@@ -464,27 +464,110 @@ def test_request_carries_session_id(env) -> None:
     assert model.requests[0].session_id == "s1"
 
 
-def test_exposure_view_limits_lazy_tools(env) -> None:
-    # With a session exposure, the request carries core tools only...
+def test_the_tool_list_stays_the_same_between_requests_and_turns(env) -> None:
+    # With a session exposure, the request carries the core only...
     exposure = ToolExposure()
     env["ctx"].tool_ctx = replace(env["ctx"].tool_ctx, exposure=exposure)
-    model = FakeModel(scripted=[ModelResponse(content="done")])
+    model = FakeModel(
+        scripted=[
+            ModelResponse(
+                content="",
+                tool_calls=(ToolCall("find", "capability.activate", {"names": ["fs.diff"]}),),
+            ),
+            ModelResponse(content="done"),
+        ]
+    )
     loop = AgentLoop(model, env["runtime"], env["assembler"])
     loop.turn(env["ctx"], "hello")
-    names = {t.name for t in model.requests[0].tools}
+    first = model.requests[0].tools
+    names = {t.name for t in first}
     assert "fs.read" in names
-    assert not any(n.startswith("browser.") for n in names)
-    # ...until the model activates what it needs.
-    exposure.activate(["browser.open"], reason="need page", scope="session")
-    model2 = FakeModel(scripted=[ModelResponse(content="done")])
-    loop2 = AgentLoop(model2, env["runtime"], env["assembler"])
-    loop2.turn(env["ctx"], "hello again")
-    names2 = {t.name for t in model2.requests[0].tools}
-    assert "browser.open" not in names2  # No browser service in this session.
+    assert not any(n.startswith("browser.") for n in names) and "fs.diff" not in names
+    # ...and activating, a new turn or a service that appears change nothing (F42).
+    assert model.requests[1].tools == first
     env["ctx"].tool_ctx = replace(env["ctx"].tool_ctx, browser=object())
-    model3 = FakeModel(scripted=[ModelResponse(content="done")])
-    AgentLoop(model3, env["runtime"], env["assembler"]).turn(env["ctx"], "with browser")
-    assert "browser.open" in {t.name for t in model3.requests[0].tools}
+    model2 = FakeModel(scripted=[ModelResponse(content="done")])
+    AgentLoop(model2, env["runtime"], env["assembler"]).turn(env["ctx"], "hello again")
+    assert model2.requests[0].tools == first
+
+
+def _door_env(env):
+    from rinari.tools.door import door_tool
+
+    env["runtime"].registry.register(door_tool())
+    env["ctx"].tool_ctx = replace(env["ctx"].tool_ctx, exposure=ToolExposure())
+
+
+def test_tool_call_runs_the_real_tool_under_its_own_name(env) -> None:
+    _door_env(env)
+    (env["root"] / "a.txt").write_text("one\n", encoding="utf-8")
+    (env["root"] / "b.txt").write_text("two\n", encoding="utf-8")
+    arguments = '{"a": "a.txt", "b": "b.txt"}'
+    model = FakeModel(
+        scripted=[
+            ModelResponse(
+                content="",
+                tool_calls=(
+                    ToolCall("d1", "tool.call", {"name": "fs.diff", "arguments": arguments}),
+                    ToolCall(
+                        "r1", "tool.call", {"name": "fs.read", "arguments": '{"path": "a.txt"}'}
+                    ),
+                ),
+            ),
+            ModelResponse(content="done"),
+        ]
+    )
+    activity: list = []
+    loop = AgentLoop(
+        model,
+        env["runtime"],
+        env["assembler"],
+        activity_sink=lambda name, payload: activity.append((name, payload)),
+    )
+    loop.turn(env["ctx"], "compare")
+    requested = [p["tool"] for name, p in activity if name == "tool.requested"]
+    assert requested == ["fs.diff", "fs.read"]
+    completed = {p["tool"]: p["ok"] for name, p in activity if name == "tool.completed"}
+    assert completed == {"fs.diff": True, "fs.read": True}
+    # The history answers the call the model wrote, under the name it used.
+    results = [m for m in env["ctx"].history if m.role == "tool"]
+    assert [(m.tool_call_id, m.name) for m in results] == [("d1", "tool.call"), ("r1", "tool.call")]
+    assert "-one" in (results[0].content or "") and "+two" in (results[0].content or "")
+    assert model.requests[1].tools == model.requests[0].tools
+
+
+def test_a_door_that_cannot_open_says_how_to_fix_it(env) -> None:
+    import json
+
+    _door_env(env)
+    model = FakeModel(
+        scripted=[
+            ModelResponse(
+                content="",
+                tool_calls=(
+                    ToolCall("u1", "tool.call", {"name": "fs.difff", "arguments": "{}"}),
+                    ToolCall("j1", "tool.call", {"name": "fs.diff", "arguments": "{a: 1"}),
+                    ToolCall("s1", "tool.call", {"name": "fs.diff", "arguments": '{"a": "x.txt"}'}),
+                ),
+            ),
+            ModelResponse(content="done"),
+        ]
+    )
+    AgentLoop(model, env["runtime"], env["assembler"]).turn(env["ctx"], "go")
+    results = {
+        m.tool_call_id: json.loads(m.content) for m in env["ctx"].history if m.role == "tool"
+    }
+    unknown = results["u1"]["error"]
+    assert unknown["code"] == "INVALID_ARGUMENT" and unknown["retryable"] is True
+    assert "fs.diff" in unknown["message"]
+    assert unknown["details"]["matches"][0]["name"] == "fs.diff"
+    assert len(unknown["details"]["matches"]) <= 3
+    bad_json = results["j1"]["error"]
+    assert "not valid JSON" in bad_json["message"]
+    assert bad_json["details"]["call"]["arguments"]["name"] == "fs.diff"
+    missing = results["s1"]["error"]
+    assert missing["code"] == "INVALID_ARGUMENT"
+    assert missing["details"]["how_to_call"]["parameters"]["required"] == ["a", "b"]
 
 
 def test_gateway_switch_changes_provider_mid_session(env) -> None:

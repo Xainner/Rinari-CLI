@@ -888,6 +888,9 @@ class SessionService:
         # After the rows: no turn can start in a session that is gone. A lock
         # still held is left for the engine-start sweep.
         discard_lock(lock_path(self._ctx.layout.dir("sessions"), record.id), record.id)
+        from rinari.context.session_state import discard
+
+        discard(self._ctx.layout, record.id)
         return record.id
 
     def sweep_turn_locks(self) -> int:

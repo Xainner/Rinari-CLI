@@ -112,6 +112,7 @@ def instructions_tools() -> list[ToolDefinition]:
     return [
         ToolDefinition(
             name="project.instructions.propose",
+            always_loaded=False,
             description=DESCRIPTION,
             input_schema=INPUT_SCHEMA,
             risk=RISK_LOW,

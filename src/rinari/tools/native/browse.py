@@ -882,8 +882,8 @@ def browse_tools() -> list[ToolDefinition]:
         "properties": {"target_id": {"type": "string"}},
         "required": ["target_id"],
     }
-    # Nivel C (Etapa B): browser tools are on-demand, discovered via
-    # capability.search and exposed via capability.activate.
+    # Browser tools are on-demand: found with capability.search and run
+    # through tool.call (F42).
     tools = [
         ToolDefinition(
             name="browser.status",

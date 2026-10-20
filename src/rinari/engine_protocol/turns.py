@@ -1042,9 +1042,9 @@ class TurnManager:
             agent_session = self._prepare_session(turn, record, reasoning_effort)
             context = agent_session.context
             if turn.activate_tools:
-                exposure = getattr(context.tool_ctx, "exposure", None)
-                if exposure is not None:
-                    exposure.activate(list(turn.activate_tools), reason="turn", scope="session")
+                # Announced with their exact call when outside the fixed list
+                # (F42); the list itself does not change.
+                agent_session.next_turn_tools = tuple(turn.activate_tools)
             with self._lock:
                 processes = self._desktop_processes.setdefault(
                     turn.session_id, context.tool_ctx.processes

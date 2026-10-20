@@ -29,6 +29,22 @@ class SkillToolHost:
         return getattr(ctx, "session_id", "") or ""
 
 
+def _door_calls(ctx, names) -> str:
+    """The exact tool.call of each named tool outside the conversation's list."""
+    exposure = getattr(ctx, "exposure", None)
+    registry = getattr(exposure, "registry", None)
+    if exposure is None or registry is None or registry.get("tool.call") is None:
+        return ""
+    from rinari.tools.door import door_text
+
+    tools = [
+        registry.get(name)
+        for name in dict.fromkeys(names or ())
+        if registry.get(name) is not None and not exposure.in_list(name, registry)
+    ]
+    return door_text(tools) if tools else ""
+
+
 def skill_tools(host: SkillToolHost):
     from rinari.tools.definition import (
         ClassifiedAction,
@@ -174,14 +190,10 @@ def skill_tools(host: SkillToolHost):
                 ),
                 origin="skills",
             )
-        # The tools the skill requests become visible now, in the same call; a
-        # policy decision still applies to each of them when it runs.
-        exposure = getattr(ctx, "exposure", None)
-        exposed = []
-        if exposure is not None and m.required_tools:
-            exposed = exposure.activate(
-                list(m.required_tools), reason=f"skill {m.name}", scope="session"
-            )
+        # The tool list never changes (F42): the skill's tools outside it come
+        # back here with their exact tool.call, in a text that is the same
+        # every time; a policy decision still applies to each when it runs.
+        through_door = _door_calls(ctx, m.required_tools)
         # The procedure comes back in this result, so it enters the
         # conversation where it was activated (F43, like Claude Code): the
         # system prompt and the skill catalog stay the same, and so does the
@@ -196,8 +208,8 @@ def skill_tools(host: SkillToolHost):
                 "name": m.name,
                 "version": m.version,
                 "active": True,
-                "tools_activated": exposed,
                 "procedure": procedure,
+                **({"tools_through_door": through_door} if through_door else {}),
                 "note": "This is the skill's procedure: follow it from here on.",
             },
             origin="skills",

@@ -10,7 +10,10 @@ specs alike, with nothing written by hand for a case. MCP servers may add
 their own `instructions` from `initialize`.
 
 The text is sorted and depends only on the registered set, so it stays the
-same between calls and keeps the prompt cache.
+same between calls and keeps the prompt cache. What the owner can connect in
+the middle of a conversation (MCP servers, OpenAPI specs, plugins) is listed
+apart, for the turn note at the end of the request (F42): connecting one
+must not change the system prompt.
 """
 
 from __future__ import annotations
@@ -22,19 +25,29 @@ from typing import Any
 MAX_NAMES = 16
 #: Characters of a server's own instructions.
 MAX_SERVER_NOTE = 600
+#: Sources the owner connects and disconnects while a conversation goes on.
+CONNECTED_SOURCES = frozenset({"mcp", "openapi", "plugin"})
 
 
 def _group(tool: Any) -> str:
     return tool.namespace or tool.name.split(".", 1)[0]
 
 
-def deferred_index(registry: Any) -> str | None:
-    """One line per group of tools that load on demand, or None without any."""
+def deferred_index(registry: Any, *, connected: bool = False) -> str | None:
+    """One line per group of tools outside the list, or None without any.
+
+    `connected` picks the MCP servers, OpenAPI specs and plugins; otherwise
+    the native packs. The two go to different places (see the module doc).
+    """
+    from rinari.tools.exposure import _source_of
+
     groups: dict[str, list[str]] = defaultdict(list)
     notes: dict[str, str] = {}
     for name in sorted(registry.names()):
         tool = registry.get(name)
         if tool is None or tool.always_loaded:
+            continue
+        if (_source_of(tool) in CONNECTED_SOURCES) is not connected:
             continue
         group = _group(tool)
         groups[group].append(name)
@@ -47,10 +60,14 @@ def deferred_index(registry: Any) -> str | None:
     if not groups:
         return None
     lines = [
-        "Tools available on demand (registered, not loaded yet). Load the ones a task needs "
-        "with capability.activate using these exact names (or find them with "
-        "capability.search), then call them. Prefer a matching tool here over doing the "
-        "same job with shell scripts or installing packages."
+        "Connected now (MCP servers, APIs and plugins), outside your tool list: get a tool's "
+        "schema and exact call with capability.search (or capability.activate with its exact "
+        "name) and run it through tool.call."
+        if connected
+        else "Tools available on demand, outside your tool list: get the schema and exact call "
+        "of the ones a task needs with capability.search (or capability.activate with these "
+        "exact names) and run them through tool.call. Prefer a matching tool here over doing "
+        "the same job with shell scripts or installing packages."
     ]
     for group in sorted(groups):
         names = groups[group]

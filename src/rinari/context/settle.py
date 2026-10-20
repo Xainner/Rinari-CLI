@@ -44,26 +44,41 @@ _REFERENCE = re.compile(r"artifact://[^\s\"'`)\]}]+")
 class SettleState:
     """Where this conversation's settled part ends, kept between calls (F45).
 
-    The boundary is a history index; the message just before it is remembered
-    so a history rewritten by compaction (or restored) starts over at 0.
+    The boundary is a history index; the id of the message just before it is
+    remembered, so a history rewritten by compaction starts over at 0 while
+    the same history restored in the next turn keeps it. The session keeps
+    it between turns (`to_json`), because the desktop builds a runtime per
+    turn and a boundary decided again each turn would move the prefix.
     """
 
     def __init__(self) -> None:
         self.boundary = 0
-        self._anchor: int | None = None
+        self._anchor: str | None = None
         #: Whether the boundary follows context pressure (the window is known).
         self.by_pressure = False
 
     def current(self, history: Sequence[ChatMessage]) -> int:
         if not self.boundary:
             return 0
-        if self.boundary > len(history) or id(history[self.boundary - 1]) != self._anchor:
+        if self.boundary > len(history) or history[self.boundary - 1].message_id != self._anchor:
             self.boundary, self._anchor = 0, None
         return self.boundary
 
     def move_to(self, boundary: int, history: Sequence[ChatMessage]) -> None:
         self.boundary = boundary
-        self._anchor = id(history[boundary - 1]) if boundary else None
+        self._anchor = history[boundary - 1].message_id if boundary else None
+
+    def to_json(self) -> dict:
+        return {"boundary": self.boundary, "anchor": self._anchor}
+
+    @classmethod
+    def from_json(cls, data) -> SettleState:
+        state = cls()
+        if isinstance(data, dict) and isinstance(data.get("boundary"), int):
+            anchor = data.get("anchor")
+            if data["boundary"] > 0 and isinstance(anchor, str):
+                state.boundary, state._anchor = data["boundary"], anchor
+        return state
 
 
 def plan_boundary(

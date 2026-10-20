@@ -397,6 +397,12 @@ class _SubagentRunner:
         for tool in [capability_search_tool(registry), *capability_activation_tools(registry)]:
             if definition.allows(tool.name):
                 registry.register(tool)
+        # What search finds runs through the door, always inside this child's
+        # own restricted registry (F42).
+        from rinari.tools.door import DOOR_TOOL, door_tool
+
+        if registry.get("capability.search") is not None and registry.get(DOOR_TOOL) is None:
+            registry.register(door_tool())
         return registry
 
     def _build_tool_ctx(self, spec: SubagentRunSpec):

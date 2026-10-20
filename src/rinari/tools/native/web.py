@@ -693,6 +693,7 @@ def web_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="web.links",
+            always_loaded=False,
             description="List the (deduplicated, absolute) links of a page.",
             input_schema=url_schema,
             risk=RISK_LOW,
@@ -702,6 +703,7 @@ def web_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="web.find",
+            always_loaded=False,
             description="Case-insensitive literal search within a page's extracted text.",
             input_schema={
                 "type": "object",
@@ -724,6 +726,7 @@ def web_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="web.extract_text",
+            always_loaded=False,
             description="Extract plain text from a page (bounded).",
             input_schema=url_schema,
             risk=RISK_LOW,
@@ -733,6 +736,7 @@ def web_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="web.extract_markdown",
+            always_loaded=False,
             description="Extract lightweight markdown from a page (bounded).",
             input_schema=url_schema,
             risk=RISK_LOW,
@@ -742,6 +746,7 @@ def web_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="web.extract_metadata",
+            always_loaded=False,
             description="Extract title, description and meta tags from a page.",
             input_schema=url_schema,
             risk=RISK_LOW,
@@ -770,6 +775,7 @@ def web_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="web.cite",
+            always_loaded=False,
             description="Build a citation/evidence record for a URL (hash, timestamp, title).",
             input_schema=url_schema,
             risk=RISK_LOW,
@@ -779,6 +785,7 @@ def web_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="web.sources",
+            always_loaded=False,
             description="Build citation records for up to 10 URLs; per-URL failures included.",
             input_schema={
                 "type": "object",

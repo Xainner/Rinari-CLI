@@ -71,6 +71,9 @@ class AssemblerContext:
     skill_catalog: str | None = None
     # Tools that load on demand, generated from the registry (V2-6).
     tool_index: str | None = None
+    # What is connected now (MCP, OpenAPI, plugins): it can change during a
+    # conversation, so it closes the request instead of the system prompt (F42).
+    connected_index: str | None = None
     skills: tuple[ActiveSkill, ...] = ()
     task_state: str | None = None
     # Preserved task truth after context compaction (harness.md 67-68).
@@ -246,6 +249,17 @@ class PromptAssembler:
                     trust=SegmentTrust.SCOPED_TRUSTED,
                     cache_policy=CachePolicy.SESSION,
                     provenance="tools:registry",
+                )
+            )
+        if context.connected_index:
+            segments.append(
+                PromptSegment(
+                    id="connected-index",
+                    kind=SegmentKind.RUNTIME_POLICY,
+                    content=context.connected_index,
+                    trust=SegmentTrust.SCOPED_TRUSTED,
+                    cache_policy=CachePolicy.TURN,
+                    provenance="tools:connected",
                 )
             )
         for skill in context.skills:

@@ -1,0 +1,189 @@
+"""The cached prefix holds across a conversation, per protocol (F42 guard).
+
+Two requests in a row of the same conversation, with an activation, a call
+through the door and a new turn in between, must start byte for byte the same
+on the wire: same tools, same system prompt, and the earlier messages
+unchanged, except the volatile note that closes each request.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import replace
+from itertools import pairwise
+
+import pytest
+
+from rinari.capability_search import capability_activation_tools, capability_search_tool
+from rinari.models.router import _alias_map_for_request
+from rinari.models.types import ModelRequest, ModelResponse, ToolCall
+from rinari.policy.engine import PermissionProfile
+from rinari.policy.sandbox import FilesystemSandbox, ProcessLimits
+from rinari.prompts.assembler import AssemblerContext, PromptAssembler
+from rinari.providers.adapters.anthropic import AnthropicAdapter
+from rinari.providers.adapters.openai_compatible import OpenAICompatibleAdapter
+from rinari.providers.adapters.responses import OpenAIResponsesAdapter
+from rinari.runtime.agent import AgentContext, AgentLoop
+from rinari.runtime.cancellation import CancellationToken
+from rinari.shared.clock import FakeClock
+from rinari.tools.definition import ToolContext
+from rinari.tools.door import door_tool
+from rinari.tools.exposure import ToolExposure
+from tests.unit.test_agent_loop import FakeModel, make_tool_runtime
+
+
+def _conversation(tmp_path) -> list[ModelRequest]:
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "a.txt").write_text("one\n", encoding="utf-8")
+    (root / "b.txt").write_text("two\n", encoding="utf-8")
+    clock = FakeClock(start=1_700_000_000.0, step=0.05)
+    runtime, _scope = make_tool_runtime(tmp_path, root, clock)
+    registry = runtime.registry
+    registry.register(capability_search_tool(registry))
+    registry.register_all(capability_activation_tools(registry))
+    registry.register(door_tool())
+    tool_ctx = ToolContext(
+        session_id="s1",
+        kind="PROJECT",
+        cwd=root,
+        project_root=root,
+        user_home=tmp_path,
+        profile=PermissionProfile.WORKSPACE,
+        sandbox=FilesystemSandbox(read_root=root, write_roots=(root,)),
+        limits=ProcessLimits(timeout_s=30, max_output_bytes=65536),
+        artifact_root=tmp_path / "artifacts",
+        clock=clock,
+        cancellation=CancellationToken(),
+        exposure=ToolExposure(key={"engine": "t", "model": "fake-model", "compaction": 0}),
+    )
+    ctx = AgentContext(
+        session_id="s1",
+        model_ref="fake-model",
+        tool_ctx=tool_ctx,
+        # "repository" is volatile: it closes every request as the turn note.
+        assembler_base=AssemblerContext(
+            session_kind="PROJECT",
+            constitution="You are RINARI.",
+            environment={"cwd": str(root), "repository": "files: a.txt, b.txt"},
+        ),
+    )
+    diff = '{"a": "a.txt", "b": "b.txt"}'
+    model = FakeModel(
+        scripted=[
+            ModelResponse(
+                content="",
+                tool_calls=(ToolCall("act", "capability.activate", {"names": ["fs.diff"]}),),
+            ),
+            ModelResponse(
+                content="",
+                tool_calls=(ToolCall("door", "tool.call", {"name": "fs.diff", "arguments": diff}),),
+            ),
+            ModelResponse(content="They differ in one line."),
+            ModelResponse(content="Yes."),
+        ]
+    )
+    loop = AgentLoop(model, runtime, PromptAssembler())
+    loop.turn(ctx, "compare a and b")
+    ctx.tool_ctx = replace(ctx.tool_ctx, exposure=ctx.tool_ctx.exposure)
+    loop.turn(ctx, "sure?")
+    assert len(model.requests) == 4
+    return model.requests
+
+
+def _strip(value):
+    """Cache breakpoints mark the end of a request, not its content."""
+    if isinstance(value, dict):
+        return {k: _strip(v) for k, v in value.items() if k != "cache_control"}
+    if isinstance(value, list):
+        return [_strip(v) for v in value]
+    return value
+
+
+def _chat(request):
+    payload = OpenAICompatibleAdapter()._payload(
+        request, stream=False, tool_aliases=_alias_map_for_request(None, request)
+    )
+    return payload["tools"], payload["messages"]
+
+
+def _responses(request):
+    payload = OpenAIResponsesAdapter()._responses_payload(
+        request, stream=False, tool_aliases=_alias_map_for_request(None, request)
+    )
+    return payload["tools"], payload["input"]
+
+
+def _anthropic(request):
+    payload = AnthropicAdapter()._payload(
+        request, stream=False, tool_aliases=_alias_map_for_request(None, request)
+    )
+    return payload["tools"], [payload.get("system"), *payload["messages"]]
+
+
+@pytest.mark.parametrize(
+    "wire", [_chat, _responses, _anthropic], ids=["chat", "responses", "anthropic"]
+)
+def test_every_request_starts_like_the_one_before(tmp_path, wire) -> None:
+    requests = _conversation(tmp_path)
+    for before, after in pairwise(requests):
+        tools_before, messages_before = wire(before)
+        tools_after, messages_after = wire(after)
+        assert tools_after == tools_before
+        # The last element carries the volatile note (and, for Anthropic, the
+        # tool results it joins): everything before it is the cached prefix.
+        kept = _strip(messages_before[:-1])
+        assert _strip(messages_after[: len(kept)]) == kept
+
+
+def test_the_door_and_search_are_in_the_list_and_the_activated_tool_is_not(tmp_path) -> None:
+    requests = _conversation(tmp_path)
+    names = {tool.name for tool in requests[0].tools}
+    assert {"tool.call", "capability.search"} <= names
+    assert "fs.diff" not in names
+
+
+def test_a_changed_prefix_is_logged_with_what_changed(tmp_path, caplog) -> None:
+    from rinari.models.types import ChatMessage, ToolSchema
+    from rinari.runtime.agent import _watch_prefix
+
+    exposure = ToolExposure(key={"model": "m1"})
+    ctx = AgentContext(
+        session_id="s9",
+        model_ref="m1",
+        tool_ctx=ToolContext(
+            session_id="s9",
+            kind="CHAT",
+            cwd=tmp_path,
+            project_root=None,
+            user_home=tmp_path,
+            profile=PermissionProfile.WORKSPACE,
+            sandbox=FilesystemSandbox(read_root=tmp_path, write_roots=(tmp_path,)),
+            limits=ProcessLimits(timeout_s=30, max_output_bytes=65536),
+            artifact_root=tmp_path / "artifacts",
+            clock=FakeClock(start=0.0, step=1.0),
+            cancellation=CancellationToken(),
+            exposure=exposure,
+        ),
+        assembler_base=AssemblerContext(),
+    )
+    one = ModelRequest(
+        model="m1",
+        messages=(ChatMessage.system("rules"),),
+        tools=(ToolSchema("fs.read", "read", {"type": "object"}),),
+    )
+    two = replace(one, tools=(*one.tools, ToolSchema("fs.stat", "stat", {"type": "object"})))
+    with caplog.at_level(logging.INFO, logger="rinari.cache"):
+        _watch_prefix(ctx, one)
+        _watch_prefix(ctx, one)
+        assert not caplog.records
+        _watch_prefix(ctx, two)
+        (warned,) = caplog.records
+        assert warned.levelno == logging.WARNING and "tools" in warned.getMessage()
+        caplog.clear()
+        exposure.key = {"model": "m2"}
+        _watch_prefix(ctx, one)
+        (expected,) = caplog.records
+        assert (
+            expected.levelno == logging.INFO and "new model or compaction" in expected.getMessage()
+        )

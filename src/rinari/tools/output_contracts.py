@@ -89,7 +89,7 @@ FIELDS = {
         "name:s version:s valid:b issues:a warnings:a review:o previous_version:s? unchanged:b"
     ),
     "skills.propose": "name:s status:s version:s update:b review:s warnings:a previous_version:s?",
-    "skills.activate": "name:s version:s active:b tools_activated:a?",
+    "skills.activate": "name:s version:s active:b procedure:s? tools_through_door:s?",
     "schedule.propose": "status:s proposal:o? task_id:s? next_run_at:n? description:s note:s",
     "rinari.status": (
         "engine:o providers:a models:a? models_total:i context:o soul:s? skills:a "
@@ -99,9 +99,9 @@ FIELDS = {
     "rinari.session": "session:o turns:a turns_total:i turns_shown:i note:s",
     "rinari.turn": "id:s outcome:s session_id:s tools:a? events:a? note:s",
     "skills.deactivate": "name:s active:b removed:b",
-    "capability.search": "query:s results:a matched:b loaded:a load_error:s? diagnostics:a",
-    "capability.activate": "activated:a scope:s reason:s",
-    "capability.deactivate": "deactivated:a",
+    "capability.search": "query:s results:a matched:b diagnostics:a",
+    "capability.activate": "in_list:a outside_list:a note:s",
+    "capability.deactivate": "deactivated:a note:s",
     "agent.spawn": "agent_id:s agent:s state:s limits:o",
     "agent.wait": "agent_id:s state:s status:s timed_out:b",
     "agent.result": "agent_id:s state:s",

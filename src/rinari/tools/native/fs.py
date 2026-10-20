@@ -1067,6 +1067,7 @@ def filesystem_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="fs.diff",
+            always_loaded=False,
             description="Unified diff between two text files.",
             input_schema={
                 "type": "object",

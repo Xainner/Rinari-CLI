@@ -748,6 +748,7 @@ def memory_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="memory.update",
+            always_loaded=False,
             description=(
                 "Update an existing user or project memory record by id (text, "
                 "topic, confidence, provenance). Use after a stored fact turns "
@@ -784,6 +785,7 @@ def memory_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="memory.forget",
+            always_loaded=False,
             description=(
                 "Delete one user, project, or pattern memory record by id. Use when "
                 "the user asks you to forget something or a stored record is wrong."

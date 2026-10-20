@@ -89,6 +89,9 @@ class AgentSession:
     pending_attachments: list[str | dict] = field(default_factory=list)
     # Slash command for the next turn only (`/learn`); consumed when it runs.
     next_turn_command: str = ""
+    # Tools the next turn needs (an /init turn's proposal tool): announced
+    # with their exact call when they are outside the fixed list (F42).
+    next_turn_tools: tuple[str, ...] = ()
     # The next turn starts with the external-content guard on: a child born
     # after its mother read the web (plan-sesiones-hijas 5.2).
     next_turn_external: bool = False
@@ -312,6 +315,9 @@ def build_assembler_context(
         project_instructions=instructions,
         skill_catalog=catalog,
         tool_index=deferred_index(registry) if registry is not None else None,
+        connected_index=(
+            deferred_index(registry, connected=True) if registry is not None else None
+        ),
         skills=skills_tuple,
         task_state=task_state,
         memory=_memory_text(services, root, record=record),
@@ -341,20 +347,81 @@ def _skills_in_history(history) -> set[str]:
 
 
 def _exposure_for(services: ServiceContainer, record: SessionRecord, root: Path | None):
-    """Tool exposure for one runtime, with the tools of the pinned skills visible.
+    """The conversation's fixed tool list (F42), kept with the session.
 
-    The desktop builds a runtime per turn, so an activation made in one turn
-    would not outlive it; a pinned skill keeps the tools it requires instead.
+    The desktop builds a runtime per turn: the list decided in the first
+    request is saved, and every later turn sends the same one until another
+    model or a compaction (its key), so the provider's cache keeps working.
+    Tools outside it (a pinned skill's, an /init turn's) are announced in the
+    conversation with their exact `tool.call` instead (see `_tools_note`).
     """
-    exposure = ToolExposure()
+    from rinari.context.session_state import SessionState, state_path
+    from rinari.tools.exposure import list_key, schemas_from_json, schemas_to_json
+
+    store = SessionState(state_path(services.ctx.layout, record.id))
+    key = list_key(record.model_id, (record.compact_state or {}).get("revision"))
+    saved = store.get("tools")
+    fixed = (
+        schemas_from_json(saved.get("schemas"))
+        if isinstance(saved, dict) and saved.get("key") == key
+        else None
+    )
+
+    def keep(current_key, schemas) -> None:
+        store.put("tools", {"key": current_key, "schemas": schemas_to_json(schemas)})
+
+    return ToolExposure(fixed=fixed, key=key, on_fix=keep)
+
+
+def _session_state(services: ServiceContainer, session_id: str):
+    from rinari.context.session_state import SessionState, state_path
+
+    return SessionState(state_path(services.ctx.layout, session_id))
+
+
+def _tools_note(session: AgentSession, wanted: tuple[str, ...] = ()) -> ChatMessage | None:
+    """Tools this turn needs that are not in the fixed list, with their exact call.
+
+    `wanted` are the turn's own (an /init turn's proposal tool) and the pinned
+    skills'; a core tool that became available after the list was decided (a
+    goal set later) joins them. Each tool is announced once per conversation:
+    the text is the same every time and stays in the history, which only grows
+    at the end, so the cached prefix does not move.
+    """
+    from rinari.tools.door import door_text
+    from rinari.tools.exposure import list_key
+
+    exposure = getattr(session.context.tool_ctx, "exposure", None)
+    registry = session.loop._tools.registry
+    if exposure is None or registry.get("tool.call") is None:
+        return None
+    exposure.follow(list_key(session.context.model_ref, session.context.compact_revision))
+    # Availability as the loop will see it (a goal tool only with a goal).
+    registry.context = session.context.tool_ctx
+    # Not decided yet (a first turn): the list the first request will decide.
+    listed = set(exposure.exposed_names(registry))
+    names = list(dict.fromkeys([*wanted, *exposure._planned(registry)]))
+    tools = [registry.get(n) for n in names if n not in listed and registry.get(n) is not None]
+    said = "\n".join(m.content or "" for m in session.context.history if m.role == "user")
+    tools = [tool for tool in tools if door_text([tool]) not in said]
+    if not tools:
+        return None
+    return ChatMessage.harness(
+        "Tools for this conversation that are not in your tool list; run them through "
+        "tool.call exactly as shown:\n" + door_text(tools),
+        "tools",
+    )
+
+
+def _pinned_skill_tools(services: ServiceContainer, record: SessionRecord) -> tuple[str, ...]:
+    names: list[str] = []
+    root = _root_of(record)
     for name, _version in record.active_skills or ():
         try:
-            required = services.skills.get(name, root).required_tools
+            names.extend(services.skills.get(name, root).required_tools or ())
         except Exception:
             continue
-        if required:
-            exposure.activate(list(required), reason=f"skill {name}", scope="session")
-    return exposure
+    return tuple(names)
 
 
 # The conversation title is asked beside the first turn (V2-4). Tests that
@@ -994,6 +1061,7 @@ def build_agent_session(
         collect_agent_notices=orchestrator.completion_notices,
         checklist_reminder=None,
         checklist_final_check=_checklist_final_check(services, record.id),
+        session_state=_session_state(services, record.id),
     )
     context.checklist_reminder = _checklist_reminder(
         services, record.id, request=lambda: _last_request(context.history)
@@ -1198,8 +1266,8 @@ def _plugin_tools(services: ServiceContainer, root: Path | None) -> list:
         if not loaded.ok():
             continue
         for tool in loaded.tools:
-            # Nivel C (Etapa B): plugin tools are on-demand, discovered via
-            # capability.search and exposed via capability.activate.
+            # Plugin tools are on-demand: found with capability.search and run
+            # through tool.call (F42).
             collected.append(replace(tool, always_loaded=False))
     return collected
 
@@ -1318,6 +1386,10 @@ def _build_tools(
         registry.register(capability_search_tool(registry, skills=_skills_for_search))
         registry.register_all(capability_activation_tools(registry))
         registry.register_all(ssh_tools(TargetStore(services.ctx.layout.root)))
+        # The door (F42): what search finds outside the fixed list runs here.
+        from rinari.tools.door import door_tool
+
+        registry.register(door_tool())
 
     if channel_host is not None:
         from rinari.capability_search import capability_activation_tools, capability_search_tool
@@ -1330,6 +1402,9 @@ def _build_tools(
         )
         registry.register(capability_search_tool(registry))
         registry.register_all(capability_activation_tools(registry))
+        from rinari.tools.door import door_tool
+
+        registry.register(door_tool())
 
     def ask(request) -> str:
         if approval_prompt is not None:
@@ -1619,17 +1694,13 @@ def _apply_session(
 
 def pin_skill(session: AgentSession, name: str):
     """Pin a skill from a slash command: persisted on the session (the next
-    turn's prompt refresh injects its procedure), its tools exposed now."""
+    turn's prompt refresh injects its procedure and announces its tools)."""
     services = session.services
     record = session.record
     root = Path(record.project_root_snapshot) if record.project_root_snapshot else None
     manifest = services.skills.activate(name, record.id, root)
     session.record = records_get(services, record.id)
-    exposure = getattr(session.context.tool_ctx, "exposure", None)
-    if exposure is not None and manifest.required_tools:
-        exposure.activate(
-            list(manifest.required_tools), reason=f"skill {manifest.name}", scope="session"
-        )
+    # Its tools outside the fixed list are announced at the next turn (F42).
     return manifest
 
 
@@ -2402,11 +2473,13 @@ def _run_turn_unlocked(
     )
     session.next_turn_command = ""
     session.next_turn_external = False
-    exposure = getattr(session.context.tool_ctx, "exposure", None)
-    if exposure is not None:
-        for past in refreshed_history:
-            if past.role == "tool" and past.name:
-                exposure.note_used(past.name)
+    wanted_tools = (*session.next_turn_tools, *_pinned_skill_tools(services, session.record))
+    session.next_turn_tools = ()
+    with contextlib.suppress(Exception):
+        note = _tools_note(session, wanted_tools)
+        if note is not None:
+            # Right after the owner's message, saved with it (F42).
+            session.context.turn_notes = (note,)
     _set_session_state(services, session.record, STATE_ACTIVE)
     base = session.context.assembler_base
     include_identity = _needs_identity(message)

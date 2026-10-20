@@ -347,6 +347,7 @@ def http_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="http.sse",
+            always_loaded=False,
             description=(
                 "Consume a text/event-stream endpoint; returns bounded parsed "
                 "SSE events (event, data, id, retry) within the timeout."

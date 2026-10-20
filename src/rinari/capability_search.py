@@ -16,7 +16,6 @@ ships in v1.
 
 from __future__ import annotations
 
-import contextlib
 import re
 import unicodedata
 from collections.abc import Callable
@@ -140,17 +139,46 @@ def search_capabilities(
     scored.sort(key=lambda item: (-item[0], item[1]))
     results: list[dict] = []
     for score, _, tool in scored[: max(1, limit)]:
-        results.append(
-            {
-                "name": tool.name,
-                "source": classify_source(tool),
-                "description": tool.description,
-                "risk": tool.risk,
-                "side_effects": tool.side_effects,
-                "score": round(score, 3),
-            }
-        )
+        row = {
+            "name": tool.name,
+            "source": classify_source(tool),
+            "description": tool.description,
+            "risk": tool.risk,
+            "side_effects": tool.side_effects,
+            "score": round(score, 3),
+        }
+        server = (tool.manifest or {}).get("server")
+        if server and row["source"] == SOURCE_MCP:
+            row["server"] = str(server)
+        results.append(row)
     return results
+
+
+# Results outside the list that come back with their schema and exact call:
+# enough to act in the next step, without paying every schema of a long list.
+_CALLS_IN_SEARCH = 3
+
+
+def _outside_list(ctx, registry: ToolRegistry, name: str) -> bool:
+    exposure = getattr(ctx, "exposure", None)
+    if exposure is None:
+        return False
+    return not exposure.in_list(name, registry)
+
+
+def _add_calls(results: list[dict], ctx, registry: ToolRegistry) -> int:
+    """Mark each result in or out of the list; the first ones out get their call."""
+    from rinari.tools.door import how_to_call
+
+    given = 0
+    for item in results:
+        tool = registry.get(item["name"])
+        outside = tool is not None and _outside_list(ctx, registry, item["name"])
+        item["in_list"] = not outside
+        if outside and given < _CALLS_IN_SEARCH and item.get("available") is not False:
+            item["how_to_call"] = how_to_call(tool)
+            given += 1
+    return given
 
 
 def search_skills(skills, query: str, limit: int = 5) -> list[dict]:
@@ -204,25 +232,9 @@ def capability_search_tool(registry: ToolRegistry, skills=None) -> ToolDefinitio
 
         for item in results:
             item.update(availability(item["name"], ctx))
-        loaded = []
-        load_error = None
-        if arguments.get("load") and getattr(ctx, "exposure", None) is not None:
-            names = [item["name"] for item in results if item["available"] is not False]
-            from rinari.tools.exposure import _schema_tokens
-
-            visible = set(ctx.exposure.exposed_names(registry)) | set(names)
-            if (
-                len(visible) <= ctx.exposure.max_schema_count
-                and sum(_schema_tokens(registry.get(n)) for n in visible)
-                <= ctx.exposure.max_schema_tokens
-            ):
-                loaded = ctx.exposure.activate(names, reason=query, scope="turn")
-            else:
-                load_error = (
-                    "Schema budget exceeded; request fewer matches or deactivate unused tools."
-                )
-        elif arguments.get("load"):
-            load_error = "Dynamic exposure is not enabled in this context."
+        # The tool list never changes (F42): what is outside it comes back
+        # with its schema and the exact tool.call to run it.
+        given = _add_calls(results, ctx, registry)
         skill_matches: list[dict] = []
         if skills is not None:
             try:
@@ -253,7 +265,12 @@ def capability_search_tool(registry: ToolRegistry, skills=None) -> ToolDefinitio
             if native:
                 guidance += " Typed tools that match: " + ", ".join(native) + "."
         elif results:
-            guidance = "Use an exact returned tool name."
+            guidance = (
+                "Call a tool marked in_list directly; run any other through tool.call exactly "
+                "as its how_to_call shows."
+                if given
+                else "Use an exact returned tool name."
+            )
         else:
             guidance = (
                 "No registered capability matched. Check the integration configuration; "
@@ -266,8 +283,6 @@ def capability_search_tool(registry: ToolRegistry, skills=None) -> ToolDefinitio
                 "skills": skill_matches,
                 "results": results,
                 "matched": bool(results or skill_matches),
-                "loaded": loaded,
-                "load_error": load_error,
                 "diagnostics": list(registry.diagnostics),
                 "guidance": guidance,
             },
@@ -280,15 +295,14 @@ def capability_search_tool(registry: ToolRegistry, skills=None) -> ToolDefinitio
             "Search the capabilities available this session across all sources "
             "(skills, native, plugin, MCP, OpenAPI and browser). A matching skill is a "
             "ready procedure: activate it first. Prefer typed "
-            "API/connector matches over browser automation. Set load=true to "
-            "activate matching schemas in the same call, within the schema budget."
+            "API/connector matches over browser automation. A tool outside your list comes "
+            "back with its schema and the exact tool.call that runs it."
         ),
         input_schema={
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "What you want to do (service, verb)."},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
-                "load": {"type": "boolean", "default": False},
             },
             "required": ["query"],
         },
@@ -303,27 +317,13 @@ def capability_search_tool(registry: ToolRegistry, skills=None) -> ToolDefinitio
 
 
 def capability_activation_tools(registry: ToolRegistry) -> list[ToolDefinition]:
-    """capability.activate / capability.deactivate over the session exposure.
+    """capability.activate / capability.deactivate, kept for what names them.
 
-    Explicit, traceable activation (review §4, Etapa B): the model searches
-    with capability.search, then activates exactly what it needs. Turn-scoped
-    activations decay automatically; session scope persists for the session.
+    The tool list never changes in the middle of a conversation (F42), so
+    activating is finding: it returns each tool's schema and the exact
+    tool.call that runs it, and deactivating has nothing to undo. Skills and
+    instructions written for the old flow keep working.
     """
-
-    def _exposure(ctx):
-        from rinari.tools.definition import ToolErrorCode, ToolErrorInfo, ToolResult
-
-        exposure = getattr(ctx, "exposure", None)
-        if exposure is None:
-            return None, ToolResult(
-                ok=False,
-                error=ToolErrorInfo(
-                    ToolErrorCode.INVALID_ARGUMENT,
-                    "dynamic exposure is not enabled in this context",
-                ),
-                origin="capability",
-            )
-        return exposure, None
 
     def _names(arguments: dict) -> list[str]:
         raw = arguments.get("names") or []
@@ -333,10 +333,8 @@ def capability_activation_tools(registry: ToolRegistry) -> list[ToolDefinition]:
 
     def activate_handler(arguments: dict, ctx) -> object:
         from rinari.tools.definition import ToolErrorCode, ToolErrorInfo, ToolResult
+        from rinari.tools.door import how_to_call
 
-        exposure, err = _exposure(ctx)
-        if err is not None:
-            return err
         names = _names(arguments)
         if not names:
             return ToolResult(
@@ -354,89 +352,25 @@ def capability_activation_tools(registry: ToolRegistry) -> list[ToolDefinition]:
                 ),
                 origin="capability",
             )
-        scope = str(arguments.get("scope") or "turn")
-        if scope not in ("turn", "session"):
-            return ToolResult(
-                ok=False,
-                error=ToolErrorInfo(
-                    ToolErrorCode.INVALID_ARGUMENT, "scope must be 'turn' or 'session'"
-                ),
-                origin="capability",
-            )
-        try:
-            ttl = max(1, min(32, int(arguments.get("ttl_rounds") or 4)))
-        except (TypeError, ValueError):
-            ttl = 4
-        reason = str(arguments.get("reason") or "")
-        from rinari.tools.exposure import _schema_tokens
-
-        def over_budget() -> bool:
-            visible = set(exposure.exposed_names(registry)) | set(names)
-            return (
-                len(visible) > exposure.max_schema_count
-                or sum(_schema_tokens(registry.get(n)) for n in visible)
-                > exposure.max_schema_tokens
-            )
-
-        # Room is made by dropping this turn's oldest activations that are not
-        # asked for again (F33, plan 0.4.0 v2, V2-12): a large MCP server ran
-        # out of budget on its third tool while finished ones stayed loaded.
-        # Session activations (a pinned skill's tools) are never dropped.
-        evicted: list[str] = []
-        if over_budget():
-            for old in [
-                name
-                for name, activation in exposure.activated.items()
-                if activation.scope != "session" and name not in names
-            ]:
-                exposure.deactivate([old])
-                with contextlib.suppress(ValueError):
-                    exposure.recent.remove(old)
-                evicted.append(old)
-                if not over_budget():
-                    break
-        if over_budget():
-            if evicted:
-                exposure.activate(evicted, reason="restored", scope="turn")
-            return ToolResult(
-                ok=False,
-                error=ToolErrorInfo(
-                    ToolErrorCode.RESOURCE_EXHAUSTED,
-                    "Schema budget exceeded; activate fewer tools or deactivate unused tools.",
-                ),
-                origin="capability",
-            )
-        activated = exposure.activate(names, reason=reason, scope=scope, ttl_rounds=ttl)
-        data = {"activated": activated, "scope": scope, "reason": reason}
-        if evicted:
-            data["unloaded_to_make_room"] = evicted
+        in_list = [n for n in names if not _outside_list(ctx, registry, n)]
+        outside = [how_to_call(registry.get(n)) for n in names if n not in in_list]
+        data: dict = {"in_list": in_list, "outside_list": outside}
+        data["note"] = (
+            "Your tool list does not change. Call the in_list tools directly; run the others "
+            "through tool.call exactly as each call shows."
+            if outside
+            else "These tools are already in your list: call them directly."
+        )
         return ToolResult(ok=True, data=data, origin="capability")
 
     def deactivate_handler(arguments: dict, ctx) -> object:
-        from rinari.tools.definition import ToolErrorCode, ToolErrorInfo, ToolResult
+        from rinari.tools.definition import ToolResult
 
-        exposure, err = _exposure(ctx)
-        if err is not None:
-            return err
-        names = _names(arguments)
-        if not names:
-            return ToolResult(
-                ok=False,
-                error=ToolErrorInfo(ToolErrorCode.INVALID_ARGUMENT, "names is required"),
-                origin="capability",
-            )
-        removed = exposure.deactivate(names)
         return ToolResult(
             ok=True,
             data={
-                "deactivated": removed,
-                "still_exposed": [
-                    name for name in names if name in exposure.exposed_names(registry)
-                ],
-                "note": (
-                    "Core or recently used tools may remain visible "
-                    "after explicit activation is removed."
-                ),
+                "deactivated": [],
+                "note": "Your tool list does not change; there is nothing to deactivate.",
             },
             origin="capability",
         )
@@ -445,10 +379,8 @@ def capability_activation_tools(registry: ToolRegistry) -> list[ToolDefinition]:
         ToolDefinition(
             name="capability.activate",
             description=(
-                "Expose on-demand tools (browser, MCP, OpenAPI, plugins) to this "
-                "session. Search first with capability.search, then activate exactly "
-                "what the task needs. Turn scope lasts a few model rounds, session "
-                "scope persists."
+                "Get the schema and the exact tool.call of tools outside your list, by exact "
+                "name (find them with capability.search). Your tool list does not change."
             ),
             input_schema={
                 "type": "object",
@@ -456,35 +388,23 @@ def capability_activation_tools(registry: ToolRegistry) -> list[ToolDefinition]:
                     "names": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Exact tool names to expose.",
-                    },
-                    "scope": {
-                        "type": "string",
-                        "enum": ["turn", "session"],
-                        "default": "turn",
-                    },
-                    "ttl_rounds": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 32,
-                        "default": 4,
-                        "description": "Model rounds a turn-scoped activation survives.",
+                        "description": "Exact tool names.",
                     },
                     "reason": {"type": "string", "description": "Why the task needs these."},
                 },
                 "required": ["names"],
             },
-            capabilities=("state.mutate",),
+            capabilities=("state.read",),
             risk="low",
-            idempotent=False,
+            idempotent=True,
             namespace="capability",
             manifest={"source": "native", "kind": "capability-activation"},
-            classify=lambda _input: ClassifiedAction("state.mutate"),
+            classify=lambda _input: ClassifiedAction("state.read"),
             handler=activate_handler,
         ),
         ToolDefinition(
             name="capability.deactivate",
-            description="Drop previously activated tools from this session's exposure.",
+            description="Kept for old instructions: your tool list does not change.",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -492,12 +412,13 @@ def capability_activation_tools(registry: ToolRegistry) -> list[ToolDefinition]:
                 },
                 "required": ["names"],
             },
-            capabilities=("state.mutate",),
+            capabilities=("state.read",),
             risk="low",
-            idempotent=False,
+            idempotent=True,
             namespace="capability",
+            always_loaded=False,
             manifest={"source": "native", "kind": "capability-activation"},
-            classify=lambda _input: ClassifiedAction("state.mutate"),
+            classify=lambda _input: ClassifiedAction("state.read"),
             handler=deactivate_handler,
         ),
     ]

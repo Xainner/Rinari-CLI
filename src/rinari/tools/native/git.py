@@ -311,6 +311,7 @@ def git_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="git.log",
+            always_loaded=False,
             description="Recent commit history (oneline).",
             input_schema={
                 "type": "object",
@@ -327,6 +328,7 @@ def git_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="git.show",
+            always_loaded=False,
             description="Show a commit's metadata and file stats.",
             input_schema={
                 "type": "object",
@@ -342,6 +344,7 @@ def git_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="git.branch",
+            always_loaded=False,
             description="Current branch and local branch list.",
             input_schema=dict(base_schema),
             risk=RISK_LOW,
