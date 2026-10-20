@@ -814,6 +814,7 @@ def test_failed_refresh_raises_reauth_required(fake, services, manager, caplog) 
     assert excinfo.value.http_status == 401
     status = manager.status(row["id"])
     assert status["signed_in"] is True and status["has_refresh_token"] is False
+    assert status["reauth_required"] is True
     # A refused refresh token is not spent again.
     requests = len(fake.token_requests)
     with pytest.raises(McpError) as again:
@@ -853,6 +854,37 @@ def test_anonymous_listing_works_before_signing_in(fake, services) -> None:
     with pytest.raises(McpError) as excinfo:
         services.mcp.invoke("remote", "whoami", {})
     assert excinfo.value.hint == "oauth_required"
+
+
+def test_a_connection_made_before_signing_in_uses_the_new_token(fake, services, manager) -> None:
+    fake.anonymous_listing = True
+    row = _add(services, fake)
+    services.mcp.connect("remote")  # cached without a token
+    _sign_in(manager, services, row)
+    refreshes = sum(r["form"]["grant_type"] == "refresh_token" for r in fake.token_requests)
+    result = services.mcp.invoke("remote", "whoami", {})
+    assert result["content"][0]["text"] == "you are signed in"
+    after = sum(r["form"]["grant_type"] == "refresh_token" for r in fake.token_requests)
+    assert after == refreshes  # the stored token was enough: no refresh spent
+
+
+def test_anonymous_discovery_ends_the_session_it_opened(fake) -> None:
+    fake.anonymous_listing = True
+    fake.publish_prm = False
+    fake.challenge_names_prm = False
+    deletes: list[str] = []
+    original = fake.mcp_url
+
+    with httpx.Client(trust_env=False) as http:
+        http.event_hooks["request"] = [
+            lambda request: (
+                deletes.append(request.headers.get("Mcp-Session-Id"))
+                if request.method == "DELETE"
+                else None
+            )
+        ]
+        assert oauth_module.anonymous_challenge(original, http) == {}
+    assert deletes == ["s-1"]
 
 
 def test_unsupported_protocol_version_is_refused(fake, monkeypatch) -> None:

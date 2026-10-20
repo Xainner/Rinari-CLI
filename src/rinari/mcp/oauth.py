@@ -314,6 +314,11 @@ def anonymous_challenge(url: str, http: httpx.Client) -> dict[str, str]:
         return {}
     with contextlib.suppress(httpx.HTTPError):
         response.close()
+    session = response.headers.get("mcp-session-id")
+    if session and response.status_code < 300:
+        # Answered anonymously: end the session this probe opened.
+        with contextlib.suppress(httpx.HTTPError):
+            http.delete(url, headers={"Mcp-Session-Id": session}).close()
     if response.status_code not in (401, 403):
         return {}
     return parse_challenge(response.headers.get("www-authenticate"))
@@ -818,8 +823,10 @@ class OAuthSession:
                 return False
             self._had_tokens = True
             current = f"Bearer {tokens['access_token']}"
-            if sent is not None and current != sent and not self._expired(tokens):
-                return True  # another connection refreshed it already
+            if current != sent and not self._expired(tokens):
+                # Another connection refreshed it, or the sign-in happened
+                # after this one was made: retry with it before refreshing.
+                return True
             if not tokens.get("refresh_token"):
                 self._mark_reauth(tokens)
                 return False
@@ -1484,8 +1491,9 @@ class OAuthManager:
         has_refresh = bool(tokens and tokens.get("refresh_token"))
         view: dict[str, Any] = {
             "signed_in": tokens is not None,
+            # Refused by the server (flag), or expired with nothing to renew it.
             "reauth_required": bool(
-                tokens and expired and (tokens.get("reauth_required") or not has_refresh)
+                tokens and (tokens.get("reauth_required") or (expired and not has_refresh))
             ),
             "expires_at": _iso(expires_at) if isinstance(expires_at, int | float) else None,
             "has_refresh_token": has_refresh,
