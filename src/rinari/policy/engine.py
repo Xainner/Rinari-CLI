@@ -38,10 +38,6 @@ destination: in workspace, a call that sends out asks after external content
 only when that content came from somewhere else (a page, another connector);
 reading from a connector and calling the same connector again does not.
 
-Docker (C7). `docker` and `docker compose` are classified: reads run in every
-mode (also read-only), running containers and builds is a local command, and
-removing containers, images, volumes or networks asks in workspace (it is
-refused in read-only). `docker push` publishes like any other send.
 """
 
 from __future__ import annotations
@@ -417,10 +413,7 @@ def _local_part(command: str) -> str:
 
 def _is_inspection(command: str) -> bool:
     command = _local_part(command)
-    if _INSPECTION_SHELL.match(command) and not _CHAINING.search(command):
-        return True
-    docker = docker_intent(command)
-    return docker is not None and docker.kind == DOCKER_READ
+    return bool(_INSPECTION_SHELL.match(command)) and not _CHAINING.search(command)
 
 
 # ssh options that take a value (`ssh -p 22 -i key host cmd`): the host is the
@@ -509,159 +502,6 @@ def remote_actions(command: str) -> list[RemoteAction]:
             ):
                 source = next(p for p in paths[:-1] if _REMOTE_PATH.match(p))
                 found.append(RemoteAction("fetch", source.split(":", 1)[0]))
-    return found
-
-
-# -- docker (connectors plan, C7) ------------------------------------------------
-
-DOCKER_READ = "read"
-DOCKER_EXEC = "exec"
-DOCKER_PUSH = "push"
-DOCKER_DESTRUCTIVE = "destructive"
-_DOCKER_SEVERITY = {DOCKER_READ: 0, DOCKER_EXEC: 1, DOCKER_PUSH: 2, DOCKER_DESTRUCTIVE: 3}
-
-# Global options of the docker CLI that take a value (`docker -H host ps`).
-_DOCKER_VALUE_OPTIONS = frozenset(
-    {"-H", "--host", "-c", "--context", "--config", "-l", "--log-level"}
-    | {"--tlscacert", "--tlscert", "--tlskey"}
-)
-# `docker compose` options before its subcommand that take a value.
-_COMPOSE_VALUE_OPTIONS = frozenset(
-    {"-f", "--file", "-p", "--project-name", "--profile", "--env-file"}
-    | {"--project-directory", "--ansi", "--progress", "--parallel"}
-)
-_DOCKER_READS = frozenset(
-    {"ps", "logs", "inspect", "images", "version", "info", "top", "stats", "port", "diff"}
-    | {"history", "events", "search"}
-)
-_DOCKER_DESTRUCTIVE = frozenset({"rm", "rmi"})
-# `docker <object> <verb>`: the verbs that read, and the ones that delete.
-_DOCKER_OBJECTS = frozenset(
-    {"container", "image", "volume", "network", "system", "builder", "buildx", "context"}
-)
-_DOCKER_OBJECT_READS = frozenset(
-    {"ls", "list", "ps", "inspect", "logs", "top", "stats", "port", "diff", "history", "df"}
-    | {"info", "events", "show", "version"}
-)
-_DOCKER_OBJECT_DESTRUCTIVE = frozenset({"rm", "remove", "prune", "rmi"})
-_COMPOSE_READS = frozenset({"ps", "logs", "ls", "config", "images", "top", "version", "port"})
-# Filters after a docker read that keep it a read (`docker logs app | grep error`).
-_READ_FILTERS = frozenset(
-    {"grep", "findstr", "head", "tail", "wc", "sort", "uniq", "less", "more", "jq"}
-    | {"select-string", "select-object", "sls"}
-)
-
-
-@dataclass(frozen=True, slots=True)
-class DockerIntent:
-    """What a docker command line does, at its most severe command."""
-
-    kind: str  # read | exec | push | destructive
-    verb: str  # what it runs, e.g. "ps", "compose down -v", "system prune"
-
-
-def _skip_options(tokens: list[str], index: int, with_value: frozenset[str]) -> int:
-    while index < len(tokens) and tokens[index].startswith("-") and len(tokens[index]) > 1:
-        option = tokens[index]
-        index += 1
-        if "=" not in option and option in with_value:
-            index += 1  # its value is the next token
-    return index
-
-
-def _docker_segment(tokens: list[str]) -> DockerIntent | None:
-    """One simple command: docker or docker-compose, None for anything else.
-
-    Whatever is not a known read, push or deletion is something that runs
-    (`run`, `build`, `exec`, `start`, `stop`, `restart`, `pull`, plugins…).
-    """
-    program = _program(tokens[0]) if tokens else ""
-    if program == "docker-compose":
-        return _compose_intent(tokens, 1)
-    if program != "docker":
-        return None
-    index = _skip_options(tokens, 1, _DOCKER_VALUE_OPTIONS)
-    if index >= len(tokens):
-        return DockerIntent(DOCKER_READ, "help")
-    verb = tokens[index].lower()
-    if verb == "compose":
-        return _compose_intent(tokens, index + 1)
-    if verb in _DOCKER_READS:
-        return DockerIntent(DOCKER_READ, verb)
-    if verb in _DOCKER_DESTRUCTIVE:
-        return DockerIntent(DOCKER_DESTRUCTIVE, verb)
-    if verb == "push":
-        return DockerIntent(DOCKER_PUSH, verb)
-    if verb in _DOCKER_OBJECTS:
-        sub = _skip_options(tokens, index + 1, frozenset())
-        action = tokens[sub].lower() if sub < len(tokens) else ""
-        label = f"{verb} {action}".strip()
-        if not action or action in _DOCKER_OBJECT_READS:
-            return DockerIntent(DOCKER_READ, label)
-        if action in _DOCKER_OBJECT_DESTRUCTIVE:
-            return DockerIntent(DOCKER_DESTRUCTIVE, label)
-        if action == "push":
-            return DockerIntent(DOCKER_PUSH, label)
-        return DockerIntent(DOCKER_EXEC, label)
-    return DockerIntent(DOCKER_EXEC, verb)
-
-
-def _compose_intent(tokens: list[str], index: int) -> DockerIntent:
-    index = _skip_options(tokens, index, _COMPOSE_VALUE_OPTIONS)
-    if index >= len(tokens):
-        return DockerIntent(DOCKER_READ, "compose")
-    verb = tokens[index].lower()
-    flags = {token.lower() for token in tokens[index + 1 :] if token.startswith("-")}
-    deleting = flags & {"-v", "--volumes", "--rmi"} or {
-        flag for flag in flags if flag.startswith("--rmi=")
-    }
-    if verb == "down" and deleting:
-        # Volumes hold the data (a database); --rmi deletes the images.
-        return DockerIntent(DOCKER_DESTRUCTIVE, f"compose down {sorted(deleting)[0]}")
-    if verb == "rm":
-        return DockerIntent(DOCKER_DESTRUCTIVE, "compose rm")
-    if verb in _COMPOSE_READS:
-        return DockerIntent(DOCKER_READ, f"compose {verb}")
-    if verb == "push":
-        return DockerIntent(DOCKER_PUSH, "compose push")
-    return DockerIntent(DOCKER_EXEC, f"compose {verb}")
-
-
-# A redirection to a file, or a command substitution: more than a read.
-_WRITES_OR_SUBSTITUTES = re.compile(r"(?<![<>&0-9])>|`|\$\(")
-
-
-def docker_intent(command: str) -> DockerIntent | None:
-    """How `command` uses docker (`docker`, `docker compose`, `docker-compose`).
-
-    None when no command of the line is docker. Several commands chained:
-    the most severe wins. A read stays a read only when nothing runs with it
-    but filters of its output; a redirection or any other command makes it
-    an `exec`.
-    """
-    text = command or ""
-    if "docker" not in text.lower():
-        return None
-    try:
-        segments = _segments(text)
-    except ValueError:
-        return None
-    found: DockerIntent | None = None
-    others = bool(_WRITES_OR_SUBSTITUTES.search(text))
-    for tokens in segments:
-        while tokens and _program(tokens[0]) in {"sudo", "env", "nohup", "time"}:
-            tokens = tokens[1:]
-        if not tokens:
-            continue
-        intent = _docker_segment(tokens)
-        if intent is None:
-            if _program(tokens[0]) not in _READ_FILTERS:
-                others = True
-            continue
-        if found is None or _DOCKER_SEVERITY[intent.kind] > _DOCKER_SEVERITY[found.kind]:
-            found = intent
-    if found is not None and found.kind == DOCKER_READ and others:
-        return DockerIntent(DOCKER_EXEC, found.verb)
     return found
 
 
@@ -792,29 +632,6 @@ class PolicyEngine:
     ) -> PolicyDecision:
         read_only = scope.profile is PermissionProfile.READ_ONLY
         if read_only and capability == CAPABILITY_SHELL:
-            docker = docker_intent(command or "")
-            reads = docker is not None and docker.kind == DOCKER_READ
-            if reads and not catastrophic(command or ""):
-                # `docker ps`, `logs`, `inspect`…: reading, as read-only allows.
-                return self._allow(capability, f"docker {docker.verb} only reads", risk, risk_class)
-            if docker is not None and docker.kind == DOCKER_DESTRUCTIVE:
-                return self._deny(
-                    capability,
-                    f"read-only mode: docker {docker.verb} deletes containers, images or data",
-                    target=command,
-                    risk="high",
-                    risk_class="local-destructive",
-                    rule_id="docker_destructive",
-                )
-            if docker is not None and docker.kind == DOCKER_PUSH:
-                return self._deny(
-                    capability,
-                    f"read-only mode: docker {docker.verb} publishes an image to a registry",
-                    target=command,
-                    risk="high",
-                    risk_class="remote-reversible",
-                    rule_id="docker_push",
-                )
             # A review re-runs the tests; a command can also change files, so
             # read-only asks for each one and never keeps the answer (as
             # Codex's read-only sandbox does).
@@ -1486,12 +1303,7 @@ class PolicyEngine:
                         rule_id="catastrophic",
                     )
             if any(
-                action.payload
-                and (
-                    _DESTRUCTIVE_SHELL.search(action.payload)
-                    or getattr(docker_intent(action.payload), "kind", None) == DOCKER_DESTRUCTIVE
-                )
-                for action in machines
+                action.payload and _DESTRUCTIVE_SHELL.search(action.payload) for action in machines
             ):
                 return self._hard(
                     scope,
@@ -1527,37 +1339,6 @@ class PolicyEngine:
                     risk_class="communication",
                     rule_id="shell_send",
                 )
-        docker = docker_intent(command or "") if not machines else None
-        if docker is not None and docker.kind == DOCKER_DESTRUCTIVE:
-            # Containers, images, volumes and networks live outside the
-            # project, and a volume holds data no checkpoint brings back.
-            if scope.profile is PermissionProfile.FULL_ACCESS:
-                return self._allow(
-                    CAPABILITY_SHELL,
-                    f"full-access: docker {docker.verb}",
-                    "high",
-                    "local-destructive",
-                )
-            return self._ask(
-                CAPABILITY_SHELL,
-                f"docker {docker.verb} deletes containers, images, volumes or networks",
-                target=command,
-                risk="high",
-                risk_class="local-destructive",
-                rule_id="docker_destructive",
-                choices=CHOICES_SESSION,
-                binding_mode="exact",
-            )
-        if docker is not None and docker.kind == DOCKER_PUSH:
-            return self._outbound(
-                scope,
-                CAPABILITY_SHELL,
-                f"docker {docker.verb} publishes an image to a registry",
-                target=command,
-                risk="high",
-                risk_class="remote-reversible",
-                rule_id="docker_push",
-            )
         if shell_risk.destructive and shell_risk.external_path_targets:
             return self._hard(
                 scope,
