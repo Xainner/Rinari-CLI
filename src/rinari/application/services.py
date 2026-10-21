@@ -119,6 +119,8 @@ def build_services(
         skill_exists=lambda name: True,
         # Rinari Agency: a permanent rule belongs to an agent.
         agent_exists=lambda agent_id: ctx.agency_repo.get(agent_id) is not None,
+        # «Repetir aquí»: the conversation the task runs in.
+        session_exists=lambda session_id: ctx.session_repo.get(session_id) is not None,
     )
     rinari_profiles = RinariProfileService(ctx)
     projects.profiles = rinari_profiles

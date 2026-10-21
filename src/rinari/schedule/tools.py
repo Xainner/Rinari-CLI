@@ -9,6 +9,7 @@ schedules work on its own, and never grants itself permissions for later.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 
@@ -42,6 +43,13 @@ def schedule_tools(host: ScheduleToolHost):
             )
         if args.pop("in_this_project", True) and host.project_id:
             args.setdefault("project_id", host.project_id)
+        # «Repetir aquí»: this conversation, with its history, instead of a
+        # fresh session for every run. Only the conversation it was asked in.
+        args.pop("target", None)
+        args.pop("session_id", None)
+        if args.pop("in_this_conversation", False):
+            args["target"] = "this_conversation"
+            args["session_id"] = getattr(ctx, "session_id", "") or None
         # Grants are the owner's to give, in the confirmation card.
         args.pop("grants", None)
         args.pop("enabled", None)
@@ -80,6 +88,8 @@ def schedule_tools(host: ScheduleToolHost):
                     "task_id": proposed["task"]["id"],
                     "description": proposed["description"],
                     "next_run_at": proposed["task"]["next_run_at"],
+                    # The machine's local time: what to tell the owner.
+                    "next_run_local": _local(proposed["task"]["next_run_at"]),
                     "note": (
                         "Scheduled. It has no permissions granted in advance: a run asks "
                         "for what it needs. The owner can undo it from the notice."
@@ -106,9 +116,13 @@ def schedule_tools(host: ScheduleToolHost):
                 "another pane or task is only proposed for the owner to confirm. It never "
                 "carries permissions: a run asks for what it needs. "
                 "schedule is local time: {kind: once, at: 'YYYY-MM-DDTHH:MM'} | "
-                "{kind: interval, minutes} | {kind: daily, time: 'HH:MM'} | "
-                "{kind: weekly, days: [0-6, 0=Monday], time: 'HH:MM'}. For kind 'agent' the "
-                "prompt must stand alone: the run starts in a fresh session. In a Rinari "
+                "{kind: once, after: {minutes, hours, days}} (counted from now, no need to "
+                "know the time) | {kind: interval, minutes} (5 or more) | "
+                "{kind: daily, time: 'HH:MM'} | {kind: weekly, days: [0-6, 0=Monday], "
+                "time: 'HH:MM'} | {kind: cron, expr: 'minute hour day month weekday'}. For kind "
+                "'agent' each run starts in a fresh session, so the prompt must stand alone, "
+                "unless in_this_conversation is true: then it runs in this conversation as a "
+                "new message, with its history. In a Rinari "
                 "Agency agent's conversation this proposes one of its permanent rules (always "
                 "for the owner to confirm), and kind 'tool' calls one of its connectors with "
                 "fixed arguments and no model: tool = {server, tool, arguments, on_result: "
@@ -129,6 +143,7 @@ def schedule_tools(host: ScheduleToolHost):
                     "mode": {"type": "string", "enum": ["plan", "build", "review"]},
                     "skills": {"type": "array", "items": {"type": "string"}},
                     "in_this_project": {"type": "boolean"},
+                    "in_this_conversation": {"type": "boolean"},
                 },
                 "required": ["name", "kind", "schedule"],
                 "additionalProperties": False,
@@ -140,6 +155,10 @@ def schedule_tools(host: ScheduleToolHost):
             handler=propose,
         )
     ]
+
+
+def _local(epoch: float | None) -> str | None:
+    return datetime.fromtimestamp(epoch).strftime("%Y-%m-%d %H:%M") if epoch else None
 
 
 __all__ = ["ScheduleToolHost", "schedule_tools"]

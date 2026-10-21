@@ -26,6 +26,8 @@ _TASK_COLUMNS = (
     "tool_json",
     "watch_json",
     "agent_id",
+    "target",
+    "session_id",
     "enabled",
     "next_run_at",
     "created_at",
@@ -57,6 +59,8 @@ def _task(row: Any) -> dict[str, Any]:
     raw_watch = item.pop("watch_json", None)
     item["watch"] = json.loads(raw_watch) if raw_watch else None
     item["agent_id"] = item.get("agent_id")
+    item["target"] = item.get("target") or "new_session"
+    item["session_id"] = item.get("session_id")
     item["enabled"] = bool(item["enabled"])
     return item
 
@@ -103,6 +107,8 @@ class ScheduleRepository:
                 json.dumps(task["watch"], sort_keys=True) if task.get("watch") else None
             ),
             "agent_id": task.get("agent_id"),
+            "target": task.get("target") or "new_session",
+            "session_id": task.get("session_id"),
             "enabled": 1 if task.get("enabled", True) else 0,
             "next_run_at": task.get("next_run_at"),
             "created_at": task["created_at"],
@@ -167,7 +173,16 @@ class ScheduleRepository:
 
     def unfinished_runs(self) -> list[dict[str, Any]]:
         rows = self._db.query(
-            "SELECT * FROM scheduled_runs WHERE status IN ('running', 'needs_you')"
+            "SELECT * FROM scheduled_runs WHERE status IN ('queued', 'running', 'needs_you')"
+        )
+        return [dict(row) for row in rows]
+
+    def queued_runs(self, session_id: str) -> list[dict[str, Any]]:
+        """Runs waiting in a conversation's queue («Repetir aquí»), oldest first."""
+        rows = self._db.query(
+            "SELECT * FROM scheduled_runs WHERE session_id = ? AND status = 'queued' "
+            "ORDER BY scheduled_for, started_at",
+            (session_id,),
         )
         return [dict(row) for row in rows]
 

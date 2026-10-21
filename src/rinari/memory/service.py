@@ -1653,7 +1653,11 @@ class MemoryService:
                 if record.turn_id:
                     hidden_turns.add(record.turn_id)
                 continue
-            if record.turn_id in hidden_turns and record.role != "user":
+            # A harness note travels as a user message (the turn's clock, the
+            # tools it needs) but is not the owner's: it belongs to the hidden
+            # turn and must not reopen it for the reply that follows.
+            harness = (getattr(record, "origin", None) or {}).get("kind") == "harness"
+            if record.turn_id in hidden_turns and (record.role != "user" or harness):
                 redacted += 1
                 continue
             if record.role == "user":

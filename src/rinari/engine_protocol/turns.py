@@ -87,11 +87,16 @@ _DECISION_TO_ANSWER = {"deny": "n", "allow_once": "y", "allow_session": "s", "al
 
 @dataclass
 class _QueuedPrompt:
-    """A manual queue entry (legacy `session.queue.add`), origin user."""
+    """A manual queue entry (legacy `session.queue.add`), origin user.
+
+    A scheduled task that runs in its conversation waits here too, with its
+    own origin and `memory_origin`: it is not the owner speaking.
+    """
 
     message: str
     origin: dict[str, Any] | None = None
     display_message: str | None = None
+    memory_origin: str = "interactive"
 
 
 @dataclass
@@ -278,6 +283,9 @@ class TurnManager:
         # A resume waiting for a provider limit holds the session's queue
         # (plan 0.4.0 #24); set by the resume runner.
         self.queue_hold: Any = None
+        # Told what «Vaciar» took out of a session's queue: a scheduled run
+        # waiting there ends cancelled, set by the schedule runner.
+        self.queue_cleared: Any = None
         self._closed_approvals: dict[str, str] = {}
         self._queue: dict[str, collections.deque[_QueuedPrompt]] = {}
         self._lock = threading.RLock()
@@ -822,7 +830,14 @@ class TurnManager:
         activate_tools: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         record = self._services.sessions.show(session_id)
-        if record.state in {SESSION_STATE_CLOSED, SESSION_STATE_ARCHIVED}:
+        # A scheduled task that runs in its conversation («Repetir aquí») runs
+        # there even when it was archived, and leaves it archived.
+        scheduled_here = (
+            record.state == SESSION_STATE_ARCHIVED
+            and memory_origin == "automation"
+            and (origin or {}).get("kind") == "schedule"
+        )
+        if record.state in {SESSION_STATE_CLOSED, SESSION_STATE_ARCHIVED} and not scheduled_here:
             raise EngineProtocolError(
                 errors.SESSION_CLOSED,
                 f"Session {record.id} is closed; resume it before starting turns.",
@@ -1871,6 +1886,7 @@ class TurnManager:
         *,
         origin: dict[str, Any] | None = None,
         display_message: str | None = None,
+        memory_origin: str = "interactive",
     ) -> dict[str, Any]:
         record = self._services.sessions.show(session_id)
         text = (message or "").strip()
@@ -1893,6 +1909,7 @@ class TurnManager:
                     message=text,
                     origin=origin or {"kind": "user"},
                     display_message=display_message,
+                    memory_origin=memory_origin,
                 )
             )
             position = len(pending)
@@ -1918,6 +1935,7 @@ class TurnManager:
                 "message": item.message,
                 "state": "queued",
                 "origin": item.origin or {"kind": "user"},
+                "display_message": item.display_message,
             }
             for item in manual
         ]
@@ -1932,9 +1950,15 @@ class TurnManager:
     def queue_clear(self, session_id: str) -> dict[str, Any]:
         record = self._services.sessions.show(session_id)
         with self._lock:
-            removed = len(self._queue.pop(record.id, ()))
+            dropped = list(self._queue.pop(record.id, ()))
         self._emit(event("session.queue.updated", {"session_id": record.id, "pending": 0}))
-        return {"session_id": record.id, "removed": removed}
+        listener = self.queue_cleared
+        if listener is not None and dropped:
+            try:
+                listener(record.id, [item.origin or {"kind": "user"} for item in dropped])
+            except Exception:
+                logger.exception("queue cleared listener failed")
+        return {"session_id": record.id, "removed": len(dropped)}
 
     def queue_resume(self, params: dict[str, Any]) -> dict[str, Any]:
         """Explicit intervention: the session's queue runs again."""
@@ -2094,6 +2118,7 @@ class TurnManager:
                     item.message,
                     display_message=item.display_message,
                     origin=item.origin,
+                    memory_origin=item.memory_origin,
                 )
             except EngineProtocolError:
                 with self._lock:

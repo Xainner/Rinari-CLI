@@ -9,12 +9,18 @@ on this machine, so its clock and daylight-saving rules are the right ones):
     {"kind": "weekly", "days": [0, 2, 4], "time": "08:30"}   # 0 = Monday
     {"kind": "cron", "expr": "*/15 9-18 * * 1-5"}            # minute hour day month weekday
 
+A one-time schedule may also be asked for from now, `{"kind": "once",
+"after": {"minutes": 30}}` (`hours` and `days` too): `resolve_after` turns it
+into the `at` it means when the task is created, so a model does not need to
+know the time and what is stored is always `at`.
+
 Times are epoch seconds everywhere else; only these rules know about local
 dates. Pure functions: the scheduler passes its clock in.
 """
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -28,6 +34,9 @@ CATCH_UP_WINDOW_S = 12 * 3600
 
 _TIME = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 KINDS = ("once", "interval", "daily", "weekly", "cron")
+#: Units of a relative one-time schedule, in seconds.
+AFTER_UNITS = {"minutes": 60, "hours": 3600, "days": 86400}
+MAX_AFTER_S = 366 * 86400
 # How far ahead a cron expression is searched for its next match.
 _CRON_HORIZON_DAYS = 366 * 4
 
@@ -58,6 +67,31 @@ class Schedule:
         if self.kind == "daily":
             return {"kind": "daily", "time": time}
         return {"kind": "weekly", "days": list(self.days), "time": time}
+
+
+def resolve_after(raw: Any, now: float) -> Any:
+    """`{kind: once, after: {...}}` as the local `at` it means from `now`.
+
+    Rounded up to the minute, so it never runs before the time asked for.
+    Anything else is returned as it came: `parse_schedule` judges it.
+    """
+    if not isinstance(raw, dict) or raw.get("kind") != "once" or "after" not in raw:
+        return raw
+    if raw.get("at") is not None:
+        raise ScheduleError("A one-time schedule takes 'at' or 'after', not both.")
+    after = raw["after"]
+    if not isinstance(after, dict) or not after or set(after) - set(AFTER_UNITS):
+        raise ScheduleError("'after' is an object of minutes, hours and days.")
+    seconds = 0
+    for unit, value in after.items():
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ScheduleError(f"'after.{unit}' must be a whole number.")
+        seconds += value * AFTER_UNITS[unit]
+    if not 60 <= seconds <= MAX_AFTER_S:
+        raise ScheduleError("'after' must be between 1 minute and 366 days.")
+    due = math.ceil((now + seconds) / 60) * 60
+    at = datetime.fromtimestamp(due).strftime("%Y-%m-%dT%H:%M")
+    return {key: value for key, value in raw.items() if key != "after"} | {"at": at}
 
 
 def parse_schedule(raw: Any) -> Schedule:

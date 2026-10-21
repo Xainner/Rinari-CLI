@@ -2483,6 +2483,25 @@
             "null"
           ],
           "description": "Where that external content came through."
+        },
+        "target": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "new_session",
+            "this_conversation",
+            null
+          ],
+          "description": "A scheduled run: this_conversation when it runs in the conversation it was asked in («Repetir aquí»)."
+        },
+        "task_name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "A scheduled run in its conversation: the task's name, to show with the message."
         }
       }
     },
@@ -2513,6 +2532,12 @@
         },
         "origin": {
           "$ref": "#/$defs/messageOrigin"
+        },
+        "display_message": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "error": {
           "type": [

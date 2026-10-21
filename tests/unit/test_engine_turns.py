@@ -1246,7 +1246,11 @@ def test_cancelled_owner_turn_clears_source_and_does_not_duplicate_user(services
         )
         assert result.kind == "cancelled"
         assert session.context.tool_ctx.memory_source is None
-        users = [row for row in services.ctx.message_repo.list(record.id) if row.role == "user"]
+        users = [
+            row
+            for row in services.ctx.message_repo.list(record.id)
+            if row.role == "user" and (row.origin or {}).get("kind") != "harness"
+        ]
         assert len(users) == 1
     finally:
         session.end()
@@ -1714,7 +1718,8 @@ def test_steering_is_read_after_the_current_tool_round(
     users = [
         m
         for m in history["messages"]
-        if m["role"] == "user" and (m.get("origin") or {}).get("source") != "turn-state"
+        if m["role"] == "user"
+        and (m.get("origin") or {}).get("source") not in ("turn-state", "clock")
     ]
     assert [m["content"] for m in users] == ["revisa", "solo los .py, por favor"]
     assert users[1]["origin"]["steer_id"] == steered["result"]["steer_id"]
@@ -1997,11 +2002,12 @@ def test_command_secret_runs_for_real_but_is_hidden_from_storage_ui_and_later_tu
 
 def _conversation(messages):
     """The request without the harness's state notes: the per-call one of old,
-    and the one the conversation keeps since F42 (they always name the language)."""
+    the one the conversation keeps since F42 (they always name the language)
+    and the turn's local time."""
     return [
         m
         for m in messages
-        if not m.is_turn_context and (m.origin or {}).get("source") != "turn-state"
+        if not m.is_turn_context and (m.origin or {}).get("source") not in ("turn-state", "clock")
     ]
 
 
