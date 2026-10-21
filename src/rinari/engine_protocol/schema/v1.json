@@ -6393,6 +6393,10 @@
             "value",
             "env_ref"
           ]
+        },
+        "variable": {
+          "type": "string",
+          "description": "For env_ref: the owner's environment variable it reads (its name, never its value)."
         }
       },
       "required": [

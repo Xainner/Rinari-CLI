@@ -1286,7 +1286,8 @@ are ignored, so nothing of the owner's is read) — or the servers of a pasted `
 …}`, `{"servers": …}` or a bare map). → `{sources [{source, label, path,
 found, servers, error}], candidates [{key, name, source, source_label, path,
 project_root, transport, command, url, secrets [{where: env | header | url,
-name, kind: value | env_ref}], warnings, importable, reason, existing,
+name, kind: value | env_ref, variable? (the owner's environment variable an
+env_ref reads: its name, never its value)}], warnings, importable, reason, existing,
 suggested_name}]}`. Only names of secrets: values never leave the Engine.
 `${VAR}` and `${env:VAR}` become `env://VAR`; `Authorization: Bearer
 ${VAR}` and Codex's `bearer_token_env_var` become bearer auth from that
