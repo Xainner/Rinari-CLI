@@ -936,7 +936,15 @@ class AgencyTeams:
             post["session_id"],
             prompt,
             self._origin(
-                {"kind": "agency_office", "team_id": team["id"], "chain_id": message["chain_id"]},
+                {
+                    "kind": "agency_office",
+                    "team_id": team["id"],
+                    "chain_id": message["chain_id"],
+                    # Who mentioned it, for the app to say so (never the owner's words).
+                    "from_label": self._author(message.get("agent_id"))
+                    if message.get("agent_id")
+                    else None,
+                },
                 bool(message.get("external")) or office_external,
             ),
             {
@@ -994,7 +1002,12 @@ class AgencyTeams:
             post["session_id"],
             prompt,
             self._origin(
-                {"kind": "agency_errand", "team_id": team["id"], "errand_id": errand["id"]},
+                {
+                    "kind": "agency_errand",
+                    "team_id": team["id"],
+                    "errand_id": errand["id"],
+                    "from_label": asker if errand.get("from_agent_id") else None,
+                },
                 bool(errand.get("external")) or office_external,
             ),
             {
@@ -1167,7 +1180,12 @@ class AgencyTeams:
                 session_id,
                 prompt,
                 self._origin(
-                    {"kind": "agency_delivery", "team_id": team["id"], "errand_id": errand["id"]},
+                    {
+                        "kind": "agency_delivery",
+                        "team_id": team["id"],
+                        "errand_id": errand["id"],
+                        "from_label": team["name"],
+                    },
                     bool(errand.get("external")),
                 ),
                 {

@@ -457,3 +457,27 @@ def test_engine_notices_are_data(server, turns, kind) -> None:
     notice = [m for m in office if m["system"]]
     assert [m["notice"] for m in notice] == [expected]
     assert all("Recado" not in m["text"] and "Espera" not in m["text"] for m in office)
+
+
+def test_an_agency_turn_says_where_it_comes_from(server, turns) -> None:
+    # The app shows it as the office's or a teammate's, never as the owner's words.
+    ana, beto = _agent(server, "Ana"), _agent(server, "Beto")
+    team = _team(server, "Canal", [ana, beto])
+    _ok(_call(server, "agency.office.post", {"team_id": team["id"], "text": "@Ana hola"}))
+    assert turns[-1]["origin"]["from_label"] is None
+    _finish(server, _post(team, ana), "@Beto tu turno")
+    assert turns[-1]["origin"] == {
+        "kind": "agency_office",
+        "team_id": team["id"],
+        "chain_id": turns[0]["origin"]["chain_id"],
+        "from_label": "Ana",
+    }
+    from pathlib import Path
+
+    path = Path(__file__).parents[2] / "src/rinari/engine_protocol/schema/v1.json"
+    schema = json.loads(path.read_text(encoding="utf-8"))
+    origin = schema["$defs"]["messageOrigin"]
+    assert {"agency_office", "agency_errand", "agency_delivery"} <= set(
+        origin["properties"]["kind"]["enum"]
+    )
+    assert {"team_id", "errand_id", "from_label", "external_content"} <= set(origin["properties"])

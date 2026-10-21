@@ -2291,7 +2291,10 @@
             "peer",
             "automation",
             "schedule",
-            "harness"
+            "harness",
+            "agency_office",
+            "agency_errand",
+            "agency_delivery"
           ]
         },
         "message_id": {
@@ -2445,6 +2448,41 @@
           "items": {
             "type": "string"
           }
+        },
+        "team_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Rinari Agency: the team of an office, errand or delivery turn."
+        },
+        "errand_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Rinari Agency: the errand this turn does or reviews."
+        },
+        "from_label": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Rinari Agency: who it comes from (the agent that mentioned or asked, or the team that delivered), as the Engine names them."
+        },
+        "external_content": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "The turn starts with the external-content guard on: what it got came from outside the machine."
+        },
+        "external_source": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Where that external content came through."
         }
       }
     },
