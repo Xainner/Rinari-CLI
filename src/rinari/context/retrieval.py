@@ -108,7 +108,7 @@ class ContextRetrievalService:
         if project_root and "symbol" in wanted:
             candidates.extend(self._symbol_candidates(project_root, query))
         if "memory" in wanted:
-            candidates.extend(self._memory_candidates(project_root, query))
+            candidates.extend(self._memory_candidates(project_root, query, session_id))
         if session_id and "artifact" in wanted:
             candidates.extend(self._artifact_candidates(session_id, query))
 
@@ -193,11 +193,20 @@ class ContextRetrievalService:
         items.sort(key=lambda item: item["ref"])
         return items[:400]
 
-    def _memory_candidates(self, project_root: str | None, query: str) -> list[dict]:
+    def _user_memory(self, session_id: str | None) -> list[dict]:
+        """The personal memory this conversation may see (#75: an agent or a post
+        never reads another agent's, another team's or the owner's other places)."""
+        if session_id:
+            return self._memory.visible_user_rows(session_id=session_id)
+        return self._memory.repo.user_live()
+
+    def _memory_candidates(
+        self, project_root: str | None, query: str, session_id: str | None = None
+    ) -> list[dict]:
         items: list[dict] = []
         if self._memory is None:
             return items
-        for row in self._memory.repo.user_live()[:100]:
+        for row in self._user_memory(session_id)[:100]:
             items.append(
                 {
                     "source": "memory",
@@ -241,6 +250,10 @@ class ContextRetrievalService:
             row = None
             if self._memory is not None:
                 row = self._memory.repo.user_get(ref)
+                if row is not None and not any(
+                    item["id"] == row["id"] for item in self._user_memory(session_id)
+                ):
+                    row = None  # pinned by id, but not this conversation's to see
                 if row is None and project_root:
                     row = self._memory.repo.project_get(project_root, ref)
             if row is None:

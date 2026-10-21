@@ -353,8 +353,15 @@ class TeamService:
             raise LookupError(f"Unknown errand: {errand_id}")
         return errand
 
-    def review(self, errand_id: Any, accepted: bool, reason: str | None = None) -> dict:
-        """Whoever asked reviews a delivered errand: accepted, or back with why."""
+    def review(
+        self, errand_id: Any, accepted: bool, reason: str | None = None, *, external: bool = False
+    ) -> dict:
+        """Whoever asked reviews a delivered errand: accepted, or back with why.
+
+        `external`: the reviewing turn read something from outside the machine.
+        Its reason goes to whoever redoes the errand, so the errand keeps the
+        mark and the turn that redoes it keeps the guard on (#75).
+        """
         errand = self.errand(errand_id)
         if errand["status"] != "delivered":
             raise AgencyError("Only a delivered errand can be reviewed.")
@@ -375,6 +382,7 @@ class TeamService:
                     "status": "blocked" if too_many else "returned",
                     "return_reason": "too_many_returns" if too_many else why,
                     "returns": returns,
+                    "external": bool(errand.get("external")) or external,
                     "session_id": None,
                     "turn_id": None,
                     "updated_at": now,

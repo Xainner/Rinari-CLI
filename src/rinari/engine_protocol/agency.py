@@ -417,14 +417,14 @@ class AgencyMethods:
             for agent_id in agents
             for session_id in self._services.ctx.agency_repo.session_ids(agent_id)
         }
-        cancelled = []
-        for turn in self._turns.runtime_state()["active_turns"]:
-            if turn["session_id"] in sessions and turn["session_id"] not in cancelled:
-                try:
-                    self._turns.cancel_turn(turn["session_id"])
-                    cancelled.append(turn["session_id"])
-                except Exception:  # already finishing: nothing left to stop
-                    continue
+        # The board first (B5): halted before any turn is cut, so the tick a
+        # cancelled turn runs finds nothing to start. It cuts its own live turns.
+        board = getattr(self._server, "_teams", None)
+        halted = (
+            board.halt(profile or self._services.rinari_profiles.active_id())
+            if board is not None
+            else {"blocked_errands": 0}
+        )
         paused = []
         for task in self._services.ctx.schedule_repo.list():
             if task.get("agent_id") in agents and task.get("enabled"):
@@ -434,13 +434,14 @@ class AgencyMethods:
                     task["id"], False, self._services.ctx.clock.now()
                 )
                 paused.append(task["id"])
-        # The board too: nothing queued starts until the owner resumes (B5).
-        board = getattr(self._server, "_teams", None)
-        halted = (
-            board.halt(profile or self._services.rinari_profiles.active_id())
-            if board is not None
-            else {"blocked_errands": 0}
-        )
+        cancelled = []
+        for turn in self._turns.runtime_state()["active_turns"]:
+            if turn["session_id"] in sessions and turn["session_id"] not in cancelled:
+                try:
+                    self._turns.cancel_turn(turn["session_id"])
+                    cancelled.append(turn["session_id"])
+                except Exception:  # already finishing: nothing left to stop
+                    continue
         self._turns.emit_external(
             event(
                 "agency.stopped",

@@ -352,6 +352,22 @@ class TurnManager:
         with self._lock:
             return self._last_external.get(session_id, False)
 
+    def _note_external(self, turn) -> None:
+        """Remember whether this turn read external content, before its terminal event.
+
+        Also when it failed or was cancelled: never the previous turn's value
+        (#75). Before the turn had a session, its origin's mark is all there is.
+        """
+        state = None
+        if turn.session is not None:
+            state = getattr(getattr(turn.session.context, "tool_ctx", None), "turn_state", None)
+        if state is not None:
+            external = bool(getattr(state, "external_content", False))
+        else:
+            external = bool((turn.origin or {}).get("external_content"))
+        with self._lock:
+            self._last_external[turn.session_id] = external
+
     def has_active_turn(self, session_id: str) -> bool:
         with self._lock:
             return any(
@@ -1207,11 +1223,7 @@ class TurnManager:
                     memory_origin=turn.memory_origin,
                 )
             turn.goal_result = result
-            state = getattr(getattr(agent_session.context, "tool_ctx", None), "turn_state", None)
-            with self._lock:
-                self._last_external[turn.session_id] = bool(
-                    getattr(state, "external_content", False)
-                )
+            self._note_external(turn)
             if result.kind == "cancelled":
                 self._cancel_running_activities(turn)
                 finalize_changes()
@@ -1238,10 +1250,12 @@ class TurnManager:
                     {"kind": result.kind, "content": result.content},
                 )
         except CancelledError:
+            self._note_external(turn)
             self._cancel_running_activities(turn)
             finalize_changes()
             self._activity_cb(turn)("turn.cancelled", {})
         except EngineProtocolError as err:
+            self._note_external(turn)
             turn.goal_error = (err.code, err.message)
             self._fail_running_activities(turn, err.message)
             finalize_changes()
@@ -1257,6 +1271,7 @@ class TurnManager:
                 },
             )
         except RinariError as err:
+            self._note_external(turn)
             self._fail_running_activities(turn, str(err))
             finalize_changes()
             mapped = errors.from_rinari_error(err)
@@ -1276,6 +1291,7 @@ class TurnManager:
                 },
             )
         except Exception as err:  # defensive: the desktop must see a terminal event
+            self._note_external(turn)
             self._fail_running_activities(turn, str(err))
             finalize_changes()
             self._activity_cb(turn)(

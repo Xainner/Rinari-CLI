@@ -266,6 +266,24 @@ def _agent_identity(services: ServiceContainer, record: SessionRecord) -> str | 
     return "\n".join(lines)
 
 
+def _agency_pack(services: ServiceContainer, record: SessionRecord) -> str | None:
+    """Which Agency tools a conversation gets: «post», «direct» or none.
+
+    Only a post and the agent's own direct chat. Their children and forks
+    keep the agent (its memory, budget and connectors) but get no Agency
+    tools: the conversation that opened them delivers the work, inside its
+    own chain, so a child never starts a chain of its own (#75).
+    """
+    if getattr(services, "teams", None) is None:
+        return None
+    if getattr(record, "team_id", None) and services.ctx.team_repo.post_for_session(record.id):
+        return "post"
+    agent_id = getattr(record, "agent_id", None)
+    if agent_id and (services.ctx.agency_repo.get(agent_id) or {}).get("session_id") == record.id:
+        return "direct"
+    return None
+
+
 def _agency_place(services: ServiceContainer, record: SessionRecord, agent: dict) -> list[str]:
     """D-29 / D-30: who the agent works with. Only what changes when someone joins or
     leaves (never live state, so the cached prompt holds): live state is `team.members`."""
@@ -273,9 +291,10 @@ def _agency_place(services: ServiceContainer, record: SessionRecord, agent: dict
     repo = getattr(services.ctx, "team_repo", None)
     if teams is None or repo is None:
         return []
-    # None once the agent left the team: the conversation no longer works for it.
-    team_id = repo.active_team(record)
-    if not team_id:
+    pack = _agency_pack(services, record)
+    if pack is None:
+        return []  # a child or a fork: no Agency tools to speak of
+    if pack == "direct":
         return [
             "",
             "## The Agency's teams",
@@ -283,7 +302,7 @@ def _agency_place(services: ServiceContainer, record: SessionRecord, agent: dict
             "errand.create leaves one an errand (its chief takes it). You are told here when "
             "it is delivered, to review it with errand.review.",
         ]
-    team = repo.get(team_id)
+    team = repo.get(record.team_id)
     if team is None:
         return []
     lines = [
@@ -1462,18 +1481,14 @@ def _build_tools(
                     )
                 )
             )
-        active_post = (
-            getattr(record, "team_id", None)
-            and getattr(services, "teams", None) is not None
-            and services.ctx.team_repo.post_for_session(record.id) is not None
-        )
-        if active_post:
+        agency_pack = _agency_pack(services, record)
+        if agency_pack == "post":
             # Rinari Agency A2: a post has its office and its team's board.
             with registry.loading("agency"):
                 from rinari.agency.tools import TeamToolHost, team_tools
 
                 registry.register_all(team_tools(TeamToolHost(services, record.id)))
-        elif getattr(record, "agent_id", None) and getattr(services, "teams", None) is not None:
+        elif agency_pack == "direct":
             # D-30: an agent's direct chat can pass work to a team.
             with registry.loading("agency"):
                 from rinari.agency.tools import TeamToolHost, direct_tools

@@ -37,6 +37,9 @@ logger = logging.getLogger(__name__)
 
 TICK_S = 20.0
 SUMMARY_CHARS = 600
+#: Failed runs on the same change of a watched folder before the change is
+#: taken anyway and the rule is told as blocked (#75).
+MAX_CHANGE_FAILURES = 3
 _ACTIVE = ("running", "needs_you")
 _TERMINAL = {
     "turn.completed": "completed",
@@ -67,6 +70,8 @@ class ScheduleRunner:
         self._pending_fingerprints: dict[str, tuple[str, str]] = {}
         # Rules whose watched folder has more files than are watched.
         self._truncated: set[str] = set()
+        # task_id -> (fingerprint, failed runs on that change).
+        self._change_failures: dict[str, tuple[str, int]] = {}
         self._turns.add_observer(self._observe)
 
     @property
@@ -157,8 +162,9 @@ class ScheduleRunner:
         The fingerprint is kept with the task, so a change made while the
         Engine was closed still runs the rule at its next check. Only the
         very first check of a rule takes the fingerprint without running.
-        A change is only taken once the run it caused finishes: if that run
-        fails or is blocked, the next check sees the change again. Returns
+        A change is taken once the run it caused ends, whatever the end
+        (skipped, blocked or cancelled too), except a failure: the next
+        check tries it again, up to MAX_CHANGE_FAILURES times. Returns
         (why it is skipped, the new fingerprint to keep when the run ends).
         """
         watch = task.get("watch")
@@ -177,6 +183,35 @@ class ScheduleRunner:
         if before == current:
             return "no changes in the folder", None
         return None, current
+
+    def _take_change(
+        self,
+        task: dict[str, Any],
+        pending: tuple[str, str],
+        status: str,
+        fields: dict[str, Any],
+    ) -> tuple[str, dict[str, Any]]:
+        """Whether a run used up the folder's change: every end but a failure does.
+
+        A failure is retried at the next check, up to MAX_CHANGE_FAILURES
+        times on the same change; then the change is taken and the run says
+        blocked, so the owner hears of it and the rule stops spending (#75).
+        """
+        task_id, fingerprint = pending
+        if status != "failed":
+            self._change_failures.pop(task_id, None)
+            self._keep_fingerprint(task_id, fingerprint)
+            return status, fields
+        seen, failures = self._change_failures.get(task_id, (fingerprint, 0))
+        failures = failures + 1 if seen == fingerprint else 1
+        if failures < MAX_CHANGE_FAILURES:
+            self._change_failures[task_id] = (fingerprint, failures)
+            return status, fields
+        self._change_failures.pop(task_id, None)
+        self._keep_fingerprint(task_id, fingerprint)
+        note = f"failed {failures} times on this change of the folder: it waits for the next one"
+        reason = fields.get("reason")
+        return "blocked", {**fields, "reason": f"{reason} ({note})" if reason else note}
 
     def _keep_fingerprint(self, task_id: str, fingerprint: str) -> None:
         self._fingerprints[task_id] = fingerprint
@@ -536,8 +571,8 @@ class ScheduleRunner:
         **fields: Any,
     ) -> None:
         pending = self._pending_fingerprints.pop(run_id, None)
-        if pending is not None and status == "completed":
-            self._keep_fingerprint(*pending)
+        if pending is not None:
+            status, fields = self._take_change(task, pending, status, fields)
         if task["id"] in self._truncated:
             note = (
                 f"the folder has more than {MAX_WATCHED_FILES} files: "

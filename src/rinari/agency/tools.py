@@ -88,7 +88,7 @@ def _teams_directory(host: TeamToolHost, profile: str, but: str | None = None) -
     return out
 
 
-def _errand_review(host: TeamToolHost, agent_id: str, arguments):
+def _errand_review(host: TeamToolHost, agent_id: str, arguments, external: bool = False):
     from rinari.agency import AgencyError
 
     _, _, ToolErrorCode, _, _ = _defs()
@@ -100,7 +100,9 @@ def _errand_review(host: TeamToolHost, agent_id: str, arguments):
     if not isinstance(accepted, bool):
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "accepted must be true or false")
     try:
-        reviewed = host.services.teams.review(errand["id"], accepted, args.get("reason"))
+        reviewed = host.services.teams.review(
+            errand["id"], accepted, args.get("reason"), external=external
+        )
     except AgencyError as exc:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, str(exc))
     board = getattr(host.services.teams, "board", None)
@@ -277,7 +279,7 @@ def team_tools(host: TeamToolHost):
         found = context()
         if found is None:
             return _fail(ToolErrorCode.DEPENDENCY_ERROR, not_post)
-        return _errand_review(host, found[1]["agent_id"], arguments)
+        return _errand_review(host, found[1]["agent_id"], arguments, _external(ctx))
 
     def board_list(arguments, ctx):
         found = context()
@@ -441,7 +443,7 @@ def direct_tools(host: TeamToolHost):
         found = context()
         if found is None:
             return _fail(ToolErrorCode.DEPENDENCY_ERROR, not_agent)
-        return _errand_review(host, found[0]["id"], arguments)
+        return _errand_review(host, found[0]["id"], arguments, _external(ctx))
 
     return [
         ToolDefinition(
