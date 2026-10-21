@@ -252,6 +252,12 @@ CAPABILITIES: dict[str, bool] = {
     # and agency.chain.stopped, and the post tools office.say, errand.create,
     # errand.review and board.list.
     "agency_teams_v1": True,
+    # D-29 / D-30: a post's prompt names its team, `team.members` says who is
+    # free, `office.wait` parks a mention until a teammate posts in the chain
+    # (agency.chain.stopped reasons wait_expired and wait_cancelled), an
+    # errand's prompt carries the office, and an agent's direct chat can leave
+    # an errand to a team and is told there when it is delivered.
+    "agency_team_awareness_v1": True,
     # soul.settings.get/set: character intensity (minimal | balanced | full),
     # separate from Soul selection; bundled default Soul 4.0.
     "soul_character_intensity_v1": True,

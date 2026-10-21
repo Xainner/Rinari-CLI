@@ -260,7 +260,56 @@ def _agent_identity(services: ServiceContainer, record: SessionRecord) -> str | 
         lines.append(f"Your job: {agent['role']}")
     if agent.get("instructions"):
         lines += ["The owner's instructions for this agent:", agent["instructions"]]
+    lines += _agency_place(services, record, agent)
     return "\n".join(lines)
+
+
+def _agency_place(services: ServiceContainer, record: SessionRecord, agent: dict) -> list[str]:
+    """D-29 / D-30: who the agent works with. Only what changes when someone joins or
+    leaves (never live state, so the cached prompt holds): live state is `team.members`."""
+    teams = getattr(services, "teams", None)
+    repo = getattr(services.ctx, "team_repo", None)
+    if teams is None or repo is None:
+        return []
+    team_id = getattr(record, "team_id", None)
+    if not team_id:
+        return [
+            "",
+            "## The Agency's teams",
+            "You can pass work to one of the owner's teams: teams.list shows them and "
+            "errand.create leaves one an errand (its chief takes it). You are told here when "
+            "it is delivered, to review it with errand.review.",
+        ]
+    team = repo.get(team_id)
+    if team is None:
+        return []
+    lines = [
+        "",
+        "## Your team",
+        f"In this conversation you work at your post in the team «{team['name']}».",
+    ]
+    if team.get("purpose"):
+        lines.append(f"What the team is for: {team['purpose']}")
+    mates = []
+    for post in repo.posts(team["id"]):
+        mate = services.ctx.agency_repo.get(post["agent_id"])
+        if mate is None or mate["id"] == agent["id"]:
+            continue
+        chief = " (chief)" if mate["id"] == team.get("chief_agent_id") else ""
+        job = f" — {mate['role']}" if mate.get("role") else ""
+        mates.append(f"- {mate['name']}{chief}{job}")
+    if agent["id"] == team.get("chief_agent_id"):
+        lines.append(
+            "You are the team's chief: errands with no one assigned come to you, to do or "
+            "to pass to a teammate."
+        )
+    if mates:
+        lines += ["Your teammates (write @Name in the office to wake one):", *mates]
+    lines.append(
+        "Use the office, the board and team.members (who is free right now). If what you are "
+        "asked depends on a teammate doing something first, call office.wait with their name."
+    )
+    return lines
 
 
 def build_assembler_context(
@@ -1416,6 +1465,12 @@ def _build_tools(
                 from rinari.agency.tools import TeamToolHost, team_tools
 
                 registry.register_all(team_tools(TeamToolHost(services, record.id)))
+        elif getattr(record, "agent_id", None) and getattr(services, "teams", None) is not None:
+            # D-30: an agent's direct chat can pass work to a team.
+            with registry.loading("agency"):
+                from rinari.agency.tools import TeamToolHost, direct_tools
+
+                registry.register_all(direct_tools(TeamToolHost(services, record.id)))
         with registry.loading("introspection"):
             from rinari.tools.native.rinari_state import RinariStateHost, rinari_state_tools
 

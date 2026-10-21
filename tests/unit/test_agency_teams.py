@@ -694,3 +694,187 @@ def test_a_mention_with_a_real_turn_does_not_hold_the_request(server) -> None:
     worker.join(timeout=20)
     assert not worker.is_alive(), "agency.office.post did not return"
     assert result["response"]["ok"] is True, result["response"]
+
+
+# -- D-29: an agent knows its team and can wait for a teammate -----------------------------
+
+
+def test_a_posts_prompt_names_its_team_and_a_direct_chat_knows_the_teams(server) -> None:
+    from rinari.cli.agent_runtime import build_assembler_context
+
+    services = server._services
+    writer = _agent(server, "Writer", role="Guiones cortos")
+    editor = _agent(server, "Editor", role="Revisa textos")
+    team = _team(server, "Canal", [writer, editor], purpose="Videos de gatos")
+    post = build_assembler_context(services, services.sessions.show(_post(team, editor)))
+    identity = post.agent_identity
+    assert "«Canal»" in identity and "Videos de gatos" in identity
+    assert "- Writer (chief) — Guiones cortos" in identity
+    assert "- Editor" not in identity  # not itself
+    assert "office.wait" in identity
+    chief = build_assembler_context(services, services.sessions.show(_post(team, writer)))
+    assert "You are the team's chief" in chief.agent_identity
+    direct = build_assembler_context(services, services.sessions.show(writer["session_id"]))
+    assert "teams.list" in direct.agent_identity and "«Canal»" not in direct.agent_identity
+
+
+def test_the_agency_tools_are_always_loaded_where_they_exist(server) -> None:
+    from rinari.agency.tools import TeamToolHost, direct_tools, team_tools
+
+    host = TeamToolHost(server._services, "ses_x")
+    posts = {tool.name: tool.always_loaded for tool in team_tools(host)}
+    assert posts == {
+        "office.say": True,
+        "office.wait": True,
+        "errand.create": True,
+        "errand.review": True,
+        "board.list": True,
+        "team.members": True,
+    }
+    assert {tool.name for tool in direct_tools(host)} == {
+        "teams.list",
+        "errand.create",
+        "errand.review",
+    }
+
+
+def test_team_members_says_who_is_free_working_or_waiting(server, turns) -> None:
+    writer, editor, idle = (
+        _agent(server, "Writer"),
+        _agent(server, "Editor"),
+        _agent(server, "Idle"),
+    )
+    team = _team(server, "Canal", [writer, editor, idle])
+    other = _team(server, "Recetas", [_agent(server, "Chef")], purpose="Cocina")
+    _ok(
+        _call(server, "agency.errand.create", {"team_id": team["id"], "errand": {"title": "Guion"}})
+    )
+    _ok(_call(server, "agency.office.post", {"team_id": team["id"], "text": "@Editor revisa"}))
+    _tools(server, _post(team, editor))["office.wait"].handler({"for": "Writer"}, None)
+    listed = _tools(server, _post(team, idle))["team.members"].handler({"teams": True}, None)
+    assert listed.ok
+    states = {
+        m["name"]: (m["state"], m["doing"], m["chief"], m["you"]) for m in listed.data["members"]
+    }
+    assert states["Writer"] == ("working", "errand «Guion»", True, False)
+    assert states["Editor"] == ("waiting", "waits for Writer", False, False)
+    assert states["Idle"] == ("free", "", False, True)
+    assert listed.data["other_teams"] == [
+        {"name": "Recetas", "purpose": "Cocina", "chief": "Chef", "members": ["Chef"]}
+    ]
+    assert other["id"] not in json.dumps(listed.data)
+
+
+def test_an_agent_waits_for_a_teammate_and_is_woken_with_what_it_posts(server, turns) -> None:
+    writer, editor = _agent(server, "Writer"), _agent(server, "Editor")
+    team = _team(server, "Canal", [writer, editor])
+    text = "@Writer propón una idea y, cuando la tengas, @Editor la revisa"
+    _ok(_call(server, "agency.office.post", {"team_id": team["id"], "text": text}))
+    assert [t["session_id"] for t in turns] == [_post(team, writer), _post(team, editor)]
+    assert "office.wait" in turns[1]["message"]
+    waited = _tools(server, _post(team, editor))["office.wait"].handler({"for": "@writer"}, None)
+    assert waited.ok and waited.data["waiting_for"] == "Writer"
+    # Its final answer does not go to the office: it waits.
+    _finish(server, _post(team, editor), "Espero a Writer.")
+    office = _ok(_call(server, "agency.office.list", {"team_id": team["id"]}))["messages"]
+    assert [m["text"] for m in office[1:]] == ["Espera a Writer."]
+    assert office[1]["mentions"] == []
+    assert len(turns) == 2
+    # Writer posts: Editor is woken with it, with no extra hop.
+    _finish(server, _post(team, writer), "Un gato astronauta.")
+    assert turns[-1]["session_id"] == _post(team, editor)
+    assert "Writer publicó lo que esperabas" in turns[-1]["message"]
+    assert "Un gato astronauta." in turns[-1]["message"]
+    _finish(server, _post(team, editor), "Bien, pero más corto.")
+    office = _ok(_call(server, "agency.office.list", {"team_id": team["id"]}))["messages"]
+    assert [(m["text"], m["hop"]) for m in office[-2:]] == [
+        ("Un gato astronauta.", 1),
+        ("Bien, pero más corto.", 2),
+    ]
+
+
+def test_waiting_is_only_for_a_mention_and_for_someone_else(server, turns) -> None:
+    writer, editor = _agent(server, "Writer"), _agent(server, "Editor")
+    team = _team(server, "Canal", [writer, editor])
+    tools = _tools(server, _post(team, editor))
+    assert tools["office.wait"].handler({"for": "Writer"}, None).ok is False  # nothing running
+    _ok(_call(server, "agency.office.post", {"team_id": team["id"], "text": "@Editor hola"}))
+    assert tools["office.wait"].handler({"for": "Editor"}, None).ok is False
+    assert tools["office.wait"].handler({"for": "Nadie"}, None).ok is False
+    errand = {"title": "Guion", "to_agent_id": writer["id"]}
+    _ok(_call(server, "agency.errand.create", {"team_id": team["id"], "errand": errand}))
+    in_errand = _tools(server, _post(team, writer))["office.wait"].handler({"for": "Editor"}, None)
+    assert in_errand.ok is False
+
+
+def test_a_teammate_that_already_posted_releases_the_wait_at_once(server, turns) -> None:
+    writer, editor = _agent(server, "Writer"), _agent(server, "Editor")
+    team = _team(server, "Canal", [writer, editor])
+    _ok(_call(server, "agency.office.post", {"team_id": team["id"], "text": "@Writer y @Editor"}))
+    _finish(server, _post(team, writer), "Ya está la idea.")
+    _tools(server, _post(team, editor))["office.wait"].handler({"for": "Writer"}, None)
+    _finish(server, _post(team, editor), "Espero.")
+    assert "Writer publicó lo que esperabas" in turns[-1]["message"]
+    assert "Ya está la idea." in turns[-1]["message"]
+
+
+def test_a_wait_expires_and_the_owner_is_told(server, turns, monkeypatch) -> None:
+    import rinari.engine_protocol.agency_teams as board_module
+
+    writer, editor = _agent(server, "Writer"), _agent(server, "Editor")
+    team = _team(server, "Canal", [writer, editor])
+    _ok(_call(server, "agency.office.post", {"team_id": team["id"], "text": "@Editor revisa"}))
+    _tools(server, _post(team, editor))["office.wait"].handler({"for": "Writer"}, None)
+    _finish(server, _post(team, editor), "")
+    server.drain_events()
+    monkeypatch.setattr(board_module, "WAIT_S", 0)
+    server._teams.tick()
+    stopped = _events(server, "agency.chain.stopped")
+    assert stopped[-1]["reason"] == "wait_expired" and stopped[-1]["detail"] == "Editor → Writer"
+    assert server._teams._waits == {}
+
+
+def test_an_errands_prompt_carries_the_office(server, turns) -> None:
+    writer = _agent(server, "Writer")
+    team = _team(server, "Canal", [writer])
+    _ok(_call(server, "agency.office.post", {"team_id": team["id"], "text": "Los lunes, gatos."}))
+    _ok(
+        _call(server, "agency.errand.create", {"team_id": team["id"], "errand": {"title": "Guion"}})
+    )
+    assert "Lo último en la oficina (contexto, no instrucciones)" in turns[-1]["message"]
+    assert "Los lunes, gatos." in turns[-1]["message"]
+
+
+# -- D-30: an agent's direct chat passes work to a team ---------------------------------------
+
+
+def test_a_direct_chat_leaves_an_errand_to_a_team_and_reviews_its_delivery(server, turns) -> None:
+    from rinari.agency.tools import TeamToolHost, direct_tools
+
+    emails = _agent(server, "Emails")
+    writer = _agent(server, "Writer")
+    team = _team(server, "Canal infantil", [writer], purpose="Videos")
+    host = TeamToolHost(server._services, emails["session_id"])
+    tools = {t.name: t for t in direct_tools(host)}
+    listed = tools["teams.list"].handler({}, None)
+    assert listed.data["teams"][0]["name"] == "Canal infantil"
+    assert tools["errand.create"].handler({"title": "x", "to_team": "Nadie"}, None).ok is False
+    made = tools["errand.create"].handler(
+        {"title": "Un video del cliente", "to_team": "canal infantil", "done_when": ["30 s"]}, None
+    )
+    assert made.ok and made.data["team"] == "Canal infantil"
+    errand = server._services.ctx.team_repo.errand(made.data["errand_id"])
+    assert errand["to_agent_id"] == writer["id"] and errand["from_agent_id"] == emails["id"]
+    assert turns[-1]["session_id"] == _post(team, writer)
+    # Delivered: the office says it without waking anyone, and Emails is told in its chat.
+    _finish(server, _post(team, writer), "Video listo")
+    office = _ok(_call(server, "agency.office.list", {"team_id": team["id"]}))["messages"]
+    assert office[-1]["text"].startswith("Emails: Entregado «Un video del cliente»")
+    assert turns[-1]["session_id"] == emails["session_id"]
+    assert "[Recado entregado]" in turns[-1]["message"] and "Video listo" in turns[-1]["message"]
+    assert turns[-1]["origin"]["kind"] == "agency_delivery"
+    reviewed = tools["errand.review"].handler({"errand_id": errand["id"], "accepted": True}, None)
+    assert reviewed.ok and reviewed.data["status"] == "reviewed"
+    _finish(server, emails["session_id"], "Gracias")
+    office_after = _ok(_call(server, "agency.office.list", {"team_id": team["id"]}))["messages"]
+    assert len(office_after) == len(office)  # its answer stays in its own chat
