@@ -46,6 +46,8 @@ def checked_owner(services: Any, owner: Any) -> str | None:
 
 
 SETTINGS_KEY = "agency.settings"
+#: The profiles a «Detener a todos» with no profile halted: what «Reanudar» with none resumes.
+HALTED_BY_ALL_KEY = "agency.halted_by_all"
 ERRAND_MODES = ("turn", "subagents")
 #: The ways an errand can run that exist today (D-28: subagents come later).
 AVAILABLE_ERRAND_MODES = ("turn",)
@@ -435,7 +437,7 @@ class AgencyMethods:
         if board is not None:
             profiles = {profile} if profile else halt_profiles(self._services, listed)
             for each in sorted(profiles):
-                halted["blocked_errands"] += board.halt(each)["blocked_errands"]
+                halted["blocked_errands"] += board.halt(each, by_all=not profile)["blocked_errands"]
         paused = []
         for task in self._services.ctx.schedule_repo.list():
             if task.get("agent_id") in agents and task.get("enabled"):

@@ -355,9 +355,17 @@ class ScheduleRunner:
                 self._finish(task, run_id, "completed", summary=summary, quiet=True)
                 return
             if on_result == "agent":
+                from rinari.policy.mcp_tools import mcp_origin
+
                 prompt = tool_agent_prompt(task, spec, text)
+                # The connector's result is in the prompt: the turn starts with
+                # the external-content guard on, and whatever it hands on (an
+                # errand to a team) keeps the mark (#75).
                 session_id, turn_id = self._start_agent_run(
-                    {**task, "kind": "agent", "prompt": prompt}, run_id, started
+                    {**task, "kind": "agent", "prompt": prompt},
+                    run_id,
+                    started,
+                    external_source=mcp_origin(str(spec.get("server") or "*")),
                 )
                 self._repo.save_run(run_id, session_id=session_id, turn_id=turn_id, summary=summary)
                 self._emit("schedule.run.started", task, run_id, session_id=session_id)
@@ -489,7 +497,11 @@ class ScheduleRunner:
         return str(Path.home())
 
     def _start_agent_run(
-        self, task: dict[str, Any], run_id: str, started: float
+        self,
+        task: dict[str, Any],
+        run_id: str,
+        started: float,
+        external_source: str | None = None,
     ) -> tuple[str, str]:
         stamp = datetime.fromtimestamp(started).strftime("%Y-%m-%d %H:%M")
         created = self._server._session_create(
@@ -550,7 +562,16 @@ class ScheduleRunner:
                 session_id,
                 task["prompt"],
                 memory_origin="automation",
-                origin={"kind": "schedule", "task_id": task["id"], "run_id": run_id},
+                origin={
+                    "kind": "schedule",
+                    "task_id": task["id"],
+                    "run_id": run_id,
+                    **(
+                        {"external_content": True, "external_source": external_source}
+                        if external_source
+                        else {}
+                    ),
+                },
             )
         except Exception:
             with self._lock:

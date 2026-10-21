@@ -31,6 +31,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import unicodedata
 from typing import TYPE_CHECKING, Any
 
 from rinari.agency import AgencyError
@@ -92,19 +93,25 @@ def find_mentions(text: str, names: dict[str, str]) -> list[str]:
     return sorted(first, key=first.__getitem__)
 
 
-#: The author brackets the Engine writes, and the look-alikes an agent could forge them with.
-_BRACKETS = str.maketrans(
-    {
-        **dict.fromkeys("⟦〚\uff3b⟪【⁅〖⦃⦗", "["),
-        **dict.fromkeys("⟧〛\uff3d⟫】⁆〗⦄⦘", "]"),
-    }
-)
+def _plain_brackets(text: str) -> str:
+    """Every non-ASCII opening or closing bracket becomes [ or ]: the Engine's author
+    brackets and anything an agent could forge them with (Unicode Ps/Pe, #75)."""
+    out = []
+    for ch in text:
+        if ord(ch) > 127:
+            category = unicodedata.category(ch)
+            if category == "Ps":
+                ch = "["
+            elif category == "Pe":
+                ch = "]"
+        out.append(ch)
+    return "".join(out)
 
 
 def one_line(text: str, limit: int = LINE_CHARS) -> str:
     """A message as one line of data: no line breaks and no author brackets to forge."""
     flat = " ⏎ ".join(part.strip() for part in str(text or "").splitlines() if part.strip())
-    flat = flat.translate(_BRACKETS)
+    flat = _plain_brackets(flat)
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 
@@ -114,7 +121,7 @@ def quoted(text: str, limit: int = SUMMARY_CHARS) -> str:
     Its lines never start a line of the prompt, so a forged header or office
     line stays inside the quote, and the author brackets are escaped.
     """
-    body = str(text or "").translate(_BRACKETS).strip()
+    body = _plain_brackets(str(text or "")).strip()
     if len(body) > limit:
         body = body[: limit - 1] + "…"
     return "\n".join(f"| {line}" for line in body.splitlines()) or "| (empty)"
@@ -305,7 +312,19 @@ class AgencyTeams:
             self._changed(errand["team_id"], "errand")
         return True
 
-    def halt(self, profile: str) -> dict[str, int]:
+    def _halted_by_all(self, profiles: set[str] | None = None) -> set[str]:
+        """The profiles a «Detener a todos» with no profile halted; with `profiles`, set them."""
+        from rinari.engine_protocol.agency import HALTED_BY_ALL_KEY
+        from rinari.shared.clock import now_iso
+
+        config = self._services.ctx.config_repo
+        if profiles is not None:
+            config.set_json(HALTED_BY_ALL_KEY, sorted(profiles), now_iso(self._services.ctx.clock))
+            return profiles
+        stored = config.get_json(HALTED_BY_ALL_KEY)
+        return set(stored) if isinstance(stored, list) else set()
+
+    def halt(self, profile: str, *, by_all: bool = False) -> dict[str, int]:
         """Stop the profile's board: clear what is queued and block what is open.
 
         Nothing starts again on its own until the owner resumes it. The
@@ -314,6 +333,8 @@ class AgencyTeams:
         already finds the board halted (#75).
         """
         self._set_halted(profile, True)
+        if by_all:
+            self._halted_by_all(self._halted_by_all() | {profile})
         teams = {team["id"] for team in self._repo.list(profile)}
         directs = {
             agent["session_id"]
@@ -372,12 +393,17 @@ class AgencyTeams:
         """The owner lets the board work again. Blocked errands stay blocked until retried."""
         if profile in self._halted_profiles():
             self._set_halted(profile, False)
+        by_all = self._halted_by_all()
+        if profile in by_all:
+            self._halted_by_all(by_all - {profile})
         self.tick()
 
     def resume_params(self, params: dict[str, Any]) -> dict[str, Any]:
-        # With no profile, every halted one: «Detener a todos» with none halts them all.
+        # With no profile, the ones a «Detener a todos» with no profile halted; a
+        # profile the owner stopped on its own stays stopped (#75).
         profile = self._server._profile_filter(params)
-        for each in [profile] if profile else sorted(self._halted_profiles()):
+        halted = self._halted_profiles()
+        for each in [profile] if profile else sorted(self._halted_by_all() & halted):
             self.resume(each)
         self.tick()
         return {"resumed": True}
@@ -993,7 +1019,8 @@ class AgencyTeams:
             # halt() came between the check above and the start: its snapshot
             # had no turn to cut yet, so this one is cut here (#75).
             try:
-                self._turns.cancel_turn(session_id)
+                # Only this turn: another one (the owner's) may have started since.
+                self._turns.cancel_turn(session_id, turn_id=started.get("turn_id"))
             except Exception:  # already over
                 logger.info("agency conversation %s: turn already over", session_id)
         return None

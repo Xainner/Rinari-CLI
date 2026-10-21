@@ -961,13 +961,16 @@ class TurnManager:
                 self.operations.finish(turn.turn_id, "cancelling")
             return self.operations.get(operation_id) or operation
 
-    def cancel_turn(self, session_id: str) -> dict[str, Any]:
+    def cancel_turn(self, session_id: str, turn_id: str | None = None) -> dict[str, Any]:
+        """Cancel the session's running turn; with `turn_id`, only if it is that one."""
         with self._lock:
             turn = next(
                 (
                     active
                     for active in self._turns.values()
-                    if active.session_id == session_id and not active.done.is_set()
+                    if active.session_id == session_id
+                    and not active.done.is_set()
+                    and (turn_id is None or active.turn_id == turn_id)
                 ),
                 None,
             )
