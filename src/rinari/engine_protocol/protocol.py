@@ -175,6 +175,13 @@ CAPABILITIES: dict[str, bool] = {
     # Desktop terminal: ConPTY on Windows, raw keystrokes, pty.shells, tail stream.
     "desktop_terminal_v1": True,
     "scheduled_tasks_v1": True,
+    # «Repetir aquí» and time from now: a task's `target` (new_session |
+    # this_conversation) with its `session_id`, run status `queued`, queue
+    # entries with their `display_message` and origin {kind: schedule,
+    # task_name, target}, schedule {kind: once, after: {minutes, hours,
+    # days}} resolved to `at` on create, and `next_run_local` from
+    # schedule.propose.
+    "schedule_target_v1": True,
     # session.turn.steer: a message for the running turn, read after its
     # current step; events steer.applied / steer.returned.
     "turn_steering_v1": True,

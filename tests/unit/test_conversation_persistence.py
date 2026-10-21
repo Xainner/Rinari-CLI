@@ -128,7 +128,8 @@ def test_history_restored_across_invocations(env, monkeypatch) -> None:
 
 
 def _state(message) -> bool:
-    return (message.origin or {}).get("source") == "turn-state"
+    """A harness note the conversation keeps: its turn state or its local time."""
+    return (message.origin or {}).get("source") in ("turn-state", "clock")
 
 
 def test_cancelled_turn_persists_partial_history(env, monkeypatch) -> None:
@@ -150,7 +151,7 @@ def test_cancelled_turn_persists_partial_history(env, monkeypatch) -> None:
     session.token.cancel()
     result = run_turn(session, "interrupted prompt")
     assert result.kind == "cancelled"
-    assert [r.role for r in s.ctx.message_repo.list(record.id)] == ["user"]
+    assert [r.role for r in s.ctx.message_repo.list(record.id) if not _state(r)] == ["user"]
     assert s.ctx.session_repo.get(record.id).state == "interrupted"
 
 

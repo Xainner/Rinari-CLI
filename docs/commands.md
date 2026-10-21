@@ -1062,6 +1062,28 @@ the task at once when the owner asked in their own turn (`origin_kind` user)
 and only proposes it otherwise (another pane, another task); either way it
 carries no grants, so a run asks for what it needs. The desktop receives it
 whole as a `schedule.proposed` event (`created`, and `task` when created).
+Its result gives `next_run_local` (the machine's local time) with
+`next_run_at`.
+Time from now and «Repetir aquí» (`schedule_target_v1`): a one-time schedule
+may be `{kind: once, after: {minutes, hours, days}}` (1 minute to 366 days),
+turned on create into the `at` it means, rounded up to the minute: what is
+stored is always `at`. Every turn, whoever started it, gets a harness note
+(`origin.source = "clock"`) with the local time right after its message; the
+system prompt keeps the day only. An agent task with `target:
+"this_conversation"` and its `session_id` (`schedule.propose`
+`in_this_conversation: true` sets both to the conversation it was asked in)
+runs as one more message there, with its history and the conversation's own
+model, mode and permissions. It carries no grants and nothing of the task is
+applied to the conversation (model, mode, permission mode and skills are
+cleared), and its turn is not the owner's (`memory_origin` automation,
+`origin {kind: schedule, task_id, run_id, target, task_name}`). With a turn
+running or messages waiting, the run is `queued` in the conversation's queue,
+whose entries carry their `origin` and `display_message`; it starts when the
+queue reaches it, a queue lost with the Engine is filled again on the next
+start (within the 12 h window), and `session.queue.clear` ends it `cancelled`
+(`cancelled_by_owner`). An archived conversation is used as it is and stays
+archived; a deleted one fails the run (`conversation_deleted`) and switches
+the task off. A conversation left out of memory still runs.
 Remote MCP (`mcp_remote_v1`): servers are `transport: "stdio"` (a
 `command` array) or `"http"` (a `url`, http/https, no userinfo) speaking the
 Streamable HTTP transport of MCP 2025-03-26: one POST per JSON-RPC message

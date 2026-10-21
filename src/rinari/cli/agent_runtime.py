@@ -509,6 +509,24 @@ def _session_state(services: ServiceContainer, session_id: str):
     return SessionState(state_path(services.ctx.layout, session_id))
 
 
+def _clock_note(services: ServiceContainer) -> ChatMessage:
+    """The local time when the turn starts, for whatever depends on it.
+
+    The system prompt carries the day only, so its cache holds through the
+    day. The time travels as one line saved after the turn's message — the
+    owner's, a scheduled task's or the Agency's — so it never rewrites the
+    turn state and costs one line per turn, never one per model call.
+    """
+    from datetime import datetime
+
+    now = datetime.fromtimestamp(services.ctx.clock.now()).astimezone()
+    offset = now.strftime("%z")
+    return ChatMessage.harness(
+        f"Local time now: {now:%Y-%m-%d %H:%M} ({now:%A}), UTC{offset[:3]}:{offset[3:]}.",
+        "clock",
+    )
+
+
 def _tools_note(session: AgentSession, wanted: tuple[str, ...] = ()) -> ChatMessage | None:
     """Tools this turn needs that are not in the fixed list, with their exact call.
 
@@ -2263,6 +2281,7 @@ def _live_output_sink(interactive: bool):
 
 STATE_ACTIVE = "active"
 STATE_INTERRUPTED = "interrupted"
+STATE_ARCHIVED = "archived"
 
 
 def _set_session_state(services: ServiceContainer, record: SessionRecord, state: str) -> None:
@@ -2623,12 +2642,18 @@ def _run_turn_unlocked(
     session.next_turn_external_source = ""
     wanted_tools = (*session.next_turn_tools, *_pinned_skill_tools(services, session.record))
     session.next_turn_tools = ()
+    notes = [_clock_note(services)]
     with contextlib.suppress(Exception):
         note = _tools_note(session, wanted_tools)
         if note is not None:
-            # Right after the owner's message, saved with it (F42).
-            session.context.turn_notes = (note,)
-    _set_session_state(services, session.record, STATE_ACTIVE)
+            notes.append(note)
+    # Right after the turn's message, saved with it (F42).
+    session.context.turn_notes = tuple(notes)
+    # A scheduled message in an archived conversation runs there and leaves it
+    # archived: only the owner brings a conversation back.
+    keep_archived = memory_origin == "automation" and session.record.state == STATE_ARCHIVED
+    if not keep_archived:
+        _set_session_state(services, session.record, STATE_ACTIVE)
     base = session.context.assembler_base
     include_identity = _needs_identity(message)
     if base.include_extended_identity is not include_identity:
@@ -2799,7 +2824,8 @@ def _run_turn_unlocked(
                     ChatMessage.assistant("[Cancelled model response; incomplete]\n" + str(partial))
                 )
             session.context.tool_ctx = replace(session.context.tool_ctx, memory_source=None)
-            _set_session_state(services, session.record, STATE_INTERRUPTED)
+            if not keep_archived:
+                _set_session_state(services, session.record, STATE_INTERRUPTED)
             new_msgs = _without_pre_persisted_owner_message(
                 _new_history(session.context, before, dropped_before), owner_source_record
             )
@@ -2817,7 +2843,8 @@ def _run_turn_unlocked(
             )
             return TurnResult(kind="cancelled", content="Turn cancelled.", tool_calls=0, usage=None)
     except Exception as exc:
-        _set_session_state(services, session.record, STATE_INTERRUPTED)
+        if not keep_archived:
+            _set_session_state(services, session.record, STATE_INTERRUPTED)
         details = getattr(exc, "details", {}) or {}
         details["history_preserved"] = True
         if hasattr(exc, "details"):

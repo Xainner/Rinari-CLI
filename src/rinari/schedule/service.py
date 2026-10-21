@@ -14,7 +14,14 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from rinari.schedule.rules import Schedule, ScheduleError, describe, next_run, parse_schedule
+from rinari.schedule.rules import (
+    Schedule,
+    ScheduleError,
+    describe,
+    next_run,
+    parse_schedule,
+    resolve_after,
+)
 
 KINDS = ("agent", "reminder", "command", "tool")
 # A «command» task (plan 0.4.0 #50) runs without the model: zero tokens.
@@ -37,7 +44,19 @@ MAX_NAME = 80
 MAX_PROMPT = 8000
 MAX_GRANTS = 50
 MAX_SKILLS = 10
-RUN_STATUSES = ("running", "needs_you", "completed", "failed", "cancelled", "blocked", "skipped")
+RUN_STATUSES = (
+    "queued",
+    "running",
+    "needs_you",
+    "completed",
+    "failed",
+    "cancelled",
+    "blocked",
+    "skipped",
+)
+#: Where an agent task runs: a fresh session each time, or the conversation it
+#: was asked in, as one more message with its history («Repetir aquí»).
+TARGETS = ("new_session", "this_conversation")
 
 
 class ScheduledTaskError(ValueError):
@@ -180,6 +199,7 @@ class ScheduleService:
         model_exists: Callable[[str], bool] = lambda model: True,
         skill_exists: Callable[[str], bool] = lambda name: True,
         agent_exists: Callable[[str], bool] = lambda agent_id: True,
+        session_exists: Callable[[str], bool] = lambda session_id: True,
     ) -> None:
         self._repo = repo
         self._clock = clock
@@ -188,6 +208,7 @@ class ScheduleService:
         self._model_exists = model_exists
         self._skill_exists = skill_exists
         self._agent_exists = agent_exists
+        self._session_exists = session_exists
         # Set by the Engine server: a validated proposal becomes the
         # `schedule.proposed` event the desktop shows as a card.
         self.on_proposed: Callable[[dict[str, Any]], None] | None = None
@@ -205,6 +226,9 @@ class ScheduleService:
         if kind not in KINDS:
             raise ScheduledTaskError("Kind must be agent, reminder, command or tool.")
         try:
+            # Relative to now only when the schedule itself is being set.
+            if "schedule" in raw:
+                merged["schedule"] = resolve_after(raw["schedule"], self._clock.now())
             schedule = parse_schedule(merged.get("schedule"))
         except ScheduleError as exc:
             raise ScheduledTaskError(str(exc)) from None
@@ -255,6 +279,24 @@ class ScheduleService:
         enabled = merged.get("enabled", True)
         if not isinstance(enabled, bool):
             raise ScheduledTaskError("'enabled' must be a boolean.")
+        target = merged.get("target") or "new_session"
+        if target not in TARGETS:
+            raise ScheduledTaskError("Target must be new_session or this_conversation.")
+        session_id = merged.get("session_id") or None
+        if target == "this_conversation":
+            if kind != "agent":
+                raise ScheduledTaskError("Only an agent task can run in its conversation.")
+            if not isinstance(session_id, str) or not self._session_exists(session_id):
+                raise ScheduledTaskError(f"Unknown conversation: {session_id}")
+            # It runs with the conversation's own model, mode and permissions,
+            # and asks for what it needs: a grant would outlive the run there.
+            if grants:
+                raise ScheduledTaskError(
+                    "A task that runs in its conversation carries no grants: each run asks."
+                )
+            model, skills, permission_profile = None, [], None
+        else:
+            session_id = None
         return {
             "name": name.strip(),
             "kind": kind,
@@ -270,6 +312,8 @@ class ScheduleService:
             "tool": tool,
             "watch": watch,
             "agent_id": agent_id,
+            "target": target,
+            "session_id": session_id,
             "enabled": enabled,
         }
 

@@ -110,7 +110,7 @@ def test_implement_runs_in_build_with_the_plan_steps_and_no_typed_message(
     asked = next(
         m
         for m in model.requests[0].messages
-        if (m.origin or {}).get("source") not in (None, "turn-state")
+        if (m.origin or {}).get("source") not in (None, "turn-state", "clock")
     )
     assert "Implement the plan" in (asked.content or "")
     assert "## Pasos" in (asked.content or "")
@@ -138,7 +138,7 @@ def test_adjust_stays_in_plan_and_carries_the_comment(server, tmp_path, monkeypa
     asked = next(
         m
         for m in model.requests[0].messages
-        if (m.origin or {}).get("source") not in (None, "turn-state")
+        if (m.origin or {}).get("source") not in (None, "turn-state", "clock")
     )
     assert "usa la tabla existente" in (asked.content or "")
 
