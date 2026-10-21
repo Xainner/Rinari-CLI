@@ -445,8 +445,8 @@ class McpService:
         if root and key != root:
             return False
         trusted = self._trust_seen.get(key)
-        if trusted is None:  # never checked by an entry point: once, here
-            trusted = self._trust_seen[key] = self._trust.is_trusted(project)
+        if trusted is None:  # no entry point checked it: here, and not kept
+            trusted = self._trust.is_trusted(project)
         return trusted
 
     def _check_trust(self, project: Path | None, needed: bool | None = None) -> None:
@@ -456,8 +456,7 @@ class McpService:
         if project is None:
             return
         if needed is None:
-            with self._lock:
-                needed = any(state.scope == "project" for state in self._states.values())
+            needed = bool(self._ctx.mcp_server_repo.list("project"))
         if not needed:
             return
         trusted = self._trust.is_trusted(project)
