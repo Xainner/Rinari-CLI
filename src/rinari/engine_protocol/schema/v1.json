@@ -650,6 +650,8 @@
         "agency.errand.retry",
         "agency.team.template",
         "agency.team.duplicate",
+        "agency.team.memory.list",
+        "agency.team.memory.add",
         "agency.settings.get",
         "agency.settings.set",
         "project.move_profile",

@@ -641,3 +641,36 @@ def test_archiving_a_team_cancels_its_open_errands(server, turns) -> None:
     )
     assert refused["ok"] is False
     assert _ok(_call(server, "agency.team.list"))["teams"] == []
+
+
+def test_a_catalog_account_can_belong_to_one_team(server) -> None:
+    team = _team(server, "Canal", [_agent(server, "Writer")])
+    added = _ok(
+        _call(
+            server,
+            "mcp.catalog.add",
+            {"id": "notion", "name": "notion-del-canal", "owner": f"team:{team['id']}"},
+        )
+    )
+    assert added["server"]["owner"] == f"team:{team['id']}"
+    refused = _call(server, "mcp.catalog.add", {"id": "notion", "owner": "team:nadie"})
+    assert refused["ok"] is False
+
+
+def test_a_teams_memory_is_listed_and_written_in_the_agency_settings(server) -> None:
+    team = _team(server, "Canal", [_agent(server, "Writer")])
+    other = _team(server, "Recetas", [_agent(server, "Chef")])
+    added = _ok(
+        _call(
+            server,
+            "agency.team.memory.add",
+            {"team_id": team["id"], "topic": "estilo", "text": "Animales en 3D"},
+        )
+    )["record"]
+    assert added["place"] == "team" and added["place_label"] == "Canal"
+    server._services.memory.remember_user(
+        "Sin gluten", topic="estilo", place="team", place_ref=other["id"]
+    )
+    listed = _ok(_call(server, "agency.team.memory.list", {"team_id": team["id"]}))
+    assert [row["text"] for row in listed["records"]] == ["Animales en 3D"]
+    assert _call(server, "agency.team.memory.list", {"team_id": "nadie"})["ok"] is False

@@ -341,6 +341,8 @@ class EngineServer:
         self._dispatcher.register("agency.stop_all", self._agency.stop_all)
         self._dispatcher.register("agency.agent.memory.list", self._agency.memory_list)
         self._dispatcher.register("agency.agent.memory.add", self._agency.memory_add)
+        self._dispatcher.register("agency.team.memory.list", self._agency.team_memory_list)
+        self._dispatcher.register("agency.team.memory.add", self._agency.team_memory_add)
         from rinari.engine_protocol.agency_teams import AgencyTeams
 
         self._teams = AgencyTeams(self)

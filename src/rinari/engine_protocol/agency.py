@@ -26,17 +26,21 @@ if TYPE_CHECKING:
 
 
 def checked_owner(services: Any, owner: Any) -> str | None:
-    """`owner` of a new connector account: None, or "agent:<id>" of an existing agent."""
+    """`owner` of a new connector account: None, "agent:<id>" of an existing
+    agent or, A2, "team:<id>" of an existing team (only its posts see it)."""
     if owner is None:
         return None
-    agent_id = owner[len("agent:") :] if isinstance(owner, str) else ""
-    if (
-        not isinstance(owner, str)
-        or not owner.startswith("agent:")
-        or services.ctx.agency_repo.get(agent_id) is None
-    ):
+    kind, _, ref = owner.partition(":") if isinstance(owner, str) else ("", "", "")
+    exists = False
+    if kind == "agent" and ref:
+        exists = services.ctx.agency_repo.get(ref) is not None
+    elif kind == "team" and ref:
+        exists = services.ctx.team_repo.get(ref) is not None
+    if not exists:
         raise EngineProtocolError(
-            INVALID_PARAMS, "Param 'owner' must be 'agent:<id>' of an existing agent."
+            INVALID_PARAMS,
+            "Param 'owner' must be 'agent:<id>' of an existing agent or 'team:<id>' of an "
+            "existing team.",
         )
     return owner
 
@@ -299,19 +303,39 @@ class AgencyMethods:
     def memory_list(self, params: dict[str, Any]) -> dict[str, Any]:
         """An agent's own memory (D-24, Ajustes de la Agency). Edit and forget
         use memory.update and memory.forget, like any personal memory."""
-        agent = self._agent(params)
-        rows = [
-            row
-            for row in self._services.memory.list_user(limit=500)
-            if row.get("place") == "agent" and row.get("place_ref") == agent["id"]
-        ]
-        return {"records": self._server._with_place_labels(rows), "count": len(rows)}
+        return self._place_memory("agent", self._agent(params)["id"])
 
     def memory_add(self, params: dict[str, Any]) -> dict[str, Any]:
         """The owner writes something into an agent's own memory."""
+        return self._remember(params, "agent", self._agent(params)["id"])
+
+    def _team(self, params: dict[str, Any]) -> dict[str, Any]:
+        team_id = params.get("team_id")
+        if not isinstance(team_id, str) or not team_id:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'team_id' must be a non-empty string.")
+        team = self._services.ctx.team_repo.get(team_id)
+        if team is None:
+            raise NotFoundError(f"Unknown team: {team_id}")
+        return team
+
+    def team_memory_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        """A2: a team's memory, what its posts learn (D-7)."""
+        return self._place_memory("team", self._team(params)["id"])
+
+    def team_memory_add(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._remember(params, "team", self._team(params)["id"])
+
+    def _place_memory(self, place: str, ref: str) -> dict[str, Any]:
+        rows = [
+            row
+            for row in self._services.memory.list_user(limit=500)
+            if row.get("place") == place and row.get("place_ref") == ref
+        ]
+        return {"records": self._server._with_place_labels(rows), "count": len(rows)}
+
+    def _remember(self, params: dict[str, Any], place: str, ref: str) -> dict[str, Any]:
         from rinari.shared.errors import InvalidUsageError
 
-        agent = self._agent(params)
         topic = params.get("topic")
         text = params.get("text")
         kind = params.get("kind", "fact")
@@ -329,8 +353,8 @@ class AgencyMethods:
                 kind=kind,
                 topic=topic.strip(),
                 provenance="panel",
-                place="agent",
-                place_ref=agent["id"],
+                place=place,
+                place_ref=ref,
             )
         except InvalidUsageError as exc:
             raise EngineProtocolError(INVALID_PARAMS, exc.message) from None

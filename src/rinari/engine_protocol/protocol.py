@@ -241,8 +241,9 @@ CAPABILITIES: dict[str, bool] = {
     # its place_label is the agent's name.
     "agency_agent_memory_v1": True,
     # Rinari Agency A2: teams with posts (sessions with agent_id and team_id), a
-    # chief, team connectors and accounts (owner team:ID), team memory (place
-    # team), the office chat (agency.office.*: only @mentions wake, 3 hops, 5
+    # chief, team connectors and accounts (owner team:ID, also from
+    # mcp.catalog.add), team memory (place team, agency.team.memory.*), the
+    # office chat (agency.office.*: only @mentions wake, 3 hops, 5
     # mentions, 20 deliveries per chain), errands as the board's queue, one per
     # post at a time (agency.errand.*), team and global budgets
     # (agency.settings.*), a blocked errand waits until agency.errand.retry,
