@@ -524,11 +524,13 @@ def token_request(
         raise OAuthError(
             "OAUTH_UNREACHABLE", f"cannot reach {safe_url(endpoint)}", "check_url_or_network"
         ) from exc
-    if response.status_code >= 500:
+    if response.status_code >= 500 or response.status_code in (408, 429):
+        # Passing (busy, rate limited, timed out): never a reason to throw a
+        # refresh token away; the connection retries later.
         raise OAuthError(
             "OAUTH_SERVER_ERROR",
             f"{safe_url(endpoint)} failed (HTTP {response.status_code})",
-            "server_error",
+            "rate_limited" if response.status_code == 429 else "server_error",
         )
     if response.status_code != 200:
         raise OAuthError(
@@ -913,6 +915,8 @@ def session_for(
     """The OAuth session of a saved `oauth` server's transport (None otherwise)."""
     if draft.auth_kind != AUTH_OAUTH or not server_id:
         return None
+    if _secure_url(draft.url) is None:
+        return None  # a row saved before https was required: its token never goes in clear
     return OAuthSession(
         OAuthStore(credentials, server_id),
         client_secret=_secret_loader(draft.oauth or OAuthConfig(), credentials.resolve),
@@ -1172,6 +1176,10 @@ class OAuthManager:
         self._lock = threading.Lock()
         self._flows: dict[str, _Flow] = {}
         self._last: dict[str, dict[str, Any]] = {}
+        # Sign-ins still discovering or registering (no listener yet), and
+        # those cancelled meanwhile: they never reach the browser.
+        self._starting: dict[str, str] = {}
+        self._cancelled_starts: set[str] = set()
 
     @property
     def client_metadata_url(self) -> str | None:
@@ -1190,11 +1198,44 @@ class OAuthManager:
         open_browser: bool = True,
         timeout_s: float = DEFAULT_FLOW_TIMEOUT_S,
     ) -> dict[str, Any]:
-        """Begin signing in to `url`; raises OAuthError before the browser step."""
+        """Begin signing in to `url`; raises OAuthError before the browser step.
+
+        A `cancel` while it still discovers or registers wins: the listener
+        closes, nothing opens and this raises `OAUTH_CANCELLED`.
+        """
         oauth = oauth or OAuthConfig()
+        if _secure_url(url) is None:
+            raise OAuthError(
+                "OAUTH_INSECURE_URL",
+                f"{safe_url(url)} is not https; OAuth needs https (http only on this computer)",
+                "https_required",
+            )
         timeout_s = min(max(float(timeout_s), MIN_FLOW_TIMEOUT_S), MAX_FLOW_TIMEOUT_S)
         self.cancel(server_id)  # a new sign-in replaces one in progress
         flow_id = f"oauth_{secrets.token_hex(8)}"
+        with self._lock:
+            self._starting[server_id] = flow_id
+        try:
+            return self._start(
+                server_id, name, url, oauth, flow_id, client_secret, open_browser, timeout_s
+            )
+        finally:
+            with self._lock:
+                if self._starting.get(server_id) == flow_id:
+                    del self._starting[server_id]
+                self._cancelled_starts.discard(flow_id)
+
+    def _start(
+        self,
+        server_id: str,
+        name: str,
+        url: str,
+        oauth: OAuthConfig,
+        flow_id: str,
+        client_secret: str | None,
+        open_browser: bool,
+        timeout_s: float,
+    ) -> dict[str, Any]:
         store = OAuthStore(self._credentials, server_id)
         self._emit_progress(name, flow_id, "discovering")
         listener: _Listener | None = None
@@ -1250,7 +1291,14 @@ class OAuthManager:
         )
         listener.server.on_callback = lambda query: self._on_callback(flow, query)
         with self._lock:
-            self._flows[server_id] = flow
+            cancelled = flow_id in self._cancelled_starts
+            if not cancelled:
+                self._flows[server_id] = flow
+        if cancelled:
+            # Cancelled while discovering: finish it here, before the browser.
+            error = OAuthError("OAUTH_CANCELLED", "sign-in cancelled", "oauth_cancelled")
+            self._finish(flow, "cancelled", error)
+            raise error
         listener.serve()
         threading.Thread(
             target=self._watch, args=(flow,), name=f"rinari-oauth-wait-{flow_id}", daemon=True
@@ -1464,8 +1512,11 @@ class OAuthManager:
     def cancel(self, server_id: str) -> bool:
         with self._lock:
             flow = self._flows.get(server_id)
-        if flow is None:
-            return False
+            if flow is None:
+                starting = self._starting.get(server_id)
+                if starting is not None:
+                    self._cancelled_starts.add(starting)
+                return starting is not None
         return self._finish(
             flow, "cancelled", OAuthError("OAUTH_CANCELLED", "sign-in cancelled", "oauth_cancelled")
         )

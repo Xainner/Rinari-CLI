@@ -239,6 +239,9 @@ class McpService:
         # no I/O runs while it is held.
         self._lock = threading.RLock()
         self._states: dict[str, _ServerState] = {}
+        # Whether each project folder is trusted, checked outside the lock
+        # (`_check_trust`: git runs) and read under it by `_visible`.
+        self._trust_seen: dict[str, bool] = {}
         self._followers: weakref.WeakSet[_Follower] = weakref.WeakSet()
         # Rinari Agency: (allowed connectors, agent id) of a conversation, set by
         # the services; None means no conversation is an agent's.
@@ -452,9 +455,29 @@ class McpService:
     def _visible(self, scope: str | None, project: Path | None, root: str = "") -> bool:
         if scope != "project":
             return True
-        if project is None or (root and canonical_root(project) != root):
+        if project is None:
             return False
-        return self._trust.is_trusted(project)
+        key = canonical_root(project)
+        if root and key != root:
+            return False
+        trusted = self._trust_seen.get(key)
+        if trusted is None:  # no entry point checked it: here, and not kept
+            trusted = self._trust.is_trusted(project)
+        return trusted
+
+    def _check_trust(self, project: Path | None, needed: bool | None = None) -> None:
+        """Check `project`'s trust before taking the lock, only if a project
+        server could need it: `is_trusted` runs git, and nothing under the
+        service's lock may wait on it."""
+        if project is None:
+            return
+        if needed is None:
+            needed = bool(self._ctx.mcp_server_repo.list("project"))
+        if not needed:
+            return
+        trusted = self._trust.is_trusted(project)
+        with self._lock:
+            self._trust_seen[canonical_root(project)] = trusted
 
     def _sees(
         self,
@@ -840,6 +863,7 @@ class McpService:
         and one that needs a new sign-in is not retried at all: the call
         fails at once with the stored reason instead of waiting a timeout.
         """
+        self._check_trust(project)
         with self._lock:
             cached = self._clients.get(name)
             state = self._states.get(name)
@@ -906,6 +930,7 @@ class McpService:
         scopes: dict[str, set] = {}
         for row in rows:
             scopes.setdefault(row["name"], set()).add(row.get("scope"))
+        self._check_trust(project, any(row.get("scope") == "project" for row in rows))
         with self._lock:
             for row in rows:
                 name = row["name"]
@@ -1029,6 +1054,11 @@ class McpService:
         with self._lock:
             clients = list(self._clients.values())
             self._clients.clear()
+            for state in self._states.values():
+                # An attempt still connecting finds itself stale and closes
+                # its client, instead of leaving a stdio server running.
+                state.generation += 1
+                state.attempt = None
         for client in clients:
             with contextlib.suppress(Exception):
                 client.close()
@@ -1086,6 +1116,7 @@ class McpService:
         """
         allowed, agent = self.session_scope(session_id)
         follower = _Follower(registry, project, allowed, agent)
+        self._check_trust(project)
         with self._lock:
             self._followers.add(follower)
             registry.followers.append(follower)
@@ -1095,6 +1126,7 @@ class McpService:
 
     def available_tools(self, project: Path | None = None, session_id: str | None = None) -> list:
         """The tools known right now for a session in `project` (no waiting)."""
+        self._check_trust(project)
         allowed, agent = self.session_scope(session_id)
         with self._lock:
             tools = [
@@ -1168,6 +1200,7 @@ class McpService:
         An agent's conversation (by `session_id`, or `allowed`/`agent` given)
         sees only its connectors (Rinari Agency).
         """
+        self._check_trust(project)
         if allowed is None and agent is None:
             allowed, agent = self.session_scope(session_id)
         with self._lock:
@@ -1209,6 +1242,7 @@ class McpService:
         self, project: Path | None = None, session_id: str | None = None
     ) -> list[str]:
         """Connected servers that offer resources, for a session in `project`."""
+        self._check_trust(project)
         allowed, agent = self.session_scope(session_id)
         with self._lock:
             return self._resource_servers_locked(project, allowed, agent)
@@ -1277,17 +1311,9 @@ class McpService:
             config.pop(tool_permissions.PERMISSIONS_KEY, None)
         else:
             config[tool_permissions.PERMISSIONS_KEY] = block
-        # Same row, same id and secrets: only config_json changes.
-        self._ctx.mcp_server_repo.add(
-            row["id"],
-            name=row["name"],
-            transport=row.get("transport") or TRANSPORT_STDIO,
-            command=row.get("command") or "",
-            url=row.get("url") or "",
-            scope=row.get("scope") or "global",
-            enabled=bool(row.get("enabled")),
-            config_json=json.dumps(config, sort_keys=True),
-            created_at=_now(self._ctx),
+        # Same row, same id, folder and secrets: only config_json changes.
+        self._ctx.mcp_server_repo.set_config(
+            row["id"], json.dumps(config, sort_keys=True), _now(self._ctx)
         )
         saved = tool_permissions.stored_permissions(config)
         name = row["name"]
@@ -1314,11 +1340,15 @@ class McpService:
             state = self._states.get(name)
             if state is None or self._clients.get(name) is not client:
                 return
-            if (exc.hint or "") in _REAUTH_HINTS:
+            reauth = (exc.hint or "") in _REAUTH_HINTS
+            if reauth:
                 self._clients.pop(name, None)
                 self._set(name, state, STATUS_REAUTH, exc)
             elif not client.connected:
                 self._dropped(name, state, exc)
+        if reauth:
+            with contextlib.suppress(Exception):
+                client.close()  # out of the registry: nothing else would close it
         self._flush()
 
     def invoke(

@@ -456,7 +456,7 @@ def _stdio(candidate: ImportCandidate, spec: dict, flavor: str) -> None:
         if secret == "":
             continue
         env[str(env_name)] = secret
-        candidate.secrets.append({"where": "env", "name": str(env_name), "kind": _kind(secret)})
+        candidate.secrets.append(_secret_entry("env", str(env_name), secret))
     if spec.get("cwd"):
         candidate.warnings.append("cwd_ignored")
     if spec.get("envFile") or spec.get("env_file"):
@@ -467,6 +467,17 @@ def _stdio(candidate: ImportCandidate, spec: dict, flavor: str) -> None:
 
 def _kind(secret: Any) -> str:
     return "env_ref" if isinstance(secret, str) and secret.startswith("env://") else "value"
+
+
+def _secret_entry(where: str, name: str, secret: Any) -> dict[str, str]:
+    """How a secret is filled; for one read from the owner's environment, which
+    variable (its name, never its value): a project's `.mcp.json` can point
+    `${AWS_SECRET_ACCESS_KEY}` at its author's own server.
+    """
+    entry = {"where": where, "name": name, "kind": _kind(secret)}
+    if entry["kind"] == "env_ref":
+        entry["variable"] = str(secret)[len("env://") :]
+    return entry
 
 
 def _http(candidate: ImportCandidate, spec: dict, flavor: str) -> None:
@@ -510,7 +521,7 @@ def _http(candidate: ImportCandidate, spec: dict, flavor: str) -> None:
         bearer = _BEARER_VAR_RE.match(text.strip())
         if header.lower() == "authorization" and bearer:
             auth = {"kind": "bearer", "token": f"env://{bearer.group(1)}"}
-            candidate.secrets.append({"where": "header", "name": header, "kind": "env_ref"})
+            candidate.secrets.append(_secret_entry("header", header, auth["token"]))
             continue
         secret, ok = _secret_input(text)
         if not ok:
@@ -520,20 +531,18 @@ def _http(candidate: ImportCandidate, spec: dict, flavor: str) -> None:
             continue
         # Every imported header value is kept as a secret: the source cannot say.
         headers[header] = {"value": secret, "secret": True}
-        candidate.secrets.append({"where": "header", "name": header, "kind": _kind(secret)})
+        candidate.secrets.append(_secret_entry("header", header, secret))
     # Codex: bearer token and headers read from the environment.
     bearer_env = spec.get("bearer_token_env_var")
     if isinstance(bearer_env, str) and _ENV_NAME_RE.match(bearer_env):
         auth = {"kind": "bearer", "token": f"env://{bearer_env}"}
-        candidate.secrets.append({"where": "header", "name": "Authorization", "kind": "env_ref"})
+        candidate.secrets.append(_secret_entry("header", "Authorization", auth["token"]))
     env_headers = spec.get("env_http_headers") or {}
     if isinstance(env_headers, dict):
         for header, var in env_headers.items():
             if isinstance(var, str) and _ENV_NAME_RE.match(var):
                 headers[str(header)] = {"value": f"env://{var}", "secret": True}
-                candidate.secrets.append(
-                    {"where": "header", "name": str(header), "kind": "env_ref"}
-                )
+                candidate.secrets.append(_secret_entry("header", str(header), f"env://{var}"))
     for found in [h for h in headers if h.lower() == "authorization"]:
         if auth is not None:  # an env bearer wins over a literal Authorization
             headers.pop(found)

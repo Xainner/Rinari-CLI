@@ -1173,8 +1173,11 @@ no refresh token is kept) for Google. Errors before the browser step are
 `oauth_metadata_missing` / `oauth_metadata_invalid` / `oauth_pkce_unsupported`,
 `OAUTH_CLIENT_REQUIRED`, `OAUTH_REGISTRATION_FAILED`
 `oauth_registration_rejected`, `OAUTH_PORT_IN_USE` `redirect_port_busy`,
-`OAUTH_UNREACHABLE`). A callback with another `state` is refused (400) and the
-sign-in keeps waiting. Events: `mcp.auth.progress {name, flow_id, stage}`
+`OAUTH_UNREACHABLE`, `OAUTH_INSECURE_URL` `https_required`: OAuth needs an
+https URL, http only on a loopback host, and `mcp.add`/`mcp.update` refuse
+it too; `OAUTH_CANCELLED` `oauth_cancelled` when `mcp.auth.cancel` arrives
+while it still discovers or registers: the browser never opens). A callback
+with another `state` is refused (400) and the sign-in keeps waiting. Events: `mcp.auth.progress {name, flow_id, stage}`
 (`discovering`, `registering`, `waiting_for_browser`, `exchanging_code`) and
 `mcp.auth.finished {name, flow_id, outcome, finished_at, error?}` with
 `outcome` `signed_in`, `failed` (`OAUTH_DENIED`, `OAUTH_TOKEN_REJECTED`…),
@@ -1188,7 +1191,8 @@ connection → `{name, revoked, removed, cancelled}`. Tokens (access, refresh,
 expiry, scopes) live only in the credential store under `mcp/<server
 id>/oauth` (a registered client under `mcp/<server id>/oauth-client`); the
 transport refreshes a token about to expire and, after a 401, refreshes and
-retries once. When that is impossible the error is `MCP_AUTH_REJECTED` with
+retries once; a refresh answered 408, 429 or 5xx keeps the refresh token and
+is retried later. When that is impossible the error is `MCP_AUTH_REJECTED` with
 hint `reauth_required` (`oauth_required` if never signed in). `mcp.remove`
 revokes and deletes them too. `mcp.test`/`mcp.probe` add `oauth` for http
 servers with auth `none` or `oauth`: `{available, client: configured |
@@ -1236,25 +1240,6 @@ reconnecting.
   Block for tools without their own setting (`null`: the mode decides) →
   `{server}`.
 
-Docker in the console policy (plan de conectores C7), for every user with or
-without a connector. `docker`, `docker compose` and `docker-compose` (after
-`sudo`/`env`, with global options such as `-H`/`--context` and compose's
-`-f`/`-p`): reads (`ps`, `logs`, `inspect`, `images`, `version`, `info`,
-`top`, `stats`, `compose ps`/`logs`, `<object> ls`/`inspect`, `system df`)
-run in every mode, also read-only, and from a folder outside the project;
-piped only into filters (`grep`, `head`, `tail`…) they stay reads, while a
-redirection or another command makes them commands that run. `run`, `build`,
-`exec`, `compose up`/`down` (without `-v`), `start`, `stop`, `restart`,
-`pull` and the rest are local commands (asked in read-only, free in project
-mode inside the project). Deletions (`rm`, `rmi`, `container`/`image`/
-`volume`/`network rm`, `system`/`image`/`container`/`volume`/`network`/
-`builder prune`, `compose down -v`/`--volumes`/`--rmi`, `compose rm`, with
-`-f`, `--force` and `-a` alike) are refused in read-only, ask in project mode
-(once or for this session, rule `docker_destructive`, bound to the exact
-command) and run in full access; on another machine over `ssh` they ask every
-time. `docker push` sends like any other send (rule `docker_push`; refused in
-read-only). The catastrophic list still wins.
-
 Connector catalog and imports (`mcp_catalog_v1`, plan de conectores C4).
 The catalog is data shipped with the Engine (`src/rinari/mcp/catalog.json`,
 validated against `catalog.schema.json`). `mcp.catalog.list` → `{version,
@@ -1301,7 +1286,8 @@ are ignored, so nothing of the owner's is read) — or the servers of a pasted `
 …}`, `{"servers": …}` or a bare map). → `{sources [{source, label, path,
 found, servers, error}], candidates [{key, name, source, source_label, path,
 project_root, transport, command, url, secrets [{where: env | header | url,
-name, kind: value | env_ref}], warnings, importable, reason, existing,
+name, kind: value | env_ref, variable? (the owner's environment variable an
+env_ref reads: its name, never its value)}], warnings, importable, reason, existing,
 suggested_name}]}`. Only names of secrets: values never leave the Engine.
 `${VAR}` and `${env:VAR}` become `env://VAR`; `Authorization: Bearer
 ${VAR}` and Codex's `bearer_token_env_var` become bearer auth from that

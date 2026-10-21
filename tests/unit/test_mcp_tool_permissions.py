@@ -406,6 +406,18 @@ def test_settings_survive_editing_the_server_and_hold_no_secret(services) -> Non
     assert "permissions" not in json.loads(services.mcp.show("mail")["config_json"])
 
 
+def test_a_project_server_keeps_its_folder_when_its_permissions_change(services, tmp_path) -> None:
+    folder = tmp_path / "project-a"
+    folder.mkdir()
+    services.mcp.add("local-db", ["fake-db"], scope="project", project_root=folder)
+    root = services.mcp.show("local-db", "project")["project_root"]
+    assert root
+    services.mcp.set_tool_permission("local-db", "plain", decision="allow", scope="project")
+    services.mcp.set_default_permission("local-db", "ask", scope="project")
+    # Still tied to its folder: never visible in every trusted project.
+    assert services.mcp.show("local-db", "project")["project_root"] == root
+
+
 def test_invalid_settings_are_refused(services) -> None:
     with pytest.raises(ValueError, match="allow, ask, deny"):
         services.mcp.set_tool_permission("mail", "plain", decision="maybe")

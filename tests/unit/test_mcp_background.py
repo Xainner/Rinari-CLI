@@ -693,3 +693,65 @@ def test_an_untrusted_project_server_keeps_its_reason_and_waits(services, tmp_pa
     assert wait_for(lambda: _status(services, "local-db") == "connected")
     assert services.mcp.available_tools(project)
     assert services.mcp.available_tools(None) == []
+
+
+def test_a_project_trust_check_never_runs_under_the_service_lock(services, tmp_path) -> None:
+    """`is_trusted` runs git: every MCP operation would wait on it."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    services.trust.add(project)
+    services.mcp.add("local-db", ["fake"], scope="project", project_root=project)
+    services.mcp._transport_for = FakeServer().transport
+    services.mcp.start(project)
+    assert wait_for(lambda: _status(services, "local-db") == "connected")
+    real = services.mcp._trust.is_trusted
+    held: list[bool] = []
+
+    def is_trusted(path):
+        # Another thread tries the lock: it is free unless this call holds it.
+        free: list[bool] = []
+        probe = threading.Thread(
+            target=lambda: (
+                free.append(services.mcp._lock.acquire(timeout=0.5))
+                or (free[-1] and services.mcp._lock.release())
+            )
+        )
+        probe.start()
+        probe.join()
+        held.append(not free[0])
+        return real(path)
+
+    services.mcp._trust.is_trusted = is_trusted
+    services.mcp.connectors(project)
+    services.mcp.available_tools(project)
+    services.mcp.resource_servers(project)
+    services.mcp.client("local-db", project)
+    assert held and not any(held)
+    # Trust taken away shows on the next look.
+    services.trust.remove(project)
+    assert services.mcp.connectors(project) == []
+
+
+def test_closing_while_a_server_connects_leaves_no_client_running(services, gate) -> None:
+    server = FakeServer(gate=gate)
+    services.mcp.add("tracker", ["fake-tracker"])
+    services.mcp._transport_for = server.transport
+    services.mcp.start()
+    assert wait_for(lambda: server.transports)
+    services.mcp.close()  # the end of the process, while it still connects
+    gate.set()
+    assert wait_for(lambda: all(t._closed for t in server.transports))
+    assert services.mcp._clients == {}
+
+
+def test_a_client_sent_to_reauth_is_closed(services) -> None:
+    server = FakeServer()
+    services.mcp.add("mail", ["fake"])
+    services.mcp._transport_for = server.transport
+    services.mcp.connect("mail")
+    server.call_error = TransportError(
+        "TRANSPORT_AUTH", "the sign-in renewal failed", http_status=401, hint="reauth_required"
+    )
+    with pytest.raises(Exception, match="renewal failed"):
+        services.mcp.invoke("mail", "read_thing", {})
+    assert server.transports[-1]._closed
