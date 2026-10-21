@@ -845,6 +845,11 @@ class TurnManager:
             )
         if record.agent_id and not compaction_only:
             self._check_agent(record)
+            if reasoning_effort is None:
+                # Rinari Agency: the agent's effort, for its chat, its posts,
+                # its rules and its children, unless the turn chose one.
+                agent = self._services.ctx.agency_repo.get(record.agent_id) or {}
+                reasoning_effort = agent.get("reasoning_effort") or None
             if origin is None and memory_origin == "interactive":
                 self._warn_pasted_secret(record.id, message)
         # A turn is what recency means, and nothing else refreshed it here, so

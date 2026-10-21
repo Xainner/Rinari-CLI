@@ -9,9 +9,13 @@ chat is an ordinary conversation marked with its id.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from typing import Any
 
+from rinari.agents.config import EFFORTS
+
+_ICON_ID = re.compile(r"[A-Za-z0-9_-]{1,40}")
 PERMISSION_PROFILES = ("read-only", "workspace", "full-access")
 MAX_NAME = 60
 MAX_ROLE = 120
@@ -24,6 +28,8 @@ EDITABLE = (
     "role",
     "instructions",
     "model",
+    "reasoning_effort",
+    "icon",
     "permission_profile",
     "connectors",
     "budget",
@@ -119,6 +125,15 @@ class AgencyService:
                 raise AgencyError(f"Unknown model: {model}.")
             model = resolved
         agent["model"] = model
+        effort = merged.get("reasoning_effort") or None
+        if effort is not None and effort not in EFFORTS:
+            raise AgencyError(f"reasoning_effort must be one of {', '.join(EFFORTS)} or null.")
+        agent["reasoning_effort"] = effort
+        # The app maps the id to an avatar; the Engine only keeps a safe id.
+        icon = merged.get("icon") or None
+        if icon is not None and (not isinstance(icon, str) or not _ICON_ID.fullmatch(icon)):
+            raise AgencyError("icon must be an id of 1 to 40 letters, digits, '-' or '_'.")
+        agent["icon"] = icon
         profile = merged.get("permission_profile") or "workspace"
         if profile not in PERMISSION_PROFILES:
             raise AgencyError(
