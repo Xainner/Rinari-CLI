@@ -107,6 +107,8 @@ def _errand_review(host: TeamToolHost, agent_id: str, arguments, external: bool 
         return _fail(ToolErrorCode.INVALID_ARGUMENT, str(exc))
     board = getattr(host.services.teams, "board", None)
     if board is not None:
+        if reviewed["status"] == "returned" and board.hold_if_halted(reviewed["id"]):
+            return _ok({"status": "blocked", "reason": "stopped_by_owner"})
         board.tick()
     return _ok({"status": reviewed["status"]})
 
@@ -138,6 +140,16 @@ def _leave_errand(
     except AgencyError as exc:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, str(exc))
     board.post_notice(target_team, errand, author_agent_id=from_agent_id)
+    if board.hold_if_halted(errand["id"]):
+        # The owner stopped the Agency: it stays on the board, blocked.
+        return _ok(
+            {
+                "errand_id": errand["id"],
+                "status": "blocked",
+                "reason": "stopped_by_owner",
+                "team": target_team["name"],
+            }
+        )
     board.tick()
     return _ok({"errand_id": errand["id"], "status": errand["status"], "team": target_team["name"]})
 

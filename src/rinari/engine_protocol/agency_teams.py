@@ -66,6 +66,8 @@ MAX_DOING = 120
 EXTERNAL_SOURCE = "agency office"
 _TERMINAL = ("turn.completed", "turn.failed", "turn.cancelled", "turn.stopped")
 _BUSY = "busy"
+#: Why nothing starts on a board the owner stopped («Detener a todos»).
+_HALTED = "stopped_by_owner"
 _OWNER = "the owner"
 
 
@@ -91,7 +93,12 @@ def find_mentions(text: str, names: dict[str, str]) -> list[str]:
 
 
 #: The author brackets the Engine writes, and the look-alikes an agent could forge them with.
-_BRACKETS = str.maketrans({"⟦": "[", "⟧": "]", "〚": "[", "〛": "]"})
+_BRACKETS = str.maketrans(
+    {
+        **dict.fromkeys("⟦〚\uff3b⟪【⁅〖⦃⦗", "["),
+        **dict.fromkeys("⟧〛\uff3d⟫】⁆〗⦄⦘", "]"),
+    }
+)
 
 
 def one_line(text: str, limit: int = LINE_CHARS) -> str:
@@ -271,6 +278,33 @@ class AgencyTeams:
             now_iso(self._services.ctx.clock),
         )
 
+    def _team_halted(self, team_id: str | None) -> bool:
+        team = self._repo.get(team_id) if team_id else None
+        return team is not None and team["rinari_profile_id"] in self._halted_profiles()
+
+    def hold_if_halted(self, errand_id: str) -> bool:
+        """An errand left or sent back while the board is halted waits, blocked, for the owner.
+
+        A cancelled turn may still be finishing after «Detener a todos»; what
+        it leaves must not run when the owner resumes (#75), like its mentions.
+        """
+        errand = self._repo.errand(errand_id)
+        if errand is None or not self._team_halted(errand["team_id"]):
+            return False
+        if errand["status"] in ("pending", "returned"):
+            self._repo.save_errand(
+                errand["id"],
+                {
+                    **errand,
+                    "status": "blocked",
+                    "return_reason": "stopped_by_owner",
+                    "session_id": None,
+                    "updated_at": self._clock.now(),
+                },
+            )
+            self._changed(errand["team_id"], "errand")
+        return True
+
     def halt(self, profile: str) -> dict[str, int]:
         """Stop the profile's board: clear what is queued and block what is open.
 
@@ -341,8 +375,11 @@ class AgencyTeams:
         self.tick()
 
     def resume_params(self, params: dict[str, Any]) -> dict[str, Any]:
-        profile = self._server._profile_filter(params) or self._services.rinari_profiles.active_id()
-        self.resume(profile)
+        # With no profile, every halted one: «Detener a todos» with none halts them all.
+        profile = self._server._profile_filter(params)
+        for each in [profile] if profile else sorted(self._halted_profiles()):
+            self.resume(each)
+        self.tick()
         return {"resumed": True}
 
     # -- teams ---------------------------------------------------------------------------
@@ -928,6 +965,8 @@ class AgencyTeams:
         self, session_id: str, prompt: str, origin: dict[str, Any], live: dict
     ) -> str | None:
         """Start a turn. None when it started, `_BUSY` if one is running, else why it could not."""
+        if self._team_halted(live.get("team_id")):
+            return _HALTED
         with self._lock:
             if session_id in self._live:
                 return _BUSY
@@ -950,6 +989,13 @@ class AgencyTeams:
         with self._lock:
             if self._live.get(session_id) is live:
                 self._live[session_id] = {**live, "turn_id": started.get("turn_id")}
+        if self._team_halted(live.get("team_id")):
+            # halt() came between the check above and the start: its snapshot
+            # had no turn to cut yet, so this one is cut here (#75).
+            try:
+                self._turns.cancel_turn(session_id)
+            except Exception:  # already over
+                logger.info("agency conversation %s: turn already over", session_id)
         return None
 
     def _start_mention(self, team: dict, post: dict, mention: dict) -> None:
@@ -999,6 +1045,8 @@ class AgencyTeams:
                 "message_at": message["created_at"],
             },
         )
+        if why_not == _HALTED:
+            return  # the owner stopped the Agency: the mention is dropped, as in halt()
         if why_not == _BUSY:
             with self._lock:
                 self._mentions.setdefault(post["session_id"], []).insert(0, mention)
@@ -1249,7 +1297,7 @@ class AgencyTeams:
                     "hop": errand["hop"] + 1,
                 },
             )
-            if why == _BUSY:
+            if why in (_BUSY, _HALTED):
                 with self._lock:
                     self._direct.setdefault(session_id, []).insert(0, item)
             elif why is not None:

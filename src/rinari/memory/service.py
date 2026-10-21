@@ -587,20 +587,26 @@ class MemoryService:
         """General memory, plus this profile's, this chat's, its agent's and its team's (#75)."""
         if profile_id is None:
             profile_id = self._profile_of(session_id)
+        sees = self._place_filter(profile_id, session_id)
+        return [row for row in self.repo.user_live() if sees(row)]
+
+    def _place_filter(self, profile_id: str | None, session_id: str | None):
+        """Whether a row with a `place` (a memory, a candidate) is this conversation's to see."""
         agent_id = self._agent_of(session_id)
         team_id = self._team_of(session_id)
-        rows = []
-        for row in self.repo.user_live():
+
+        def sees(row: dict) -> bool:
             place = row.get("place") or "general"
-            if (
+            ref = row.get("place_ref")
+            return (
                 place == "general"
-                or (place == "profile" and profile_id and row.get("place_ref") == profile_id)
-                or (place == "chat" and session_id and row.get("place_ref") == session_id)
-                or (place == "agent" and agent_id and row.get("place_ref") == agent_id)
-                or (place == "team" and team_id and row.get("place_ref") == team_id)
-            ):
-                rows.append(row)
-        return rows
+                or (place == "profile" and bool(profile_id) and ref == profile_id)
+                or (place == "chat" and bool(session_id) and ref == session_id)
+                or (place == "agent" and bool(agent_id) and ref == agent_id)
+                or (place == "team" and bool(team_id) and ref == team_id)
+            )
+
+        return sees
 
     def move(
         self,
@@ -1382,8 +1388,12 @@ class MemoryService:
         value = re.sub(r"documentos?[\\/]|[\\/]documentos?\b", " ", value)
         return MemoryService.requires_owner_consent("", value)
 
-    def _learned_store_rows(self, scope: str, project_root: str | None) -> list[dict]:
-        rows = list(self.repo.user_live())
+    def _learned_store_rows(
+        self, scope: str, project_root: str | None, session_id: str | None = None
+    ) -> list[dict]:
+        # Only what this conversation may see (#75): a post never learns that
+        # another team already knows something, nor reads that team's note.
+        rows = list(self._user_rows_for(session_id))
         if scope == "project" and project_root:
             rows += self.repo.project_live(project_root)
         return rows
@@ -1425,7 +1435,7 @@ class MemoryService:
         _, text_hash = _suppression_hashes(topic, text)
         if self.repo.suppression_exists(text_hash):
             return {"status": "forgotten"}
-        for row in self._learned_store_rows(scope, project_root):
+        for row in self._learned_store_rows(scope, project_root, session_id):
             if _similar(row["text"], text):
                 view = (
                     self._project_view(row)
@@ -1433,9 +1443,12 @@ class MemoryService:
                     else self._user_view(row)
                 )
                 return {"status": "already_known", "memory": view}
+        sees = self._place_filter(self._profile_of(session_id), session_id)
         for row in self.repo.candidates(status=("pending", "denied"), limit=500):
             if row.get("classification") not in MODEL_CANDIDATE_CLASSES or not row.get("text"):
                 continue
+            if (row.get("scope") or "user") == "user" and not sees(row):
+                continue  # another agent's or team's proposal
             if (row.get("scope") or "user") != scope or (
                 scope == "project" and row.get("project_root") != project_root
             ):

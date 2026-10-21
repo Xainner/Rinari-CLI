@@ -51,6 +51,15 @@ ERRAND_MODES = ("turn", "subagents")
 AVAILABLE_ERRAND_MODES = ("turn",)
 
 
+def halt_profiles(services: Any, agents: list[dict[str, Any]]) -> set[str]:
+    """The profiles «Detener a todos» halts when it names none: every one with agents
+    or teams, and the active one."""
+    profiles = {agent["rinari_profile_id"] for agent in agents}
+    profiles |= {team["rinari_profile_id"] for team in services.ctx.team_repo.list(None)}
+    profiles.add(services.rinari_profiles.active_id())
+    return profiles
+
+
 def agency_settings(services: Any) -> dict[str, Any]:
     """The Agency's own settings: the global daily budget and how errands run."""
     stored = services.ctx.config_repo.get_json(SETTINGS_KEY) or {}
@@ -411,7 +420,8 @@ class AgencyMethods:
         conversations are not touched.
         """
         profile = self._server._profile_filter(params)
-        agents = {agent["id"] for agent in self.agency.list(profile)}
+        listed = self.agency.list(profile)
+        agents = {agent["id"] for agent in listed}
         sessions = {
             session_id
             for agent_id in agents
@@ -419,12 +429,13 @@ class AgencyMethods:
         }
         # The board first (B5): halted before any turn is cut, so the tick a
         # cancelled turn runs finds nothing to start. It cuts its own live turns.
+        # Every profile whose agents are stopped (all of them with no profile, #75).
         board = getattr(self._server, "_teams", None)
-        halted = (
-            board.halt(profile or self._services.rinari_profiles.active_id())
-            if board is not None
-            else {"blocked_errands": 0}
-        )
+        halted = {"blocked_errands": 0}
+        if board is not None:
+            profiles = {profile} if profile else halt_profiles(self._services, listed)
+            for each in sorted(profiles):
+                halted["blocked_errands"] += board.halt(each)["blocked_errands"]
         paused = []
         for task in self._services.ctx.schedule_repo.list():
             if task.get("agent_id") in agents and task.get("enabled"):

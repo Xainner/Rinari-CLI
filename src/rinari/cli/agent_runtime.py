@@ -269,10 +269,11 @@ def _agent_identity(services: ServiceContainer, record: SessionRecord) -> str | 
 def _agency_pack(services: ServiceContainer, record: SessionRecord) -> str | None:
     """Which Agency tools a conversation gets: «post», «direct» or none.
 
-    Only a post and the agent's own direct chat. Their children and forks
-    keep the agent (its memory, budget and connectors) but get no Agency
-    tools: the conversation that opened them delivers the work, inside its
-    own chain, so a child never starts a chain of its own (#75).
+    Only a post, the agent's own direct chat and a run of one of its rules
+    (it works as the agent, and may pass work to a team like its chat).
+    Their children keep the agent (its memory, budget and connectors) but
+    get no Agency tools: the conversation that opened them delivers the
+    work, inside its own chain, so a child never starts a chain of its own (#75).
     """
     if getattr(services, "teams", None) is None:
         return None
@@ -281,6 +282,12 @@ def _agency_pack(services: ServiceContainer, record: SessionRecord) -> str | Non
     agent_id = getattr(record, "agent_id", None)
     if agent_id and (services.ctx.agency_repo.get(agent_id) or {}).get("session_id") == record.id:
         return "direct"
+    if (
+        agent_id
+        and getattr(record, "lineage_kind", None) == "schedule"
+        and not getattr(record, "parent_session_id", None)
+    ):
+        return "direct"  # a run of the agent's rule
     return None
 
 

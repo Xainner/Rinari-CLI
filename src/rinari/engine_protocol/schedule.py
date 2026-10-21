@@ -40,6 +40,8 @@ SUMMARY_CHARS = 600
 #: Failed runs on the same change of a watched folder before the change is
 #: taken anyway and the rule is told as blocked (#75).
 MAX_CHANGE_FAILURES = 3
+#: Why a tool rule waits past its `max_per_day`; the folder's change waits with it.
+DAILY_LIMIT = "daily limit reached"
 _ACTIVE = ("running", "needs_you")
 _TERMINAL = {
     "turn.completed": "completed",
@@ -163,8 +165,9 @@ class ScheduleRunner:
         Engine was closed still runs the rule at its next check. Only the
         very first check of a rule takes the fingerprint without running.
         A change is taken once the run it caused ends, whatever the end
-        (skipped, blocked or cancelled too), except a failure: the next
-        check tries it again, up to MAX_CHANGE_FAILURES times. Returns
+        (skipped, blocked or cancelled too), except a failure, which the next
+        check tries again up to MAX_CHANGE_FAILURES times, and the daily
+        limit, which keeps it for when the rule may run again. Returns
         (why it is skipped, the new fingerprint to keep when the run ends).
         """
         watch = task.get("watch")
@@ -198,6 +201,8 @@ class ScheduleRunner:
         blocked, so the owner hears of it and the rule stops spending (#75).
         """
         task_id, fingerprint = pending
+        if status == "skipped" and fields.get("reason") == DAILY_LIMIT:
+            return status, fields  # past the day's limit it waits: the change too (#75)
         if status != "failed":
             self._change_failures.pop(task_id, None)
             self._keep_fingerprint(task_id, fingerprint)
@@ -328,7 +333,7 @@ class ScheduleRunner:
             allowed, agent_id = self._rule_scope(task)
             limit = spec.get("max_per_day")
             if limit and self._completed_today(task) >= limit:
-                self._finish(task, run_id, "skipped", reason="daily limit reached", quiet=True)
+                self._finish(task, run_id, "skipped", reason=DAILY_LIMIT, quiet=True)
                 return
             text = self._call_rule_tool(spec, allowed, agent_id)
             if not text.strip():
