@@ -4475,12 +4475,18 @@ class EngineServer:
         from rinari.commands import command_list
 
         project = None
+        agency = False
         session_id = params.get("session_id")
         if isinstance(session_id, str) and session_id:
             record = self._services.sessions.show(session_id)
             if record.project_root_snapshot:
                 project = Path(record.project_root_snapshot)
-        return {"commands": command_list(self._services.skills, project, client="desktop")}
+            agency = bool(getattr(record, "agent_id", None))
+        commands = command_list(self._services.skills, project, client="desktop")
+        if agency:
+            # Rinari Agency: its conversations are never forked (session.fork refuses).
+            commands = [item for item in commands if item.get("name") != "fork"]
+        return {"commands": commands}
 
     def _expand_command(self, session_id: str, command: Any, typed: str) -> tuple[str, str]:
         """`/review x`, `/test`, `/pdf-tools x`: the Engine turns the command the

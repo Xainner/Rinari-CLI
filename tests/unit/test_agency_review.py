@@ -620,9 +620,21 @@ def test_an_agency_conversation_cannot_be_forked(server) -> None:
     with pytest.raises(InvalidUsageError):
         services.sessions.fork(writer["session_id"])
     assert len(services.sessions.list()) == before
+    # The «/» menu of an Agency conversation does not offer /fork; Rinari's does.
+    names = {
+        c["name"]
+        for c in _ok(_call(server, "command.list", {"session_id": writer["session_id"]}))[
+            "commands"
+        ]
+    }
+    assert "fork" not in names
     # Rinari's own conversations still fork.
     plain = services.sessions.new(cwd=services.ctx.layout.root, forced_chat=True)
     assert services.sessions.fork(plain.id).session.id != plain.id
+    names = {
+        c["name"] for c in _ok(_call(server, "command.list", {"session_id": plain.id}))["commands"]
+    }
+    assert "fork" in names
 
 
 def test_a_folder_change_is_used_up_by_a_skipped_run_and_by_three_failures(
