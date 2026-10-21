@@ -14,6 +14,7 @@ import hashlib
 import itertools
 import json
 import logging
+import os
 import socket
 import threading
 import time
@@ -66,6 +67,7 @@ class FakeAuth:
         # Tokens.
         self.expires_in = 3600
         self.reject_refresh = False
+        self.refresh_status: int | None = None  # answer refreshes with this HTTP status
         self.rotate_refresh = True
         self.clients: dict[str, dict[str, Any]] = {}
         self.registrations: list[dict[str, Any]] = []
@@ -249,6 +251,9 @@ def _handler(state: FakeAuth):
                     return
                 if form.get("grant_type") == "refresh_token":
                     token = form.get("refresh_token", "")
+                    if state.refresh_status is not None:
+                        self._json(state.refresh_status, {"error": "slow_down"})
+                        return
                     if state.reject_refresh or state.refresh.get(token) != client_id:
                         self._json(
                             400,
@@ -586,6 +591,10 @@ def test_registered_client_is_reused_on_its_port_and_replaced_when_busy(
     assert second["redirect_uri"] == first["redirect_uri"]
     port = urlsplit(first["redirect_uri"]).port
     with socket.socket() as busy:
+        if os.name != "nt":
+            # The last callback leaves TIME_WAIT on the port; the listening
+            # socket still blocks the listener (Windows: no TIME_WAIT bind error).
+            busy.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         busy.bind(("127.0.0.1", port))
         busy.listen()
         third = _sign_in(manager, services, row)
@@ -730,6 +739,32 @@ def test_cancel_mid_flow_closes_the_listener(fake, services, manager, events) ->
     assert manager.status(row["id"])["last"]["outcome"] == "cancelled"
 
 
+def test_cancel_while_discovering_never_reaches_the_browser(
+    fake, services, manager, events, opened
+) -> None:
+    row = _add(services, fake)
+    original = manager._client
+
+    def client_then_cancel(*args, **kwargs):
+        result = original(*args, **kwargs)
+        # The owner cancels while discovery and registration run.
+        assert manager.cancel(row["id"]) is True
+        return result
+
+    manager._client = client_then_cancel
+    with pytest.raises(OAuthError) as excinfo:
+        _start(manager, services, row)
+    assert excinfo.value.code == "OAUTH_CANCELLED"
+    assert opened == []
+    assert events.finished()[-1]["outcome"] == "cancelled"
+    assert manager.status(row["id"])["pending"] is None
+    assert manager.cancel(row["id"]) is False
+    # The next sign-in starts clean.
+    manager._client = original
+    _sign_in(manager, services, row)
+    assert manager.status(row["id"])["signed_in"] is True
+
+
 def test_denied_authorization_ends_the_sign_in(fake, services, manager, events) -> None:
     row = _add(services, fake)
     flow = _start(manager, services, row)
@@ -826,6 +861,23 @@ def test_failed_refresh_raises_reauth_required(fake, services, manager, caplog) 
     text = str(excinfo.value) + json.dumps(test) + json.dumps(services.mcp.logs()) + caplog.text
     for token in _tokens(fake):
         assert token not in text
+
+
+@pytest.mark.parametrize("status", [429, 408, 503])
+def test_a_passing_refresh_failure_keeps_the_refresh_token(fake, services, manager, status) -> None:
+    row = _add(services, fake)
+    _sign_in(manager, services, row)
+    services.mcp.connect("remote")
+    fake.invalidate_access()
+    fake.refresh_status = status
+    with pytest.raises(McpError) as excinfo:
+        services.mcp.invoke("remote", "whoami", {})
+    assert excinfo.value.hint != "reauth_required"
+    after = manager.status(row["id"])
+    assert after["has_refresh_token"] is True and after["reauth_required"] is False
+    # Once the server answers again, the same refresh token works.
+    fake.refresh_status = None
+    assert services.mcp.invoke("remote", "whoami", {})
 
 
 def test_expired_token_without_refresh_needs_reauth(fake, services, manager) -> None:
@@ -994,6 +1046,18 @@ def test_oauth_config_round_trip_and_partial_update(fake, services) -> None:
 def test_invalid_oauth_configs_are_rejected(services, auth) -> None:
     with pytest.raises(McpConfigError):
         services.mcp.add("bad", url="https://example.com/mcp", auth=auth)
+
+
+def test_oauth_needs_https_except_on_this_computer(services) -> None:
+    with pytest.raises(McpConfigError, match="https"):
+        services.mcp.add("plain", url="http://example.com/mcp", auth={"kind": "oauth"})
+    assert services.mcp.add("local", url="http://127.0.0.1:9/mcp", auth={"kind": "oauth"})
+
+
+def test_sign_in_refuses_a_plain_http_url(services, manager) -> None:
+    with pytest.raises(OAuthError) as excinfo:
+        manager.start("mcp_x", "plain", "http://example.com/mcp")
+    assert excinfo.value.hint == "https_required"
 
 
 def test_oauth_with_an_authorization_header_is_rejected(services) -> None:

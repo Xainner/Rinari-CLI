@@ -1173,8 +1173,11 @@ no refresh token is kept) for Google. Errors before the browser step are
 `oauth_metadata_missing` / `oauth_metadata_invalid` / `oauth_pkce_unsupported`,
 `OAUTH_CLIENT_REQUIRED`, `OAUTH_REGISTRATION_FAILED`
 `oauth_registration_rejected`, `OAUTH_PORT_IN_USE` `redirect_port_busy`,
-`OAUTH_UNREACHABLE`). A callback with another `state` is refused (400) and the
-sign-in keeps waiting. Events: `mcp.auth.progress {name, flow_id, stage}`
+`OAUTH_UNREACHABLE`, `OAUTH_INSECURE_URL` `https_required`: OAuth needs an
+https URL, http only on a loopback host, and `mcp.add`/`mcp.update` refuse
+it too; `OAUTH_CANCELLED` `oauth_cancelled` when `mcp.auth.cancel` arrives
+while it still discovers or registers: the browser never opens). A callback
+with another `state` is refused (400) and the sign-in keeps waiting. Events: `mcp.auth.progress {name, flow_id, stage}`
 (`discovering`, `registering`, `waiting_for_browser`, `exchanging_code`) and
 `mcp.auth.finished {name, flow_id, outcome, finished_at, error?}` with
 `outcome` `signed_in`, `failed` (`OAUTH_DENIED`, `OAUTH_TOKEN_REJECTED`…),
@@ -1188,7 +1191,8 @@ connection → `{name, revoked, removed, cancelled}`. Tokens (access, refresh,
 expiry, scopes) live only in the credential store under `mcp/<server
 id>/oauth` (a registered client under `mcp/<server id>/oauth-client`); the
 transport refreshes a token about to expire and, after a 401, refreshes and
-retries once. When that is impossible the error is `MCP_AUTH_REJECTED` with
+retries once; a refresh answered 408, 429 or 5xx keeps the refresh token and
+is retried later. When that is impossible the error is `MCP_AUTH_REJECTED` with
 hint `reauth_required` (`oauth_required` if never signed in). `mcp.remove`
 revokes and deletes them too. `mcp.test`/`mcp.probe` add `oauth` for http
 servers with auth `none` or `oauth`: `{available, client: configured |

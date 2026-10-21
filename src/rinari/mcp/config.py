@@ -603,6 +603,9 @@ def validate_draft(draft: ServerDraft) -> None:
         if draft.auth_kind == AUTH_OAUTH:
             if _find_header(draft.headers, "Authorization"):
                 raise McpConfigError("oauth and an Authorization header cannot be combined")
+            if urlsplit(draft.url).scheme != "https" and not is_local_host(draft.url):
+                # The access token travels with every request (OAuth 2.1, MCP).
+                raise McpConfigError("oauth needs an https:// URL (http only on this computer)")
             oauth = draft.oauth or OAuthConfig()
             if oauth.client_secret is not None and not oauth.client_id:
                 raise McpConfigError("auth.client_secret needs auth.client_id")
