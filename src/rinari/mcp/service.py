@@ -1162,17 +1162,9 @@ class McpService:
             config.pop(tool_permissions.PERMISSIONS_KEY, None)
         else:
             config[tool_permissions.PERMISSIONS_KEY] = block
-        # Same row, same id and secrets: only config_json changes.
-        self._ctx.mcp_server_repo.add(
-            row["id"],
-            name=row["name"],
-            transport=row.get("transport") or TRANSPORT_STDIO,
-            command=row.get("command") or "",
-            url=row.get("url") or "",
-            scope=row.get("scope") or "global",
-            enabled=bool(row.get("enabled")),
-            config_json=json.dumps(config, sort_keys=True),
-            created_at=_now(self._ctx),
+        # Same row, same id, folder and secrets: only config_json changes.
+        self._ctx.mcp_server_repo.set_config(
+            row["id"], json.dumps(config, sort_keys=True), _now(self._ctx)
         )
         saved = tool_permissions.stored_permissions(config)
         name = row["name"]

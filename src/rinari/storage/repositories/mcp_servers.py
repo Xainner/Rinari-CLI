@@ -77,6 +77,14 @@ class McpServerRepository:
         )
         return cursor.rowcount > 0
 
+    def set_config(self, server_id: str, config_json: str, updated_at: str) -> bool:
+        """Only the config changes: the folder, command and secrets stay as they are."""
+        cursor = self._db.execute(
+            "UPDATE mcp_servers SET config_json = ?, updated_at = ? WHERE id = ?",
+            (config_json, updated_at, server_id),
+        )
+        return cursor.rowcount > 0
+
     def delete(self, name: str, scope: str) -> bool:
         cursor = self._db.execute(
             "DELETE FROM mcp_servers WHERE scope = ? AND name = ?", (scope, name)
