@@ -163,9 +163,12 @@ _REVIEW_DESCRIPTION = (
 
 def _kinds():
     ClassifiedAction, *_ = _defs()
+    # The office and the board are the Agency's own bookkeeping, with no effect
+    # outside it: allowed in a read-only post. Each agent woken by them works
+    # with its own permissions.
     write = {
-        "capabilities": ("state.write",),
-        "classify": lambda _i: ClassifiedAction("state.write"),
+        "capabilities": ("state.mutate",),
+        "classify": lambda _i: ClassifiedAction("state.mutate"),
         "always_loaded": True,
         "side_effects": "local-reversible",
     }

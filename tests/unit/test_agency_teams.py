@@ -878,3 +878,27 @@ def test_a_direct_chat_leaves_an_errand_to_a_team_and_reviews_its_delivery(serve
     _finish(server, emails["session_id"], "Gracias")
     office_after = _ok(_call(server, "agency.office.list", {"team_id": team["id"]}))["messages"]
     assert len(office_after) == len(office)  # its answer stays in its own chat
+
+
+def test_the_agency_tools_work_in_a_read_only_post_or_chat(server) -> None:
+    # Read-only agents use them: they only touch the Agency's own state.
+    from rinari.agency.tools import TeamToolHost, direct_tools, team_tools
+    from rinari.policy.engine import PolicyAction, PolicyEngine
+
+    host = TeamToolHost(server._services, "ses_x")
+    for tool in [*team_tools(host), *direct_tools(host)]:
+        action = tool.classify({})
+        assert action.capability in ("state.read", "state.mutate"), tool.name
+        assert set(tool.capabilities) <= {"state.read", "state.mutate"}, tool.name
+    assert PolicyEngine().decide("state.mutate", _read_only_scope()).action is PolicyAction.ALLOW
+
+
+def _read_only_scope():
+    from pathlib import Path
+
+    from rinari.policy.engine import SessionScope, normalize_profile
+
+    root = Path.cwd()
+    return SessionScope(
+        kind="CHAT", root=None, cwd=root, profile=normalize_profile("read-only"), user_home=root
+    )
