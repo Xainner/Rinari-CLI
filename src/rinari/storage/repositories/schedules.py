@@ -171,6 +171,26 @@ class ScheduleRepository:
         )
         return dict(row) if row else None
 
+    def has_active_run(self, task_id: str) -> bool:
+        """A run of the task still waiting, running or asking, however old it is."""
+        row = self._db.query_one(
+            "SELECT 1 FROM scheduled_runs WHERE task_id = ? "
+            "AND status IN ('queued', 'running', 'needs_you') LIMIT 1",
+            (task_id,),
+        )
+        return row is not None
+
+    def queued_runs_of(self, task_id: str | None = None) -> list[dict[str, Any]]:
+        """Runs waiting in a conversation's queue: a task's, or every task's."""
+        if task_id is None:
+            rows = self._db.query("SELECT * FROM scheduled_runs WHERE status = 'queued'")
+        else:
+            rows = self._db.query(
+                "SELECT * FROM scheduled_runs WHERE task_id = ? AND status = 'queued'",
+                (task_id,),
+            )
+        return [dict(row) for row in rows]
+
     def unfinished_runs(self) -> list[dict[str, Any]]:
         rows = self._db.query(
             "SELECT * FROM scheduled_runs WHERE status IN ('queued', 'running', 'needs_you')"

@@ -51,7 +51,6 @@ SUMMARY_CHARS = 600
 MAX_CHANGE_FAILURES = 3
 #: Why a tool rule waits past its `max_per_day`; the folder's change waits with it.
 DAILY_LIMIT = "daily limit reached"
-_ACTIVE = ("queued", "running", "needs_you")
 #: Why a «Repetir aquí» run could not reach its conversation.
 CONVERSATION_DELETED = "conversation_deleted"
 _TERMINAL = {
@@ -118,6 +117,7 @@ class ScheduleRunner:
         with self._lock:
             if not self._recovered:
                 self._recover(now)
+            self._settle_gone_conversations()
             for task in self._repo.due(now):
                 due_at = task["next_run_at"]
                 self._settle_gone_conversation(task)
@@ -155,7 +155,7 @@ class ScheduleRunner:
         if now - (run["scheduled_for"] or now) > CATCH_UP_WINDOW_S:
             self._finish(task, run["id"], "skipped", reason="missed")
             return
-        self._start_or_queue(task, run["id"])
+        self._start_or_queue(task, run["id"], session_id=run["session_id"])
 
     def _settle_gone_conversation(self, task: dict[str, Any]) -> None:
         """Runs waiting for a conversation deleted since: failed."""
@@ -167,8 +167,43 @@ class ScheduleRunner:
         for run in self._repo.queued_runs(session_id):
             self._finish(task, run["id"], "failed", reason=CONVERSATION_DELETED)
 
+    def _settle_gone_conversations(self) -> None:
+        """Queued runs of any task whose conversation was deleted: failed now, not
+        when their task is due again."""
+        gone: dict[str, bool] = {}
+        for run in self._repo.queued_runs_of():
+            session_id = run["session_id"]
+            if session_id not in gone:
+                gone[session_id] = (
+                    not session_id or self._services.ctx.session_repo.get(session_id) is None
+                )
+            if not gone[session_id]:
+                continue
+            task = self._repo.get(run["task_id"])
+            if task is None:
+                self._repo.save_run(
+                    run["id"], status="failed", finished_at=self._clock.now(), reason="task_deleted"
+                )
+            else:
+                self._finish(task, run["id"], "failed", reason=CONVERSATION_DELETED)
+
+    def _discard_queued(self, task_id: str, *, settle: bool) -> None:
+        """A deleted or switched-off task: its waiting runs leave their queues."""
+        runs = self._repo.queued_runs_of(task_id)
+        by_session: dict[str, set[str]] = {}
+        for run in runs:
+            if run["session_id"]:
+                by_session.setdefault(run["session_id"], set()).add(run["id"])
+        for session_id, run_ids in by_session.items():
+            self._turns.queue_discard(session_id, run_ids)
+        task = self._repo.get(task_id) if settle else None
+        if task is None:
+            return
+        for run in runs:
+            self._finish(task, run["id"], "cancelled", reason="cancelled_by_owner", quiet=True)
+
     def _has_active_run(self, task_id: str) -> bool:
-        return any(run["status"] in _ACTIVE for run in self._repo.runs(task_id, limit=5))
+        return self._repo.has_active_run(task_id)
 
     def _record_skipped(self, task: dict[str, Any], due_at: float, reason: str) -> str:
         run_id = self._services.ctx.ids.new("run")
@@ -320,14 +355,16 @@ class ScheduleRunner:
         self._emit("schedule.run.started", task, run_id, session_id=session_id)
         return run_id
 
-    def _start_or_queue(self, task: dict[str, Any], run_id: str) -> None:
+    def _start_or_queue(
+        self, task: dict[str, Any], run_id: str, *, session_id: str | None = None
+    ) -> None:
         """«Repetir aquí»: the task's prompt as one more message in its conversation.
 
         Nothing of the task is applied to the conversation (model, mode,
         permissions, skills, grants): it stays the owner's. Busy — a turn
         running or messages waiting before it — the run waits in its queue.
         """
-        session_id = task.get("session_id")
+        session_id = session_id or task.get("session_id")
         if not session_id or self._services.ctx.session_repo.get(session_id) is None:
             self._finish(task, run_id, "failed", reason=CONVERSATION_DELETED)
             # Every next run would fail the same way.
@@ -341,8 +378,13 @@ class ScheduleRunner:
             "target": "this_conversation",
             "task_name": task["name"],
         }
-        busy = self._turns.has_active_turn(session_id) or bool(
-            self._turns.queue_list(session_id)["pending"]
+        # A queue held (a provider limit waiting to resume) is busy too: the run
+        # waits behind what holds it.
+        hold = self._turns.queue_hold
+        busy = (
+            self._turns.has_active_turn(session_id)
+            or bool(self._turns.queue_list(session_id)["pending"])
+            or bool(hold is not None and hold(session_id))
         )
         if not busy:
             with self._lock:
@@ -367,6 +409,9 @@ class ScheduleRunner:
                 )
                 self._emit("schedule.run.started", task, run_id, session_id=session_id)
                 return
+        # Queued before it is in the queue: a turn ending in between starts it at
+        # once, and its `turn.started` must find it waiting (`_observe`).
+        self._repo.save_run(run_id, status="queued", session_id=session_id, started_at=None)
         try:
             self._turns.queue_add(
                 session_id, task["prompt"], origin=origin, memory_origin="automation"
@@ -374,8 +419,8 @@ class ScheduleRunner:
         except EngineProtocolError as exc:
             self._finish(task, run_id, "failed", reason=str(exc.message)[:500])
             return
-        # It starts when the queue reaches it (`turn.started`, in `_observe`).
-        self._repo.save_run(run_id, status="queued", session_id=session_id, started_at=None)
+        # The turn it waited for may have ended before it was in the queue.
+        self._turns.kick_queue(session_id)
 
     def _queue_cleared(self, session_id: str, origins: list[dict[str, Any]]) -> None:
         """«Vaciar»: the scheduled runs taken out of the queue end cancelled."""
@@ -857,11 +902,16 @@ class ScheduleRunner:
             updated = self.tasks.update(task["id"], patch)
         except ScheduledTaskError as exc:
             raise EngineProtocolError(INVALID_PARAMS, str(exc)) from None
+        if task.get("enabled") and not updated.get("enabled"):
+            with self._lock:
+                self._discard_queued(task["id"], settle=True)
         self._changed(task["id"], "updated")
         return {"task": updated}
 
     def delete(self, params: dict[str, Any]) -> dict[str, Any]:
         task = self._task(params.get("task_id"))
+        with self._lock:
+            self._discard_queued(task["id"], settle=False)
         self.tasks.delete(task["id"])
         self._changed(task["id"], "deleted")
         return {"deleted": True, "task_id": task["id"]}

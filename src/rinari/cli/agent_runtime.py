@@ -2651,7 +2651,8 @@ def _run_turn_unlocked(
     session.context.turn_notes = tuple(notes)
     # A scheduled message in an archived conversation runs there and leaves it
     # archived: only the owner brings a conversation back.
-    if not (memory_origin == "automation" and session.record.state == STATE_ARCHIVED):
+    keep_archived = memory_origin == "automation" and session.record.state == STATE_ARCHIVED
+    if not keep_archived:
         _set_session_state(services, session.record, STATE_ACTIVE)
     base = session.context.assembler_base
     include_identity = _needs_identity(message)
@@ -2823,7 +2824,8 @@ def _run_turn_unlocked(
                     ChatMessage.assistant("[Cancelled model response; incomplete]\n" + str(partial))
                 )
             session.context.tool_ctx = replace(session.context.tool_ctx, memory_source=None)
-            _set_session_state(services, session.record, STATE_INTERRUPTED)
+            if not keep_archived:
+                _set_session_state(services, session.record, STATE_INTERRUPTED)
             new_msgs = _without_pre_persisted_owner_message(
                 _new_history(session.context, before, dropped_before), owner_source_record
             )
@@ -2841,7 +2843,8 @@ def _run_turn_unlocked(
             )
             return TurnResult(kind="cancelled", content="Turn cancelled.", tool_calls=0, usage=None)
     except Exception as exc:
-        _set_session_state(services, session.record, STATE_INTERRUPTED)
+        if not keep_archived:
+            _set_session_state(services, session.record, STATE_INTERRUPTED)
         details = getattr(exc, "details", {}) or {}
         details["history_preserved"] = True
         if hasattr(exc, "details"):

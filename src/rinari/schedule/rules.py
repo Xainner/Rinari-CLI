@@ -90,7 +90,13 @@ def resolve_after(raw: Any, now: float) -> Any:
     if not 60 <= seconds <= MAX_AFTER_S:
         raise ScheduleError("'after' must be between 1 minute and 366 days.")
     due = math.ceil((now + seconds) / 60) * 60
-    at = datetime.fromtimestamp(due).strftime("%Y-%m-%dT%H:%M")
+    local = datetime.fromtimestamp(due).replace(fold=0)
+    # `at` is a local time without an offset: in an hour the clock repeats it
+    # means the first one, which can be before `due`. The next minute that is
+    # not before it (at most an hour later) keeps «never earlier».
+    while local.timestamp() < due:
+        local += timedelta(minutes=1)
+    at = local.strftime("%Y-%m-%dT%H:%M")
     return {key: value for key, value in raw.items() if key != "after"} | {"at": at}
 
 

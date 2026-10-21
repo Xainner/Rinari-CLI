@@ -390,5 +390,123 @@ def test_a_grant_cannot_join_a_task_that_runs_here(server, monkeypatch) -> None:
     assert refused["ok"] is False and refused["error"]["code"] == "INVALID_PARAMS"
 
 
+def test_a_turn_ending_while_the_run_is_queued_still_starts_it(server, monkeypatch) -> None:
+    """The run is `queued` before it is in the queue, and the queue is run again:
+    a turn that ends in between can neither strand it nor run it untracked."""
+    fake = FakeModel(["respuesta de la tarea"])
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda services, rec: fake)
+    session_id = _ok(_call(server, "session.create", {"chat": True}))["session"]["id"]
+    task = _here(server, session_id)
+    # Busy when the run looks, but the owner's turn ends before it is queued.
+    monkeypatch.setattr(server.turns, "has_active_turn", lambda sid: True)
+    [run_id] = server._schedule.tick(_due(server, task["id"]))
+    run = _finished(server, run_id)
+    assert run["status"] == "completed" and run["summary"] == "respuesta de la tarea"
+    assert server.turns.queue_list(session_id)["pending"] == 0
+
+
+def test_skipped_ticks_never_hide_a_waiting_run(server, monkeypatch) -> None:
+    gate = threading.Event()
+    fake = FakeModel(["al dueño", "de la tarea"], gate=gate)
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda services, rec: fake)
+    session_id = _ok(_call(server, "session.create", {"chat": True}))["session"]["id"]
+    _ok(_call(server, "session.turn.start", {"session_id": session_id, "message": "hola"}))
+    task = _here(server, session_id)
+    [run_id] = server._schedule.tick(_due(server, task["id"]))
+    for _ in range(8):  # more than any page of recent runs
+        [skipped] = server._schedule.tick(_due(server, task["id"]))
+        assert _run(server, skipped)["reason"] == "previous_run_active"
+    assert server.turns.queue_list(session_id)["pending"] == 1
+    gate.set()
+    assert _finished(server, run_id)["status"] == "completed"
+
+
+def test_a_held_queue_keeps_the_run_waiting(server, monkeypatch) -> None:
+    session_id = _ok(_call(server, "session.create", {"chat": True}))["session"]["id"]
+    task = _here(server, session_id)
+    monkeypatch.setattr(server.turns, "queue_hold", lambda sid: sid == session_id)
+    [run_id] = server._schedule.tick(_due(server, task["id"]))
+    assert _run(server, run_id)["status"] == "queued"
+    assert not server.turns.has_active_turn(session_id)
+
+
+def test_deleting_or_switching_off_a_task_takes_its_run_out_of_the_queue(
+    server, monkeypatch
+) -> None:
+    gate = threading.Event()
+    fake = FakeModel(["al dueño", "lo otro"], gate=gate)
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda services, rec: fake)
+    session_id = _ok(_call(server, "session.create", {"chat": True}))["session"]["id"]
+    _ok(_call(server, "session.turn.start", {"session_id": session_id, "message": "hola"}))
+    _ok(_call(server, "session.queue.add", {"session_id": session_id, "message": "y luego esto"}))
+    off = _here(server, session_id, name="Apagada")
+    gone = _here(server, session_id, name="Borrada")
+    [off_run] = server._schedule.tick(_due(server, off["id"]))
+    server._schedule.tick(_due(server, gone["id"]))
+    assert server.turns.queue_list(session_id)["pending"] == 3
+    _ok(_call(server, "schedule.update", {"task_id": off["id"], "patch": {"enabled": False}}))
+    run = _run(server, off_run)
+    assert (run["status"], run["reason"]) == ("cancelled", "cancelled_by_owner")
+    _ok(_call(server, "schedule.delete", {"task_id": gone["id"]}))
+    # Only the owner's own message is still waiting.
+    [entry] = server.turns.queue_list(session_id)["entries"]
+    assert entry["message"] == "y luego esto"
+    gate.set()
+    _wait(
+        lambda: (
+            not server.turns.has_active_turn(session_id)
+            and server.turns.queue_list(session_id)["pending"] == 0
+        )
+    )
+
+
+def test_a_failed_run_leaves_an_archived_conversation_archived(server, monkeypatch) -> None:
+    class Broken:
+        def capabilities(self):
+            return ProviderCapabilities(streaming=False, tool_calls=True, structured_output=True)
+
+        def invoke(self, request):
+            raise RuntimeError("provider down")
+
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda services, rec: Broken())
+    session_id = _ok(_call(server, "session.create", {"chat": True}))["session"]["id"]
+    task = _here(server, session_id)
+    server._services.sessions.archive(session_id)
+    [run_id] = server._schedule.tick(_due(server, task["id"]))
+    assert _finished(server, run_id)["status"] == "failed"
+    assert server._services.sessions.show(session_id).state == "archived"
+
+
+def test_a_deleted_conversation_settles_its_waiting_run_at_the_next_tick(server) -> None:
+    session_id = _ok(_call(server, "session.create", {"chat": True}))["session"]["id"]
+    task = _here(server, session_id, schedule={"kind": "once", "after": {"days": 2}})
+    repo = server._services.ctx.schedule_repo
+    now = server._services.ctx.clock.now()
+    repo.save_run(
+        "run_left", task_id=task["id"], status="queued", trigger="manual", session_id=session_id
+    )
+    server._schedule._recovered = True  # no restart: just a tick while it waits
+    server._services.sessions.delete(session_id)
+    server._schedule.tick(now)
+    run = _run(server, "run_left")
+    assert (run["status"], run["reason"]) == ("failed", "conversation_deleted")
+
+
+def test_after_never_lands_before_the_time_in_a_repeated_hour(monkeypatch) -> None:
+    """Where the clock repeats an hour, the local `at` keeps «never earlier»."""
+    if not hasattr(time, "tzset"):
+        pytest.skip("needs time.tzset to switch the local zone")
+    monkeypatch.setenv("TZ", "America/New_York")
+    time.tzset()
+    try:
+        # 01:00 EDT: an hour later the clock reads 01:00 again (EST).
+        now = datetime.fromisoformat("2026-11-01T05:00:00+00:00").timestamp()
+        at = resolve_after({"kind": "once", "after": {"minutes": 60}}, now)["at"]
+        assert datetime.fromisoformat(at).timestamp() >= now + 3600
+    finally:
+        monkeypatch.delenv("TZ", raising=False)
+        time.tzset()
+
+
 def test_the_capability_is_announced() -> None:
     assert CAPABILITIES["schedule_target_v1"] is True

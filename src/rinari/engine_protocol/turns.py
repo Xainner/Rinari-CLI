@@ -1965,6 +1965,35 @@ class TurnManager:
                 logger.exception("queue cleared listener failed")
         return {"session_id": record.id, "removed": len(dropped)}
 
+    def queue_discard(self, session_id: str, run_ids: set[str]) -> int:
+        """Take scheduled runs out of a session's queue (their task was deleted or
+        turned off); the rest of the queue stays as it was."""
+        with self._lock:
+            pending = self._queue.get(session_id)
+            if not pending:
+                return 0
+            kept = collections.deque(
+                item
+                for item in pending
+                if not (
+                    (item.origin or {}).get("kind") == "schedule"
+                    and (item.origin or {}).get("run_id") in run_ids
+                )
+            )
+            removed = len(pending) - len(kept)
+            if kept:
+                self._queue[session_id] = kept
+            else:
+                self._queue.pop(session_id, None)
+        if removed:
+            self._emit(
+                event(
+                    "session.queue.updated",
+                    {"session_id": session_id, "pending": self._pending_count(session_id)},
+                )
+            )
+        return removed
+
     def queue_resume(self, params: dict[str, Any]) -> dict[str, Any]:
         """Explicit intervention: the session's queue runs again."""
         session_id = params.get("session_id")
