@@ -185,6 +185,33 @@ CAPABILITIES: dict[str, bool] = {
     # env/header secrets in the CredentialStore, mcp.update, mcp.probe and the
     # structured mcp.test diagnosis (code, http_status, hint, latency_ms).
     "mcp_remote_v1": True,
+    # MCP servers connect in the Engine, in parallel and in the background
+    # (connectors plan, C2): mcpServer.status (idle | connecting | connected |
+    # reauth_required | error | disabled) and .connection (code, hint,
+    # message, tools, resources, attempts, retry_in_s, changed_at), the
+    # mcp.status.changed event, mcp.reconnect, tools refreshed on the
+    # server's list_changed, and mcp.resources.list/read for the model.
+    "mcp_background_connect_v1": True,
+    # OAuth for remote MCP servers (plan de conectores C1): auth.kind "oauth",
+    # mcp.auth.start/status/cancel/signout, mcp.auth.progress/finished, the
+    # `oauth` support block in mcp.test/mcp.probe, hints oauth_required and
+    # reauth_required, and MCP 2025-06-18 with negotiation down.
+    "mcp_oauth_v1": True,
+    # Permissions per connector and per tool (plan de conectores C5): the
+    # server's annotations count (readOnlyHint, destructiveHint, openWorldHint),
+    # Allow / Ask / Block per tool and per server, corrected annotations,
+    # mcp.tools.list/set/set_default, «always» on an MCP tool's approval saves
+    # Allow for it (approval.requested grant_scope "mcp_tool"), and the guard
+    # of external content treats a connector's own results as the same
+    # destination.
+    "mcp_tool_permissions_v1": True,
+    # Connector catalog and imports (connectors plan, C4): mcp.catalog.list/add
+    # (catalog shipped with the Engine, `added` per entry, `next` sign_in |
+    # connect), mcp.import.scan/apply (Claude Desktop, Claude Code, Cursor,
+    # VS Code, Codex or a pasted JSON; only marked servers are created),
+    # mcp.project_offers.list/decide (a trusted folder's .mcp.json asked once
+    # per server), mcpServer.project_root and url_secret.
+    "mcp_catalog_v1": True,
     # soul.settings.get/set: character intensity (minimal | balanced | full),
     # separate from Soul selection; bundled default Soul 4.0.
     "soul_character_intensity_v1": True,

@@ -1102,14 +1102,227 @@ name), `MCP_UNREACHABLE`, `MCP_TLS`, `MCP_TIMEOUT`, `MCP_PROTOCOL`,
 `MCP_HTTP_ERROR`, `MCP_TRANSPORT_UNSUPPORTED`, `MCP_SESSION_EXPIRED`,
 `MCP_SPAWN_FAILED`, `MCP_SECRET_MISSING`, `MCP_NOT_CONNECTED`,
 `MCP_DEPENDENCY` (a stdio server that exited). Hint keys: `check_credentials`,
-`oauth_required` (401 with an OAuth `resource_metadata` challenge and no
-token; OAuth is not implemented), `check_url_or_network`,
+`oauth_required` (a 401 and no OAuth sign-in: sign in, see `mcp_oauth_v1`),
+`reauth_required` (the OAuth sign-in expired and could not be renewed),
+`protocol_version_unsupported`, `check_url_or_network`,
 `check_tls_certificate`, `server_slow_or_unresponsive`, `check_endpoint_path`,
 `server_not_registered`, `not_an_mcp_endpoint`, `initialize_rejected`,
 `server_error`, `request_rejected`, `legacy_sse_unsupported`,
 `session_expired`, `check_command_installed`, `server_exited`,
 `secret_missing`, `server_disabled`, `project_not_trusted`. Messages carry no
 header values, tokens or query strings.
+Background connections (`mcp_background_connect_v1`, connectors plan C2):
+the Engine connects every enabled global server when it starts, in parallel,
+each on its own thread; a project server connects when a session of a
+trusted project builds its runtime. No turn waits for any server: a server
+that arrives later joins the running turn's registry (`capability.search`,
+`tool.call`) and the turn note's index of what is connected, never the
+model's tool list (F42). The connection, its client and its `tools/list`
+live in the Engine process and are shared by every session; `tools/list` is
+read again only when the server sends `notifications/tools/list_changed`
+(over Streamable HTTP, only when it arrives on a POST's event stream: the
+standalone GET stream is not opened). Views add `status` (`idle` before any
+attempt, `connecting`, `connected`, `reauth_required`, `error`, `disabled`)
+and `connection {code, hint, message, tools, resources, attempts,
+retry_in_s, changed_at}`; `mcp.status.changed {name, status, connection}`
+is emitted on every change, and `engine.diagnostics` carries the same per
+server. A failed server is retried with a growing wait (2 s, 4 s, 8 s… up to
+5 min; six timer retries in a serving Engine), by a call to one of its tools
+once the wait is over, or at once with `mcp.reconnect {name}` (returns
+`{server}`, usually `connecting`; the outcome arrives as the event). A call
+inside the wait fails at once with the stored reason instead of waiting for
+a timeout. `reauth_required` (renewing a sign-in failed) and failures the
+owner must fix (`check_credentials`, `secret_missing`, …) are never retried
+on a timer. Connected servers that offer resources add two on-demand reads
+for the model, `mcp.resources.list {server?}` and `mcp.resources.read
+{server, uri}` (`mcp.read`); binary contents are described, not inlined.
+
+OAuth for remote MCP (`mcp_oauth_v1`, plan de conectores C1): `initialize`
+asks for MCP `2025-06-18` and follows the server down to `2025-03-26` or
+`2024-11-05` (any other answer: `MCP_PROTOCOL`, hint
+`protocol_version_unsupported`). `auth = {kind: "oauth", client_id?,
+client_secret?, scopes?, redirect_port?, client_metadata_url?,
+authorize_params?}` on `mcp.create`/`mcp.update` (merged over the stored one;
+`null` clears a key): `client_id` is the owner's own OAuth client (public, kept
+in the row), `client_secret` a secret like any other (credential store, slot
+`oauth-client-secret`), `scopes` a list or a space-separated string,
+`redirect_port` 1024..65535 for clients that need an exact redirect,
+`client_metadata_url` an https URL with a path (a client ID metadata
+document; the process default is `RINARI_MCP_CLIENT_METADATA_URL`), and
+`authorize_params` extra authorization-request parameters (never
+`response_type`, `client_id`, `redirect_uri`, `state`, `code_challenge*`,
+`resource` or `scope`). Views add `client_id`, `client_secret` (state),
+`scopes`, `redirect_port`, `client_metadata_url` and `authorize_params`.
+`mcp.auth.start {name, open_browser?: true, timeout_s?: 300}` (oauth servers
+only, otherwise `INVALID_PARAMS` with `details.hint` `oauth_not_configured`)
+discovers the authorization server — protected resource metadata (RFC 9728)
+at `/.well-known/oauth-protected-resource<path>` even without a 401, else the
+`resource_metadata` of an anonymous `initialize`'s 401, else the authorization
+server on the MCP origin (RFC 8414 / OpenID discovery) — picks the client
+(the configured `client_id`; else dynamic registration, RFC 7591, kept per
+server and reused on its port; else the client metadata document when the
+server accepts them; else `MCP_AUTH_FAILED` with `details.hint`
+`oauth_client_required`), opens a listener on
+`http://127.0.0.1:<free or redirect_port>/callback` for that sign-in only, and
+returns at once `{name, flow_id, authorize_url, redirect_uri, browser_opened,
+expires_at, client, issuer, resource, resource_metadata, registration,
+client_metadata_document, revocation}`; the URL carries PKCE S256, `state` and
+`resource` (RFC 8707), plus `access_type=offline` (and `prompt=consent` while
+no refresh token is kept) for Google. Errors before the browser step are
+`MCP_AUTH_FAILED` with `details {code, message, hint}` (`OAUTH_DISCOVERY_FAILED`
+`oauth_metadata_missing` / `oauth_metadata_invalid` / `oauth_pkce_unsupported`,
+`OAUTH_CLIENT_REQUIRED`, `OAUTH_REGISTRATION_FAILED`
+`oauth_registration_rejected`, `OAUTH_PORT_IN_USE` `redirect_port_busy`,
+`OAUTH_UNREACHABLE`, `OAUTH_INSECURE_URL` `https_required`: OAuth needs an
+https URL, http only on a loopback host, and `mcp.add`/`mcp.update` refuse
+it too; `OAUTH_CANCELLED` `oauth_cancelled` when `mcp.auth.cancel` arrives
+while it still discovers or registers: the browser never opens). A callback
+with another `state` is refused (400) and the sign-in keeps waiting. Events: `mcp.auth.progress {name, flow_id, stage}`
+(`discovering`, `registering`, `waiting_for_browser`, `exchanging_code`) and
+`mcp.auth.finished {name, flow_id, outcome, finished_at, error?}` with
+`outcome` `signed_in`, `failed` (`OAUTH_DENIED`, `OAUTH_TOKEN_REJECTED`…),
+`cancelled` or `timed_out`. `mcp.auth.status {name}` → `{name, kind,
+signed_in, reauth_required, expires_at, has_refresh_token, scopes, issuer,
+client, pending {flow_id, authorize_url, started_at, expires_at} | null, last
+{flow_id, outcome, finished_at, error?} | null}`; `mcp.auth.cancel {name}` →
+`{name, cancelled}`; `mcp.auth.signout {name}` revokes the tokens when the
+server has a revocation endpoint (RFC 7009), deletes them and drops the cached
+connection → `{name, revoked, removed, cancelled}`. Tokens (access, refresh,
+expiry, scopes) live only in the credential store under `mcp/<server
+id>/oauth` (a registered client under `mcp/<server id>/oauth-client`); the
+transport refreshes a token about to expire and, after a 401, refreshes and
+retries once; a refresh answered 408, 429 or 5xx keeps the refresh token and
+is retried later. When that is impossible the error is `MCP_AUTH_REJECTED` with
+hint `reauth_required` (`oauth_required` if never signed in). `mcp.remove`
+revokes and deletes them too. `mcp.test`/`mcp.probe` add `oauth` for http
+servers with auth `none` or `oauth`: `{available, client: configured |
+registration | metadata_document | required, issuer, resource,
+resource_metadata, registration, client_metadata_document, revocation}` or
+null. No token, code, verifier or client secret is ever in a view, an event,
+a log line or an error message.
+
+Permissions per connector and per tool (`mcp_tool_permissions_v1`, plan de
+conectores C5), on top of the three modes. The server's annotations count:
+`readOnlyHint: true` is a read (`mcp.read`), `destructiveHint: true` on a
+tool that writes asks in project mode (risk high, with «always»), and a tool
+that writes without `openWorldHint: false` may send data outside. They are
+hints, not guarantees: only an explicit `true`/`false` counts, and the owner
+can correct them per tool. Allow / Ask / Block per tool wins over the
+server's default, which wins over the mode's rule. Block (`deny`) holds in
+every mode; read-only calls no MCP tool; full access asks for nothing else
+(Ask included). «Always» on an MCP tool's card (`allow_project`, also in a
+loose chat; `approval.requested` says `grant_scope: "mcp_tool"`) saves Allow
+for that tool instead of a project grant. Same connector, same destination:
+after external content, a call that may send data out asks in project mode
+(once or for this session, rule `external_content_send`) only when the
+content came from somewhere else (a page, another connector); results of a
+connector going back to that connector ask nothing, and Allow does not lift
+this guard. Settings live in the server's `config_json` (`permissions
+{default?, tools {<tool> {decision?, annotations?}}}`), survive `mcp.update`
+and never hold a secret; changing them re-classifies the live tools without
+reconnecting.
+- `mcp.tools.list {name, scope?}` → `{server {name, scope, status, default,
+  tools[]}}` from the server's last `tools/list` (nothing connects). Each
+  tool: `{name, tool, title, description, listed, annotations {server, owner,
+  effective}, kind (read | write | destructive), sends_out, setting, decision,
+  decision_source (tool | server | mode), by_mode {read-only, workspace,
+  full-access}}`; `by_mode` is what each mode does before any external
+  content, and a saved setting for a tool the server no longer lists comes
+  with `listed: false`.
+- `mcp.tools.set {name, tool, decision?, annotations?, scope?}`: `decision`
+  `allow` | `ask` | `deny` | `null` (back to the server's default);
+  `annotations {readOnlyHint?, destructiveHint?, openWorldHint?}` with `true`,
+  `false` or `null` (back to the server's hint) per key, or `null` to drop
+  every correction. Marking a tool destructive also makes it a write. →
+  `{server, tool}`. Anything else is `INVALID_PARAMS`; an unknown server is
+  `NOT_FOUND`.
+- `mcp.tools.set_default {name, decision, scope?}`: the server's Allow / Ask /
+  Block for tools without their own setting (`null`: the mode decides) →
+  `{server}`.
+
+Connector catalog and imports (`mcp_catalog_v1`, plan de conectores C4).
+The catalog is data shipped with the Engine (`src/rinari/mcp/catalog.json`,
+validated against `catalog.schema.json`). `mcp.catalog.list` → `{version,
+verified_at, entries}`; each entry: `id`, `name`, `logo` (an identifier: the
+Engine ships no images), `category` (`google`, `work`, `dev`, `design`,
+`files`, `crm`, `media`, `data`), `group?`, `preview?`, `description {es,
+en}`, `notes? {es, en}`, `docs_url`, `tools?` (expected names, when known),
+`server` (`{transport: "http", url, auth {kind: oauth | bearer, scopes?,
+authorize_params?}}` or `{transport: "stdio", command, env [{name, label,
+secret, required, default?}], connection_string? {schemes, env}}`), `setup
+{kind, fields [{name, required}], console_url?, help {es, en},
+alternatives?}` and `added` plus `servers [{name, scope, enabled, status}]`
+(saved servers with the same URL — scheme, host and path — or the same
+command, however they were added). `setup.kind`: `registration` (dynamic
+client registration: nothing to type), `client_metadata` (Rinari's client
+metadata document; alternative: an own `client_id`), `own_client`
+(`client_id`, often `client_secret`, and `redirect_port` when the app needs
+an exact redirect; Google, Slack, Asana, HubSpot), `token` (sent as Bearer;
+GitHub, alternative: an own OAuth app) or `secrets` (a local server's
+environment). `mcp.catalog.add {id, name?, client_id?, client_secret?,
+redirect_port?, token?, secrets? {ENV: value}, connection_string?}` creates
+the global server the entry describes (`name` defaults to the id, with `-2`,
+`-3`… when taken; a taken `name` is `INVALID_PARAMS` with `details.hint`
+`name_taken`, never a replacement) and returns `{server, entry_id, next}`:
+`sign_in` (call `mcp.auth.start`) or `connect` (already connecting). A
+missing required field, or one the entry does not use, is `INVALID_PARAMS`
+naming the field, never its value. `connection_string` is split into the
+entry's env names (`postgresql://user:password@host:port/db?query` →
+`POSTGRES_*`; a path, `sqlite:///relative.db`, `sqlite:////absolute.db` or
+`file:///C:/x.db` → `SQLITE_DATABASE`); every env value goes to the
+credential store like any other.
+`mcp.import.scan {sources?, json?}` lists, without creating anything, the
+servers other apps on this PC declare — `claude_desktop`
+(`%APPDATA%\Claude\claude_desktop_config.json` and the Microsoft Store
+package, `~/Library/Application Support/Claude/…`,
+`$XDG_CONFIG_HOME/Claude/…`), `claude_code` (`~/.claude.json` or
+`$CLAUDE_CONFIG_DIR/.claude.json`: user servers and per-project ones),
+`cursor` (`~/.cursor/mcp.json`), `vscode` (`Code` and `Code - Insiders`
+`User/mcp.json` and `User/settings.json` → `mcp.servers`, JSON with
+comments) and `codex` (`$CODEX_HOME/config.toml` or `~/.codex/config.toml`,
+`[mcp_servers.*]`; with `RINARI_IMPORT_HOME`, for tests and sandboxes, that
+folder stands in for `~` and `APPDATA`, `LOCALAPPDATA` and `XDG_CONFIG_HOME`
+are ignored, so nothing of the owner's is read) — or the servers of a pasted `json` (`{"mcpServers":
+…}`, `{"servers": …}` or a bare map). → `{sources [{source, label, path,
+found, servers, error}], candidates [{key, name, source, source_label, path,
+project_root, transport, command, url, secrets [{where: env | header | url,
+name, kind: value | env_ref, variable? (the owner's environment variable an
+env_ref reads: its name, never its value)}], warnings, importable, reason, existing,
+suggested_name}]}`. Only names of secrets: values never leave the Engine.
+`${VAR}` and `${env:VAR}` become `env://VAR`; `Authorization: Bearer
+${VAR}` and Codex's `bearer_token_env_var` become bearer auth from that
+variable; a URL's user and password become a Basic `Authorization` header;
+secret-looking query values (`api_key`, `token`, …) keep the whole URL in the
+credential store (`url_secret` in the view, `***` in `url`). Every imported
+header value is stored as a secret. Not importable (`reason`):
+`legacy_sse_unsupported`, `secret_in_command` (a secret on the command line
+would stay in the row and the views: move it to `env`), `unresolved_variable`
+(a variable in the URL), `invalid_url`, `invalid_definition`. Warnings:
+`disabled_in_source`, `unresolved_variable:<field>` (that value is left
+out: `${input:…}`, `${workspaceFolder}`…), `invalid_env_name`,
+`cwd_ignored`, `env_file_ignored`. `existing` names a saved server with the
+same definition. `mcp.import.apply {keys, names? {key: name}, sources?,
+json?}` scans again (secrets never travel to the client and back) and
+creates only the marked `keys`, each on its own, never replacing a server:
+`{created [{key, server}], failed [{key, code, message}]}`. Claude Code's
+per-project servers are created with project scope tied to their folder.
+`mcp.project_offers.list {path}` → `{project, trusted, offers, answered,
+files}`: the servers a trusted folder brings in `.mcp.json`,
+`.rinari/mcp.json`, `.vscode/mcp.json` or `.cursor/mcp.json` (a name repeated
+in a later file is skipped) that the owner has not answered, as candidates
+(`key` is the name) with `changed` and `previous_decision`. An untrusted
+folder offers nothing (`trusted: false`). `mcp.project_offers.decide {path,
+decisions [{key, accept, name?}]}` records each answer for that folder
+(`mcp_project_offers`, migration 0061), so each server is asked about once;
+an accepted one is created with project scope tied to the folder
+(`mcpServer.project_root`; it never runs in another project, even a trusted
+one) and its secrets in the credential store. A definition that changes
+later (command, URL without its query values, env or header names) is
+offered again. → `{project, created [{key, server}], rejected, failed}`; an
+untrusted folder is `INVALID_PARAMS` with `details.hint`
+`project_not_trusted`, a key the folder no longer declares `NOT_FOUND`.
+Project servers saved before 0061 (`project_root` null) stay visible in every
+trusted project.
 The envelope contract is unchanged across slices.
 
 ---
@@ -2834,11 +3047,14 @@ mcp resources
 mcp prompts
 mcp test
 mcp logs
+mcp login
+mcp logout
 ```
 
 Project-local MCP definitions require project trust.
 
-Transports: `stdio` (a command) and `http` (Streamable HTTP, MCP 2025-03-26):
+Transports: `stdio` (a command) and `http` (Streamable HTTP; MCP 2025-06-18,
+following the server down to 2025-03-26 or 2024-11-05):
 
 ```text
 rinari mcp add github --url https://example.com/mcp --bearer          # token asked hidden
@@ -2846,6 +3062,11 @@ rinari mcp add github --url https://example.com/mcp --bearer-env GH_MCP_TOKEN
 rinari mcp add api --url https://example.com/mcp \
     --header "X-Team: core" --secret-header X-Api-Key                   # value asked hidden
 rinari mcp add local -- npx -y some-mcp-server
+rinari mcp add notion --url https://mcp.example.com/mcp --oauth        # registers itself
+rinari mcp add work --url https://mcp.example.com/mcp --oauth \
+    --client-id <your client id> --client-secret --oauth-scope read    # your own OAuth app
+rinari mcp login notion                 # signs in in your default browser
+rinari mcp logout notion                # revokes (if the server can) and deletes the tokens
 ```
 
 Tokens, secret headers and stdio env values never reach the database or the
@@ -2853,7 +3074,19 @@ config file: they are stored in the OS credential store (file fallback) or
 kept as `env://NAME` references. `rinari mcp show` reports whether each one is
 configured, never its value. `rinari mcp test` reports the failure code, the
 HTTP status and a hint key (see the `engine` section, `mcp_remote_v1`). The
-legacy HTTP+SSE transport and OAuth authorization are not supported.
+legacy HTTP+SSE transport is not supported.
+
+OAuth (`--oauth`, see the `engine` section, `mcp_oauth_v1`): `--client-id`,
+`--client-secret` (asked hidden) or `--client-secret-env VAR`, `--oauth-scope`
+(repeatable), `--redirect-port` (a fixed loopback port, for OAuth clients that
+need an exact redirect such as a Google "web" client) and
+`--client-metadata-url` (a client ID metadata document). Without a client ID,
+Rinari registers itself when the server allows it. `rinari mcp login <name>
+[--no-browser] [--timeout 300]` prints the authorization URL on stderr, opens
+the default browser and waits for the redirect to
+`http://127.0.0.1:<port>/callback`; the tokens go to the credential store and
+renew themselves. `rinari mcp show` says whether the server is signed in and
+until when, never a token. `rinari mcp logout <name>` revokes and deletes them.
 
 All MCP calls should still pass through Rinari policy, tracing, schema validation, and result normalization where possible.
 

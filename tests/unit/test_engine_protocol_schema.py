@@ -29,6 +29,17 @@ def test_protocol_schema_matches_server_method_inventory() -> None:
     registered.update(re.findall(r'dispatcher\.register\(\s*"([^"]+)"', documents_source))
     speech_source = (root / "src/rinari/engine_protocol/speech.py").read_text(encoding="utf-8")
     registered.update(re.findall(r'dispatcher\.register\(\s*"([^"]+)"', speech_source))
+    mcp_auth_source = (root / "src/rinari/engine_protocol/mcp_auth.py").read_text(encoding="utf-8")
+    registered.update(re.findall(r'dispatcher\.register\(\s*"([^"]+)"', mcp_auth_source))
+    # Permissions per connector and per tool (connectors plan, C5).
+    mcp_tools_source = (root / "src/rinari/engine_protocol/mcp_tools.py").read_text(
+        encoding="utf-8"
+    )
+    registered.update(re.findall(r'dispatcher\.register\(\s*"([^"]+)"', mcp_tools_source))
+    connectors_source = (root / "src/rinari/engine_protocol/mcp_connectors.py").read_text(
+        encoding="utf-8"
+    )
+    registered.update(re.findall(r'dispatcher\.register\(\s*"([^"]+)"', connectors_source))
     advanced_source = (root / "src/rinari/engine_protocol/advanced.py").read_text(encoding="utf-8")
     registered.update(re.findall(r'dispatcher\.register\(\s*"([^"]+)"', advanced_source))
     tree_source = (root / "src/rinari/engine_protocol/workspace_tree.py").read_text(

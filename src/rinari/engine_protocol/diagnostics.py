@@ -155,6 +155,15 @@ def _providers(services: Any) -> list[dict[str, Any]]:
     return rows
 
 
+def _mcp_status(services: Any, row: dict) -> dict[str, Any]:
+    """The connection state (C2) with its reason; messages never carry secrets."""
+    state = services.mcp.status(row)
+    connection = dict(state.get("connection") or {})
+    if connection.get("message"):
+        connection["message"] = _redact_home(str(connection["message"]))[:300]
+    return {"status": state.get("status"), "connection": connection}
+
+
 def _extensions(services: Any, connected: Any) -> dict[str, Any]:
     mcp = [
         {
@@ -163,6 +172,7 @@ def _extensions(services: Any, connected: Any) -> dict[str, Any]:
             "scope": row.get("scope") or "global",
             "enabled": bool(row.get("enabled")),
             "connected": bool(connected(row.get("name"))),
+            **_mcp_status(services, row),
         }
         for row in services.mcp.list(None)
     ]

@@ -14,6 +14,10 @@ Decision record (2026-08-17, see TODO.md "Registro de decisiones"):
 - Project scope: project-local MCP definitions require project trust.
 - Secrets: server config carries references only (`env://VAR`, or slots the
   CredentialStore owns); literal tokens/headers/env values are stored there.
+- OAuth for remote servers (plan de conectores C1, 2026-10-19): `oauth.py`
+  (discovery, client registration, PKCE on a loopback callback, tokens in
+  the CredentialStore, refresh, revocation); `initialize` asks for MCP
+  2025-06-18 and negotiates down.
 """
 
 from rinari.mcp.adapter import mcp_tool_definitions

@@ -298,10 +298,14 @@ class ClassifiedAction:
         mode: str | None = None,
         cwd: str | None = None,
         cost_basis: str | None = None,
+        mcp: Any = None,
     ) -> None:
         self.capability = capability
         self.target = target
         self.mode = mode
+        # MCP calls: the tool's annotations and the owner's setting
+        # (policy.mcp_tools.McpToolFacts, C5).
+        self.mcp = mcp
         # Paid actions (an image service): how the service charges for it,
         # as it declares (`included`, `local`, `per_image`, `unknown`).
         self.cost_basis = cost_basis
@@ -329,6 +333,9 @@ class TurnState:
     def __init__(self) -> None:
         self.external_content = False
         self.sources: list[str] = []
+        # Every origin of that content (unbounded, unlike `sources`): the
+        # guard tells a connector's own results from anyone else's (C5).
+        self.origins: set[str] = set()
         # Deliveries (P1): what file.present already showed this turn, by
         # artifact URI or content hash, and the images a tool made for the
         # owner. One picture gets one card; one never shown is shown at the end.
@@ -344,8 +351,11 @@ class TurnState:
     def owner_is_waiting(self, session_id: str | None) -> bool:
         return self.owner_wrote.is_set() and session_id == self.owner_session
 
-    def mark_external(self, source: str) -> None:
+    def mark_external(self, source: str, origin: str | None = None) -> None:
+        """`origin` says who the content came from (`mcp:<server>` for a
+        connector, C5); without it the source itself is the origin."""
         self.external_content = True
+        self.origins.add(origin or source or "unknown")
         if source and source not in self.sources and len(self.sources) < 20:
             self.sources.append(source)
 

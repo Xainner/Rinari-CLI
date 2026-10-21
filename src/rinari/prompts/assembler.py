@@ -74,6 +74,7 @@ class AssemblerContext:
     tool_index: str | None = None
     # What is connected now (MCP, OpenAPI, plugins): it can change during a
     # conversation, so it closes the request instead of the system prompt (F42).
+    # Each MCP server says what it is for and its state this turn (C6).
     connected_index: str | None = None
     skills: tuple[ActiveSkill, ...] = ()
     task_state: str | None = None

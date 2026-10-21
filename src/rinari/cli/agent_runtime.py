@@ -24,6 +24,7 @@ from rinari import __version__
 from rinari.agents.config import AgentAssignment, coerce_assignment
 from rinari.application.services import ServiceContainer
 from rinari.instructions.resolver import provenance_for, resolve_project_instructions
+from rinari.mcp.catalog import catalog_lookup
 from rinari.models.router import ModelRouter
 from rinari.models.types import ChatMessage, ToolCall
 from rinari.policy.approvals import AnswerPrompt, ApprovalEngine
@@ -54,7 +55,7 @@ from rinari.storage.records import (
 from rinari.tools.activity import activity_output_sink as _activity_output_sink
 from rinari.tools.definition import ToolContext
 from rinari.tools.exposure import ToolExposure
-from rinari.tools.index import deferred_index
+from rinari.tools.index import connected_index, deferred_index
 from rinari.tools.native import all_native_tools
 from rinari.tools.native.process import ProcessRegistry
 from rinari.tools.registry import ToolRegistry
@@ -316,7 +317,9 @@ def build_assembler_context(
         skill_catalog=catalog,
         tool_index=deferred_index(registry) if registry is not None else None,
         connected_index=(
-            deferred_index(registry, connected=True) if registry is not None else None
+            connected_index(registry, services.mcp, catalog=catalog_lookup(services.mcp))
+            if registry is not None
+            else None
         ),
         skills=skills_tuple,
         task_state=task_state,
@@ -1056,6 +1059,11 @@ def build_agent_session(
         model_ref=record.model_id,
         tool_ctx=tool_ctx,
         assembler_base=build_assembler_context(services, record, profile, tools.registry),
+        # What is connected, from the live registry and the MCP servers'
+        # state on every request (C2, C6).
+        connected_index=lambda: connected_index(
+            tools.registry, services.mcp, catalog=catalog_lookup(services.mcp)
+        ),
         history=_restore_history(services, record),
         collect_subagent_results=orchestrator.collect_for_final,
         collect_agent_notices=orchestrator.completion_notices,
@@ -1273,19 +1281,13 @@ def _plugin_tools(services: ServiceContainer, root: Path | None) -> list:
 
 
 def _mcp_tools(services: ServiceContainer, root: Path | None) -> list:
-    """Connect enabled MCP servers and contribute their normalized tools."""
-    from rinari.mcp.client import McpError
+    """The MCP tools known now; servers not tried yet connect in the background.
 
-    collected = []
-    for row in services.mcp.list():
-        if not row.get("enabled"):
-            continue
-        try:
-            collected.extend(services.mcp.tools(row["name"], root))
-        except McpError:
-            # A server that can't be reached must not break the session.
-            continue
-    return collected
+    Never waits for a server (plan de conectores, C2): the connections live
+    in the Engine process, so a slow or dead server costs no turn anything.
+    """
+    services.mcp.start(root)
+    return services.mcp.available_tools(root)
 
 
 def _build_hook_engine(
@@ -1332,7 +1334,10 @@ def _build_tools(
         with registry.loading("plugins"):
             registry.register_all(_plugin_tools(services, root))
         with registry.loading("mcp"):
-            registry.register_all(_mcp_tools(services, root))
+            # Servers that connect while the turn runs join this registry
+            # (capability.search, tool.call); the model's list never changes.
+            services.mcp.start(root)
+            services.mcp.follow(registry, root)
         with registry.loading("openapi"):
             for row in services.api.list():
                 if row.get("enabled"):

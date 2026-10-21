@@ -21,21 +21,23 @@ class McpServerRepository:
         enabled: bool = True,
         config_json: str = "",
         created_at: str = "",
+        project_root: str = "",
     ) -> dict:
         self._db.execute(
             """
             INSERT INTO mcp_servers (
                 id, name, transport, command, url, scope, enabled, config_json,
-                created_at, updated_at
+                created_at, updated_at, project_root
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(scope, name) DO UPDATE SET
                 transport = excluded.transport,
                 command = excluded.command,
                 url = excluded.url,
                 enabled = excluded.enabled,
                 config_json = excluded.config_json,
-                updated_at = excluded.created_at
+                updated_at = excluded.created_at,
+                project_root = excluded.project_root
             """,
             (
                 server_id,
@@ -48,6 +50,7 @@ class McpServerRepository:
                 config_json,
                 created_at,
                 created_at,
+                project_root,
             ),
         )
         return self.find(name, scope)
@@ -71,6 +74,14 @@ class McpServerRepository:
         cursor = self._db.execute(
             "UPDATE mcp_servers SET enabled = ?, updated_at = ? WHERE scope = ? AND name = ?",
             (1 if enabled else 0, updated_at, scope, name),
+        )
+        return cursor.rowcount > 0
+
+    def set_config(self, server_id: str, config_json: str, updated_at: str) -> bool:
+        """Only the config changes: the folder, command and secrets stay as they are."""
+        cursor = self._db.execute(
+            "UPDATE mcp_servers SET config_json = ?, updated_at = ? WHERE id = ?",
+            (config_json, updated_at, server_id),
         )
         return cursor.rowcount > 0
 

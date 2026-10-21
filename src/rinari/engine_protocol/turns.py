@@ -2414,9 +2414,16 @@ class TurnManager:
             "choices": list(request.choices),
             "rule_id": request.rule_id,
             "reusable": request.reusable,
-            # Where "allow_project" keeps the grant: this project, or every
-            # loose chat.
-            "grant_scope": "chats" if request.project_id in (None, "chats") else "project",
+            # Where "allow_project" keeps the grant: this project, every loose
+            # chat, or (an MCP tool, mcp_tool_permissions_v1) Allow saved for
+            # the tool with its server.
+            "grant_scope": (
+                "mcp_tool"
+                if getattr(request, "on_always", None) is not None
+                else "chats"
+                if request.project_id in (None, "chats")
+                else "project"
+            ),
             # `exact`: a session grant binds to this target only.
             "binding_mode": request.binding_mode,
         }
