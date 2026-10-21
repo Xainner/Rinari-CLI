@@ -12,6 +12,7 @@ import types
 
 import pytest
 
+from rinari.shared.errors import InvalidUsageError
 from tests.unit.test_agency_teams import (  # noqa: F401  (fixtures)
     _agent,
     _call,
@@ -207,7 +208,8 @@ def test_a_fork_or_child_of_an_agents_conversation_keeps_its_agent_and_team(serv
     services = server._services
     writer = _agent(server, "Writer")
     team = _team(server, "Canal", [writer], connectors=[])
-    fork = services.sessions.fork(_post(team, writer)).session
+    # A child with the fork context: the only way an agent's conversation forks.
+    fork = services.sessions.fork(_post(team, writer), child=True).session
     stored = services.sessions.show(fork.id)
     assert stored.agent_id == writer["id"] and stored.team_id == team["id"]
     assert services.memory.place_for("general", fork.id) == ("team", team["id"])
@@ -601,8 +603,26 @@ def test_a_child_or_fork_of_a_post_or_a_direct_chat_has_no_agency_tools(server) 
     assert _agency_pack(services, post) == "post"
     assert _agency_pack(services, direct) == "direct"
     for parent in (post, direct):
-        fork = services.sessions.fork(parent.id).session
+        fork = services.sessions.fork(parent.id, child=True).session
         assert _agency_pack(services, services.sessions.show(fork.id)) is None
+
+
+def test_an_agency_conversation_cannot_be_forked(server) -> None:
+    """Owner, 2026-10-21: an agent works in its direct chat and its posts; a
+    fork would be a hidden copy spending its budget without the Agency's work."""
+    services = server._services
+    writer = _agent(server, "Writer")
+    team = _team(server, "Canal", [writer], connectors=[])
+    for ref in (writer["session_id"], _post(team, writer)):
+        error = _call(server, "session.fork", {"ref": ref})
+        assert error["ok"] is False and "cannot be forked" in error["error"]["message"]
+    before = len(services.sessions.list())
+    with pytest.raises(InvalidUsageError):
+        services.sessions.fork(writer["session_id"])
+    assert len(services.sessions.list()) == before
+    # Rinari's own conversations still fork.
+    plain = services.sessions.new(cwd=services.ctx.layout.root, forced_chat=True)
+    assert services.sessions.fork(plain.id).session.id != plain.id
 
 
 def test_a_folder_change_is_used_up_by_a_skipped_run_and_by_three_failures(

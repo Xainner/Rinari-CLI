@@ -386,7 +386,7 @@ class SessionService:
 
     # -- fork -------------------------------------------------------------------
 
-    def fork(self, ref: str, title: str | None = None) -> StartedSession:
+    def fork(self, ref: str, title: str | None = None, *, child: bool = False) -> StartedSession:
         """Create an independent session continuing from `ref`.
 
         Fork state: kind, project identity, cwd, provider/model/profile,
@@ -397,6 +397,15 @@ class SessionService:
         not modified in any way.
         """
         source = self._resolve(ref)
+        if getattr(source, "agent_id", None) and not child:
+            # Rinari Agency: an agent works in its direct chat and its posts.
+            # A fork would be a hidden copy spending its budget and writing its
+            # memory without doing the Agency's work (owner, 2026-10-21). Its
+            # children (`child=True`, a child with the fork context) still can.
+            raise InvalidUsageError(
+                "Rinari Agency conversations cannot be forked: an agent works in "
+                "its direct chat and its posts."
+            )
         # A fork copies message content into a new session with new message
         # identifiers.  Copying a privacy-retired source would otherwise
         # bypass its source tombstones and let the new session extract it

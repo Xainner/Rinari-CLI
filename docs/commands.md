@@ -2497,6 +2497,11 @@ rinari session resume ses_123
 rinari session fork ses_123 --name alternate-approach
 ```
 
+`session fork` (and `session.fork`) refuses a Rinari Agency conversation (an agent's
+direct chat, a post or anything with `agent_id`): an agent works in its direct chat and
+its posts. Its children can still start from a copy of it (`child.create` with
+`context: fork`).
+
 `session pin|unpin` marca una conversación como fijada (la sección «Fijados» del
 escritorio). Es estado del Engine: el CLI y el escritorio ven la misma lista, y
 `session list` antepone `[pin]` al título.

@@ -119,7 +119,7 @@ class ChildSessions:
                 raise ConflictError("Restore the project before opening a child.")
             root = Path(project.canonical_root) if project is not None else None
             if context == "fork":
-                record = sessions.fork(parent.id, title=title).session
+                record = sessions.fork(parent.id, title=title, child=True).session
             else:
                 cwd = root if root is not None else Path(parent.current_cwd)
                 record = sessions.new(
