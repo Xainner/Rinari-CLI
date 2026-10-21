@@ -17,6 +17,9 @@ class ScheduleToolHost:
     service: Any
     #: The session's project: a proposal made in a project runs there.
     project_id: str | None = None
+    #: Rinari Agency: the agent whose conversation this is. Its proposals are
+    #: its permanent rules, and a rule is always confirmed by the owner.
+    agent_id: str | None = None
 
 
 def schedule_tools(host: ScheduleToolHost):
@@ -45,6 +48,20 @@ def schedule_tools(host: ScheduleToolHost):
         # The owner asking in their own turn is the confirmation. A turn that
         # came from another pane, another task or a channel only proposes.
         owner_asked = (getattr(ctx, "origin_kind", "user") or "user") == "user"
+        if host.agent_id:
+            # Rinari Agency: a permanent rule may move data out, so it is
+            # always a card the owner confirms (never created by the model).
+            args["agent_id"] = host.agent_id
+            owner_asked = False
+        elif args.get("kind") == "tool":
+            return ToolResult(
+                ok=False,
+                error=ToolErrorInfo(
+                    ToolErrorCode.INVALID_ARGUMENT,
+                    "Only a Rinari Agency agent's rules call a connector without the model.",
+                ),
+                origin="schedule",
+            )
         try:
             proposed = host.service.propose(
                 args, session_id=getattr(ctx, "session_id", "") or "", create=owner_asked
@@ -91,20 +108,29 @@ def schedule_tools(host: ScheduleToolHost):
                 "schedule is local time: {kind: once, at: 'YYYY-MM-DDTHH:MM'} | "
                 "{kind: interval, minutes} | {kind: daily, time: 'HH:MM'} | "
                 "{kind: weekly, days: [0-6, 0=Monday], time: 'HH:MM'}. For kind 'agent' the "
-                "prompt must stand alone: the run starts in a fresh session."
+                "prompt must stand alone: the run starts in a fresh session. In a Rinari "
+                "Agency agent's conversation this proposes one of its permanent rules (always "
+                "for the owner to confirm), and kind 'tool' calls one of its connectors with "
+                "fixed arguments and no model: tool = {server, tool, arguments, on_result: "
+                "nothing | notify | agent | deliver, deliver: {server, tool, arguments with "
+                "'{result}'}, max_per_day, only_if_contains: exact text the result must "
+                "contain (e.g. 'failure' for a CI)}. watch = {path} runs it only when that "
+                "folder changed since the last check."
             ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "name": {"type": "string", "maxLength": 80},
-                    "kind": {"type": "string", "enum": ["agent", "reminder"]},
+                    "kind": {"type": "string", "enum": ["agent", "reminder", "tool"]},
+                    "tool": {"type": "object"},
+                    "watch": {"type": "object"},
                     "schedule": {"type": "object"},
                     "prompt": {"type": "string", "maxLength": 8000},
                     "mode": {"type": "string", "enum": ["plan", "build", "review"]},
                     "skills": {"type": "array", "items": {"type": "string"}},
                     "in_this_project": {"type": "boolean"},
                 },
-                "required": ["name", "kind", "schedule", "prompt"],
+                "required": ["name", "kind", "schedule"],
                 "additionalProperties": False,
             },
             capabilities=("state.write",),

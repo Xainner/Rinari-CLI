@@ -23,6 +23,9 @@ _TASK_COLUMNS = (
     "skills_json",
     "grants_json",
     "command_json",
+    "tool_json",
+    "watch_json",
+    "agent_id",
     "enabled",
     "next_run_at",
     "created_at",
@@ -49,6 +52,11 @@ def _task(row: Any) -> dict[str, Any]:
     item["grants"] = json.loads(item.pop("grants_json"))
     raw_command = item.pop("command_json", None)
     item["command"] = json.loads(raw_command) if raw_command else None
+    raw_tool = item.pop("tool_json", None)
+    item["tool"] = json.loads(raw_tool) if raw_tool else None
+    raw_watch = item.pop("watch_json", None)
+    item["watch"] = json.loads(raw_watch) if raw_watch else None
+    item["agent_id"] = item.get("agent_id")
     item["enabled"] = bool(item["enabled"])
     return item
 
@@ -90,6 +98,11 @@ class ScheduleRepository:
             "command_json": (
                 json.dumps(task["command"], sort_keys=True) if task.get("command") else None
             ),
+            "tool_json": json.dumps(task["tool"], sort_keys=True) if task.get("tool") else None,
+            "watch_json": (
+                json.dumps(task["watch"], sort_keys=True) if task.get("watch") else None
+            ),
+            "agent_id": task.get("agent_id"),
             "enabled": 1 if task.get("enabled", True) else 0,
             "next_run_at": task.get("next_run_at"),
             "created_at": task["created_at"],
@@ -105,6 +118,24 @@ class ScheduleRepository:
             (task_id, *(row[column] for column in _TASK_COLUMNS)),
         )
         return self.get(task_id) or {}
+
+    def set_enabled(self, task_id: str, enabled: bool, updated_at: float) -> None:
+        """Turn a task on or off without validating it again («Detener a todos»)."""
+        self._db.execute(
+            "UPDATE scheduled_tasks SET enabled = ?, updated_at = ? WHERE id = ?",
+            (int(enabled), updated_at, task_id),
+        )
+
+    def set_watch_fingerprint(self, task_id: str, fingerprint: str) -> None:
+        """What a watched folder looked like at its last check (kept across restarts)."""
+        task = self.get(task_id)
+        if task is None or not task.get("watch"):
+            return
+        watch = {**task["watch"], "fingerprint": fingerprint}
+        self._db.execute(
+            "UPDATE scheduled_tasks SET watch_json = ? WHERE id = ?",
+            (json.dumps(watch, sort_keys=True), task_id),
+        )
 
     def delete(self, task_id: str) -> bool:
         existed = self.get(task_id) is not None

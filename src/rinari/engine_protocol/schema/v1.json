@@ -623,6 +623,38 @@
         "schedule.runs",
         "schedule.run_now",
         "schedule.grant",
+        "schedule.rehearse",
+        "agency.agent.list",
+        "agency.agent.get",
+        "agency.agent.create",
+        "agency.agent.update",
+        "agency.agent.archive",
+        "agency.status",
+        "agency.agent.draft",
+        "agency.stop_all",
+        "agency.agent.memory.list",
+        "agency.agent.memory.add",
+        "agency.team.list",
+        "agency.team.get",
+        "agency.team.create",
+        "agency.team.update",
+        "agency.team.archive",
+        "agency.team.join",
+        "agency.team.leave",
+        "agency.office.list",
+        "agency.office.post",
+        "agency.errand.create",
+        "agency.errand.list",
+        "agency.errand.review",
+        "agency.errand.cancel",
+        "agency.errand.retry",
+        "agency.team.template",
+        "agency.team.duplicate",
+        "agency.team.memory.list",
+        "agency.team.memory.add",
+        "agency.resume",
+        "agency.settings.get",
+        "agency.settings.set",
         "project.move_profile",
         "session.move_profile",
         "followup.list",
@@ -728,6 +760,15 @@
         "skill.proposed",
         "skill.proposal.resolved",
         "schedule.changed",
+        "agency.agent.changed",
+        "agency.draft.ready",
+        "agency.draft.failed",
+        "agency.stopped",
+        "agency.secret_pasted",
+        "agency.team.changed",
+        "agency.office.message",
+        "agency.chain.stopped",
+        "schedule.rehearsed",
         "schedule.run.started",
         "schedule.run.needs_you",
         "schedule.run.completed",
@@ -1036,6 +1077,18 @@
         },
         "rinari_profile_id": {
           "type": "string"
+        },
+        "agent_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "team_id": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "parent_session_id": {
           "type": [
@@ -2238,7 +2291,10 @@
             "peer",
             "automation",
             "schedule",
-            "harness"
+            "harness",
+            "agency_office",
+            "agency_errand",
+            "agency_delivery"
           ]
         },
         "message_id": {
@@ -2392,6 +2448,41 @@
           "items": {
             "type": "string"
           }
+        },
+        "team_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Rinari Agency: the team of an office, errand or delivery turn."
+        },
+        "errand_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Rinari Agency: the errand this turn does or reviews."
+        },
+        "from_label": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Rinari Agency: who it comes from (the agent that mentioned or asked, or the team that delivered), as the Engine names them."
+        },
+        "external_content": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "The turn starts with the external-content guard on: what it got came from outside the machine."
+        },
+        "external_source": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Where that external content came through."
         }
       }
     },
@@ -3789,6 +3880,13 @@
             "null"
           ],
           "description": "The folder a project-scope server belongs to (mcp_catalog_v1); null: visible in every trusted project."
+        },
+        "owner": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "agency_agents_v1: \"agent:ID\" when the account belongs to an agent, seen only by that agent; null: everyone's."
         },
         "enabled": {
           "type": "boolean"

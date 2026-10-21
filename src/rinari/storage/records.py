@@ -111,6 +111,11 @@ class SessionRecord:
     parent_session_id: str | None = None
     lineage_kind: str | None = None
     brief: dict[str, Any] | None = None
+    # The Agency agent whose conversation this is (its direct chat); None for
+    # Rinari's own. Written by AgencyRepository.set_session_agent only.
+    agent_id: str | None = None
+    # Rinari Agency A2: the team of a post (agent_id + team_id); None otherwise.
+    team_id: str | None = None
 
 
 @dataclass(slots=True)

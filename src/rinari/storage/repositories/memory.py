@@ -34,7 +34,9 @@ PROJECT_KINDS = (
     "decision",
 )
 #: Where a personal memory applies (#75). Project memory has its own table.
-USER_PLACES = ("general", "profile", "chat")
+# agent: Rinari Agency, an agent's own memory (place_ref is the agent id).
+# team: Rinari Agency A2, a team's memory (place_ref is the team id).
+USER_PLACES = ("general", "profile", "chat", "agent", "team")
 
 
 class MemoryRepository:

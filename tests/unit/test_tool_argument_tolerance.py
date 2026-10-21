@@ -422,7 +422,7 @@ class _Memory:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    def search_user(self, query, *, kind=None, limit=10):
+    def search_user(self, query, *, kind=None, limit=10, session_id=None):
         self.calls.append("user")
         return [{"id": "u1", "text": "prefers tabs"}]
 

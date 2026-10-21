@@ -8,6 +8,8 @@ from pathlib import Path
 
 import httpx
 
+from rinari.agency import AgencyService
+from rinari.agency.teams import TeamService
 from rinari.agents.config import AgentConfigStore
 from rinari.agents.registry import AgentRegistry
 from rinari.application.context import AppContext
@@ -72,6 +74,8 @@ class ServiceContainer:
     goals: GoalService = None
     resumes: ResumeService = None
     followups: FollowupService = None
+    agency: AgencyService = None
+    teams: TeamService = None
 
 
 def build_services(
@@ -113,6 +117,8 @@ def build_services(
         model_exists=lambda model: _exists(models.resolve, model),
         # A task may name a project skill: its folder is only known at run time.
         skill_exists=lambda name: True,
+        # Rinari Agency: a permanent rule belongs to an agent.
+        agent_exists=lambda agent_id: ctx.agency_repo.get(agent_id) is not None,
     )
     rinari_profiles = RinariProfileService(ctx)
     projects.profiles = rinari_profiles
@@ -120,6 +126,25 @@ def build_services(
     # A broken profile file never keeps the engine from starting.
     with contextlib.suppress(Exception):
         rinari_profiles.reconcile_orphans()
+    agency = AgencyService(
+        ctx.agency_repo,
+        ctx.clock,
+        ctx.ids,
+        resolve_model=lambda model: _model_id(models, model),
+        connector_exists=lambda name: any(
+            row.get("name") == name for row in ctx.mcp_server_repo.list(None)
+        ),
+    )
+    teams = TeamService(
+        ctx.team_repo,
+        agency,
+        ctx.clock,
+        ctx.ids,
+        connector_exists=lambda name: any(
+            row.get("name") == name for row in ctx.mcp_server_repo.list(None)
+        ),
+    )
+    mcp.scope_of = lambda session_id: _agent_scope(agency, session_id, ctx)
     return ServiceContainer(
         ctx=ctx,
         credentials=credentials,
@@ -151,7 +176,35 @@ def build_services(
         goals=GoalService(ctx),
         resumes=ResumeService(ctx),
         followups=FollowupService(ctx),
+        agency=agency,
+        teams=teams,
     )
+
+
+def _agent_scope(agency: AgencyService, session_id: str, ctx: AppContext):
+    """(allowed connectors, owner tag) of an agent's conversation, else (None, None).
+
+    A post (A2) sees its team's connectors and the team's own accounts, never
+    another team's nor the agent's personal ones: in each post, only that team.
+    """
+    agent = agency.for_session(session_id)
+    if agent is None:
+        return None, None
+    record = ctx.session_repo.get(session_id) if ctx.team_repo else None
+    team_id = ctx.team_repo.active_team(record) if record is not None else None
+    if team_id is not None:
+        # A post, or a child of one: the team's connectors and accounts.
+        team = ctx.team_repo.get(team_id)
+        if team is not None:
+            return frozenset(team.get("connectors") or ()), f"team:{team['id']}"
+    return frozenset(agent.get("connectors") or ()), f"agent:{agent['id']}"
+
+
+def _model_id(models, ref: str) -> str | None:
+    try:
+        return models.resolve(ref).id
+    except Exception:
+        return None
 
 
 def _exists(lookup, ref: str) -> bool:

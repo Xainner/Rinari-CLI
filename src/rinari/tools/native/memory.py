@@ -253,7 +253,7 @@ def memory_remember(input: dict, ctx: ToolContext) -> ToolResult:
             "memory is excluded for this conversation; the owner must re-enable it. Do not retry.",
         )
     if scope in _PERSONAL:
-        place = _PERSONAL[scope]
+        place, place_ref = service.place_for(_PERSONAL[scope], ctx.session_id)
         return _remember_for_owner(
             service,
             input,
@@ -261,7 +261,7 @@ def memory_remember(input: dict, ctx: ToolContext) -> ToolResult:
             topic.strip(),
             text.strip(),
             place,
-            service.place_ref_for(place, ctx.session_id),
+            place_ref,
         )
     provenance = input.get("provenance")
     if provenance is not None and not isinstance(provenance, str):
@@ -376,7 +376,7 @@ def memory_propose(input: dict, ctx: ToolContext) -> ToolResult:
     scope = input.get("scope", "user")
     if scope not in ("user", "profile", "project", "chat"):
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "scope must be user, profile, project or chat")
-    place = _PERSONAL.get(scope, "general")
+    place, place_ref = service.place_for(_PERSONAL.get(scope, "general"), ctx.session_id)
     if scope in ("profile", "chat"):
         scope = "user"
     if not service.session_exists(ctx.session_id):
@@ -419,7 +419,7 @@ def memory_propose(input: dict, ctx: ToolContext) -> ToolResult:
             trusted=trusted,
             untrusted_reason=untrusted_reason,
             place=place,
-            place_ref=service.place_ref_for(place, ctx.session_id),
+            place_ref=place_ref,
         )
     except Exception as exc:
         message = getattr(exc, "message", str(exc))
@@ -467,7 +467,9 @@ def memory_recall(input: dict, ctx: ToolContext) -> ToolResult:
         notes = ("this session has no project: searched user memory instead of project memory",)
     try:
         if scope == "user":
-            rows = service.search_user(query, kind=kind, limit=limit)
+            # Only what this conversation may see (an agent never reads
+            # another agent's or team's memory).
+            rows = service.search_user(query, kind=kind, limit=limit, session_id=ctx.session_id)
         elif scope == "project":
             root = _project_root(ctx)
             rows = service.search_project(str(root), query, kind=kind, limit=limit)
@@ -525,6 +527,8 @@ def memory_update(input: dict, ctx: ToolContext) -> ToolResult:
     provenance, err = _optional_str(input, "provenance", max_len=256)
     if err is not None:
         return err
+    if scope == "user" and not service.may_change_user(memory_id, ctx.session_id):
+        return _fail(ToolErrorCode.NOT_FOUND, f"no memory {memory_id} in this conversation")
     try:
         if scope == "user":
             row = service.update_user(
@@ -581,6 +585,8 @@ def memory_forget(input: dict, ctx: ToolContext) -> ToolResult:
             ToolErrorCode.INVALID_ARGUMENT,
             "expected_revision is required for user memory deletion",
         )
+    if scope == "user" and not service.may_change_user(memory_id, ctx.session_id):
+        return _fail(ToolErrorCode.NOT_FOUND, f"no memory {memory_id} in this conversation")
     try:
         if scope == "user":
             forgotten = service.forget_user(memory_id, expected_revision=expected_revision)

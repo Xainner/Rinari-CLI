@@ -110,6 +110,10 @@ class McpConnectorMethods:
                 f"An MCP server named {name!r} already exists.",
                 details={"hint": "name_taken"},
             )
+        from rinari.engine_protocol.agency import checked_owner
+
+        # Rinari Agency (C8): the account can belong to one agent only.
+        owner = checked_owner(self._services, params.get("owner"))
         inputs = {key: params[key] for key in _ADD_INPUTS if key in params}
         try:
             fields = catalog.create_params(item, inputs)
@@ -121,9 +125,11 @@ class McpConnectorMethods:
                 url=fields.get("url"),
                 env=fields.get("env"),
                 auth=fields.get("auth"),
+                owner=owner,
             )
         except ValueError as exc:  # McpConfigError: never carries a value
             raise EngineProtocolError(INVALID_PARAMS, str(exc)) from exc
+            row = self._mcp.show(name) or row
         return {
             "server": self._view(row),
             "entry_id": item["id"],

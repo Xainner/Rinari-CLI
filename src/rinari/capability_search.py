@@ -196,7 +196,10 @@ def _mark_waiting_servers(results: list[dict], ctx) -> set[str]:
         return set()
     try:
         rows = {
-            str(row["name"]): row for row in service.connectors(getattr(ctx, "project_root", None))
+            str(row["name"]): row
+            for row in service.connectors(
+                getattr(ctx, "project_root", None), getattr(ctx, "session_id", None)
+            )
         }
     except Exception:
         return set()

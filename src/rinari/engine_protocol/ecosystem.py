@@ -29,6 +29,8 @@ def mcp_row_view(
         "scope": row.get("scope") or "global",
         # The folder a project server belongs to (C4); null: any trusted project.
         "project_root": row.get("project_root") or None,
+        # Rinari Agency (C8): "agent:ID" for an agent's own account, else null.
+        "owner": row.get("owner") or None,
         "enabled": bool(row.get("enabled")),
         "connected": connected,
         "updated_at": row.get("updated_at"),

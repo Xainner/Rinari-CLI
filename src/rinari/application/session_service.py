@@ -386,7 +386,7 @@ class SessionService:
 
     # -- fork -------------------------------------------------------------------
 
-    def fork(self, ref: str, title: str | None = None) -> StartedSession:
+    def fork(self, ref: str, title: str | None = None, *, child: bool = False) -> StartedSession:
         """Create an independent session continuing from `ref`.
 
         Fork state: kind, project identity, cwd, provider/model/profile,
@@ -397,6 +397,15 @@ class SessionService:
         not modified in any way.
         """
         source = self._resolve(ref)
+        if getattr(source, "agent_id", None) and not child:
+            # Rinari Agency: an agent works in its direct chat and its posts.
+            # A fork would be a hidden copy spending its budget and writing its
+            # memory without doing the Agency's work (owner, 2026-10-21). Its
+            # children (`child=True`, a child with the fork context) still can.
+            raise InvalidUsageError(
+                "Rinari Agency conversations cannot be forked: an agent works in "
+                "its direct chat and its posts."
+            )
         # A fork copies message content into a new session with new message
         # identifiers.  Copying a privacy-retired source would otherwise
         # bypass its source tombstones and let the new session extract it
@@ -464,6 +473,7 @@ class SessionService:
             if messages:
                 self._ctx.message_repo.append_many(record.id, messages)
             self._append_event(record.id, EVENT_SESSION_FORKED, {"from": source.id})
+            inherit_agency(self._ctx, source, record)
         return StartedSession(session=record, created=True)
 
     # -- promotion ----------------------------------------------------------
@@ -641,6 +651,8 @@ class SessionService:
         state: str | None = None,
         limit: int = 50,
         rinari_profile_id: str | None = None,
+        agent_id: str | None = None,
+        exclude_agents: bool = False,
     ) -> list[SessionRecord]:
         records = self._ctx.session_repo.list(
             kind=kind,
@@ -648,6 +660,8 @@ class SessionService:
             state=state,
             limit=limit,
             rinari_profile_id=rinari_profile_id,
+            agent_id=agent_id,
+            exclude_agents=exclude_agents,
         )
         # Older Windows transports decoded UTF-8 titles with the ANSI locale.
         # Repair only the known generated title; never guess at user-authored text.
@@ -1022,3 +1036,18 @@ class SessionService:
     def _default_title(cwd: Path, kind: str) -> str:
         name = cwd.name or "root"
         return f"{kind.lower()} in {name}"
+
+
+def inherit_agency(ctx: Any, parent: Any, child: Any) -> None:
+    """Rinari Agency: a fork or a child of an agent's conversation works for
+    the same agent (and team), with its card, its connectors, its memory and
+    its budget; never as Rinari's general assistant."""
+    agent_id = getattr(parent, "agent_id", None)
+    if not agent_id:
+        return
+    ctx.agency_repo.set_session_agent(child.id, agent_id)
+    child.agent_id = agent_id
+    team_id = getattr(parent, "team_id", None)
+    if team_id and getattr(ctx, "team_repo", None) is not None:
+        ctx.team_repo.set_session_team(child.id, team_id)
+        child.team_id = team_id

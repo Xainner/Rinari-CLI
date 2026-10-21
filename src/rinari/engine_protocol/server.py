@@ -328,6 +328,44 @@ class EngineServer:
         from rinari.engine_protocol.schedule import ScheduleRunner
 
         self._schedule = ScheduleRunner(self)
+        from rinari.engine_protocol.agency import AgencyMethods
+
+        self._agency = AgencyMethods(self)
+        self._dispatcher.register("agency.agent.list", self._agency.list)
+        self._dispatcher.register("agency.agent.get", self._agency.get)
+        self._dispatcher.register("agency.agent.create", self._agency.create)
+        self._dispatcher.register("agency.agent.update", self._agency.update)
+        self._dispatcher.register("agency.agent.archive", self._agency.archive)
+        self._dispatcher.register("agency.status", self._agency.status)
+        self._dispatcher.register("agency.agent.draft", self._agency.draft)
+        self._dispatcher.register("agency.stop_all", self._agency.stop_all)
+        self._dispatcher.register("agency.agent.memory.list", self._agency.memory_list)
+        self._dispatcher.register("agency.agent.memory.add", self._agency.memory_add)
+        self._dispatcher.register("agency.team.memory.list", self._agency.team_memory_list)
+        self._dispatcher.register("agency.team.memory.add", self._agency.team_memory_add)
+        from rinari.engine_protocol.agency_teams import AgencyTeams
+
+        self._teams = AgencyTeams(self)
+        self._services.teams.board = self._teams
+        self._dispatcher.register("agency.team.list", self._teams.list)
+        self._dispatcher.register("agency.team.get", self._teams.get)
+        self._dispatcher.register("agency.team.create", self._teams.create)
+        self._dispatcher.register("agency.team.update", self._teams.update)
+        self._dispatcher.register("agency.team.archive", self._teams.archive)
+        self._dispatcher.register("agency.team.join", self._teams.join)
+        self._dispatcher.register("agency.team.leave", self._teams.leave)
+        self._dispatcher.register("agency.office.list", self._teams.office_list)
+        self._dispatcher.register("agency.office.post", self._teams.office_post)
+        self._dispatcher.register("agency.errand.create", self._teams.errand_create)
+        self._dispatcher.register("agency.errand.list", self._teams.errand_list)
+        self._dispatcher.register("agency.errand.review", self._teams.errand_review)
+        self._dispatcher.register("agency.errand.cancel", self._teams.errand_cancel)
+        self._dispatcher.register("agency.errand.retry", self._teams.errand_retry)
+        self._dispatcher.register("agency.team.template", self._teams.template)
+        self._dispatcher.register("agency.team.duplicate", self._teams.duplicate)
+        self._dispatcher.register("agency.resume", self._teams.resume_params)
+        self._dispatcher.register("agency.settings.get", self._agency.settings_get)
+        self._dispatcher.register("agency.settings.set", self._agency.settings_set)
         from rinari.engine_protocol.resume import ResumeRunner
 
         self._resume = ResumeRunner(self)
@@ -348,6 +386,7 @@ class EngineServer:
         self._dispatcher.register("schedule.runs", self._schedule.runs)
         self._dispatcher.register("schedule.run_now", self._schedule.run)
         self._dispatcher.register("schedule.grant", self._schedule.grant)
+        self._dispatcher.register("schedule.rehearse", self._schedule.rehearse)
         self._dispatcher.register("workspace.process.list", self._process_tasks.list)
         self._dispatcher.register("workspace.process.read", self._process_tasks.read)
         self._dispatcher.register("workspace.process.stop", self._process_tasks.stop)
@@ -689,6 +728,7 @@ class EngineServer:
     def start_background(self) -> None:
         """Background work of a serving Engine (not of one built for a test)."""
         self._schedule.start()
+        self._teams.start()
         self._resume.start()
         # Connect the MCP servers now, in parallel; no turn waits for them (C2).
         self._services.mcp.start_background()
@@ -880,12 +920,19 @@ class EngineServer:
             raise EngineProtocolError(INVALID_PARAMS, "Param 'project_id' must be a string.")
         if state is not None and (not isinstance(state, str) or not state):
             raise EngineProtocolError(INVALID_PARAMS, "Param 'state' must be a string.")
+        agent_id = params.get("agent_id")
+        if agent_id is not None and (not isinstance(agent_id, str) or not agent_id):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'agent_id' must be a string.")
+        # Rinari Agency: an agent's conversations are not Rinari's. They are
+        # listed only when asked for by agent.
         records = self._services.sessions.list(
             kind=kind,
             project_id=project_id,
             state=state,
             limit=limit,
             rinari_profile_id=self._profile_filter(params),
+            agent_id=agent_id,
+            exclude_agents=agent_id is None,
         )
         if not params.get("include_closed", False) and state is None:
             records = [
@@ -1649,6 +1696,13 @@ class EngineServer:
                     view["place_label"] = (
                         (getattr(record, "title", None) or str(ref)) if ref else ""
                     )
+                elif place == "agent":
+                    # Rinari Agency: an agent's own memory, by the agent's name.
+                    agent = self._services.ctx.agency_repo.get(str(ref)) if ref else None
+                    view["place_label"] = agent["name"] if agent else str(ref or "")
+                elif place == "team":
+                    team = self._services.ctx.team_repo.get(str(ref)) if ref else None
+                    view["place_label"] = team["name"] if team else str(ref or "")
                 else:
                     view["place_label"] = None
             view["origin"] = self._memory_origin(view)
@@ -3612,6 +3666,9 @@ class EngineServer:
         params = params or {}
         name = self._mcp_name(params)
         fields = self._mcp_fields(params)
+        from rinari.engine_protocol.agency import checked_owner
+
+        owner = checked_owner(self._services, params.get("owner"))
         try:
             row = self._services.mcp.add(
                 name,
@@ -3624,9 +3681,12 @@ class EngineServer:
                 auth=fields.get("auth"),
                 headers=fields.get("headers"),
                 timeout_s=fields.get("timeout_s"),
+                # Rinari Agency (C8): the account belongs to that agent only.
+                owner=owner,
             )
         except ValueError as exc:
             raise EngineProtocolError(INVALID_PARAMS, str(exc)) from exc
+            row = self._services.mcp.show(name) or row
         return {"server": self._mcp_view(row, False)}
 
     def _mcp_update(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -4415,12 +4475,18 @@ class EngineServer:
         from rinari.commands import command_list
 
         project = None
+        agency = False
         session_id = params.get("session_id")
         if isinstance(session_id, str) and session_id:
             record = self._services.sessions.show(session_id)
             if record.project_root_snapshot:
                 project = Path(record.project_root_snapshot)
-        return {"commands": command_list(self._services.skills, project, client="desktop")}
+            agency = bool(getattr(record, "agent_id", None))
+        commands = command_list(self._services.skills, project, client="desktop")
+        if agency:
+            # Rinari Agency: its conversations are never forked (session.fork refuses).
+            commands = [item for item in commands if item.get("name") != "fork"]
+        return {"commands": commands}
 
     def _expand_command(self, session_id: str, command: Any, typed: str) -> tuple[str, str]:
         """`/review x`, `/test`, `/pdf-tools x`: the Engine turns the command the

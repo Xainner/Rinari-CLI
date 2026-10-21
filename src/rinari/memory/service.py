@@ -532,28 +532,81 @@ class MemoryService:
         return place, place_ref
 
     def place_ref_for(self, place: str, session_id: str | None) -> str | None:
-        """The profile or chat a place points at, from the conversation."""
+        """The profile, chat or agent a place points at, from the conversation."""
         if place == "chat":
             return session_id
         if place == "profile" and session_id:
             record = self._ctx.session_repo.get(session_id)
             return getattr(record, "rinari_profile_id", None) or "default"
+        if place == "agent":
+            return self._agent_of(session_id)
+        if place == "team":
+            return self._team_of(session_id)
         return None
+
+    def place_for(self, place: str, session_id: str | None) -> tuple[str, str | None]:
+        """Where something learned in this conversation goes.
+
+        Rinari Agency (D-7): what an agent learns in its direct chat is its
+        own memory, and what it learns in a post is its team's; never the
+        owner's general or profile memory.
+        """
+        team_id = self._team_of(session_id)
+        if team_id and place in ("general", "profile", "agent"):
+            return "team", team_id
+        agent_id = self._agent_of(session_id)
+        if agent_id and place in ("general", "profile"):
+            return "agent", agent_id
+        return place, self.place_ref_for(place, session_id)
+
+    def _team_of(self, session_id: str | None) -> str | None:
+        """The team of a post; none once its agent left the team (the post is gone)."""
+        if not session_id:
+            return None
+        record = self._ctx.session_repo.get(session_id)
+        repo = getattr(self._ctx, "team_repo", None)
+        if record is None or repo is None:
+            return getattr(record, "team_id", None)
+        return repo.active_team(record)
+
+    def _agent_of(self, session_id: str | None) -> str | None:
+        if not session_id:
+            return None
+        record = self._ctx.session_repo.get(session_id)
+        return getattr(record, "agent_id", None)
+
+    def _profile_of(self, session_id: str | None) -> str | None:
+        if not session_id:
+            return None
+        record = self._ctx.session_repo.get(session_id)
+        return (getattr(record, "rinari_profile_id", None) or "default") if record else None
 
     def visible_user_rows(
         self, profile_id: str | None = None, session_id: str | None = None
     ) -> list[dict]:
-        """General memory, plus this profile's and this chat's (#75)."""
-        rows = []
-        for row in self.repo.user_live():
+        """General memory, plus this profile's, this chat's, its agent's and its team's (#75)."""
+        if profile_id is None:
+            profile_id = self._profile_of(session_id)
+        sees = self._place_filter(profile_id, session_id)
+        return [row for row in self.repo.user_live() if sees(row)]
+
+    def _place_filter(self, profile_id: str | None, session_id: str | None):
+        """Whether a row with a `place` (a memory, a candidate) is this conversation's to see."""
+        agent_id = self._agent_of(session_id)
+        team_id = self._team_of(session_id)
+
+        def sees(row: dict) -> bool:
             place = row.get("place") or "general"
-            if (
+            ref = row.get("place_ref")
+            return (
                 place == "general"
-                or (place == "profile" and profile_id and row.get("place_ref") == profile_id)
-                or (place == "chat" and session_id and row.get("place_ref") == session_id)
-            ):
-                rows.append(row)
-        return rows
+                or (place == "profile" and bool(profile_id) and ref == profile_id)
+                or (place == "chat" and bool(session_id) and ref == session_id)
+                or (place == "agent" and bool(agent_id) and ref == agent_id)
+                or (place == "team" and bool(team_id) and ref == team_id)
+            )
+
+        return sees
 
     def move(
         self,
@@ -673,16 +726,58 @@ class MemoryService:
                     )
         return self.about_get()
 
+    def _user_rows_for(self, session_id: str | None) -> list[dict]:
+        """A conversation reads only what it may see; the owner's panel (no session) reads all."""
+        if session_id:
+            return self.visible_user_rows(session_id=session_id)
+        return self.repo.user_live()
+
     def search_user(
-        self, query: str = "", *, kind: str | None = None, limit: int = 20
+        self,
+        query: str = "",
+        *,
+        kind: str | None = None,
+        limit: int = 20,
+        session_id: str | None = None,
     ) -> list[dict]:
-        rows = [row for row in self.repo.user_live() if kind is None or row["kind"] == kind]
+        rows = [
+            row for row in self._user_rows_for(session_id) if kind is None or row["kind"] == kind
+        ]
         ranked = rank_by_terms(rows, query, {"topic": 3, "text": 2}, limit=max(1, min(limit, 200)))
         return [self._user_view(row) for row in ranked]
 
-    def list_user(self, *, limit: int = 100, kind: str | None = None) -> list[dict]:
-        rows = [row for row in self.repo.user_live() if kind is None or row["kind"] == kind]
+    def list_user(
+        self, *, limit: int = 100, kind: str | None = None, session_id: str | None = None
+    ) -> list[dict]:
+        rows = [
+            row for row in self._user_rows_for(session_id) if kind is None or row["kind"] == kind
+        ]
         return [self._user_view(row) for row in rows[: max(1, min(limit, 500))]]
+
+    def may_change_user(self, memory_id: str, session_id: str | None) -> bool:
+        """Whether a conversation may edit or forget this personal memory.
+
+        Rinari Agency: an agent's direct chat changes only its agent's memory,
+        a post only its agent's or its team's; never the owner's nor another
+        agent's or team's. Rinari's own conversations change what they see.
+        The owner's panel (no session) changes anything.
+        """
+        row = self.repo.user_get(memory_id)
+        if row is None:
+            return False
+        if not session_id:
+            return True
+        agent_id = self._agent_of(session_id)
+        team_id = self._team_of(session_id)
+        if agent_id or team_id:
+            place = row.get("place") or "general"
+            ref = row.get("place_ref")
+            return (place == "agent" and ref == agent_id) or (
+                place == "team" and bool(team_id) and ref == team_id
+            )
+        return any(
+            item["id"] == memory_id for item in self.visible_user_rows(session_id=session_id)
+        )
 
     def get_user(self, memory_id: str) -> dict | None:
         return self._user_view(self.repo.user_get(memory_id))
@@ -1293,8 +1388,12 @@ class MemoryService:
         value = re.sub(r"documentos?[\\/]|[\\/]documentos?\b", " ", value)
         return MemoryService.requires_owner_consent("", value)
 
-    def _learned_store_rows(self, scope: str, project_root: str | None) -> list[dict]:
-        rows = list(self.repo.user_live())
+    def _learned_store_rows(
+        self, scope: str, project_root: str | None, session_id: str | None = None
+    ) -> list[dict]:
+        # Only what this conversation may see (#75): a post never learns that
+        # another team already knows something, nor reads that team's note.
+        rows = list(self._user_rows_for(session_id))
         if scope == "project" and project_root:
             rows += self.repo.project_live(project_root)
         return rows
@@ -1336,7 +1435,7 @@ class MemoryService:
         _, text_hash = _suppression_hashes(topic, text)
         if self.repo.suppression_exists(text_hash):
             return {"status": "forgotten"}
-        for row in self._learned_store_rows(scope, project_root):
+        for row in self._learned_store_rows(scope, project_root, session_id):
             if _similar(row["text"], text):
                 view = (
                     self._project_view(row)
@@ -1344,9 +1443,12 @@ class MemoryService:
                     else self._user_view(row)
                 )
                 return {"status": "already_known", "memory": view}
+        sees = self._place_filter(self._profile_of(session_id), session_id)
         for row in self.repo.candidates(status=("pending", "denied"), limit=500):
             if row.get("classification") not in MODEL_CANDIDATE_CLASSES or not row.get("text"):
                 continue
+            if (row.get("scope") or "user") == "user" and not sees(row):
+                continue  # another agent's or team's proposal
             if (row.get("scope") or "user") != scope or (
                 scope == "project" and row.get("project_root") != project_root
             ):

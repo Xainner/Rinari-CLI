@@ -96,6 +96,8 @@ class AgentSession:
     # The next turn starts with the external-content guard on: a child born
     # after its mother read the web (plan-sesiones-hijas 5.2).
     next_turn_external: bool = False
+    # Where that content came from, as the guard names it (an agent's office).
+    next_turn_external_source: str = ""
     activity_sink: object = field(default=None, repr=False)
     # The title asked beside the current turn (V2-4); hosts that exit right
     # after a turn (a one-shot CLI run) may join it.
@@ -215,6 +217,130 @@ def _runtime_facts(services: ServiceContainer, record: SessionRecord) -> dict[st
     return facts
 
 
+def _ask_new_destinations(services: ServiceContainer, record: SessionRecord) -> bool:
+    """«Preguntar antes de enviar datos a destinos nuevos» for this conversation.
+
+    Rinari Agency (D-6): an agent's card decides when it says so. When it does
+    not, a run started by a rule that reads a connector (an external trigger:
+    what arrives is content from outside) starts with it on; the owner turns
+    it off on the agent's card. Anything else follows the app's setting.
+    """
+    default = bool(services.ctx.config.config.permissions.ask_new_destinations)
+    if not getattr(record, "agent_id", None) or services.agency is None:
+        return default
+    agent = services.agency.for_session(record.id)
+    if agent is None:
+        return default
+    if agent.get("ask_new_destinations") is not None:
+        return bool(agent["ask_new_destinations"])
+    if getattr(record, "lineage_kind", None) == "schedule":
+        task_id = (getattr(record, "brief", None) or {}).get("task_id")
+        task = services.ctx.schedule_repo.get(task_id) if task_id else None
+        if task is not None and task.get("kind") == "tool":
+            return True
+    return default
+
+
+def _agent_identity(services: ServiceContainer, record: SessionRecord) -> str | None:
+    """Rinari Agency: who this conversation's agent is, from the owner's card.
+
+    The card is written by the owner only (never by the model), so its
+    instructions are the owner's words for this agent. It changes only when
+    the owner edits the card, so it is cached with the session.
+    """
+    if not getattr(record, "agent_id", None) or services.agency is None:
+        return None
+    agent = services.agency.for_session(record.id)
+    if agent is None:
+        return None
+    lines = [
+        "## Your role in Rinari Agency",
+        f"In this conversation you work as the agent «{agent['name']}» of the owner's "
+        "Rinari Agency, not as Rinari's general assistant.",
+    ]
+    if agent.get("role"):
+        lines.append(f"Your job: {agent['role']}")
+    if agent.get("instructions"):
+        lines += ["The owner's instructions for this agent:", agent["instructions"]]
+    lines += _agency_place(services, record, agent)
+    return "\n".join(lines)
+
+
+def _agency_pack(services: ServiceContainer, record: SessionRecord) -> str | None:
+    """Which Agency tools a conversation gets: «post», «direct» or none.
+
+    Only a post, the agent's own direct chat and a run of one of its rules
+    (it works as the agent, and may pass work to a team like its chat).
+    Their children keep the agent (its memory, budget and connectors) but
+    get no Agency tools: the conversation that opened them delivers the
+    work, inside its own chain, so a child never starts a chain of its own (#75).
+    """
+    if getattr(services, "teams", None) is None:
+        return None
+    if getattr(record, "team_id", None) and services.ctx.team_repo.post_for_session(record.id):
+        return "post"
+    agent_id = getattr(record, "agent_id", None)
+    if agent_id and (services.ctx.agency_repo.get(agent_id) or {}).get("session_id") == record.id:
+        return "direct"
+    if (
+        agent_id
+        and getattr(record, "lineage_kind", None) == "schedule"
+        and not getattr(record, "parent_session_id", None)
+    ):
+        return "direct"  # a run of the agent's rule
+    return None
+
+
+def _agency_place(services: ServiceContainer, record: SessionRecord, agent: dict) -> list[str]:
+    """D-29 / D-30: who the agent works with. Only what changes when someone joins or
+    leaves (never live state, so the cached prompt holds): live state is `team.members`."""
+    teams = getattr(services, "teams", None)
+    repo = getattr(services.ctx, "team_repo", None)
+    if teams is None or repo is None:
+        return []
+    pack = _agency_pack(services, record)
+    if pack is None:
+        return []  # a child or a fork: no Agency tools to speak of
+    if pack == "direct":
+        return [
+            "",
+            "## The Agency's teams",
+            "You can pass work to one of the owner's teams: teams.list shows them and "
+            "errand.create leaves one an errand (its chief takes it). You are told here when "
+            "it is delivered, to review it with errand.review.",
+        ]
+    team = repo.get(record.team_id)
+    if team is None:
+        return []
+    lines = [
+        "",
+        "## Your team",
+        f"In this conversation you work at your post in the team «{team['name']}».",
+    ]
+    if team.get("purpose"):
+        lines.append(f"What the team is for: {team['purpose']}")
+    mates = []
+    for post in repo.posts(team["id"]):
+        mate = services.ctx.agency_repo.get(post["agent_id"])
+        if mate is None or mate["id"] == agent["id"]:
+            continue
+        chief = " (chief)" if mate["id"] == team.get("chief_agent_id") else ""
+        job = f" — {mate['role']}" if mate.get("role") else ""
+        mates.append(f"- {mate['name']}{chief}{job}")
+    if agent["id"] == team.get("chief_agent_id"):
+        lines.append(
+            "You are the team's chief: errands with no one assigned come to you, to do or "
+            "to pass to a teammate."
+        )
+    if mates:
+        lines += ["Your teammates (write @Name in the office to wake one):", *mates]
+    lines.append(
+        "Use the office, the board and team.members (who is free right now). If what you are "
+        "asked depends on a teammate doing something first, call office.wait with their name."
+    )
+    return lines
+
+
 def build_assembler_context(
     services: ServiceContainer,
     record: SessionRecord,
@@ -313,6 +439,7 @@ def build_assembler_context(
         soul=canonical,
         voice=_voice_text(services),
         extended_identity=extended,
+        agent_identity=_agent_identity(services, record),
         project_instructions=instructions,
         skill_catalog=catalog,
         tool_index=deferred_index(registry) if registry is not None else None,
@@ -935,7 +1062,7 @@ def build_agent_session(
         observation_budget_bytes=services.ctx.config.config.runtime.tools.observation_bytes,
         round_observation_bytes=services.ctx.config.config.runtime.tools.round_observation_bytes,
         max_concurrency=services.ctx.config.config.runtime.tools.max_concurrency,
-        ask_new_destinations=services.ctx.config.config.permissions.ask_new_destinations,
+        ask_new_destinations=_ask_new_destinations(services, record),
         session_id=record.id,
         kind=record.kind,
         cwd=root if root is not None else cwd,
@@ -1337,7 +1464,7 @@ def _build_tools(
             # Servers that connect while the turn runs join this registry
             # (capability.search, tool.call); the model's list never changes.
             services.mcp.start(root)
-            services.mcp.follow(registry, root)
+            services.mcp.follow(registry, root, session_id=record.id)
         with registry.loading("openapi"):
             for row in services.api.list():
                 if row.get("enabled"):
@@ -1355,10 +1482,25 @@ def _build_tools(
             registry.register_all(
                 schedule_tools(
                     ScheduleToolHost(
-                        service=getattr(services, "schedules", None), project_id=record.project_id
+                        service=getattr(services, "schedules", None),
+                        project_id=record.project_id,
+                        agent_id=getattr(record, "agent_id", None),
                     )
                 )
             )
+        agency_pack = _agency_pack(services, record)
+        if agency_pack == "post":
+            # Rinari Agency A2: a post has its office and its team's board.
+            with registry.loading("agency"):
+                from rinari.agency.tools import TeamToolHost, team_tools
+
+                registry.register_all(team_tools(TeamToolHost(services, record.id)))
+        elif agency_pack == "direct":
+            # D-30: an agent's direct chat can pass work to a team.
+            with registry.loading("agency"):
+                from rinari.agency.tools import TeamToolHost, direct_tools
+
+                registry.register_all(direct_tools(TeamToolHost(services, record.id)))
         with registry.loading("introspection"):
             from rinari.tools.native.rinari_state import RinariStateHost, rinari_state_tools
 
@@ -2470,7 +2612,7 @@ def _run_turn_unlocked(
     turn_state = TurnState()
     turn_state.owner_session = session.record.id
     if session.next_turn_external:
-        turn_state.mark_external("mother conversation")
+        turn_state.mark_external(session.next_turn_external_source or "mother conversation")
     session.context.tool_ctx = replace(
         session.context.tool_ctx,
         turn_command=session.next_turn_command,
@@ -2478,6 +2620,7 @@ def _run_turn_unlocked(
     )
     session.next_turn_command = ""
     session.next_turn_external = False
+    session.next_turn_external_source = ""
     wanted_tools = (*session.next_turn_tools, *_pinned_skill_tools(services, session.record))
     session.next_turn_tools = ()
     with contextlib.suppress(Exception):

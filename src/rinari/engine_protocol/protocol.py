@@ -212,6 +212,59 @@ CAPABILITIES: dict[str, bool] = {
     # mcp.project_offers.list/decide (a trusted folder's .mcp.json asked once
     # per server), mcpServer.project_root and url_secret.
     "mcp_catalog_v1": True,
+    # Rinari Agency A1: agents with a card (role, instructions, model,
+    # permission mode, connectors, daily budget in USD or tokens) and a direct
+    # chat (a CHAT session with agent_id, left out of session.list unless
+    # asked for by agent_id). agency.agent.list/get/create/update/archive,
+    # agency.status (what the Agency card says), agency.agent.changed and
+    # usage.report scope "agent" (today's spend over its conversations).
+    "agency_agents_v1": True,
+    # «Créalo con Rinari»: agency.agent.draft answers {status, job_id} at once
+    # and the draft (name, role, instructions, permission_profile) arrives as
+    # agency.draft.ready, or agency.draft.failed with a plain message. It uses
+    # the owner's default model and creates nothing.
+    "agency_draft_v1": True,
+    # «Probar» a proposed rule: schedule.rehearse answers {status, job_id} and
+    # schedule.rehearsed says what it would do (nothing_new, condition_not_met,
+    # would_run with the delivery it would send, blocked, not_rehearsable when
+    # its first tool may change something, failed). Nothing is ever sent.
+    "agency_rule_rehearsal_v1": True,
+    # «Detener a todos»: agency.stop_all cancels the turns of every agent of the
+    # profile and pauses their active rules; event agency.stopped.
+    "agency_stop_all_v1": True,
+    # agency.secret_pasted {session_id}: the owner sent what looks like a key in
+    # an agent's chat (memory's credential patterns and the history redactor's).
+    # The text is never in the event.
+    "agency_secret_warning_v1": True,
+    # An agent's own memory in the Agency settings (D-24):
+    # agency.agent.memory.list/add; memory.update/forget edit and forget it, and
+    # its place_label is the agent's name.
+    "agency_agent_memory_v1": True,
+    # Rinari Agency A2: teams with posts (sessions with agent_id and team_id), a
+    # chief, team connectors and accounts (owner team:ID, also from
+    # mcp.catalog.add), team memory (place team, agency.team.memory.*), the
+    # office chat (agency.office.*: only @mentions wake, 3 hops, 5
+    # mentions, 20 deliveries per chain), errands as the board's queue, one per
+    # post at a time (agency.errand.*), team and global budgets
+    # (agency.settings.*), a blocked errand waits until agency.errand.retry,
+    # templates without accounts (agency.team.template / duplicate),
+    # events agency.team.changed, agency.office.message
+    # and agency.chain.stopped, and the post tools office.say, errand.create,
+    # errand.review and board.list.
+    "agency_teams_v1": True,
+    # D-29 / D-30: a post's prompt names its team, `team.members` says who is
+    # free, `office.wait` parks a mention until a teammate posts in the chain
+    # (agency.chain.stopped reasons wait_expired and wait_cancelled), an
+    # errand's prompt carries the office, and an agent's direct chat can leave
+    # an errand to a team and is told there when it is delivered.
+    "agency_team_awareness_v1": True,
+    # The board's caps after review: 3 office.say per turn, 3 returns per
+    # errand, mentions count for the 20 deliveries of a chain, the Engine's
+    # notices (office message `system` + `notice`, worded by the app) never
+    # release a wait, «Detener a todos» halts the board until agency.resume
+    # (or an owner's message, errand or retry), and agency.chain.stopped
+    # reasons too_many_returns, no_chief and could_not_start.
+    "agency_board_v2": True,
     # soul.settings.get/set: character intensity (minimal | balanced | full),
     # separate from Soul selection; bundled default Soul 4.0.
     "soul_character_intensity_v1": True,

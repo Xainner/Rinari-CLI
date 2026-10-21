@@ -53,6 +53,22 @@ MAX_DELTA_CHARS = 8000
 MAX_DETAIL_CHARS = 2000
 MAX_STREAM_CHARS = 64_000
 _TOOL_ENDS = frozenset({"tool.completed", "tool.failed", "tool.cancelled"})
+
+
+def _origin_kind(origin: dict[str, Any] | None) -> str:
+    """Who a turn's message comes from, for the tools that only trust the owner.
+
+    A child's brief and its mother's messages are shown as the owner's
+    (`kind: user`), but the model wrote them: they never count as the owner
+    asking (a rule, a quote to keep, a memory).
+    """
+    origin = origin or {}
+    kind = origin.get("kind") or "user"
+    if kind == "user" and origin.get("source") in ("child_brief", "parent_message"):
+        return "child_brief"
+    return kind
+
+
 MAX_QUEUE_DEPTH = 20
 MAX_QUEUE_MESSAGE_CHARS = 32768
 # What the model reads before a message the owner sent mid-turn. The chat
@@ -256,6 +272,9 @@ class TurnManager:
         self._preparation_threads: set[threading.Thread] = set()
         self._approvals: dict[str, _PendingApproval] = {}
         self._observers: list[Any] = []
+        # session_id -> whether its last turn read something from outside the
+        # machine (the Agency passes that on to the turn it wakes).
+        self._last_external: dict[str, bool] = {}
         # A resume waiting for a provider limit holds the session's queue
         # (plan 0.4.0 #24); set by the resume runner.
         self.queue_hold: Any = None
@@ -327,6 +346,27 @@ class TurnManager:
     def has_active_turns(self) -> bool:
         with self._lock:
             return any(not turn.done.is_set() for turn in self._turns.values())
+
+    def last_turn_external(self, session_id: str) -> bool:
+        """Whether the conversation's last finished turn read external content."""
+        with self._lock:
+            return self._last_external.get(session_id, False)
+
+    def _note_external(self, turn) -> None:
+        """Remember whether this turn read external content, before its terminal event.
+
+        Also when it failed or was cancelled: never the previous turn's value
+        (#75). Before the turn had a session, its origin's mark is all there is.
+        """
+        state = None
+        if turn.session is not None:
+            state = getattr(getattr(turn.session.context, "tool_ctx", None), "turn_state", None)
+        if state is not None:
+            external = bool(getattr(state, "external_content", False))
+        else:
+            external = bool((turn.origin or {}).get("external_content"))
+        with self._lock:
+            self._last_external[turn.session_id] = external
 
     def has_active_turn(self, session_id: str) -> bool:
         with self._lock:
@@ -695,6 +735,69 @@ class TurnManager:
 
     # -- turn lifecycle ----------------------------------------------------
 
+    def _warn_pasted_secret(self, session_id: str, message: str) -> None:
+        """Rinari Agency (D-11): the owner pasted what looks like a key in an agent's chat.
+
+        It already went to the model's provider with the message, so it cannot
+        be taken back: the desktop says so and recommends changing it. The
+        event never carries the text, only that it happened.
+        """
+        from rinari.memory.service import find_sensitive_match
+        from rinari.shared.redaction import redact_text
+
+        text = message or ""
+        if find_sensitive_match(text) is None and redact_text(text) == text:
+            return
+        self.emit_external(event("agency.secret_pasted", {"session_id": session_id}))
+
+    def _check_agent(self, record: Any) -> None:
+        """Rinari Agency: an agent's turn waits for the owner past its daily cap.
+
+        Checked before the turn exists, so nothing is spent. An unknown cost
+        (a model without a known price) never stops it: only a token cap can.
+        """
+        from rinari.engine_protocol.agency import spend_today
+
+        agency = getattr(self._services, "agency", None)
+        if agency is None:
+            return
+        agent = agency.for_session(record.id)
+        if agent is None:
+            raise EngineProtocolError(
+                errors.AGENT_ARCHIVED,
+                "This agent was archived; its conversation is read-only.",
+                details={"session_id": record.id, "agent_id": record.agent_id},
+            )
+        spend = spend_today(self._services, agent)
+        if spend["over_budget"]:
+            raise EngineProtocolError(
+                errors.AGENT_OVER_BUDGET,
+                f"{agent['name']} used today's budget; raise it or wait until tomorrow.",
+                details={"session_id": record.id, "agent_id": agent["id"], "spend": spend},
+            )
+        # A2: a post also stops at its team's cap, and every agent at the Agency's.
+        from rinari.engine_protocol.agency import agency_settings, spend_of
+
+        team_id = getattr(record, "team_id", None)
+        team = self._services.ctx.team_repo.get(team_id) if team_id else None
+        if team is not None and team.get("budget"):
+            team_spend = spend_of(self._services, "team", team["id"], team["budget"])
+            if team_spend["over_budget"]:
+                raise EngineProtocolError(
+                    errors.AGENT_OVER_BUDGET,
+                    f"The team {team['name']} used today's budget.",
+                    details={"session_id": record.id, "team_id": team["id"], "spend": team_spend},
+                )
+        global_budget = agency_settings(self._services)["budget"]
+        if global_budget:
+            total = spend_of(self._services, "agency", None, global_budget)
+            if total["over_budget"]:
+                raise EngineProtocolError(
+                    errors.AGENT_OVER_BUDGET,
+                    "The Agency used today's budget.",
+                    details={"session_id": record.id, "spend": total},
+                )
+
     def start_turn(
         self,
         session_id: str,
@@ -725,6 +828,10 @@ class TurnManager:
                 f"Session {record.id} is closed; resume it before starting turns.",
                 details={"session_id": record.id},
             )
+        if record.agent_id and not compaction_only:
+            self._check_agent(record)
+            if origin is None and memory_origin == "interactive":
+                self._warn_pasted_secret(record.id, message)
         # A turn is what recency means, and nothing else refreshed it here, so
         # a session stayed where it was however much was said in it. Compaction
         # is housekeeping the user did not ask for and must not reorder a list.
@@ -854,13 +961,16 @@ class TurnManager:
                 self.operations.finish(turn.turn_id, "cancelling")
             return self.operations.get(operation_id) or operation
 
-    def cancel_turn(self, session_id: str) -> dict[str, Any]:
+    def cancel_turn(self, session_id: str, turn_id: str | None = None) -> dict[str, Any]:
+        """Cancel the session's running turn; with `turn_id`, only if it is that one."""
         with self._lock:
             turn = next(
                 (
                     active
                     for active in self._turns.values()
-                    if active.session_id == session_id and not active.done.is_set()
+                    if active.session_id == session_id
+                    and not active.done.is_set()
+                    and (turn_id is None or active.turn_id == turn_id)
                 ),
                 None,
             )
@@ -1116,6 +1226,7 @@ class TurnManager:
                     memory_origin=turn.memory_origin,
                 )
             turn.goal_result = result
+            self._note_external(turn)
             if result.kind == "cancelled":
                 self._cancel_running_activities(turn)
                 finalize_changes()
@@ -1142,10 +1253,12 @@ class TurnManager:
                     {"kind": result.kind, "content": result.content},
                 )
         except CancelledError:
+            self._note_external(turn)
             self._cancel_running_activities(turn)
             finalize_changes()
             self._activity_cb(turn)("turn.cancelled", {})
         except EngineProtocolError as err:
+            self._note_external(turn)
             turn.goal_error = (err.code, err.message)
             self._fail_running_activities(turn, err.message)
             finalize_changes()
@@ -1161,6 +1274,7 @@ class TurnManager:
                 },
             )
         except RinariError as err:
+            self._note_external(turn)
             self._fail_running_activities(turn, str(err))
             finalize_changes()
             mapped = errors.from_rinari_error(err)
@@ -1180,6 +1294,7 @@ class TurnManager:
                 },
             )
         except Exception as err:  # defensive: the desktop must see a terminal event
+            self._note_external(turn)
             self._fail_running_activities(turn, str(err))
             finalize_changes()
             self._activity_cb(turn)(
@@ -1337,7 +1452,7 @@ class TurnManager:
                     ),
                     activity_sink=self._activity_cb(turn),
                     reasoning_effort=reasoning_effort,
-                    origin_kind=(turn.origin or {}).get("kind") or "user",
+                    origin_kind=_origin_kind(turn.origin),
                     session_grants=self.grants.for_session(record.id),
                     **({"remote_target": turn.remote_target} if turn.remote_target else {}),
                     **(
@@ -1363,6 +1478,9 @@ class TurnManager:
                 # A child born after its mother read external content keeps the
                 # guard on for its first turn (plan-sesiones-hijas 5.2).
                 session.next_turn_external = bool((turn.origin or {}).get("external_content"))
+                session.next_turn_external_source = str(
+                    (turn.origin or {}).get("external_source") or ""
+                )
                 if abandoned.is_set():
                     session.end()
                     return

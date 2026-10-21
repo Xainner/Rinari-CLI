@@ -32,7 +32,7 @@ from rinari.tools.exposure import ToolExposure
 from tests.unit.test_agent_loop import FakeModel, make_tool_runtime
 
 
-def _conversation(tmp_path) -> list[ModelRequest]:
+def _conversation(tmp_path, agent_identity: str | None = None) -> list[ModelRequest]:
     root = tmp_path / "proj"
     root.mkdir()
     (root / "a.txt").write_text("one\n", encoding="utf-8")
@@ -66,6 +66,7 @@ def _conversation(tmp_path) -> list[ModelRequest]:
             session_kind="PROJECT",
             constitution="You are RINARI.",
             environment={"cwd": str(root), "repository": "files: a.txt, b.txt"},
+            agent_identity=agent_identity,
         ),
     )
     diff = '{"a": "a.txt", "b": "b.txt"}'
@@ -134,6 +135,22 @@ def test_every_request_starts_like_the_one_before(tmp_path, wire) -> None:
         # tool results it joins): everything before it is the cached prefix.
         kept = _strip(messages_before[:-1])
         assert _strip(messages_after[: len(kept)]) == kept
+
+
+@pytest.mark.parametrize(
+    "wire", [_chat, _responses, _anthropic], ids=["chat", "responses", "anthropic"]
+)
+def test_an_agents_card_stays_in_the_cached_prefix(tmp_path, wire) -> None:
+    """Rinari Agency: the agent's block is fixed per session, so the prefix holds."""
+    card = "## Your role in Rinari Agency\nYou work as the agent «Writer»."
+    requests = _conversation(tmp_path, agent_identity=card)
+    for before, after in pairwise(requests):
+        tools_before, messages_before = wire(before)
+        tools_after, messages_after = wire(after)
+        assert tools_after == tools_before
+        kept = _strip(messages_before[:-1])
+        assert _strip(messages_after[: len(kept)]) == kept
+    assert "«Writer»" in str(wire(requests[0])[1][0])
 
 
 def test_the_door_and_search_are_in_the_list_and_the_activated_tool_is_not(tmp_path) -> None:
