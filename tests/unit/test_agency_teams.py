@@ -674,3 +674,23 @@ def test_a_teams_memory_is_listed_and_written_in_the_agency_settings(server) -> 
     listed = _ok(_call(server, "agency.team.memory.list", {"team_id": team["id"]}))
     assert [row["text"] for row in listed["records"]] == ["Animales en 3D"]
     assert _call(server, "agency.team.memory.list", {"team_id": "nadie"})["ok"] is False
+
+
+def test_a_mention_with_a_real_turn_does_not_hold_the_request(server) -> None:
+    # The office answers at once: the mentioned post's turn starts on its own.
+    import threading
+
+    writer = _agent(server, "Writer")
+    team = _team(server, "Canal", [writer])
+    result: dict = {}
+
+    def post():
+        result["response"] = _call(
+            server, "agency.office.post", {"team_id": team["id"], "text": "@Writer hola"}
+        )
+
+    worker = threading.Thread(target=post, daemon=True)
+    worker.start()
+    worker.join(timeout=20)
+    assert not worker.is_alive(), "agency.office.post did not return"
+    assert result["response"]["ok"] is True, result["response"]
