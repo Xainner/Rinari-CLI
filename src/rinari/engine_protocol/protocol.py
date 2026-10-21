@@ -258,6 +258,13 @@ CAPABILITIES: dict[str, bool] = {
     # errand's prompt carries the office, and an agent's direct chat can leave
     # an errand to a team and is told there when it is delivered.
     "agency_team_awareness_v1": True,
+    # The board's caps after review: 3 office.say per turn, 3 returns per
+    # errand, mentions count for the 20 deliveries of a chain, the Engine's
+    # notices (office message `system` + `notice`, worded by the app) never
+    # release a wait, «Detener a todos» halts the board until agency.resume
+    # (or an owner's message, errand or retry), and agency.chain.stopped
+    # reasons too_many_returns, no_chief and could_not_start.
+    "agency_board_v2": True,
     # soul.settings.get/set: character intensity (minimal | balanced | full),
     # separate from Soul selection; bundled default Soul 4.0.
     "soul_character_intensity_v1": True,

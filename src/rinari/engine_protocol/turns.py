@@ -53,6 +53,22 @@ MAX_DELTA_CHARS = 8000
 MAX_DETAIL_CHARS = 2000
 MAX_STREAM_CHARS = 64_000
 _TOOL_ENDS = frozenset({"tool.completed", "tool.failed", "tool.cancelled"})
+
+
+def _origin_kind(origin: dict[str, Any] | None) -> str:
+    """Who a turn's message comes from, for the tools that only trust the owner.
+
+    A child's brief and its mother's messages are shown as the owner's
+    (`kind: user`), but the model wrote them: they never count as the owner
+    asking (a rule, a quote to keep, a memory).
+    """
+    origin = origin or {}
+    kind = origin.get("kind") or "user"
+    if kind == "user" and origin.get("source") in ("child_brief", "parent_message"):
+        return "child_brief"
+    return kind
+
+
 MAX_QUEUE_DEPTH = 20
 MAX_QUEUE_MESSAGE_CHARS = 32768
 # What the model reads before a message the owner sent mid-turn. The chat
@@ -256,6 +272,9 @@ class TurnManager:
         self._preparation_threads: set[threading.Thread] = set()
         self._approvals: dict[str, _PendingApproval] = {}
         self._observers: list[Any] = []
+        # session_id -> whether its last turn read something from outside the
+        # machine (the Agency passes that on to the turn it wakes).
+        self._last_external: dict[str, bool] = {}
         # A resume waiting for a provider limit holds the session's queue
         # (plan 0.4.0 #24); set by the resume runner.
         self.queue_hold: Any = None
@@ -327,6 +346,11 @@ class TurnManager:
     def has_active_turns(self) -> bool:
         with self._lock:
             return any(not turn.done.is_set() for turn in self._turns.values())
+
+    def last_turn_external(self, session_id: str) -> bool:
+        """Whether the conversation's last finished turn read external content."""
+        with self._lock:
+            return self._last_external.get(session_id, False)
 
     def has_active_turn(self, session_id: str) -> bool:
         with self._lock:
@@ -1183,6 +1207,11 @@ class TurnManager:
                     memory_origin=turn.memory_origin,
                 )
             turn.goal_result = result
+            state = getattr(getattr(agent_session.context, "tool_ctx", None), "turn_state", None)
+            with self._lock:
+                self._last_external[turn.session_id] = bool(
+                    getattr(state, "external_content", False)
+                )
             if result.kind == "cancelled":
                 self._cancel_running_activities(turn)
                 finalize_changes()
@@ -1404,7 +1433,7 @@ class TurnManager:
                     ),
                     activity_sink=self._activity_cb(turn),
                     reasoning_effort=reasoning_effort,
-                    origin_kind=(turn.origin or {}).get("kind") or "user",
+                    origin_kind=_origin_kind(turn.origin),
                     session_grants=self.grants.for_session(record.id),
                     **({"remote_target": turn.remote_target} if turn.remote_target else {}),
                     **(
@@ -1430,6 +1459,9 @@ class TurnManager:
                 # A child born after its mother read external content keeps the
                 # guard on for its first turn (plan-sesiones-hijas 5.2).
                 session.next_turn_external = bool((turn.origin or {}).get("external_content"))
+                session.next_turn_external_source = str(
+                    (turn.origin or {}).get("external_source") or ""
+                )
                 if abandoned.is_set():
                     session.end()
                     return

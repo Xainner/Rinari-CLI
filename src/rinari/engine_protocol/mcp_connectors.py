@@ -125,11 +125,10 @@ class McpConnectorMethods:
                 url=fields.get("url"),
                 env=fields.get("env"),
                 auth=fields.get("auth"),
+                owner=owner,
             )
         except ValueError as exc:  # McpConfigError: never carries a value
             raise EngineProtocolError(INVALID_PARAMS, str(exc)) from exc
-        if owner is not None:
-            self._services.ctx.mcp_server_repo.set_owner(name, "global", owner)
             row = self._mcp.show(name) or row
         return {
             "server": self._view(row),

@@ -134,6 +134,9 @@ _ERRAND_COLUMNS = (
     "updated_at",
     "started_at",
     "delivered_at",
+    "deliveries",
+    "returns",
+    "external",
 )
 
 
@@ -149,12 +152,19 @@ def _errand(row: Any) -> dict[str, Any]:
     item["done_when"] = json.loads(item.pop("done_when_json") or "[]")
     raw = item.pop("result_json", None)
     item["result"] = json.loads(raw) if raw else None
+    item["external"] = bool(item.get("external"))
+    item["deliveries"] = int(item.get("deliveries") or 0)
+    item["returns"] = int(item.get("returns") or 0)
     return item
 
 
 def _office(row: Any) -> dict[str, Any]:
     item = dict(row)
     item["mentions"] = json.loads(item.pop("mentions_json") or "[]")
+    raw = item.pop("notice_json", None)
+    item["notice"] = json.loads(raw) if raw else None
+    item["system"] = bool(item.get("system"))
+    item["external"] = bool(item.get("external"))
     return item
 
 
@@ -237,6 +247,18 @@ class TeamRepository:
             (team_id, agent_id, session_id),
         )
 
+    def set_session_team(self, session_id: str, team_id: str | None) -> None:
+        """A child or fork of a post works for the same team."""
+        self._db.execute("UPDATE sessions SET team_id = ? WHERE id = ?", (team_id, session_id))
+
+    def active_team(self, record: Any) -> str | None:
+        """The team a conversation works for: while its agent is still in that team."""
+        team_id = getattr(record, "team_id", None)
+        agent_id = getattr(record, "agent_id", None)
+        if not team_id or not agent_id or self.post(team_id, agent_id) is None:
+            return None
+        return team_id
+
     def remove_post(self, team_id: str, agent_id: str) -> None:
         self._db.execute(
             "DELETE FROM agency_posts WHERE team_id = ? AND agent_id = ?", (team_id, agent_id)
@@ -253,8 +275,8 @@ class TeamRepository:
             """
             INSERT INTO agency_office_messages (
                 id, team_id, author_kind, agent_id, text, mentions_json, errand_id,
-                chain_id, hop, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                chain_id, hop, created_at, system, notice_json, external
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 message["id"],
@@ -267,6 +289,9 @@ class TeamRepository:
                 message["chain_id"],
                 int(message.get("hop") or 0),
                 message["created_at"],
+                int(bool(message.get("system"))),
+                json.dumps(message["notice"], sort_keys=True) if message.get("notice") else None,
+                int(bool(message.get("external"))),
             ),
         )
         return self.message(message["id"]) or {}
@@ -318,6 +343,9 @@ class TeamRepository:
             "hop": int(errand.get("hop") or 0),
             "status": errand.get("status") or "pending",
             "body": errand.get("body") or "",
+            "deliveries": int(errand.get("deliveries") or 0),
+            "returns": int(errand.get("returns") or 0),
+            "external": int(bool(errand.get("external"))),
         }
         self._db.execute(
             f"""
@@ -331,9 +359,43 @@ class TeamRepository:
         return self.errand(errand_id) or {}
 
     def chain_deliveries(self, chain_id: str) -> int:
+        """Every delivery of the chain's errands: one sent back and done again counts twice."""
         row = self._db.query_one(
-            "SELECT COUNT(*) AS n FROM agency_errands WHERE chain_id = ? AND status IN "
-            "('delivered', 'reviewed')",
+            "SELECT COALESCE(SUM(deliveries), 0) AS n FROM agency_errands WHERE chain_id = ?",
             (chain_id,),
         )
         return int(row["n"]) if row else 0
+
+    # -- waits (office.wait) ---------------------------------------------------
+
+    def waits(self) -> list[dict[str, Any]]:
+        return [dict(row) for row in self._db.query("SELECT * FROM agency_waits ORDER BY since")]
+
+    def save_wait(self, wait: dict[str, Any]) -> None:
+        self._db.execute(
+            """
+            INSERT INTO agency_waits (
+                session_id, team_id, agent_id, for_agent_id, chain_id, hop, message_at, since
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                team_id = excluded.team_id, agent_id = excluded.agent_id,
+                for_agent_id = excluded.for_agent_id, chain_id = excluded.chain_id,
+                hop = excluded.hop, message_at = excluded.message_at, since = excluded.since
+            """,
+            (
+                wait["session_id"],
+                wait["team_id"],
+                wait["agent_id"],
+                wait["for_agent_id"],
+                wait["chain_id"],
+                int(wait.get("hop") or 0),
+                float(wait.get("message_at") or 0),
+                wait["since"],
+            ),
+        )
+
+    def drop_wait(self, session_id: str) -> None:
+        self._db.execute("DELETE FROM agency_waits WHERE session_id = ?", (session_id,))
+
+    def drop_waits(self) -> None:
+        self._db.execute("DELETE FROM agency_waits")

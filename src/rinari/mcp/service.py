@@ -279,8 +279,12 @@ class McpService:
         headers: dict[str, Any] | None = None,
         timeout_s: float | None = None,
         project_root: str | Path | None = None,
+        owner: str | None = None,
     ) -> dict:
         """Create (or replace) a server. Raises ValueError on invalid config.
+
+        `owner` (Rinari Agency, C8): an agent's or a team's own account, saved
+        with the server before it connects, so nobody else ever sees it.
 
         `project_root` ties a project-scope server to one folder (C4: a
         server accepted from that folder's `.mcp.json`); without it a project
@@ -306,7 +310,9 @@ class McpService:
         validate_draft(draft)
         existing = self._ctx.mcp_server_repo.find(name, scope)
         root = canonical_root(project_root) if project_root and scope == "project" else None
-        return self._write(name, scope, draft, existing, enabled=True, project_root=root)
+        return self._write(
+            name, scope, draft, existing, enabled=True, project_root=root, owner=owner
+        )
 
     def update(self, name: str, params: Mapping[str, Any], *, scope: str = "global") -> dict:
         """Edit an existing server: transport, command/url, env, auth, headers.
@@ -331,6 +337,7 @@ class McpService:
         *,
         enabled: bool,
         project_root: str | None = None,
+        owner: str | None = None,
     ) -> dict:
         server_id = existing["id"] if existing is not None else self._ctx.ids.new("mcp")
         if project_root is None:
@@ -364,6 +371,10 @@ class McpService:
                     with contextlib.suppress(Exception):
                         self._credentials.delete(ref)
             raise
+        if owner is not None:
+            # Before the connection starts: its state is read with the owner.
+            self._ctx.mcp_server_repo.set_owner(name, scope, owner)
+            row = {**row, "owner": owner}
         if existing is not None:
             self._retire_refs(config_refs(stored_config(existing)) - config_refs(config))
         self._restart(name)  # connects again with the new config

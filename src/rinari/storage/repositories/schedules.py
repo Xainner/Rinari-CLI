@@ -119,6 +119,13 @@ class ScheduleRepository:
         )
         return self.get(task_id) or {}
 
+    def set_enabled(self, task_id: str, enabled: bool, updated_at: float) -> None:
+        """Turn a task on or off without validating it again («Detener a todos»)."""
+        self._db.execute(
+            "UPDATE scheduled_tasks SET enabled = ?, updated_at = ? WHERE id = ?",
+            (int(enabled), updated_at, task_id),
+        )
+
     def set_watch_fingerprint(self, task_id: str, fingerprint: str) -> None:
         """What a watched folder looked like at its last check (kept across restarts)."""
         task = self.get(task_id)

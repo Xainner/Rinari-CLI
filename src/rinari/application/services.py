@@ -190,9 +190,11 @@ def _agent_scope(agency: AgencyService, session_id: str, ctx: AppContext):
     agent = agency.for_session(session_id)
     if agent is None:
         return None, None
-    post = ctx.team_repo.post_for_session(session_id) if ctx.team_repo else None
-    if post is not None:
-        team = ctx.team_repo.get(post["team_id"])
+    record = ctx.session_repo.get(session_id) if ctx.team_repo else None
+    team_id = ctx.team_repo.active_team(record) if record is not None else None
+    if team_id is not None:
+        # A post, or a child of one: the team's connectors and accounts.
+        team = ctx.team_repo.get(team_id)
         if team is not None:
             return frozenset(team.get("connectors") or ()), f"team:{team['id']}"
     return frozenset(agent.get("connectors") or ()), f"agent:{agent['id']}"

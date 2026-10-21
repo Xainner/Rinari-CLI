@@ -363,6 +363,7 @@ class EngineServer:
         self._dispatcher.register("agency.errand.retry", self._teams.errand_retry)
         self._dispatcher.register("agency.team.template", self._teams.template)
         self._dispatcher.register("agency.team.duplicate", self._teams.duplicate)
+        self._dispatcher.register("agency.resume", self._teams.resume_params)
         self._dispatcher.register("agency.settings.get", self._agency.settings_get)
         self._dispatcher.register("agency.settings.set", self._agency.settings_set)
         from rinari.engine_protocol.resume import ResumeRunner
@@ -3680,12 +3681,11 @@ class EngineServer:
                 auth=fields.get("auth"),
                 headers=fields.get("headers"),
                 timeout_s=fields.get("timeout_s"),
+                # Rinari Agency (C8): the account belongs to that agent only.
+                owner=owner,
             )
         except ValueError as exc:
             raise EngineProtocolError(INVALID_PARAMS, str(exc)) from exc
-        if owner is not None:
-            # Rinari Agency (C8): the account belongs to that agent only.
-            self._services.ctx.mcp_server_repo.set_owner(name, "global", owner)
             row = self._services.mcp.show(name) or row
         return {"server": self._mcp_view(row, False)}
 

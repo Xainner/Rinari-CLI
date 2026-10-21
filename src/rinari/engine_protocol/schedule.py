@@ -63,6 +63,10 @@ class ScheduleRunner:
         self._recovered = False
         # task_id -> fingerprint of its watched folder at its last check.
         self._fingerprints: dict[str, str] = {}
+        # run_id -> (task_id, fingerprint) kept only once that run completes.
+        self._pending_fingerprints: dict[str, tuple[str, str]] = {}
+        # Rules whose watched folder has more files than are watched.
+        self._truncated: set[str] = set()
         self._turns.add_observer(self._observe)
 
     @property
@@ -147,32 +151,44 @@ class ScheduleRunner:
             run_id = self._run(task, trigger="manual", scheduled_for=None)
         return {"run": self._repo.run(run_id)}
 
-    def _unchanged(self, task: dict[str, Any]) -> str | None:
+    def _unchanged(self, task: dict[str, Any]) -> tuple[str | None, str | None]:
         """A watched folder that did not change since the last check: why it is skipped.
 
         The fingerprint is kept with the task, so a change made while the
         Engine was closed still runs the rule at its next check. Only the
         very first check of a rule takes the fingerprint without running.
+        A change is only taken once the run it caused finishes: if that run
+        fails or is blocked, the next check sees the change again. Returns
+        (why it is skipped, the new fingerprint to keep when the run ends).
         """
         watch = task.get("watch")
         if not watch:
-            return None
-        current = folder_fingerprint(Path(watch["path"]))
+            return None, None
+        current, truncated = folder_scan(Path(watch["path"]))
+        if truncated:
+            # Said on the rule, never ignored in silence.
+            self._truncated.add(task["id"])
+        else:
+            self._truncated.discard(task["id"])
         before = self._fingerprints.get(task["id"]) or watch.get("fingerprint")
-        self._fingerprints[task["id"]] = current
-        if current != before:
-            self._repo.set_watch_fingerprint(task["id"], current)
         if before is None:
-            return "watching the folder from now"
+            self._keep_fingerprint(task["id"], current)
+            return "watching the folder from now", None
         if before == current:
-            return "no changes in the folder"
-        return None
+            return "no changes in the folder", None
+        return None, current
+
+    def _keep_fingerprint(self, task_id: str, fingerprint: str) -> None:
+        self._fingerprints[task_id] = fingerprint
+        self._repo.set_watch_fingerprint(task_id, fingerprint)
 
     def _run(self, task: dict[str, Any], *, trigger: str, scheduled_for: float | None) -> str:
         run_id = self._services.ctx.ids.new("run")
         started = self._clock.now()
         if trigger == "schedule":
-            unchanged = self._unchanged(task)
+            unchanged, fingerprint = self._unchanged(task)
+            if fingerprint is not None:
+                self._pending_fingerprints[run_id] = (task["id"], fingerprint)
             if unchanged:
                 self._repo.save_run(
                     run_id,
@@ -519,6 +535,15 @@ class ScheduleRunner:
         quiet: bool | None = None,
         **fields: Any,
     ) -> None:
+        pending = self._pending_fingerprints.pop(run_id, None)
+        if pending is not None and status == "completed":
+            self._keep_fingerprint(*pending)
+        if task["id"] in self._truncated:
+            note = (
+                f"the folder has more than {MAX_WATCHED_FILES} files: "
+                f"only the first {MAX_WATCHED_FILES} are watched"
+            )
+            fields["reason"] = f"{fields['reason']} ({note})" if fields.get("reason") else note
         self._repo.save_run(run_id, status=status, finished_at=self._clock.now(), **fields)
         run = self._repo.run(run_id) or {}
         self._emit(
@@ -689,8 +714,9 @@ MAX_WATCHED_FILES = 5000
 _SKIPPED_DIRS = {".git", "node_modules", "__pycache__", ".venv"}
 
 
-def folder_fingerprint(folder: Path) -> str:
-    """What a watched folder looks like now: names, sizes and modification times."""
+def folder_scan(folder: Path) -> tuple[str, bool]:
+    """What a watched folder looks like now (names, sizes and modification
+    times), and whether it has more files than are watched."""
     import hashlib
     import os
 
@@ -704,11 +730,16 @@ def folder_fingerprint(folder: Path) -> str:
                 stat = path.stat()
             except OSError:
                 continue
+            if seen >= MAX_WATCHED_FILES:
+                return digest.hexdigest(), True
             digest.update(f"{path}|{stat.st_size}|{stat.st_mtime_ns}\n".encode())
             seen += 1
-            if seen >= MAX_WATCHED_FILES:
-                return digest.hexdigest()
-    return digest.hexdigest()
+    return digest.hexdigest(), False
+
+
+def folder_fingerprint(folder: Path) -> str:
+    """What a watched folder looks like now: names, sizes and modification times."""
+    return folder_scan(folder)[0]
 
 
 class RuleBlockedError(Exception):

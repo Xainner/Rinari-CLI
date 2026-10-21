@@ -56,11 +56,14 @@ def agency_settings(services: Any) -> dict[str, Any]:
     stored = services.ctx.config_repo.get_json(SETTINGS_KEY) or {}
     budget = stored.get("budget") if isinstance(stored, dict) else None
     mode = stored.get("errand_mode") if isinstance(stored, dict) else None
+    stopped = stored.get("stopped_profiles") if isinstance(stored, dict) else None
     return {
         "budget": budget if isinstance(budget, dict) else {},
         "errand_mode": mode if mode in AVAILABLE_ERRAND_MODES else "turn",
         "errand_modes": list(ERRAND_MODES),
         "available_errand_modes": list(AVAILABLE_ERRAND_MODES),
+        # Profiles whose board «Detener a todos» halted, until the owner resumes it.
+        "stopped_profiles": list(stopped) if isinstance(stopped, list) else [],
     }
 
 
@@ -374,7 +377,11 @@ class AgencyMethods:
         from rinari.shared.clock import now_iso
 
         current = agency_settings(self._services)
-        stored = {"budget": current["budget"], "errand_mode": current["errand_mode"]}
+        stored = {
+            "budget": current["budget"],
+            "errand_mode": current["errand_mode"],
+            "stopped_profiles": current["stopped_profiles"],
+        }
         if "budget" in params:
             try:
                 stored["budget"] = normalize_budget(params.get("budget"))
@@ -421,19 +428,38 @@ class AgencyMethods:
         paused = []
         for task in self._services.ctx.schedule_repo.list():
             if task.get("agent_id") in agents and task.get("enabled"):
-                self._services.schedules.update(task["id"], {"enabled": False})
+                # A direct write: pausing never fails on a rule that no longer
+                # validates (a watched folder that was deleted, for example).
+                self._services.ctx.schedule_repo.set_enabled(
+                    task["id"], False, self._services.ctx.clock.now()
+                )
                 paused.append(task["id"])
+        # The board too: nothing queued starts until the owner resumes (B5).
+        board = getattr(self._server, "_teams", None)
+        halted = (
+            board.halt(profile or self._services.rinari_profiles.active_id())
+            if board is not None
+            else {"blocked_errands": 0}
+        )
         self._turns.emit_external(
             event(
                 "agency.stopped",
-                {"cancelled_sessions": cancelled, "paused_rules": paused},
+                {
+                    "cancelled_sessions": cancelled,
+                    "paused_rules": paused,
+                    "blocked_errands": halted["blocked_errands"],
+                },
             )
         )
         for task_id in paused:
             self._turns.emit_external(
                 event("schedule.changed", {"task_id": task_id, "change": "updated"})
             )
-        return {"cancelled_turns": len(cancelled), "paused_rules": len(paused)}
+        return {
+            "cancelled_turns": len(cancelled),
+            "paused_rules": len(paused),
+            "blocked_errands": halted["blocked_errands"],
+        }
 
     def status(self, params: dict[str, Any]) -> dict[str, Any]:
         """What the Agency card says: how many agents, working and waiting."""

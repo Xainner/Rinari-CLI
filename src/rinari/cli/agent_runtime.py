@@ -96,6 +96,8 @@ class AgentSession:
     # The next turn starts with the external-content guard on: a child born
     # after its mother read the web (plan-sesiones-hijas 5.2).
     next_turn_external: bool = False
+    # Where that content came from, as the guard names it (an agent's office).
+    next_turn_external_source: str = ""
     activity_sink: object = field(default=None, repr=False)
     # The title asked beside the current turn (V2-4); hosts that exit right
     # after a turn (a one-shot CLI run) may join it.
@@ -271,7 +273,8 @@ def _agency_place(services: ServiceContainer, record: SessionRecord, agent: dict
     repo = getattr(services.ctx, "team_repo", None)
     if teams is None or repo is None:
         return []
-    team_id = getattr(record, "team_id", None)
+    # None once the agent left the team: the conversation no longer works for it.
+    team_id = repo.active_team(record)
     if not team_id:
         return [
             "",
@@ -1459,7 +1462,12 @@ def _build_tools(
                     )
                 )
             )
-        if getattr(record, "team_id", None) and getattr(services, "teams", None) is not None:
+        active_post = (
+            getattr(record, "team_id", None)
+            and getattr(services, "teams", None) is not None
+            and services.ctx.team_repo.post_for_session(record.id) is not None
+        )
+        if active_post:
             # Rinari Agency A2: a post has its office and its team's board.
             with registry.loading("agency"):
                 from rinari.agency.tools import TeamToolHost, team_tools
@@ -2582,7 +2590,7 @@ def _run_turn_unlocked(
     turn_state = TurnState()
     turn_state.owner_session = session.record.id
     if session.next_turn_external:
-        turn_state.mark_external("mother conversation")
+        turn_state.mark_external(session.next_turn_external_source or "mother conversation")
     session.context.tool_ctx = replace(
         session.context.tool_ctx,
         turn_command=session.next_turn_command,
@@ -2590,6 +2598,7 @@ def _run_turn_unlocked(
     )
     session.next_turn_command = ""
     session.next_turn_external = False
+    session.next_turn_external_source = ""
     wanted_tools = (*session.next_turn_tools, *_pinned_skill_tools(services, session.record))
     session.next_turn_tools = ()
     with contextlib.suppress(Exception):

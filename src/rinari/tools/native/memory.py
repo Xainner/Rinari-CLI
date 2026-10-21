@@ -467,7 +467,9 @@ def memory_recall(input: dict, ctx: ToolContext) -> ToolResult:
         notes = ("this session has no project: searched user memory instead of project memory",)
     try:
         if scope == "user":
-            rows = service.search_user(query, kind=kind, limit=limit)
+            # Only what this conversation may see (an agent never reads
+            # another agent's or team's memory).
+            rows = service.search_user(query, kind=kind, limit=limit, session_id=ctx.session_id)
         elif scope == "project":
             root = _project_root(ctx)
             rows = service.search_project(str(root), query, kind=kind, limit=limit)
@@ -525,6 +527,8 @@ def memory_update(input: dict, ctx: ToolContext) -> ToolResult:
     provenance, err = _optional_str(input, "provenance", max_len=256)
     if err is not None:
         return err
+    if scope == "user" and not service.may_change_user(memory_id, ctx.session_id):
+        return _fail(ToolErrorCode.NOT_FOUND, f"no memory {memory_id} in this conversation")
     try:
         if scope == "user":
             row = service.update_user(
@@ -581,6 +585,8 @@ def memory_forget(input: dict, ctx: ToolContext) -> ToolResult:
             ToolErrorCode.INVALID_ARGUMENT,
             "expected_revision is required for user memory deletion",
         )
+    if scope == "user" and not service.may_change_user(memory_id, ctx.session_id):
+        return _fail(ToolErrorCode.NOT_FOUND, f"no memory {memory_id} in this conversation")
     try:
         if scope == "user":
             forgotten = service.forget_user(memory_id, expected_revision=expected_revision)

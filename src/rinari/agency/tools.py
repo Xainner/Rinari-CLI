@@ -49,6 +49,11 @@ def _ok(data: dict[str, Any]):
     return ToolResult(ok=True, data=data, origin="agency")
 
 
+def _external(ctx: Any) -> bool:
+    """Whether the calling turn read something from outside the machine."""
+    return bool(getattr(getattr(ctx, "turn_state", None), "external_content", False))
+
+
 def _work_of(board, session_id: str) -> dict[str, Any]:
     """What the conversation's running turn is for (a mention, an errand, a delivery)."""
     with board._lock:
@@ -104,7 +109,9 @@ def _errand_review(host: TeamToolHost, agent_id: str, arguments):
     return _ok({"status": reviewed["status"]})
 
 
-def _leave_errand(host, board, target_team, args, *, from_agent_id, from_team_id, work):
+def _leave_errand(
+    host, board, target_team, args, *, from_agent_id, from_team_id, work, external=False
+):
     """Leave an errand on a board, one hop further in the chain of the running work (D-2)."""
     from rinari.agency import AgencyError
 
@@ -124,18 +131,11 @@ def _leave_errand(host, board, target_team, args, *, from_agent_id, from_team_id
             from_team_id=from_team_id,
             chain_id=work.get("chain_id"),
             hop=hop,
+            external=external,
         )
     except AgencyError as exc:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, str(exc))
-    board.post_message(
-        target_team,
-        f"Recado «{errand['title']}»",
-        author_agent_id=from_agent_id,
-        chain_id=errand["chain_id"],
-        hop=errand["hop"],
-        errand_id=errand["id"],
-        wake=False,
-    )
+    board.post_notice(target_team, errand, author_agent_id=from_agent_id)
     board.tick()
     return _ok({"errand_id": errand["id"], "status": errand["status"], "team": target_team["name"]})
 
@@ -206,6 +206,12 @@ def team_tools(host: TeamToolHost):
         text = (arguments or {}).get("text")
         if not isinstance(text, str) or not text.strip() or len(text) > MAX_TEXT:
             return _fail(ToolErrorCode.INVALID_ARGUMENT, f"text must be 1..{MAX_TEXT} characters")
+        if not board.count_say(host.session_id):
+            # The Engine's cap, not the prompt's (D-2): a turn says at most 3 things.
+            return _fail(
+                ToolErrorCode.RESOURCE_EXHAUSTED,
+                "You already wrote 3 times in the office this turn: put the rest in your answer.",
+            )
         work = _work_of(board, host.session_id)
         message = board.post_message(
             team,
@@ -213,6 +219,7 @@ def team_tools(host: TeamToolHost):
             author_agent_id=post["agent_id"],
             chain_id=work.get("chain_id"),
             hop=int(work.get("hop") or 0) + 1,
+            external=_external(ctx),
         )
         return _ok({"posted": True, "mentions": len(message["mentions"]), "hop": message["hop"]})
 
@@ -263,6 +270,7 @@ def team_tools(host: TeamToolHost):
             from_agent_id=post["agent_id"],
             from_team_id=team["id"] if target_team["id"] != team["id"] else None,
             work=_work_of(board, host.session_id),
+            external=_external(ctx),
         )
 
     def review(arguments, ctx):
@@ -426,6 +434,7 @@ def direct_tools(host: TeamToolHost):
             from_agent_id=agent["id"],
             from_team_id=None,
             work=_work_of(board, host.session_id),
+            external=_external(ctx),
         )
 
     def review(arguments, ctx):

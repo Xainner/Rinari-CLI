@@ -706,7 +706,7 @@ def test_stop_all_stops_the_agents_and_only_them(server, monkeypatch) -> None:
     cancelled = []
     monkeypatch.setattr(server._turns, "cancel_turn", lambda sid: cancelled.append(sid) or {})
     result = _ok(_call(server, "agency.stop_all", {"rinari_profile_id": "active"}))
-    assert result == {"cancelled_turns": 1, "paused_rules": 1}
+    assert result == {"cancelled_turns": 1, "paused_rules": 1, "blocked_errands": 0}
     assert cancelled == [agent["session_id"]]
     assert services.schedules.get(own_rule["id"])["enabled"] is False
     assert services.schedules.get(rinari_task["id"])["enabled"] is True

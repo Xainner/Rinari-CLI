@@ -560,10 +560,14 @@ class MemoryService:
         return place, self.place_ref_for(place, session_id)
 
     def _team_of(self, session_id: str | None) -> str | None:
+        """The team of a post; none once its agent left the team (the post is gone)."""
         if not session_id:
             return None
         record = self._ctx.session_repo.get(session_id)
-        return getattr(record, "team_id", None)
+        repo = getattr(self._ctx, "team_repo", None)
+        if record is None or repo is None:
+            return getattr(record, "team_id", None)
+        return repo.active_team(record)
 
     def _agent_of(self, session_id: str | None) -> str | None:
         if not session_id:
@@ -571,10 +575,18 @@ class MemoryService:
         record = self._ctx.session_repo.get(session_id)
         return getattr(record, "agent_id", None)
 
+    def _profile_of(self, session_id: str | None) -> str | None:
+        if not session_id:
+            return None
+        record = self._ctx.session_repo.get(session_id)
+        return (getattr(record, "rinari_profile_id", None) or "default") if record else None
+
     def visible_user_rows(
         self, profile_id: str | None = None, session_id: str | None = None
     ) -> list[dict]:
-        """General memory, plus this profile's, this chat's and its agent's (#75)."""
+        """General memory, plus this profile's, this chat's, its agent's and its team's (#75)."""
+        if profile_id is None:
+            profile_id = self._profile_of(session_id)
         agent_id = self._agent_of(session_id)
         team_id = self._team_of(session_id)
         rows = []
@@ -708,16 +720,58 @@ class MemoryService:
                     )
         return self.about_get()
 
+    def _user_rows_for(self, session_id: str | None) -> list[dict]:
+        """A conversation reads only what it may see; the owner's panel (no session) reads all."""
+        if session_id:
+            return self.visible_user_rows(session_id=session_id)
+        return self.repo.user_live()
+
     def search_user(
-        self, query: str = "", *, kind: str | None = None, limit: int = 20
+        self,
+        query: str = "",
+        *,
+        kind: str | None = None,
+        limit: int = 20,
+        session_id: str | None = None,
     ) -> list[dict]:
-        rows = [row for row in self.repo.user_live() if kind is None or row["kind"] == kind]
+        rows = [
+            row for row in self._user_rows_for(session_id) if kind is None or row["kind"] == kind
+        ]
         ranked = rank_by_terms(rows, query, {"topic": 3, "text": 2}, limit=max(1, min(limit, 200)))
         return [self._user_view(row) for row in ranked]
 
-    def list_user(self, *, limit: int = 100, kind: str | None = None) -> list[dict]:
-        rows = [row for row in self.repo.user_live() if kind is None or row["kind"] == kind]
+    def list_user(
+        self, *, limit: int = 100, kind: str | None = None, session_id: str | None = None
+    ) -> list[dict]:
+        rows = [
+            row for row in self._user_rows_for(session_id) if kind is None or row["kind"] == kind
+        ]
         return [self._user_view(row) for row in rows[: max(1, min(limit, 500))]]
+
+    def may_change_user(self, memory_id: str, session_id: str | None) -> bool:
+        """Whether a conversation may edit or forget this personal memory.
+
+        Rinari Agency: an agent's direct chat changes only its agent's memory,
+        a post only its agent's or its team's; never the owner's nor another
+        agent's or team's. Rinari's own conversations change what they see.
+        The owner's panel (no session) changes anything.
+        """
+        row = self.repo.user_get(memory_id)
+        if row is None:
+            return False
+        if not session_id:
+            return True
+        agent_id = self._agent_of(session_id)
+        team_id = self._team_of(session_id)
+        if agent_id or team_id:
+            place = row.get("place") or "general"
+            ref = row.get("place_ref")
+            return (place == "agent" and ref == agent_id) or (
+                place == "team" and bool(team_id) and ref == team_id
+            )
+        return any(
+            item["id"] == memory_id for item in self.visible_user_rows(session_id=session_id)
+        )
 
     def get_user(self, memory_id: str) -> dict | None:
         return self._user_view(self.repo.user_get(memory_id))

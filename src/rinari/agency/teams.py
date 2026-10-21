@@ -38,6 +38,8 @@ ERRAND_STATUSES = (
 OPEN_STATUSES = ("pending", "in_progress", "returned", "blocked")
 #: What a free post takes from the board, in order.
 READY_STATUSES = ("pending", "returned")
+#: Times an errand can be sent back; the next one blocks it (D-2).
+MAX_RETURNS = 3
 
 TEAM_EDITABLE = ("name", "purpose", "chief_agent_id", "connectors", "budget")
 
@@ -74,9 +76,11 @@ class TeamService:
         self._ids = ids
         self._connector_exists = connector_exists
         # Set by the Engine server: opens a post's conversation (returns its
-        # session id) and announces a change (agency.team.changed).
+        # session id), announces a change (agency.team.changed) and tells the
+        # owner that something stopped (agency.chain.stopped).
         self.open_post: Callable[[dict[str, Any], dict[str, Any]], str] | None = None
         self.on_changed: Callable[[str, str], None] | None = None
+        self.on_stopped: Callable[[str, str, str], None] | None = None
 
     # -- teams ---------------------------------------------------------------------
 
@@ -173,6 +177,7 @@ class TeamService:
         if team["chief_agent_id"] is not None and team["chief_agent_id"] not in members:
             raise AgencyError("The chief must be one of the team's agents.")
         saved = self._repo.save(current["id"], {**current, **team, "updated_at": self._clock.now()})
+        self._assign_orphans(saved)
         self._changed(current["id"], "updated")
         return self.view(saved)
 
@@ -225,8 +230,21 @@ class TeamService:
             team = self._repo.save(
                 team["id"], {**team, "chief_agent_id": agent["id"], "updated_at": self._clock.now()}
             )
+            self._assign_orphans(team)
         self._changed(team["id"], "updated")
         return self.view(team)
+
+    def _assign_orphans(self, team: dict[str, Any]) -> None:
+        """Errands left to nobody go to the chief as soon as there is one (D-8)."""
+        chief = team.get("chief_agent_id")
+        if chief is None:
+            return
+        now = self._clock.now()
+        for errand in self._repo.errands(team["id"], statuses=OPEN_STATUSES):
+            if errand.get("to_agent_id") is None and errand["status"] != "in_progress":
+                self._repo.save_errand(
+                    errand["id"], {**errand, "to_agent_id": chief, "updated_at": now}
+                )
 
     def leave(self, team_id: Any, agent_id: Any) -> dict[str, Any]:
         """An agent leaves: its open errands go to the chief, or are cancelled (11.3)."""
@@ -279,8 +297,13 @@ class TeamService:
         from_team_id: str | None = None,
         chain_id: str | None = None,
         hop: int = 0,
+        external: bool = False,
     ) -> dict[str, Any]:
-        """A new errand on a team's board (D-3). To nobody: the chief takes it (D-8)."""
+        """A new errand on a team's board (D-3). To nobody: the chief takes it (D-8).
+
+        `external`: it was written by a turn that read something from outside
+        the machine, so the turn that does it keeps the guard on.
+        """
         team = self.get(team_id)
         if team.get("archived_at") is not None:
             raise AgencyError("An archived team takes no errands.")
@@ -311,10 +334,14 @@ class TeamService:
                 "chain_id": chain_id or self._ids.new("chain"),
                 "hop": hop,
                 "production_run_id": raw.get("production_run_id"),
+                "external": external,
                 "created_at": now,
                 "updated_at": now,
             },
         )
+        if to_agent is None and self.on_stopped is not None:
+            # No chief yet: it waits on the board, and the owner is told.
+            self.on_stopped(team["id"], saved["chain_id"], "no_chief")
         self._changed(team["id"], "errand")
         return saved
 
@@ -338,17 +365,23 @@ class TeamService:
             )
         else:
             why = _text(reason, "The reason", MAX_DONE_ITEM, required=True)
+            returns = int(errand.get("returns") or 0) + 1
+            too_many = returns > MAX_RETURNS
             saved = self._repo.save_errand(
                 errand["id"],
                 {
                     **errand,
-                    "status": "returned",
-                    "return_reason": why,
+                    # Sent back too many times: it stops until the owner retries it.
+                    "status": "blocked" if too_many else "returned",
+                    "return_reason": "too_many_returns" if too_many else why,
+                    "returns": returns,
                     "session_id": None,
                     "turn_id": None,
                     "updated_at": now,
                 },
             )
+            if too_many and self.on_stopped is not None:
+                self.on_stopped(errand["team_id"], errand["chain_id"], "too_many_returns")
         self._changed(errand["team_id"], "errand")
         return saved
 
@@ -358,7 +391,8 @@ class TeamService:
         if errand["status"] != "blocked":
             raise AgencyError("Only a blocked errand can be retried.")
         saved = self._repo.save_errand(
-            errand["id"], {**errand, "status": "pending", "updated_at": self._clock.now()}
+            errand["id"],
+            {**errand, "status": "pending", "returns": 0, "updated_at": self._clock.now()},
         )
         self._changed(errand["team_id"], "errand")
         return saved

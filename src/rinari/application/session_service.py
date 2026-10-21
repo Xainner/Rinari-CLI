@@ -464,6 +464,7 @@ class SessionService:
             if messages:
                 self._ctx.message_repo.append_many(record.id, messages)
             self._append_event(record.id, EVENT_SESSION_FORKED, {"from": source.id})
+            inherit_agency(self._ctx, source, record)
         return StartedSession(session=record, created=True)
 
     # -- promotion ----------------------------------------------------------
@@ -1026,3 +1027,18 @@ class SessionService:
     def _default_title(cwd: Path, kind: str) -> str:
         name = cwd.name or "root"
         return f"{kind.lower()} in {name}"
+
+
+def inherit_agency(ctx: Any, parent: Any, child: Any) -> None:
+    """Rinari Agency: a fork or a child of an agent's conversation works for
+    the same agent (and team), with its card, its connectors, its memory and
+    its budget; never as Rinari's general assistant."""
+    agent_id = getattr(parent, "agent_id", None)
+    if not agent_id:
+        return
+    ctx.agency_repo.set_session_agent(child.id, agent_id)
+    child.agent_id = agent_id
+    team_id = getattr(parent, "team_id", None)
+    if team_id and getattr(ctx, "team_repo", None) is not None:
+        ctx.team_repo.set_session_team(child.id, team_id)
+        child.team_id = team_id
