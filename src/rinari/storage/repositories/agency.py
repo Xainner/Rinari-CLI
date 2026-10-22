@@ -398,14 +398,6 @@ class TeamRepository:
         )
         return self.errand(errand_id) or {}
 
-    def chain_deliveries(self, chain_id: str) -> int:
-        """Every delivery of the chain's errands: one sent back and done again counts twice."""
-        row = self._db.query_one(
-            "SELECT COALESCE(SUM(deliveries), 0) AS n FROM agency_errands WHERE chain_id = ?",
-            (chain_id,),
-        )
-        return int(row["n"]) if row else 0
-
     # -- waits (office.wait) ---------------------------------------------------
 
     def waits(self) -> list[dict[str, Any]]:

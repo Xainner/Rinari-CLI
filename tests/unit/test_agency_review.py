@@ -137,16 +137,24 @@ def test_office_say_is_capped_and_one_agent_is_woken_once_per_chain(server, turn
     assert sum(1 for t in turns if t["session_id"] == _post(team, beto)) == 1
 
 
-def test_mentions_count_for_the_chains_twenty_deliveries(server, turns, monkeypatch) -> None:
-    import rinari.engine_protocol.agency_teams as board
-
-    monkeypatch.setattr(board, "MAX_DELIVERIES", 2)
-    ana, beto, cris = _agent(server, "Ana"), _agent(server, "Beto"), _agent(server, "Cris")
-    team = _team(server, "Canal", [ana, beto, cris])
-    text = "@Ana @Beto @Cris"
-    _ok(_call(server, "agency.office.post", {"team_id": team["id"], "text": text}))
-    assert len(turns) == 2
-    assert _events(server, "agency.chain.stopped")[-1]["reason"] == "too_many_deliveries"
+def test_a_chain_is_not_cut_by_how_many_turns_it_wakes(server, turns) -> None:
+    """The AUXUUSDm team was cut at 20 deliveries two minutes after the owner's
+    kickoff (22-oct): a wait released again and again counted each time."""
+    ana, beto = _agent(server, "Ana"), _agent(server, "Beto")
+    team = _team(server, "Canal", [ana, beto])
+    pa = _post(team, ana)
+    _ok(_call(server, "agency.office.post", {"team_id": team["id"], "text": "@Ana @Beto vigilen"}))
+    chain = next(t for t in turns if t["session_id"] == pa)["origin"]["chain_id"]
+    _finish(server, _post(team, beto), "")
+    for round_ in range(25):
+        assert _tools(server, pa)["office.wait"].handler({"for": "Beto"}, None).ok
+        _finish(server, pa, "")
+        before = len(turns)
+        server._teams.post_message(
+            team, f"Beto {round_}", author_agent_id=beto["id"], chain_id=chain, hop=1
+        )
+        assert [t["session_id"] for t in turns[before:]] == [pa], round_
+    assert not [e for e in _events(server, "agency.chain.stopped") if e["chain_id"] == chain]
 
 
 # -- B5: «Detener a todos» stops the board --------------------------------------------------------
@@ -579,22 +587,6 @@ def test_an_engine_notice_never_releases_a_wait(server, turns) -> None:
     assert _tools(server, pa)["office.wait"].handler({"for": "Cata"}, None).ok
     assert pb in server._teams._waits  # Beto still waits for Ana's own answer
     assert len(turns) == before
-
-
-def test_a_delivery_counts_once_for_the_chain(server, turns) -> None:
-    ana, beto = _agent(server, "Ana"), _agent(server, "Beto")
-    team = _team(server, "Canal", [ana, beto])
-    _ok(_call(server, "agency.office.post", {"team_id": team["id"], "text": "@Ana pide algo"}))
-    chain = turns[-1]["origin"]["chain_id"]
-    made = _tools(server, _post(team, ana))["errand.create"].handler(
-        {"title": "T", "to": "Beto"}, None
-    )
-    assert made.ok
-    _finish(server, _post(team, ana), "")
-    _finish(server, _post(team, beto), "entregado")
-    assert turns[-1]["session_id"] == _post(team, ana)  # the delivery goes back to Ana
-    # The owner's mention of Ana, then the delivery: two, not three.
-    assert server._teams._chain_used(chain) == 2
 
 
 def test_a_child_or_fork_of_a_post_or_a_direct_chat_has_no_agency_tools(server) -> None:

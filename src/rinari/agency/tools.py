@@ -26,7 +26,6 @@ MAX_TEXT = 8000
 _NOT_WOKEN = {
     "too_many_hops": "this chain of work reached its hop limit",
     "too_many_mentions": "a message wakes at most 5 agents",
-    "too_many_deliveries": "this chain of work reached its delivery limit",
     "already_woken": "this turn already woke them in this chain",
     "stopped_by_owner": "the owner stopped the Agency",
     "not_in_team": "they are not in this team",

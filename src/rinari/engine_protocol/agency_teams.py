@@ -49,7 +49,6 @@ logger = logging.getLogger(__name__)
 
 MAX_HOPS = 8
 MAX_MENTIONS = 5
-MAX_DELIVERIES = 20
 #: `office.say` calls a single turn may make (D-2).
 MAX_SAYS = 3
 MAX_OFFICE_TEXT = 8000
@@ -226,8 +225,6 @@ class AgencyTeams:
         self._waits: dict[str, dict[str, Any]] = {}
         # direct chat session_id -> deliveries to tell its agent (D-30).
         self._direct: dict[str, list[dict[str, Any]]] = {}
-        # chain_id -> mentions delivered in it (they count for its cap).
-        self._chain_mentions: dict[str, int] = {}
         # session_id -> office.say calls of its running turn.
         self._says: dict[str, int] = {}
         # direct chat session_id -> who its running turn already woke (office.say there).
@@ -723,7 +720,6 @@ class AgencyTeams:
         notice: dict[str, Any] | None = None,
         external: bool = False,
         woken: set[str] | None = None,
-        counted: str | None = None,
         mentions: list[str] | None = None,
         report: dict[str, Any] | None = None,
         author_kind: str | None = None,
@@ -733,8 +729,7 @@ class AgencyTeams:
         `system`: the Engine's own notice (an errand left, a wait, a stopped
         chain). It wakes nobody and never counts as a teammate's answer.
         `woken`: who the author's turn already woke (its live work keeps it
-        otherwise). `counted`: the agent whose wake is already in the chain's
-        count. `mentions`: who the message is for, when the Engine knows it
+        otherwise). `mentions`: who the message is for, when the Engine knows it
         better than the text (a delivery is for whoever asked, whatever names
         the summary quotes). `report`, when given, is filled with who was woken
         and who was not, and why (what `office.say` tells its agent).
@@ -787,7 +782,7 @@ class AgencyTeams:
                         live = self._live.get(author_post["session_id"]) if author_post else None
                         if live is not None:
                             woken = live.setdefault("woken", set())
-                outcome.update(self._wake(team, {**message, "mentions": rest}, woken, counted))
+                outcome.update(self._wake(team, {**message, "mentions": rest}, woken))
             elif released:
                 self.tick()
         if report is not None:
@@ -1011,8 +1006,6 @@ class AgencyTeams:
                 if hop >= MAX_HOPS:
                     self._stopped(team, chain, "too_many_hops")
                     continue
-                if not self._count_mention(team, chain):
-                    continue
                 self._mentions.setdefault(session_id, []).append(
                     {
                         "team_id": team["id"],
@@ -1195,34 +1188,18 @@ class AgencyTeams:
             self._changed(team["id"], "office")
         return {"dismissed": dismissed}
 
-    def _chain_used(self, chain_id: str) -> int:
-        """Deliveries of the chain so far: its errands' deliveries and the mentions that woke."""
-        with self._lock:
-            mentions = self._chain_mentions.get(chain_id, 0)
-        return self._repo.chain_deliveries(chain_id) + mentions
-
-    def _count_mention(self, team: dict[str, Any], chain_id: str) -> bool:
-        """One more delivery in the chain: a mention that wakes an agent counts (B4)."""
-        with self._lock:
-            used = self._chain_mentions.get(chain_id, 0)
-            over = self._repo.chain_deliveries(chain_id) + used + 1 > MAX_DELIVERIES
-            if not over:
-                self._chain_mentions[chain_id] = used + 1
-        if over:
-            self._stopped(team, chain_id, "too_many_deliveries")
-        return not over
-
     def _wake(
         self,
         team: dict[str, Any],
         message: dict[str, Any],
         woken: set[str] | None = None,
-        counted: str | None = None,
     ) -> dict[str, str]:
         """Queue each mentioned agent's turn, within the caps.
 
         Returns, per mentioned agent id, «woken» or why it was not: what
-        `office.say` tells the agent that wrote it (D-31).
+        `office.say` tells the agent that wrote it (D-31). A chain is bounded by
+        its hops, not by how many turns it wakes: a team the owner leaves working
+        on its own was cut at 20 deliveries two minutes in (22-oct).
         """
         outcome: dict[str, str] = {}
         mentions = message["mentions"]
@@ -1233,11 +1210,7 @@ class AgencyTeams:
         if message["hop"] >= MAX_HOPS:
             self._stopped(team, message["chain_id"], "too_many_hops")
             return {**dict.fromkeys(mentions, "too_many_hops"), **outcome}
-        over = False
         for agent_id in mentions:
-            if over:
-                outcome[agent_id] = "too_many_deliveries"
-                continue
             post = self._repo.post(team["id"], agent_id)
             if post is None:
                 outcome[agent_id] = "not_in_team"
@@ -1254,10 +1227,6 @@ class AgencyTeams:
                     continue
                 if woken is not None:
                     woken.add(agent_id)
-            if agent_id != counted and not self._count_mention(team, message["chain_id"]):
-                over = True
-                outcome[agent_id] = "too_many_deliveries"
-                continue
             with self._lock:
                 queue.append({"team_id": team["id"], "message": message, "agent_id": agent_id})
             outcome[agent_id] = _WOKEN
@@ -1933,9 +1902,6 @@ class AgencyTeams:
             },
         )
         self._changed(team["id"], "errand")
-        # This delivery is already counted (its errand's `deliveries`): the
-        # mention that hands it back to whoever asked does not count again.
-        over = self._chain_used(errand["chain_id"]) > MAX_DELIVERIES
         requester = errand.get("from_agent_id")
         requester_agent = self._services.ctx.agency_repo.get(requester) if requester else None
         if requester_agent is not None and requester_agent.get("archived_at") is not None:
@@ -1963,9 +1929,7 @@ class AgencyTeams:
         )
         if requester_agent is None:
             return  # the owner reviews it
-        if over:
-            self._stopped(team, errand["chain_id"], "too_many_deliveries")
-        elif errand["hop"] + 1 >= MAX_HOPS:
+        if errand["hop"] + 1 >= MAX_HOPS:
             self._stopped(team, errand["chain_id"], "too_many_hops")
         elif in_team:
             # Its post is woken to review it (a delivery, not a chat line). Marked,

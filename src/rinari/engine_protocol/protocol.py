@@ -277,7 +277,7 @@ CAPABILITIES: dict[str, bool] = {
     # stopped, reason, detail?, chain_id}) and agency.chain.stopped carries
     # message_id; agency.chain.dismiss {team_id, message_id? | chain_id?};
     # office.say answers woken / not_woken (reasons too_many_hops,
-    # too_many_mentions, too_many_deliveries, already_woken, stopped_by_owner,
+    # too_many_mentions, already_woken, stopped_by_owner,
     # not_in_team, unknown_name, ambiguous_name with candidates) and an @ that
     # starts exactly one teammate's name wakes them; a delivery wakes only the
     # agent that asked (a review turn in its post, origin agency_delivery);
@@ -299,6 +299,9 @@ CAPABILITIES: dict[str, bool] = {
     # it); a delivery is posted whole; what a post presents with file.present
     # leaves an office notice {kind: files, items: [{uri | url, name, kind?,
     # mime?, caption?, size_bytes?}]}.
+    # Since 2026-10-22 a chain is no longer cut at 20 deliveries: hops (8),
+    # one queued turn per agent and chain, 5 mentions per message and the
+    # budgets bound it (too_many_deliveries only appears in older notices).
     "agency_audit_v1": True,
     # soul.settings.get/set: character intensity (minimal | balanced | full),
     # separate from Soul selection; bundled default Soul 4.0.
