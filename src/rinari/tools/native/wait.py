@@ -383,7 +383,11 @@ def wait_tools() -> list[ToolDefinition]:
                 "regex=true, appears in a process handle's output) or file (exists). "
                 "handle also stops the wait if that process exits. Returns state "
                 "ready/timed_out/exited, elapsed_s and the last observation. It ends early "
-                "(owner_wrote) when the user writes: their message comes next."
+                "(owner_wrote) when the user writes: their message comes next. It is not a "
+                "timer: when the user wants something later («in 2 minutes», «at 5 pm», "
+                "«every hour»), schedule it with schedule.propose ({kind: once, after: "
+                "{minutes: 2}} and in_this_conversation) and end your turn, so the "
+                "conversation stays free meanwhile."
             ),
             input_schema={
                 "type": "object",
