@@ -151,7 +151,7 @@ def test_a_flow_hands_each_step_on_with_what_the_earlier_ones_delivered(server, 
     (first,) = _errands(server, team, run["id"])
     assert first["to_agent_id"] == image["id"] and first["flow_step"] == 0
     assert turns[-1]["session_id"] == _post(team, image)
-    assert "Un zorro" in turns[-1]["message"]
+    assert "Un zorro" in turns[-1]["message"] and first["body"] == "Dibuja"
 
     # Auto approval: accepted as delivered, and the next step is left at once.
     _finish(server, _post(team, image), "El zorro ártico dibujado")
@@ -159,7 +159,12 @@ def test_a_flow_hands_each_step_on_with_what_the_earlier_ones_delivered(server, 
     assert repo.errand(first["id"])["status"] == "reviewed"
     second = next(e for e in _errands(server, team, run["id"]) if e["flow_step"] == 1)
     assert second["to_agent_id"] == video["id"] and second["from_agent_id"] == writer["id"]
-    assert "El zorro ártico dibujado" in second["body"]
+    # The errand keeps the owner's words; the model gets the run's context.
+    assert second["body"] == "Anima"
+    started = turns[-1]
+    assert started["session_id"] == _post(team, video)
+    assert "step 2 of 2" in started["message"] and "El zorro ártico dibujado" in started["message"]
+    assert "Un zorro" in started["message"]
 
     # Chief approval: the chief is woken to review; accepting it finishes the run.
     before = len(turns)
@@ -275,3 +280,21 @@ def test_each_agents_spend_in_the_overview_is_its_work_for_this_team(server) -> 
     row = next(item for item in view["spend"]["agents"] if item["name"] == "Image")
     assert row["today"]["tokens"] == row["week"]["tokens"] == 150
     assert view["spend"]["today"]["tokens"] == 150
+
+
+def test_an_archived_agent_is_no_longer_a_teammate_to_ask(server, turns) -> None:
+    """Nightly 1431: a routine of Redactor asked the archived «Analista de oro» (the old
+    chief, still with its post) and the chain stopped with could_not_start."""
+    team, _writer, image, video = _studio(server)
+    _ok(_call(server, "agency.agent.archive", {"agent_id": video["id"]}))
+    board = server._teams
+    assert "video" not in board._names(team["id"])
+    assert "Video" not in board._display_names(team["id"])
+    assert [m["name"] for m in board.members(board._repo.get(team["id"]))] == ["Writer", "Image"]
+    assert "- Video" not in _place(server, team, image)
+    before = len(turns)
+    said = _tools(server, _post(team, image))["office.say"].handler({"text": "@Video ayuda"}, None)
+    assert said.ok and len(turns) == before
+    assert not [
+        m for m in _office(server, team) if (m.get("notice") or {}).get("kind") == "stopped"
+    ]

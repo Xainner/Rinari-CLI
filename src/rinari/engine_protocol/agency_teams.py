@@ -381,12 +381,17 @@ class AgencyTeams:
 
     def _display_names(self, team_id: str) -> list[str]:
         """The team's agents' exact names, as a mention must write them."""
-        names = []
+        return [agent["name"] for agent in self._working(team_id)]
+
+    def _working(self, team_id: str) -> list[dict[str, Any]]:
+        """The agents working in the team: a post and not archived (an archived one
+        keeps its post for its history, but nobody can ask it anything)."""
+        out = []
         for post in self._repo.posts(team_id):
             agent = self._services.ctx.agency_repo.get(post["agent_id"])
-            if agent is not None:
-                names.append(agent["name"])
-        return names
+            if agent is not None and agent.get("archived_at") is None:
+                out.append(agent)
+        return out
 
     def _mates_block(self, team_id: str, me: str) -> str:
         """Who else is in the team and what each one's job is, for an errand's prompt.
@@ -406,12 +411,7 @@ class AgencyTeams:
         return "Your teammates (exact names) and their jobs:\n" + "\n".join(lines) + "\n"
 
     def _names(self, team_id: str) -> dict[str, str]:
-        names: dict[str, str] = {}
-        for post in self._repo.posts(team_id):
-            agent = self._services.ctx.agency_repo.get(post["agent_id"])
-            if agent is not None:
-                names[agent["name"].lower()] = agent["id"]
-        return names
+        return {agent["name"].lower(): agent["id"] for agent in self._working(team_id)}
 
     # -- halted by the owner («Detener a todos») ------------------------------------------
 
@@ -1386,7 +1386,7 @@ class AgencyTeams:
                 open_by[errand["to_agent_id"]] = open_by.get(errand["to_agent_id"], 0) + 1
         for post in self._repo.posts(team["id"]):
             agent = self._services.ctx.agency_repo.get(post["agent_id"])
-            if agent is None:
+            if agent is None or agent.get("archived_at") is not None:
                 continue
             with self._lock:
                 live = dict(self._live.get(post["session_id"]) or {})
@@ -2045,6 +2045,7 @@ class AgencyTeams:
         prompt = (
             f"[Errand of the team «{team['name']}»] From ⟦{asker}⟧\n"
             f"{from_agent}Title: {one_line(errand['title'], 300)}\n{body}"
+            f"{self.work.errand_context(errand)}"
             f"It is done when:\n{checks or '- (no checklist)'}{returned}\n\n"
             f"{self._office_block(lines)}"
             f"{self._mates_block(team['id'], post['agent_id'])}"

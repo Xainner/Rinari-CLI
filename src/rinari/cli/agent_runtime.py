@@ -439,7 +439,7 @@ def _agency_place(services: ServiceContainer, record: SessionRecord, agent: dict
     mates = []
     for post in repo.posts(team["id"]):
         mate = services.ctx.agency_repo.get(post["agent_id"])
-        if mate is None or mate["id"] == agent["id"]:
+        if mate is None or mate["id"] == agent["id"] or mate.get("archived_at") is not None:
             continue
         chief = " (chief)" if mate["id"] == team.get("chief_agent_id") else ""
         job = f" — {mate['role']}" if mate.get("role") else ""
