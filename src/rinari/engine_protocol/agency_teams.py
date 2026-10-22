@@ -1494,7 +1494,10 @@ class AgencyTeams:
             f"[Office of the team «{team['name']}»] {why}\n"
             f"{from_agent}The message, as one line: {self._line(message)}\n\n"
             f"{self._office_block(lines)}"
-            "Your final answer is posted in the office. To ask another agent for something, "
+            "Your final answer is posted in the office, unless you already posted there with "
+            "office.say in this turn (then it stays in your post: say everything with "
+            "office.say). The owner reads the office: write to them plainly, never with @. "
+            "To ask another agent for something, "
             "mention them with @ and their exact name or leave an errand; a mention wakes "
             "them, so only mention someone you need something from. If what you are asked "
             "depends on another agent doing something first, call office.wait with their name "
@@ -1621,7 +1624,7 @@ class AgencyTeams:
         if name not in _TERMINAL or not session_id:
             return
         with self._lock:
-            self._says.pop(session_id, None)
+            said = self._says.pop(session_id, 0)
             self._turn_woken.pop(session_id, None)
             live = self._live.pop(session_id, None)
         if live is None:
@@ -1637,6 +1640,10 @@ class AgencyTeams:
         elif live["kind"] == "mention":
             if live.get("waiting"):
                 pass  # it waits for a teammate (D-29): nothing goes to the office
+            elif said:
+                # It already spoke in the office this turn (office.say): its final
+                # answer would repeat it, so it stays in its post (audit 21-oct).
+                pass
             elif text:
                 self.post_message(
                     team,

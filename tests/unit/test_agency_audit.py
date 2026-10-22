@@ -781,3 +781,25 @@ def test_a_review_queued_before_a_restart_is_queued_again(server, turns) -> None
     server._teams.tick()
     assert turns[-1]["session_id"] == _post(team, ana)
     assert "[Errand delivered" in turns[-1]["message"]
+
+
+def test_a_turn_that_spoke_with_office_say_does_not_repeat_itself(server, turns) -> None:
+    """Each turn posted twice: its office.say and a final answer saying the same (21-oct)."""
+    ana, beto = _agent(server, "Ana"), _agent(server, "Beto")
+    team = _team(server, "Canal", [ana, beto])
+    post = _post(team, ana)
+    work = dict(kind="mention", team_id=team["id"], agent_id=ana["id"], chain_id="c1", hop=0)
+    _live(server, post, **work)
+    _tools(server, post)["office.say"].handler({"text": "@Beto aquí va el dato"}, None)
+    server._teams._observe(
+        {"event": "turn.completed", "payload": {"session_id": post, "content": "Le pasé el dato"}}
+    )
+    texts = [m["text"] for m in _office(server, team)]
+    assert any("aquí va el dato" in t for t in texts)
+    assert not any("Le pasé el dato" in t for t in texts)
+    # Without office.say, the final answer is what the office gets.
+    _live(server, post, **{**work, "chain_id": "c2"})
+    server._teams._observe(
+        {"event": "turn.completed", "payload": {"session_id": post, "content": "Listo, revisado"}}
+    )
+    assert any("Listo, revisado" in m["text"] for m in _office(server, team))
