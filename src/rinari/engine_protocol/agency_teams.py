@@ -1099,12 +1099,20 @@ class AgencyTeams:
                     "job": agent.get("role") or "",
                     "chief": agent["id"] == team.get("chief_agent_id"),
                     "you": agent["id"] == me,
+                    # Its own folder, readable by its teammates (never written).
+                    "folder": self._folder(post["session_id"]),
                     "state": state,
                     "doing": doing[:MAX_DOING],
                     "open_errands": open_by.get(agent["id"], 0),
                 }
             )
         return out
+
+    def _folder(self, session_id: str) -> str:
+        try:
+            return self._services.sessions.show(session_id).current_cwd or ""
+        except Exception:  # a post whose conversation is gone
+            return ""
 
     def _stopped(
         self, team: dict[str, Any], chain_id: str, reason: str, detail: str | None = None
@@ -1409,6 +1417,15 @@ class AgencyTeams:
         elif notice.get("kind") == "left":
             author = "Rinari"
             body = f"{one_line(notice.get('agent', ''), 80)} left the team"
+        elif notice.get("kind") == "files":
+            # Where the files are, so a teammate opens them (fs.read takes the URI)
+            # instead of searching Rinari's home for a name (studio run 4).
+            shown = ", ".join(
+                f"{one_line(str(file.get('name') or ''), 120)} "
+                f"({file.get('uri') or file.get('url')})"
+                for file in notice.get("items") or []
+            )
+            body = f"presented to the owner: {shown}"
         else:
             body = one_line(item["text"], limit)
         return f"⟦{author}⟧ {body}"

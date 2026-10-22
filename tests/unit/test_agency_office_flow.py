@@ -262,3 +262,24 @@ def test_a_workspace_file_a_post_presents_reaches_the_office_by_uri(server, turn
     assert item["uri"].startswith(f"artifact://{pw}/")
     assert server._services.artifacts.get(item["uri"]) == guion.read_bytes()
     assert guion.exists()  # copied, never moved out of the agent's folder
+
+
+def test_teammates_learn_where_a_presented_file_and_each_folder_are(server, turns) -> None:
+    """Image and Video searched Rinari's home for the guion Writer presented by name
+    (studio run 4): the office line carries its URI and team.members each folder."""
+    team, writer, image, _video = _studio(server)
+    pw = _post(team, writer)
+    server._teams._observe(
+        {
+            "event": "file.presented",
+            "payload": {
+                "session_id": pw,
+                "items": [{"uri": f"artifact://{pw}/media/guion.md", "name": "guion.md"}],
+            },
+        }
+    )
+    _ok(_call(server, "agency.office.post", {"team_id": team["id"], "text": "@Image mira"}))
+    assert f"guion.md (artifact://{pw}/media/guion.md)" in turns[-1]["message"]
+    members = _tools(server, _post(team, image))["team.members"].handler({}, None)
+    folders = {m["name"]: m["folder"] for m in members.data["members"]}
+    assert folders["Writer"] == server._services.sessions.show(pw).current_cwd

@@ -449,9 +449,10 @@ def team_tools(host: TeamToolHost):
         ToolDefinition(
             name="team.members",
             description=(
-                "Who is in your team right now: each teammate's job and whether they are free, "
-                "working (and on what) or waiting for someone. With teams: true, also the "
-                "Agency's other teams you can leave an errand to."
+                "Who is in your team right now: each teammate's job, whether they are free, "
+                "working (and on what) or waiting for someone, and their folder (you can read "
+                "the files they leave there). With teams: true, also the Agency's other teams "
+                "you can leave an errand to."
             ),
             input_schema={
                 "type": "object",
