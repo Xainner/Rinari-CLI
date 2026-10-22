@@ -1490,9 +1490,23 @@ class AgencyTeams:
             if message.get("agent_id")
             else ""
         )
+        # Others woken by the same message work at the same time: one whose part needs
+        # another's result waits for it instead of answering first (audit 21-oct, #11).
+        others = [
+            self._author(agent_id)
+            for agent_id in message.get("mentions") or []
+            if agent_id != post["agent_id"]
+        ]
+        together = (
+            f"This message also mentions {', '.join(others)}; they start now too. If your "
+            "part needs one of them to finish first, call office.wait with their name and end "
+            "your turn without an answer.\n"
+            if others and not mention.get("released")
+            else ""
+        )
         prompt = (
             f"[Office of the team «{team['name']}»] {why}\n"
-            f"{from_agent}The message, as one line: {self._line(message)}\n\n"
+            f"{from_agent}{together}The message, as one line: {self._line(message)}\n\n"
             f"{self._office_block(lines)}"
             "Your final answer is posted in the office, unless you already posted there with "
             "office.say in this turn (then it stays in your post: say everything with "

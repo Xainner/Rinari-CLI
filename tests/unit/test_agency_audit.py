@@ -174,6 +174,24 @@ def test_a_mentions_prompt_lists_the_teammates_exact_names(server, turns) -> Non
     team = _team(server, "Canal", [ana, beto])
     _ok(_call(server, "agency.office.post", {"team_id": team["id"], "text": "@Ana hola"}))
     assert "Teammates (exact names): Ana, Beto Largo" in turns[-1]["message"]
+    assert "also mentions" not in turns[-1]["message"]
+
+
+def test_agents_woken_by_the_same_message_know_about_each_other(server, turns) -> None:
+    """The owner mentioned two agents; the second answered before the first had worked (#11)."""
+    ana, beto = _agent(server, "Ana"), _agent(server, "Beto")
+    team = _team(server, "Canal", [ana, beto])
+    _ok(
+        _call(
+            server,
+            "agency.office.post",
+            {"team_id": team["id"], "text": "@Ana investiga y pásale a @Beto el resultado"},
+        )
+    )
+    prompts = {turn["session_id"]: turn["message"] for turn in turns}
+    assert "also mentions Beto" in prompts[_post(team, ana)]
+    assert "also mentions Ana" in prompts[_post(team, beto)]
+    assert "office.wait" in prompts[_post(team, beto)]
 
 
 # -- E8: a delivery wakes only whoever asked --------------------------------------------------
