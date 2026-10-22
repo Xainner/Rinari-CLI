@@ -405,11 +405,13 @@ def iter_model_lines(response, request, started_at, stats: dict | None = None):
     channel = queue.Queue(maxsize=64)
     stopped = threading.Event()
     received = stats if stats is not None else {}
-    received.update({"bytes": 0, "last": started_at, "payload": started_at, "eof": False})
-    # Heartbeats (blank lines, SSE «:» comments) keep a slow provider alive, but a
-    # stream that only sends them for this long has stalled: a turn hung on
-    # «Respondiendo…» with four tokens out (audit 21-oct).
-    stalled_after = max(limits["idle"] * 4, STALLED_FLOOR_S)
+    received.update(
+        {"bytes": 0, "last": started_at, "payload": started_at, "content": False, "eof": False}
+    )
+    # Heartbeats (blank lines, SSE «:» comments) never stretch the configured limits:
+    # a stream that only sends them for the first-byte limit (before any content) or
+    # the idle one (after) has stalled. Four times the idle limit hung a turn eight
+    # minutes on a provider that only pinged (studio run 4, 21-oct).
 
     def put(value):
         while not stopped.is_set():
@@ -434,6 +436,7 @@ def iter_model_lines(response, request, started_at, stats: dict | None = None):
                     line = line.rstrip("\r")
                     if line.strip() and not line.startswith(":"):
                         received["payload"] = time.monotonic()
+                        received["content"] = True
                     put(("line", line))
                 if len(buffer) > 16 * 1024 * 1024:
                     raise NetworkError("Provider SSE line exceeds transport buffer")
@@ -454,7 +457,12 @@ def iter_model_lines(response, request, started_at, stats: dict | None = None):
             limit = limits["idle"] if received["bytes"] else limits["first_byte"]
             if now - started_at >= limits["total"]:
                 phase, limit = "total", limits["total"]
-            elif received["bytes"] and now - received["payload"] >= stalled_after:
+            elif received["bytes"] and now - received["payload"] >= (
+                stalled_after := max(
+                    limits["idle"] if received["content"] else limits["first_byte"],
+                    STALLED_FLOOR_S,
+                )
+            ):
                 phase, limit = "stalled", stalled_after
             elif not channel.empty() or now - received["last"] < limit:
                 phase = None
