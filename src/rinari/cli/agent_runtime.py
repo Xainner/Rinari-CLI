@@ -2262,6 +2262,31 @@ def _prepare_owner_memory_source(
     }
 
 
+def _owner_steer_as_source(
+    session: AgentSession, item: ChatMessage, saved: list[SessionMessageRecord]
+) -> None:
+    """The owner writing into a turn they did not start (a scheduled run, 22-oct) is
+    the owner speaking: that message becomes the turn's personal-memory source.
+
+    Only the owner's own steer counts: one with a `source` was written by a mother
+    conversation or is a child's report. A turn the owner started keeps its source.
+    """
+    origin = item.origin or {}
+    if item.role != "user" or not origin.get("steer_id") or origin.get("source") or not saved:
+        return
+    tool_ctx = session.context.tool_ctx
+    if getattr(tool_ctx, "memory_source", None) is not None:
+        return
+    session.context.tool_ctx = replace(
+        tool_ctx,
+        memory_source={
+            "session_id": session.record.id,
+            "message_id": saved[0].id,
+            "text": item.display_content or saved[0].content or "",
+        },
+    )
+
+
 def _without_pre_persisted_owner_message(
     messages: list[ChatMessage], source_record: SessionMessageRecord | None
 ) -> list[ChatMessage]:
@@ -2969,7 +2994,8 @@ def _run_turn_unlocked(
         ):
             durable_history.owner_seen = True
             item = replace(item, message_id=owner_source_record.id)
-        _persist_new_messages(services, session.record, [item], turn_id)
+        saved = _persist_new_messages(services, session.record, [item], turn_id)
+        _owner_steer_as_source(session, item, saved)
         return item
 
     durable_history = DurableHistory(session.context.history, save_message)

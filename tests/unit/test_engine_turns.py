@@ -2167,3 +2167,77 @@ def test_a_slow_title_does_not_hold_the_first_turn(server, services, tmp_path, m
     while time.time() < deadline and services.sessions.show(session_id).title != "Naves espaciales":
         time.sleep(0.05)
     assert services.sessions.show(session_id).title == "Naves espaciales"
+
+
+def _remember_after_steer(server, services, tmp_path, monkeypatch, steer: str | None):
+    """A scheduled run in its conversation tries to keep a rule in personal memory."""
+    from rinari.models.types import ToolCall
+
+    sid = _create_chat(server, tmp_path, "steer-memory")
+    services.sessions.set_permission(sid, "full-access")
+    gate = threading.Event()
+    fake = GatedModel(
+        [
+            ModelResponse(
+                content="Reviso",
+                tool_calls=(ToolCall("look", "fs.list", {"path": str(tmp_path)}),),
+            ),
+            ModelResponse(
+                content="Lo guardo",
+                tool_calls=(
+                    ToolCall(
+                        "keep",
+                        "memory.remember",
+                        {"scope": "user", "topic": "cierres", "text": "Cerrar en el mismo paso"},
+                    ),
+                ),
+            ),
+            _answer(),
+        ],
+        gate,
+    )
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda *args: fake)
+    server._turns.start_turn(
+        sid,
+        "Revisa la posición",
+        memory_origin="automation",
+        origin={"kind": "schedule", "task_id": "sch_x", "run_id": "run_x"},
+    )
+    assert fake.entered.wait(10)
+    if steer is not None:
+        assert _steer(server, sid, steer)["result"]["delivery"] == "steer"
+    gate.set()
+    events = _collect_until(server, sid)
+    kept = next(
+        e
+        for e in events
+        if e["event"] in ("tool.completed", "tool.failed")
+        and e["payload"].get("tool") == "memory.remember"
+    )
+    return sid, kept
+
+
+def test_the_owner_writing_into_a_scheduled_run_can_be_kept_in_memory(
+    server, services, tmp_path, monkeypatch
+) -> None:
+    """22-oct: the owner wrote «la cerré yo, duraste demasiado» into a scheduled run and
+    personal memory refused the lesson as an unattended run's."""
+    sid, kept = _remember_after_steer(
+        server, services, tmp_path, monkeypatch, "La cerré yo, duraste demasiado"
+    )
+    assert kept["event"] == "tool.completed", kept
+    [record] = services.memory.list_user()
+    sources = services.ctx.memory_repo.sources_for_memory(record["id"])
+    steer = next(
+        row for row in services.ctx.message_repo.list(sid) if (row.origin or {}).get("steer_id")
+    )
+    assert [source["message_id"] for source in sources] == [steer.id]
+
+
+def test_a_scheduled_run_alone_still_cannot_write_personal_memory(
+    server, services, tmp_path, monkeypatch
+) -> None:
+    _sid, kept = _remember_after_steer(server, services, tmp_path, monkeypatch, None)
+    assert kept["event"] == "tool.failed"
+    assert "memory.propose" in kept["payload"]["error"]["message"]
+    assert services.memory.list_user() == []

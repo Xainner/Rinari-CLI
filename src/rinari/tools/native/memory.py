@@ -188,8 +188,10 @@ def _remember_for_owner(
     if source is None:
         return _fail(
             ToolErrorCode.PERMISSION_DENIED,
-            "personal memory can only be written during a turn the owner started "
-            "(not from a subagent, a scheduled run or another session). Do not retry.",
+            "personal memory is written only in a turn the owner started or wrote "
+            "into, never on its own from a subagent, a scheduled run or another "
+            "session. Propose it with memory.propose instead (the owner approves it); "
+            "do not retry memory.remember.",
         )
     kind = input.get("kind", "fact")
     if kind not in _USER_KINDS:
