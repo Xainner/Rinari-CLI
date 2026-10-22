@@ -886,3 +886,22 @@ def test_a_connectors_artifact_uri_says_where_it_comes_from(server) -> None:
     )
     _, error = _path_for("artifact://sess_426509106af5/images/f885734d066a.png", ctx)
     assert error is not None and error.error.message == FOREIGN_ARTIFACT
+
+
+def test_an_http_download_lands_in_its_conversation_where_the_agent_can_read_it(server) -> None:
+    """Image saved the PNG with http.request save_as: it landed in the root shared by
+    every conversation, which Rinari's home guard keeps closed to an agent."""
+    from dataclasses import replace
+
+    from rinari.tools.definition import ToolContext
+    from rinari.tools.native.http import _artifact_path
+
+    store = server._services.artifacts
+    fields = {f: None for f in ToolContext.__dataclass_fields__}
+    ctx = replace(
+        ToolContext(**{**fields, "session_id": "ses_image", "artifact_root": store._root()}),
+        artifact_store=store,
+    )
+    path, uri = _artifact_path(ctx, "tofu.png", b"PNG-bytes" * 4)
+    assert Path(path).parent == store._root() / "ses_image" / "downloads"
+    assert uri.startswith("artifact://ses_image/downloads/")

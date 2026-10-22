@@ -64,14 +64,27 @@ def _query_input(value: Any) -> dict[str, str] | None:
     return _headers_input(value)
 
 
-def _artifact_path(ctx: ToolContext, name: str, body: bytes) -> str:
+def _artifact_path(ctx: ToolContext, name: str, body: bytes) -> tuple[str, str | None]:
+    """The response saved in this conversation's downloads, as web.download does.
+
+    It used to land in the root shared by every conversation, where an Agency
+    agent could not read it back (Rinari's home is closed to it) and two
+    conversations could overwrite each other's file. Returns (path, uri).
+    """
     from pathlib import Path
 
-    root = Path(ctx.artifact_root)
-    root.mkdir(parents=True, exist_ok=True)
-    target = root / name
+    store = getattr(ctx, "artifact_store", None)
+    session_id = getattr(ctx, "session_id", None)
+    if store is not None and session_id:
+        record = store.create(
+            session_id, "downloads", name, body, provenance=f"http.request:{name}"[:500]
+        )
+        return str(store._storage_path(record.storage_path)), record.uri()
+    folder = Path(ctx.artifact_root) / (session_id or "") / "downloads"
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / name
     target.write_bytes(body)
-    return str(target)
+    return str(target), None
 
 
 def _is_textual(content_type: str, body: bytes = b"") -> bool:
@@ -94,9 +107,11 @@ def _attach_body(data: dict, resp: HttpResponse, save_as: str | None, ctx: ToolC
         data["binary"] = True
     name = _safe_name(save_as or "", f"http-response-{resp.sha256[:12]}")
     try:
-        path = _artifact_path(ctx, name, body)
+        path, uri = _artifact_path(ctx, name, body)
         data["artifact"] = {"path": path, "bytes": len(body), "sha256": resp.sha256}
-    except OSError as exc:
+        if uri:
+            data["artifact"]["uri"] = uri
+    except Exception as exc:  # saving is a nicety: the response itself stands
         data["artifact_error"] = f"Could not save response artifact: {exc.__class__.__name__}"
 
 
