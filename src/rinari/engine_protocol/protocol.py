@@ -322,6 +322,10 @@ CAPABILITIES: dict[str, bool] = {
     # agency.team.overview {team_id}: members, routines, flows and runs, the
     # board's counts, recent activity and spend today and over 7 days.
     "agency_team_work_v1": True,
+    # A scheduled task's `notify` (all | problems | none, default all): how much
+    # its runs notify the owner; every schedule.run.* event and the run's turn
+    # origin carry it (owner, 22-oct).
+    "schedule_notify_v1": True,
     # soul.settings.get/set: character intensity (minimal | balanced | full),
     # separate from Soul selection; bundled default Soul 4.0.
     "soul_character_intensity_v1": True,

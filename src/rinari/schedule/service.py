@@ -57,6 +57,9 @@ RUN_STATUSES = (
 #: Where an agent task runs: a fresh session each time, or the conversation it
 #: was asked in, as one more message with its history («Repetir aquí»).
 TARGETS = ("new_session", "this_conversation")
+#: How much a task notifies: every run, only a failure or a run that needs the
+#: owner, or nothing that pops up (its runs stay in its history).
+NOTIFY = ("all", "problems", "none")
 
 
 class ScheduledTaskError(ValueError):
@@ -283,6 +286,9 @@ class ScheduleService:
         ):
             raise ScheduledTaskError(f"Unknown agent: {agent_id}")
         enabled = merged.get("enabled", True)
+        notify = merged.get("notify") or "all"
+        if notify not in NOTIFY:
+            raise ScheduledTaskError(f"notify must be one of {', '.join(NOTIFY)}.")
         if not isinstance(enabled, bool):
             raise ScheduledTaskError("'enabled' must be a boolean.")
         target = merged.get("target") or "new_session"
@@ -322,6 +328,7 @@ class ScheduleService:
             "target": target,
             "session_id": session_id,
             "deliver_to": deliver_to,
+            "notify": notify,
             "enabled": enabled,
         }
 

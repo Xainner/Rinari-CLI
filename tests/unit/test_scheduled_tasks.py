@@ -236,7 +236,12 @@ def test_an_agent_run_is_a_turn_in_its_own_session(server, monkeypatch) -> None:
         "kind": "schedule",
         "task_id": task["id"],
         "run_id": run_id,
+        "notify": "all",
     }
+    assert (
+        next(e for e in seen if e["event"] == "schedule.run.completed")["payload"]["notify"]
+        == "all"
+    )
     run = server._services.ctx.schedule_repo.run(run_id)
     assert run["status"] == "completed" and run["summary"] == "Todo en orden."
     session = server._services.sessions.show(run["session_id"])

@@ -70,6 +70,7 @@ def schedule_tools(host: ScheduleToolHost):
             "enabled": bool(task.get("enabled")),
             "next_run_local": _local(task.get("next_run_at")) if task.get("enabled") else None,
             "here": task.get("target") == "this_conversation",
+            "notify": task.get("notify") or "all",
             "prompt": (task.get("prompt") or "")[:300],
         }
 
@@ -86,7 +87,7 @@ def schedule_tools(host: ScheduleToolHost):
         task, problem = find(args.pop("task", None))
         if task is None:
             return fail(ToolErrorCode.NOT_FOUND, problem or "not found")
-        patch = {key: args[key] for key in ("name", "schedule", "prompt") if key in args}
+        patch = {key: args[key] for key in ("name", "schedule", "prompt", "notify") if key in args}
         if "enabled" in args:
             if not isinstance(args["enabled"], bool):
                 return fail(ToolErrorCode.INVALID_ARGUMENT, "enabled must be true or false")
@@ -273,6 +274,13 @@ def schedule_tools(host: ScheduleToolHost):
                     "schedule": {"type": "object"},
                     "prompt": {"type": "string", "maxLength": 8000},
                     "mode": {"type": "string", "enum": ["plan", "build", "review"]},
+                    "notify": {
+                        "type": "string",
+                        "enum": ["all", "problems", "none"],
+                        "description": "How much its runs notify the owner: every run (all, "
+                        "the default), only a failure or one that needs them (problems), or "
+                        "nothing that pops up (none). Set it when the owner asks.",
+                    },
                     "skills": {"type": "array", "items": {"type": "string"}},
                     "in_this_project": {"type": "boolean"},
                     "in_this_conversation": {"type": "boolean"},
@@ -324,6 +332,7 @@ def schedule_tools(host: ScheduleToolHost):
                     "schedule": {"type": "object"},
                     "prompt": {"type": "string", "maxLength": 8000},
                     "enabled": {"type": "boolean"},
+                    "notify": {"type": "string", "enum": ["all", "problems", "none"]},
                 },
                 "required": ["task"],
                 "additionalProperties": False,

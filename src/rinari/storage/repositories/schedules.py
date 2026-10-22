@@ -30,6 +30,7 @@ _TASK_COLUMNS = (
     "session_id",
     "deliver_json",
     "paused_by",
+    "notify",
     "enabled",
     "next_run_at",
     "created_at",
@@ -66,6 +67,7 @@ def _task(row: Any) -> dict[str, Any]:
     raw_deliver = item.pop("deliver_json", None)
     item["deliver_to"] = json.loads(raw_deliver) if raw_deliver else None
     item["paused_by"] = item.get("paused_by")
+    item["notify"] = item.get("notify") or "all"
     item["enabled"] = bool(item["enabled"])
     return item
 
@@ -119,6 +121,7 @@ class ScheduleRepository:
             ),
             # Kept only while the task stays off: switching it on clears it.
             "paused_by": None if task.get("enabled", True) else task.get("paused_by"),
+            "notify": task.get("notify") or "all",
             "enabled": 1 if task.get("enabled", True) else 0,
             "next_run_at": task.get("next_run_at"),
             "created_at": task["created_at"],

@@ -377,6 +377,7 @@ class ScheduleRunner:
             "run_id": run_id,
             "target": "this_conversation",
             "task_name": task["name"],
+            "notify": task.get("notify") or "all",
         }
         # A queue held (a provider limit waiting to resume) is busy too: the run
         # waits behind what holds it.
@@ -736,6 +737,7 @@ class ScheduleRunner:
                     "kind": "schedule",
                     "task_id": task["id"],
                     "run_id": run_id,
+                    "notify": task.get("notify") or "all",
                     **(
                         {"external_content": True, "external_source": external_source}
                         if external_source
@@ -900,6 +902,7 @@ class ScheduleRunner:
                     "run_id": run_id,
                     "name": task["name"],
                     "kind": task["kind"],
+                    "notify": task.get("notify") or "all",
                     **{key: value for key, value in fields.items() if value is not None},
                 },
             )

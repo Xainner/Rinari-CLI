@@ -575,3 +575,20 @@ def test_a_task_the_owner_stopped_is_not_switched_back_on_by_a_model(services) -
     owner = SimpleNamespace(session_id="ses_x", origin_kind="user")
     result = _tools(services)["schedule.update"].handler({"task": "Precio", "enabled": True}, owner)
     assert not result.ok and "owner" in result.error.message
+
+
+def test_a_task_says_how_much_it_notifies_and_a_model_can_quiet_it(services) -> None:
+    """Owner, 22-oct: a setting per scheduled task to hide its notifications."""
+    task = services.schedules.create(_task(name="Radar"))
+    assert task["notify"] == "all"
+    with pytest.raises(ScheduledTaskError):
+        services.schedules.create(_task(name="Otro", notify="sometimes"))
+    quiet = services.schedules.update(task["id"], {"notify": "none"})
+    assert quiet["notify"] == "none" and services.schedules.get(task["id"])["notify"] == "none"
+    owner = SimpleNamespace(session_id="ses_x", origin_kind="user")
+    tools = _tools(services)
+    changed = tools["schedule.update"].handler({"task": "Radar", "notify": "problems"}, owner)
+    assert changed.ok and changed.data["notify"] == "problems"
+    created = tools["schedule.propose"].handler(_task(name="Callado", notify="none"), owner)
+    assert created.ok
+    assert next(t for t in services.schedules.list() if t["name"] == "Callado")["notify"] == "none"
