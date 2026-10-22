@@ -1317,6 +1317,12 @@ def test_browser_screenshot_is_a_session_image_the_chat_can_show(
     # The model sees the capture in the same step: no fs.read_image afterwards (#11).
     assert [image.uri for image in result.images] == [uri]
     assert result.images[0].path.is_file()
+    # Its path is the stored file, and no loose copy is left in the
+    # conversation's folder for a later call to name instead (it made
+    # `artifact://<session>/<file>`, which nothing could open).
+    assert Path(result.data["path"]) == result.images[0].path
+    folder = ctx.artifact_root / ctx.session_id
+    assert not list(folder.glob("screenshot-*.png")) if folder.exists() else True
     manager.close()
 
 

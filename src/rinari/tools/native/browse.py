@@ -444,27 +444,38 @@ def browser_screenshot(input: dict, ctx: ToolContext) -> ToolResult:
         png = manager.screenshot(target, cancelled=_cancelled_fn(ctx))
     except BrowserError as exc:
         return _browser_failure(exc, manager)
-    path = _artifact_dir(ctx) / f"screenshot-{int(time.time())}.png"
-    path.write_bytes(png)
-    digest = _sha256(path)
+    name = f"screenshot-{int(time.time())}.png"
     store = getattr(ctx, "artifact_store", None)
     if store is None:
+        path = _artifact_dir(ctx) / name
+        path.write_bytes(png)
         ref = ArtifactRef(uri=f"file://{path}", name=path.name, kind="screenshot")
-        return _with_artifacts({"artifact": ref.uri, "bytes": len(png), "sha256": digest}, (ref,))
+        return _with_artifacts(
+            {"artifact": ref.uri, "bytes": len(png), "sha256": _sha256(path)}, (ref,)
+        )
     # In the session media store the chat and the activity can show it; a
     # bare file:// path renders as a broken image (the renderer cannot read it).
+    # The capture is written outside the conversation's folder and imported:
+    # no loose copy is left there for a path to name instead of the stored one.
+    import tempfile
+
     from PIL import Image
 
     from rinari.artifacts.transfer import import_file
 
-    record = import_file(
-        store,
-        ctx.session_id,
-        path,
-        expected_hash=digest,
-        cancellation=ctx.cancellation,
-        provenance=f"browser.screenshot:{path}",
-    )
+    with tempfile.TemporaryDirectory(prefix="rinari-capture-") as scratch:
+        draft = Path(scratch) / name
+        draft.write_bytes(png)
+        digest = _sha256(draft)
+        record = import_file(
+            store,
+            ctx.session_id,
+            draft,
+            expected_hash=digest,
+            cancellation=ctx.cancellation,
+            provenance=f"browser.screenshot:{name}",
+        )
+    path = store._storage_path(record.storage_path)
     width = height = None
     try:
         with Image.open(path) as image:
@@ -489,7 +500,7 @@ def browser_screenshot(input: dict, ctx: ToolContext) -> ToolResult:
     # it retired with a note by the visual router; the turn goes on.
     from rinari.models.images import ImageReference
 
-    image = ImageReference(uri, store._storage_path(record.storage_path), digest, "image/png")
+    image = ImageReference(uri, path, digest, "image/png")
     return ToolResult(
         ok=True,
         data=data,

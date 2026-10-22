@@ -159,7 +159,14 @@ def _path_item(
 
 
 def _artifact_uri(ctx: ToolContext, resolved: Path) -> str | None:
-    """`artifact://<session>/…` for a path inside this conversation's saved outputs."""
+    """`artifact://<session>/<namespace>/<name>` for a path inside this
+    conversation's saved outputs.
+
+    Only a URI the store can open: a file the store keeps is named by its own
+    URI; a file loose in the conversation's folder (a browser download, an
+    older capture) is imported first. A path is never turned into a URI the
+    store does not know (`artifact://<session>/<file>` broke opening it).
+    """
     root = getattr(ctx, "artifact_root", None)
     session_id = getattr(ctx, "session_id", None)
     if not root or not session_id:
@@ -169,9 +176,29 @@ def _artifact_uri(ctx: ToolContext, resolved: Path) -> str | None:
         relative = resolved.resolve().relative_to(base)
     except (OSError, ValueError):
         return None
-    if not relative.parts:
+    if not relative.parts or resolved.is_dir():
         return None
-    return f"artifact://{session_id}/{relative.as_posix()}"
+    store = getattr(ctx, "artifact_store", None)
+    if store is None:
+        return None
+    if len(relative.parts) == 2:
+        uri = f"artifact://{session_id}/{relative.as_posix()}"
+        with contextlib.suppress(Exception):
+            store.meta(uri)
+            return uri
+    from rinari.artifacts.transfer import import_file
+
+    try:
+        record = import_file(
+            store,
+            session_id,
+            resolved,
+            cancellation=getattr(ctx, "cancellation", None),
+            provenance=f"file.present:{resolved}",
+        )
+    except Exception:
+        return None
+    return record.uri()
 
 
 def _delivery_key(item: dict[str, Any]) -> str | None:

@@ -135,3 +135,43 @@ def test_nothing_outside_the_conversation_is_presented(ctx, seen, tmp_path):
         result = TOOL.handler({"items": bad}, ctx)
         assert not result.ok, bad
     assert seen == []
+
+
+def _stored_ctx(ctx: ToolContext, app_ctx):
+    """The same context with the Engine's artifact store, as in a real turn."""
+    from dataclasses import replace
+
+    from rinari.artifacts.store import ArtifactStore
+
+    store = ArtifactStore(app_ctx)
+    # The owner's conversation could read the Engine's folder (full access).
+    sandbox = FilesystemSandbox(ctx.cwd, (ctx.cwd,), unrestricted_reads=True)
+    return replace(ctx, artifact_root=store._root(), artifact_store=store, sandbox=sandbox), store
+
+
+def test_a_loose_file_in_the_conversation_gets_a_uri_the_store_opens(ctx, seen, app_ctx):
+    """A browser capture used to leave a loose copy in the conversation's folder;
+    presenting it made `artifact://<session>/<file>`, which nothing could open."""
+    ctx, store = _stored_ctx(ctx, app_ctx)
+    loose = store._root() / ctx.session_id / "screenshot-1792631230.png"
+    loose.parent.mkdir(parents=True, exist_ok=True)
+    loose.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\0" * 64)
+    result = TOOL.handler({"items": [{"path": str(loose)}]}, ctx)
+    assert result.ok, result.error
+    uri = seen[0][1]["items"][0]["uri"]
+    assert uri.startswith(f"artifact://{ctx.session_id}/media/")
+    assert store.get(uri) == loose.read_bytes()
+
+
+def test_a_stored_file_is_named_by_its_own_uri(ctx, seen, app_ctx):
+    from rinari.artifacts.transfer import import_file
+
+    ctx, store = _stored_ctx(ctx, app_ctx)
+    source = ctx.cwd / "logo.png"
+    source.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\0" * 64)
+    record = import_file(store, ctx.session_id, source)
+    stored = store._storage_path(record.storage_path)
+    result = TOOL.handler({"items": [{"path": str(stored)}]}, ctx)
+    assert result.ok, result.error
+    assert seen[0][1]["items"][0]["uri"] == record.uri()
+    assert len(store.list(session_id=ctx.session_id)) == 1  # nothing imported twice
