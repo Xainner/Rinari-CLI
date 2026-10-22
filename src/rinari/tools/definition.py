@@ -411,6 +411,10 @@ class ToolContext:
     engine_home: Path | None = None
     engine_home_open: tuple[Path, ...] = ()
     engine_home_readable: tuple[Path, ...] = ()
+    # Rinari Agency: the other posts of this post's team. What a teammate made
+    # (an image, a script) is handed over in the office by its artifact://, so
+    # this conversation may read their outputs, never write them.
+    shared_artifact_sessions: tuple[str, ...] = ()
     # Session-scoped LspManager (rinari.lsp); None for CHAT sessions or when
     # no language server is registered/available.
     lsp: Any = None

@@ -821,3 +821,41 @@ def test_a_turn_that_spoke_with_office_say_does_not_repeat_itself(server, turns)
         {"event": "turn.completed", "payload": {"session_id": post, "content": "Listo, revisado"}}
     )
     assert any("Listo, revisado" in m["text"] for m in _office(server, team))
+
+
+def test_a_post_reads_what_a_teammate_made_and_nothing_outside_its_team(server) -> None:
+    """Image made a PNG; Video, in the same team, could not read it (owner, 21-oct)."""
+    from dataclasses import replace
+
+    from rinari.artifacts.transfer import import_file
+    from rinari.cli.agent_runtime import _teammate_sessions
+    from rinari.tools.native.artifact import _path_for
+    from rinari.tools.native.fs import _resolve_read
+
+    image, video, other = _agent(server, "Image"), _agent(server, "Video"), _agent(server, "Otro")
+    team = _team(server, "Estudio", [image, video])
+    _team(server, "Aparte", [other])
+    image_post, video_post = _post(team, image), _post(team, video)
+    services = server._services
+    assert _teammate_sessions(services, video_post) == (image_post,)
+    assert _teammate_sessions(services, other["session_id"]) == ()  # a direct chat: no team
+
+    store = services.artifacts
+    source = Path(services.ctx.layout.root) / "personaje.png"
+    source.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\0" * 64)
+    made = import_file(store, image_post, source)
+
+    from rinari.tools.definition import ToolContext
+
+    fields = {f: None for f in ToolContext.__dataclass_fields__}
+    ctx = replace(
+        ToolContext(**{**fields, "session_id": video_post, "artifact_root": store._root()}),
+        shared_artifact_sessions=(image_post,),
+    )
+    path, error = _path_for(made.uri(), ctx)
+    assert error is None and path.read_bytes() == source.read_bytes()
+    read, error = _resolve_read(ctx, made.uri())
+    assert error is None and read.is_file()
+    outsider = replace(ctx, session_id=other["session_id"], shared_artifact_sessions=())
+    _, denied = _path_for(made.uri(), outsider)
+    assert denied is not None and denied.error.code.value == "PERMISSION_DENIED"

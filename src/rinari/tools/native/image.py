@@ -17,6 +17,32 @@ from rinari.tools.definition import (
 from rinari.tools.native.fs import _fail, _resolve_read
 
 
+def _own_copy(ctx, uri: str) -> str:
+    """A teammate's output (Rinari Agency) as a copy in this session's store.
+
+    A post reads what another post of its team handed over in the office; the
+    copy keeps the rest of the media pipeline per session and never touches
+    the original. Any other URI comes back as it was.
+    """
+    shared = getattr(ctx, "shared_artifact_sessions", ()) or ()
+    try:
+        session_id, _, _ = parse_uri(uri)
+    except Exception:
+        return uri
+    if session_id == ctx.session_id or session_id not in shared or ctx.artifact_store is None:
+        return uri
+    record = ctx.artifact_store.meta(uri)
+    copy = import_file(
+        ctx.artifact_store,
+        ctx.session_id,
+        ctx.artifact_store._storage_path(record.storage_path),
+        expected_hash=record.sha256,
+        cancellation=getattr(ctx, "cancellation", None),
+        provenance=f"teammate:{uri}",
+    )
+    return copy.uri()
+
+
 def image_read(arguments, ctx):
     source = arguments.get("path")
     is_artifact = isinstance(source, str) and source.startswith("artifact://")
@@ -28,6 +54,7 @@ def image_read(arguments, ctx):
         return _fail(ToolErrorCode.DEPENDENCY_ERROR, "Session media store is unavailable")
     try:
         if is_artifact:
+            source = _own_copy(ctx, source)
             session_id, _, _ = parse_uri(source)
             if session_id != ctx.session_id:
                 return _fail(
@@ -120,6 +147,7 @@ def pdf_pages_read(arguments, ctx):
     store = ctx.artifact_store
     try:
         if isinstance(source, str) and source.startswith("artifact://"):
+            source = _own_copy(ctx, source)
             session_id, _, _ = parse_uri(source)
             if session_id != ctx.session_id:
                 return _fail(

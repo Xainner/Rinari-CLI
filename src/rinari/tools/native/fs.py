@@ -71,9 +71,12 @@ def _artifact_path(ctx: ToolContext, uri: str) -> tuple[Path | None, ToolResult 
     """
     rest = uri[len(_ARTIFACT_PREFIX) :]
     session, _, relative = rest.partition("/")
-    base = (Path(ctx.artifact_root) / ctx.session_id).resolve()
+    # A teammate's post too (Rinari Agency): what it hands over in the office.
+    shared = getattr(ctx, "shared_artifact_sessions", ()) or ()
+    owner = session if session in shared else ctx.session_id
+    base = (Path(ctx.artifact_root) / owner).resolve()
     target = (base / relative).resolve() if relative else base
-    if session != ctx.session_id or not (target == base or base in target.parents):
+    if session != owner or not (target == base or base in target.parents):
         return None, _fail(
             ToolErrorCode.SANDBOX_VIOLATION, "Only this conversation's saved outputs can be read"
         )

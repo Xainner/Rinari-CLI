@@ -38,10 +38,11 @@ def _path_for(uri: object, ctx: ToolContext) -> tuple[Path | None, ToolResult | 
             "expected artifact://<session>/<namespace>/<name>",
         )
     session_id, namespace, name = parts
-    if session_id != ctx.session_id:
+    shared = getattr(ctx, "shared_artifact_sessions", ()) or ()
+    if session_id != ctx.session_id and session_id not in shared:
         return None, _error(
             ToolErrorCode.PERMISSION_DENIED,
-            "artifacts are readable only from the current session",
+            "artifacts are readable only from the current session or a teammate's post",
         )
     if any(part in (".", "..") or "\\" in part for part in parts):
         return None, _error(ToolErrorCode.INVALID_ARGUMENT, "invalid artifact URI")

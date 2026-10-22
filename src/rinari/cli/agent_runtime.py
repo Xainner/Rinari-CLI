@@ -329,11 +329,29 @@ def _engine_home_guard(services: ServiceContainer, record: SessionRecord, cwd: P
     if workspace != home and home in workspace.parents:
         # Its own chat workspace (workspaces/<id>), never the home itself.
         opened.append(workspace)
+    teammates = _teammate_sessions(services, record.id)
     return {
         "engine_home": home,
         "engine_home_open": tuple(opened),
-        "engine_home_readable": (services.skills.user_skills_dir(),),
+        "engine_home_readable": (
+            services.skills.user_skills_dir(),
+            *(layout.artifacts_dir / session_id for session_id in teammates),
+        ),
+        "shared_artifact_sessions": teammates,
     }
+
+
+def _teammate_sessions(services: ServiceContainer, session_id: str) -> tuple[str, ...]:
+    """The other posts of the team this post belongs to (none outside a post)."""
+    repo = getattr(services.ctx, "team_repo", None)
+    post = repo.post_for_session(session_id) if repo is not None else None
+    if post is None:
+        return ()
+    return tuple(
+        item["session_id"]
+        for item in repo.posts(post["team_id"])
+        if item.get("session_id") and item["session_id"] != session_id
+    )
 
 
 def _agency_pack(services: ServiceContainer, record: SessionRecord) -> str | None:
