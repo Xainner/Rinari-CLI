@@ -570,6 +570,9 @@ class TeamWork:
         for item in errands:
             counts[item["status"]] = counts.get(item["status"], 0) + 1
         agents = []
+        # What each agent spent for this team: its post and the runs of its rules
+        # that work for the team, not its other teams or its own chat.
+        team_sessions = list(self._repo.team_session_ids(team["id"]))
         for post in self._repo.posts(team["id"]):
             agent = self._services.ctx.agency_repo.get(post["agent_id"])
             if agent is None:
@@ -578,8 +581,12 @@ class TeamWork:
                 {
                     "agent_id": agent["id"],
                     "name": agent["name"],
-                    "today": spend_of(self._services, "agent", agent["id"], {}, days=1),
-                    "week": spend_of(self._services, "agent", agent["id"], {}, days=7),
+                    "today": spend_of(
+                        self._services, "agent", agent["id"], {}, days=1, within=team_sessions
+                    ),
+                    "week": spend_of(
+                        self._services, "agent", agent["id"], {}, days=7, within=team_sessions
+                    ),
                 }
             )
         activity = [

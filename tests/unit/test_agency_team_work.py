@@ -14,6 +14,7 @@ from tests.unit.test_agency_teams import (  # noqa: F401  (fixtures)
     _agent,
     _call,
     _finish,
+    _invoked,
     _no_background_board,
     _ok,
     _post,
@@ -263,3 +264,14 @@ def test_the_overview_shows_the_team_in_one_call(server, turns) -> None:
     assert set(view["spend"]) == {"today", "week", "agents"}
     assert len(view["spend"]["agents"]) == 3
     assert view["spend"]["week"]["tokens"] == 0
+
+
+def test_each_agents_spend_in_the_overview_is_its_work_for_this_team(server) -> None:
+    """Nightly 1431: Image showed 4.0M tokens in 7 days, more than its whole team (3.8M)."""
+    team, _writer, image, _video = _studio(server)
+    _invoked(server, _post(team, image), 100, 50)
+    _invoked(server, image["session_id"], 9000, 1000)  # its own chat: not this team's
+    view = _ok(_call(server, "agency.team.overview", {"team_id": team["id"]}))
+    row = next(item for item in view["spend"]["agents"] if item["name"] == "Image")
+    assert row["today"]["tokens"] == row["week"]["tokens"] == 150
+    assert view["spend"]["today"]["tokens"] == 150

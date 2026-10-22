@@ -128,12 +128,17 @@ def build_report(
     context_of: Any = None,
     app_version: str | None = None,
     days: int = 1,
+    within: list[str] | None = None,
 ) -> dict[str, Any]:
     if scope not in SCOPES:
         raise EngineProtocolError(
             INVALID_PARAMS, f"Param 'scope' must be one of: {', '.join(SCOPES)}."
         )
     sessions, since = _sessions(services, scope, ref, days)
+    if within is not None and sessions is not None:
+        # Only these conversations (an agent's work for one team).
+        allowed = set(within)
+        sessions = [session for session in sessions if session in allowed]
     # An agent without conversations spent nothing (never «every session»).
     if sessions == [] and scope not in ("agent", "team", "agency"):
         sessions = None
