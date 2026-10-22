@@ -178,6 +178,12 @@ def test_a_flow_hands_each_step_on_with_what_the_earlier_ones_delivered(server, 
     assert states == ["started", "step", "done"]
     report = _office(server, team)[-1]
     assert "Video listo" in report["text"] and report["mentions"] == [writer["id"]]
+    assert report["author_kind"] == "system"
+    # Busy reviewing: the report waits in its queue until that turn ends.
+    _finish(server, _post(team, writer), "")
+    told = turns[-1]
+    assert told["session_id"] == _post(team, writer)
+    assert "⟦Rinari⟧" in told["message"] and "Report the result to the owner" in told["message"]
 
 
 def test_an_owner_step_waits_for_the_owner_and_a_cancelled_run_cancels_its_errands(

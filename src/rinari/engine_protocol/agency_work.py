@@ -431,12 +431,6 @@ class TeamWork:
             },
         )
         if done:
-            self._notice(
-                team,
-                flow["name"],
-                {"kind": "flow", "state": "done", "flow": flow["name"], "run_id": run["id"]},
-                run["chain_id"],
-            )
             self._report_done(team, flow, run)
         else:
             self._notice(
@@ -455,21 +449,26 @@ class TeamWork:
         self._board._changed(team["id"], "flow")
 
     def _report_done(self, team: dict[str, Any], flow: dict[str, Any], run: dict[str, Any]) -> None:
-        """A finished run goes back to whoever started it: the chief (or an agent) reviews
-        and answers the owner; one the owner started reaches the chief to report."""
+        """A finished run: one notice in the office with what each step delivered (the
+        app words its first paragraph). It wakes whoever started it, or the chief for a
+        run the owner started, to report it; with neither, it wakes nobody."""
         who = run.get("started_by") or self._board._active_chief(team)
-        post = self._repo.post(team["id"], who) if who else None
-        if post is None:
-            return
-        outputs = self._outputs(flow, run)
+        if who and self._repo.post(team["id"], who) is None:
+            who = None
+        notice = {"kind": "flow", "state": "done", "flow": flow["name"], "run_id": run["id"]}
+        head = f"The flow «{flow['name']}» is done. What each step delivered:"
+        if who:
+            head = f"@{self._board._author(who)} {head}"
         self._board.post_message(
             team,
-            f"@{self._board._author(who)} The flow «{flow['name']}» is done. What each step "
-            f"delivered:\n\n{outputs}"[:8000],
+            f"{head}\n\n{self._outputs(flow, run)}"[:8000],
             author_agent_id=None,
             chain_id=run["chain_id"],
             hop=0,
-            mentions=[who],
+            wake=who is not None,
+            system=who is None,
+            notice=notice,
+            mentions=[who] if who else None,
             author_kind="system",
         )
 
