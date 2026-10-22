@@ -592,3 +592,21 @@ def test_a_rule_that_works_for_a_team_counts_against_its_budget(server, turns) -
     run = server._schedule.run_now(task["id"])["run"]
     session_id = server._services.ctx.schedule_repo.run(run["id"])["session_id"]
     assert server._services.sessions.show(session_id).team_id == team["id"]
+
+
+def test_a_post_reads_its_office_further_back_whole(server, turns) -> None:
+    """The prompt carries the last 8 to 12 lines, cut at 400 characters (22-oct)."""
+    team, writer, image, _video = _studio(server)
+    long = "Guion: " + "el zorro corre. " * 60
+    _ok(_call(server, "agency.office.post", {"team_id": team["id"], "text": long}))
+    for n in range(40):
+        server._teams.post_message(
+            team, f"nota {n}", author_agent_id=writer["id"], chain_id=None, hop=1, wake=False
+        )
+    read = _tools(server, _post(team, image))["office.read"].handler
+    page = read({"limit": 20}, None)
+    assert page.ok and len(page.data["messages"]) == 20 and page.data["more"] is True
+    assert page.data["messages"][-1]["line"].endswith("nota 39")
+    older = read({"limit": 100, "before": page.data["messages"][0]["id"]}, None)
+    first = older.data["messages"][0]["line"]
+    assert first.endswith(long.strip()) and older.data["more"] is False

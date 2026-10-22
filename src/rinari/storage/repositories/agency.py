@@ -337,6 +337,18 @@ class TeamRepository:
         )
         return [_office(row) for row in rows]
 
+    def messages_before(
+        self, team_id: str, before: float | None, limit: int
+    ) -> list[dict[str, Any]]:
+        """The `limit` messages before `before` (the newest ones without it), oldest first."""
+        rows = self._db.query(
+            "SELECT * FROM (SELECT * FROM agency_office_messages WHERE team_id = ? "
+            "AND (? IS NULL OR created_at < ?) ORDER BY created_at DESC LIMIT ?) "
+            "ORDER BY created_at",
+            (team_id, before, before, limit),
+        )
+        return [_office(row) for row in rows]
+
     def set_notice(self, message_id: str, notice: dict[str, Any] | None) -> None:
         """Change what an Engine notice says (a stopped chain the owner dismissed)."""
         self._db.execute(

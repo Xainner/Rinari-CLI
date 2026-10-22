@@ -735,6 +735,7 @@ def test_the_agency_tools_are_always_loaded_where_they_exist(server) -> None:
     assert posts == {
         "office.say": True,
         "office.wait": True,
+        "office.read": True,
         "errand.create": True,
         "errand.review": True,
         "board.list": True,
