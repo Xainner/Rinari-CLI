@@ -19,7 +19,6 @@ from rinari.agency.service import EDITABLE, AgencyError, _text, normalize_budget
 
 MAX_TEAM_NAME = 60
 MAX_PURPOSE = 2000
-MAX_MEMBERS = 8
 MAX_ERRAND_TITLE = 200
 MAX_ERRAND_BODY = 8000
 MAX_DONE_WHEN = 10
@@ -38,8 +37,6 @@ ERRAND_STATUSES = (
 OPEN_STATUSES = ("pending", "in_progress", "returned", "blocked")
 #: What a free post takes from the board, in order.
 READY_STATUSES = ("pending", "returned")
-#: Times an errand can be sent back; the next one blocks it (D-2).
-MAX_RETURNS = 3
 
 TEAM_EDITABLE = ("name", "purpose", "chief_agent_id", "connectors", "budget")
 #: Where an agent's rule can deliver its result besides its run.
@@ -137,8 +134,8 @@ class TeamService:
             raise AgencyError("A team card is needed.")
         team = self._normalize(raw, None)
         members = raw.get("members") or []
-        if not isinstance(members, list) or len(members) > MAX_MEMBERS:
-            raise AgencyError(f"A team has at most {MAX_MEMBERS} agents.")
+        if not isinstance(members, list):
+            raise AgencyError("members must be a list of agent ids.")
         cards = [
             self._member_card(agent_id, rinari_profile_id) for agent_id in dict.fromkeys(members)
         ]
@@ -232,11 +229,6 @@ class TeamService:
         taken = {self._agents.get(post["agent_id"])["name"].lower() for post in posts}
         if agent["name"].lower() in taken:
             raise AgencyError("Two agents of a team cannot share a name (@mentions use it).")
-        if len(posts) >= MAX_MEMBERS:
-            # 6.2: past 8 agents, another team (another floor).
-            raise AgencyError(
-                f"A team has at most {MAX_MEMBERS} agents: create another team for more."
-            )
         self._add_post(team, agent)
         if team.get("chief_agent_id") is None:
             team = self._repo.save(
@@ -437,14 +429,13 @@ class TeamService:
         else:
             why = _text(reason, "The reason", MAX_DONE_ITEM, required=True)
             returns = int(errand.get("returns") or 0) + 1
-            too_many = returns > MAX_RETURNS
+            # No cap on returns (replan, 22-oct): the budget is the limit.
             saved = self._repo.save_errand(
                 errand["id"],
                 {
                     **errand,
-                    # Sent back too many times: it stops until the owner retries it.
-                    "status": "blocked" if too_many else "returned",
-                    "return_reason": "too_many_returns" if too_many else why,
+                    "status": "returned",
+                    "return_reason": why,
                     "returns": returns,
                     "external": bool(errand.get("external")) or external,
                     "session_id": None,
@@ -452,8 +443,6 @@ class TeamService:
                     "updated_at": now,
                 },
             )
-            if too_many and self.on_stopped is not None:
-                self.on_stopped(errand["team_id"], errand["chain_id"], "too_many_returns")
         self._changed(errand["team_id"], "errand")
         return saved
 

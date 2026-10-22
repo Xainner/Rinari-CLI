@@ -80,17 +80,16 @@ def test_an_agent_working_an_errand_waits_for_a_teammate_and_then_finishes_it(
     assert "zorro.mp4" in errand["result"]["summary"]
 
 
-def test_a_wait_inside_an_errand_that_expires_blocks_it_with_why(server, turns) -> None:
-    team, writer, _image, video = _studio(server)
+def test_a_wait_inside_an_errand_whose_teammate_leaves_blocks_it_with_why(server, turns) -> None:
+    team, writer, image, video = _studio(server)
     _, video_errand = _errands_from_writer(server, team, writer, turns)
     pv = _post(team, video)
     assert _tools(server, pv)["office.wait"].handler({"for": "Image"}, None).ok
     _finish(server, pv, "")
-    teams = server._teams
-    teams._waits[pv]["since"] -= 31 * 60
-    teams._expire_waits()
+    _ok(_call(server, "agency.team.leave", {"team_id": team["id"], "agent_id": image["id"]}))
+    server._teams._expire_waits()
     errand = server._services.ctx.team_repo.errand(video_errand)
-    assert errand["status"] == "blocked" and errand["return_reason"] == "wait_expired"
+    assert errand["status"] == "blocked" and errand["return_reason"] == "wait_cancelled"
 
 
 def test_a_cancelled_errand_is_not_resumed_when_the_teammate_posts(server, turns) -> None:

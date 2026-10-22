@@ -269,12 +269,7 @@ def team_tools(host: TeamToolHost):
         text = (arguments or {}).get("text")
         if not isinstance(text, str) or not text.strip() or len(text) > MAX_TEXT:
             return _fail(ToolErrorCode.INVALID_ARGUMENT, f"text must be 1..{MAX_TEXT} characters")
-        if not board.count_say(host.session_id):
-            # The Engine's cap, not the prompt's (D-2): a turn says at most 3 things.
-            return _fail(
-                ToolErrorCode.RESOURCE_EXHAUSTED,
-                "You already wrote 3 times in the office this turn: put the rest in your answer.",
-            )
+        board.count_say(host.session_id)
         work = _work_of(board, host.session_id)
         report: dict[str, Any] = {}
         message = board.post_message(
@@ -503,11 +498,7 @@ def direct_tools(host: TeamToolHost):
         text = args.get("text")
         if not isinstance(text, str) or not text.strip() or len(text) > MAX_TEXT:
             return _fail(ToolErrorCode.INVALID_ARGUMENT, f"text must be 1..{MAX_TEXT} characters")
-        if not board.count_say(host.session_id):
-            return _fail(
-                ToolErrorCode.RESOURCE_EXHAUSTED,
-                "You already wrote 3 times in an office this turn: put the rest in your answer.",
-            )
+        board.count_say(host.session_id)
         work = _work_of(board, host.session_id)
         report: dict[str, Any] = {}
         message = board.post_message(

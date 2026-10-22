@@ -93,7 +93,8 @@ def test_a_mutual_wait_is_refused_and_an_engine_notice_wakes_nobody(server, turn
 # -- B3: an errand sent back again and again -------------------------------------------------------
 
 
-def test_an_errand_sent_back_a_fourth_time_is_blocked(server, turns) -> None:
+def test_an_errand_sent_back_again_and_again_is_not_blocked_by_a_count(server, turns) -> None:
+    """No cap on returns (replan, 22-oct): what bounds it is the chain's hops and the budget."""
     ana, beto = _agent(server, "Ana"), _agent(server, "Beto")
     team = _team(server, "Canal", [ana, beto])
     tools_a = _tools(server, _post(team, ana))
@@ -113,24 +114,22 @@ def test_an_errand_sent_back_a_fourth_time_is_blocked(server, turns) -> None:
         )
         _finish(server, _post(team, ana), "")
     errand = server._services.ctx.team_repo.errand(errand_id)
-    assert rounds == 4
-    assert errand["status"] == "blocked" and errand["return_reason"] == "too_many_returns"
-    assert errand["deliveries"] == 4 and errand["returns"] == 4
-    assert "too_many_returns" in [e["reason"] for e in _events(server, "agency.chain.stopped")]
+    assert rounds > 4 and errand["returns"] == rounds
+    assert errand["status"] != "blocked"
+    assert "too_many_returns" not in [e["reason"] for e in _events(server, "agency.chain.stopped")]
 
 
 # -- B4: office.say in a burst ---------------------------------------------------------------------
 
 
-def test_office_say_is_capped_and_one_agent_is_woken_once_per_chain(server, turns) -> None:
+def test_office_say_has_no_cap_and_one_agent_is_woken_once_per_chain(server, turns) -> None:
+    """No cap on office.say (replan, 22-oct); a teammate is still woken once per chain."""
     ana, beto = _agent(server, "Ana"), _agent(server, "Beto")
     team = _team(server, "Canal", [ana, beto])
     _ok(_call(server, "agency.office.post", {"team_id": team["id"], "text": "@Ana hola"}))
     say = _tools(server, _post(team, ana))["office.say"].handler
-    results = [say({"text": f"@Beto {i}"}, None) for i in range(30)]
-    assert [r.ok for r in results[:3]] == [True, True, True]
-    assert all(r.ok is False for r in results[3:])
-    assert results[3].error.code == "RESOURCE_EXHAUSTED"
+    results = [say({"text": f"@Beto {i}"}, None) for i in range(10)]
+    assert all(r.ok for r in results)
     _finish(server, _post(team, ana), "@Beto y otra vez")
     for _ in range(5):
         _finish(server, _post(team, beto), "ok")

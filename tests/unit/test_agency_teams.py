@@ -168,17 +168,12 @@ def test_an_invalid_team_is_refused(server, card, message) -> None:
     assert refused["ok"] is False and message in refused["error"]["message"]
 
 
-def test_a_team_has_at_most_eight_agents_with_different_names(server) -> None:
+def test_a_team_has_any_number_of_agents_with_different_names(server) -> None:
+    """No cap on members (replan, 22-oct); two agents still never share a name."""
     agents = [_agent(server, f"A{i}") for i in range(9)]
-    refused = _call(
-        server,
-        "agency.team.create",
-        {"team": {"name": "Grande", "members": [a["id"] for a in agents]}},
-    )
-    assert refused["ok"] is False
-    team = _team(server, "Ocho", agents[:8])
-    full = _call(server, "agency.team.join", {"team_id": team["id"], "agent_id": agents[8]["id"]})
-    assert full["ok"] is False and "another team" in full["error"]["message"]
+    team = _team(server, "Grande", agents[:8])
+    joined = _call(server, "agency.team.join", {"team_id": team["id"], "agent_id": agents[8]["id"]})
+    assert joined["ok"] is True and len(joined["result"]["team"]["members"]) == 9
     twin = _agent(server, "a0")
     small = _team(server, "Dos", [agents[0]])
     same = _call(server, "agency.team.join", {"team_id": small["id"], "agent_id": twin["id"]})
@@ -834,19 +829,22 @@ def test_a_teammate_that_already_posted_releases_the_wait_at_once(server, turns)
     assert "Ya está la idea." in turns[-1]["message"]
 
 
-def test_a_wait_expires_and_the_owner_is_told(server, turns, monkeypatch) -> None:
-    import rinari.engine_protocol.agency_teams as board_module
-
+def test_a_wait_never_expires_on_a_clock_and_ends_when_a_teammate_leaves(server, turns) -> None:
+    """The 30-minute expiry went (replan, 22-oct); a wait on someone who left ends."""
     writer, editor = _agent(server, "Writer"), _agent(server, "Editor")
     team = _team(server, "Canal", [writer, editor])
     _ok(_call(server, "agency.office.post", {"team_id": team["id"], "text": "@Editor revisa"}))
-    _tools(server, _post(team, editor))["office.wait"].handler({"for": "Writer"}, None)
-    _finish(server, _post(team, editor), "")
+    pe = _post(team, editor)
+    _tools(server, pe)["office.wait"].handler({"for": "Writer"}, None)
+    _finish(server, pe, "")
+    server._teams._waits[pe]["since"] -= 7 * 24 * 3600
+    server._teams.tick()
+    assert pe in server._teams._waits
     server.drain_events()
-    monkeypatch.setattr(board_module, "WAIT_S", 0)
+    _ok(_call(server, "agency.team.leave", {"team_id": team["id"], "agent_id": writer["id"]}))
     server._teams.tick()
     stopped = _events(server, "agency.chain.stopped")
-    assert stopped[-1]["reason"] == "wait_expired" and stopped[-1]["detail"] == "Editor → Writer"
+    assert stopped[-1]["reason"] == "wait_cancelled" and stopped[-1]["detail"] == "Editor → Writer"
     assert server._teams._waits == {}
 
 

@@ -507,4 +507,3 @@ def test_an_interval_may_be_seconds_with_no_minimum_but_the_scheduler_tick() -> 
         "kind": "interval",
         "minutes": 2,
     }
-

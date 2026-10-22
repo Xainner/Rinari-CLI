@@ -18,8 +18,9 @@ came from outside the machine keeps the external-content guard on.
 
 D-29: a woken agent may decide that what it was asked depends on a teammate
 (`office.wait`): its mention is parked and comes back, with no extra hop,
-when that teammate posts in the same chain; a wait expires after WAIT_S and
-the owner is told. D-30: an errand left by an agent from its direct chat is
+when that teammate posts in the same chain; a wait ends when the team or one
+of the two goes (archived, left), never on a clock (replan, 22-oct). D-30: an
+errand left by an agent from its direct chat is
 delivered back there, as a turn, for it to review.
 
 «Detener a todos» halts the board (section 8): nothing queued is lost, it
@@ -49,13 +50,9 @@ logger = logging.getLogger(__name__)
 
 MAX_HOPS = 8
 MAX_MENTIONS = 5
-#: `office.say` calls a single turn may make (D-2).
-MAX_SAYS = 3
 MAX_OFFICE_TEXT = 8000
 TICK_S = 3.0
 SUMMARY_CHARS = 2000
-#: A parked mention waits this long for its teammate (D-29), then the owner is told.
-WAIT_S = 30 * 60
 #: Office lines an errand's prompt carries (D-29).
 OFFICE_IN_ERRAND = 8
 #: Office lines a mention's prompt carries.
@@ -1059,12 +1056,10 @@ class AgencyTeams:
         return message
 
     def count_say(self, session_id: str) -> bool:
-        """One more `office.say` in this turn, if it is still within the cap (B4)."""
+        """One more `office.say` in this turn. No cap (replan, 22-oct): the budget is
+        the limit; the count tells the turn's end that it already spoke."""
         with self._lock:
-            used = self._says.get(session_id, 0)
-            if used >= MAX_SAYS:
-                return False
-            self._says[session_id] = used + 1
+            self._says[session_id] = self._says.get(session_id, 0) + 1
             return True
 
     def turn_woken(self, session_id: str) -> set[str]:
@@ -1353,7 +1348,7 @@ class AgencyTeams:
         self._changed(errand["team_id"], "errand")
 
     def _expire_waits(self) -> None:
-        now = self._clock.now()
+        """A wait whose team or teammates are gone ends, and the owner is told."""
         with self._lock:
             waits = list(self._waits.items())
         for session_id, waiting in waits:
@@ -1364,19 +1359,16 @@ class AgencyTeams:
                 or self._repo.post(waiting["team_id"], waiting["agent_id"]) is None
                 or self._repo.post(waiting["team_id"], waiting["for_agent_id"]) is None
             )
-            if not gone and now - waiting["since"] < WAIT_S:
+            if not gone:
                 continue
             with self._lock:
                 self._waits.pop(session_id, None)
             self._repo.drop_wait(session_id)
-            self._block_waiting_errand(session_id, "wait_cancelled" if gone else "wait_expired")
+            self._block_waiting_errand(session_id, "wait_cancelled")
             if team is not None:
                 who = self._author(waiting["agent_id"])
                 self._stopped(
-                    team,
-                    waiting["chain_id"],
-                    "wait_cancelled" if gone else "wait_expired",
-                    f"{who} → {waiting['for_name']}",
+                    team, waiting["chain_id"], "wait_cancelled", f"{who} → {waiting['for_name']}"
                 )
 
     # -- the team as its agents see it (D-29) -------------------------------------------------
