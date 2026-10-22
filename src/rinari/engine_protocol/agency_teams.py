@@ -285,6 +285,16 @@ class AgencyTeams:
         for waiting in self._repo.waits():
             for_name = self._author(waiting["for_agent_id"])
             self._waits[waiting["session_id"]] = {**waiting, "for_name": for_name}
+        # The turns each post had queued: a restart used to lose them (22-oct).
+        for session_id, items in self._repo.queues().items():
+            if self._repo.post_for_session(session_id) is not None and items:
+                self._mentions[session_id] = list(items)
+        queued_reviews = {
+            item.get("errand_id")
+            for items in self._mentions.values()
+            for item in items
+            if item.get("errand_id")
+        }
         for errand in self._repo.errands(statuses=("delivered",)):
             requester = errand.get("from_agent_id")
             if not requester or (errand.get("result") or {}).get("notified"):
@@ -293,6 +303,8 @@ class AgencyTeams:
             if post is not None:
                 if not (errand.get("result") or {}).get("review_queued"):
                     continue  # delivered before reviews were queued: never a late burst
+                if errand["id"] in queued_reviews:
+                    continue  # its review came back with the kept queue
                 # Its post reviews it, as if just delivered (#10).
                 message = next(
                     (
@@ -520,17 +532,6 @@ class AgencyTeams:
             for session_id in [s for s, w in self._waits.items() if w["team_id"] in teams]:
                 self._waits.pop(session_id, None)
                 self._repo.drop_wait(session_id)
-            for session_id in list(self._mentions):
-                # A delivery to review is kept: it is not new work, and it waits.
-                queue = [
-                    m
-                    for m in self._mentions[session_id]
-                    if m["team_id"] not in teams or m.get("errand_id")
-                ]
-                if queue:
-                    self._mentions[session_id] = queue
-                else:
-                    self._mentions.pop(session_id, None)
             for session_id in list(self._direct):
                 if session_id in directs:
                     self._direct.pop(session_id, None)
@@ -792,6 +793,7 @@ class AgencyTeams:
             return {"team": self.teams.view(team), "paused_rules": 0}
         archived = self._guard(lambda: self.teams.archive(team["id"]))
         self._halt_teams({team["id"]})
+        self._drop_queues(team["id"])
         # Archived wins over a stop: unarchiving resumes it ready to work.
         paused = self._pause_team_rules(team["id"], PAUSED_BY_TEAM_ARCHIVE)
         for task in self._team_rules(team["id"]):
@@ -851,6 +853,7 @@ class AgencyTeams:
 
         forget_place(self._services, "team", team["id"])
         self._repo.delete(team["id"])
+        self._drop_queues(team["id"])
         self._set_team_stopped(team["id"], False)
         self._changed(team["id"], "deleted")
         return {
@@ -1029,6 +1032,7 @@ class AgencyTeams:
                 outcome.update(self._wake(team, {**message, "mentions": rest}, woken))
             elif released:
                 self.tick()
+        self._persist_queues()
         if report is not None:
             report["woken"] = [self._author(a) for a, why in outcome.items() if why == _WOKEN]
             report["not_woken"] = [
@@ -1263,6 +1267,26 @@ class AgencyTeams:
                     taken.add(waiting["agent_id"])
                 released = True
         return released
+
+    def _persist_queues(self) -> None:
+        """Keep the posts' queues in the db, so a restart does not lose them."""
+        with self._lock:
+            snapshot = {sid: list(items) for sid, items in self._mentions.items() if items}
+        try:
+            self._repo.save_queues(snapshot, self._clock.now())
+        except Exception:  # never stop the board because the queue could not be kept
+            logger.exception("agency board: the queues could not be kept")
+
+    def _drop_queues(self, team_id: str) -> None:
+        """What an archived or deleted team had queued goes with it."""
+        with self._lock:
+            for session_id in list(self._mentions):
+                kept = [m for m in self._mentions[session_id] if m.get("team_id") != team_id]
+                if kept:
+                    self._mentions[session_id] = kept
+                else:
+                    self._mentions.pop(session_id, None)
+        self._persist_queues()
 
     def _waiting_errand(self, session_id: str) -> str | None:
         """The errand a post left in progress to wait for a teammate, if any."""
@@ -1623,6 +1647,7 @@ class AgencyTeams:
                 )
                 if errand is not None:
                     self._start_errand(team, post, errand)
+        self._persist_queues()
 
     # -- what a woken agent reads -------------------------------------------------------------
 

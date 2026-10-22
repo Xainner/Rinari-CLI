@@ -418,6 +418,24 @@ class TeamRepository:
         )
         return self.errand(errand_id) or {}
 
+    # -- the posts' queues (replan 22-oct) ------------------------------------------
+
+    def queues(self) -> dict[str, list[dict[str, Any]]]:
+        rows = self._db.query("SELECT session_id, items_json FROM agency_queue")
+        return {row["session_id"]: json.loads(row["items_json"]) for row in rows}
+
+    def save_queues(self, queues: dict[str, list[dict[str, Any]]], now: float) -> None:
+        """The queues as they are now: an empty queue is not kept."""
+        with self._db.transaction():
+            self._db.execute("DELETE FROM agency_queue")
+            for session_id, items in queues.items():
+                if items:
+                    self._db.execute(
+                        "INSERT INTO agency_queue (session_id, items_json, updated_at) "
+                        "VALUES (?, ?, ?)",
+                        (session_id, json.dumps(items), now),
+                    )
+
     # -- waits (office.wait) ---------------------------------------------------
 
     def waits(self) -> list[dict[str, Any]]:

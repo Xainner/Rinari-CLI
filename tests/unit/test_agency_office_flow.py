@@ -451,3 +451,35 @@ def test_an_owner_message_naming_nobody_goes_to_the_chief(server, turns) -> None
     before = len(turns)
     _ok(_call(server, "agency.office.post", {"team_id": team["id"], "text": "@Image hola"}))
     assert [t["session_id"] for t in turns[before:]] == [_post(team, image)]
+
+
+def test_queued_turns_survive_a_restart_and_a_stop(
+    server, turns, services, tmp_path, monkeypatch
+) -> None:
+    """Queued mentions lived only in memory: a restart or a stop lost them (22-oct)."""
+    from rinari.engine_protocol.server import EngineServer
+
+    team, writer, image, _video = _studio(server)
+    pi = _post(team, image)
+    _ok(
+        _call(server, "agency.office.post", {"team_id": team["id"], "text": "@Writer @Image hagan"})
+    )
+    # Image is busy with another turn: Writer's mention of it waits in the queue.
+    server._teams.post_message(
+        team, "@Image ¿y la imagen?", author_agent_id=writer["id"], chain_id=None, hop=1
+    )
+    assert server._teams._mentions.get(pi)
+    queued = list(server._teams._mentions[pi])
+    # A stop keeps the queue; resuming carries on with it.
+    monkeypatch.setattr(server._turns, "cancel_turn", lambda sid, **kw: None)
+    _ok(_call(server, "agency.team.stop", {"team_id": team["id"]}))
+    assert server._teams._mentions.get(pi) == queued
+    # A new Engine on the same home finds it again.
+    again = EngineServer(services, user_home=tmp_path / "home2")
+    try:
+        again._teams._recover()
+        assert [m["message"]["text"] for m in again._teams._mentions.get(pi, [])] == [
+            m["message"]["text"] for m in queued
+        ]
+    finally:
+        again.close()
