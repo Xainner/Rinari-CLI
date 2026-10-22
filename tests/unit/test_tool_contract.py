@@ -276,9 +276,12 @@ def test_builtin_catalog_covers_session_tools_without_executing_them():
     from rinari.tools.catalog import builtin_catalog
 
     registry = builtin_catalog()
-    assert len(registry.names()) == 144
+    assert len(registry.names()) == 147
     assert {
         "artifact.export",
+        "schedule.list",
+        "schedule.update",
+        "schedule.cancel",
         "fs.read_image",
         "fs.read_pdf_pages",
         "ssh.inspect",

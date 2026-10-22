@@ -304,6 +304,13 @@ def wait_for(input: dict, ctx: ToolContext) -> ToolResult:
         data["process"] = process
     if state == "timed_out":
         data["timeout"] = timeout
+        # A wait that only let time pass is a timer in disguise (22-oct: a file that
+        # never exists, to «check every minute»).
+        data["note"] = (
+            "Nothing changed. If you are waiting for time to pass or want to repeat a "
+            "check, end your turn and schedule it with schedule.propose "
+            "(in_this_conversation) instead of waiting again."
+        )
     return _ok(data)
 
 

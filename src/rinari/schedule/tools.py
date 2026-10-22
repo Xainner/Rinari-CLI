@@ -300,7 +300,9 @@ def schedule_tools(host: ScheduleToolHost):
             },
             capabilities=("state.write",),
             side_effects="local_reversible",
-            always_loaded=False,
+            # Always in the list: a model that had to search for it answered «I can't
+            # check every minute» and held its turn with a wait instead (22-oct).
+            always_loaded=True,
             classify=lambda _i: ClassifiedAction("state.write"),
             handler=propose,
         ),

@@ -592,3 +592,11 @@ def test_a_task_says_how_much_it_notifies_and_a_model_can_quiet_it(services) -> 
     created = tools["schedule.propose"].handler(_task(name="Callado", notify="none"), owner)
     assert created.ok
     assert next(t for t in services.schedules.list() if t["name"] == "Callado")["notify"] == "none"
+
+
+def test_scheduling_is_always_in_the_tool_list() -> None:
+    """Rinari answered «I can't check every minute» before searching for it (22-oct)."""
+    tools = {tool.name: tool for tool in schedule_tools(ScheduleToolHost(service=None))}
+    assert tools["schedule.propose"].always_loaded is True
+    # Changing or stopping one is found from the proposal's description.
+    assert not tools["schedule.update"].always_loaded

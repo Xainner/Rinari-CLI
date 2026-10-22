@@ -107,6 +107,8 @@ def test_a_port_that_never_opens_times_out_with_the_last_error(ctx):
     assert result.data["state"] == "timed_out"
     assert result.data["last"]["error"]
     assert result.data["timeout"]["effective_s"] == 0.5
+    # A wait that only let time pass points to the scheduler (22-oct).
+    assert "schedule.propose" in result.data["note"]
 
 
 def test_a_url_is_ready_when_it_answers(ctx):
