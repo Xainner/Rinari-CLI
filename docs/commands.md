@@ -1048,8 +1048,8 @@ delete/runs/run_now/grant`, events `schedule.changed`,
 `schedule.run.started`, `schedule.run.needs_you` and
 `schedule.run.completed`. A task is a reminder or a prompt for an agent turn
 (project or chat, mode, model, skills) on a local-time schedule (`once`,
-`interval` of 5 min or more, `daily`, `weekly`). The serving Engine checks
-every 20 s; a run due while it was down still runs within 12 h and is
+`interval` in minutes or seconds, from 5 s, `daily`, `weekly`). The serving
+Engine checks every 5 s; a run due while it was down still runs within 12 h and is
 recorded `skipped` after that, as is one whose previous run is still active.
 An agent run is a turn in its own session ("⏰ name · date") with
 `origin.kind = "schedule"`. The task's `grants` ({capability, target?}) are

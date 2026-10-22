@@ -59,8 +59,10 @@ def test_interval_and_once() -> None:
     [
         None,
         {"kind": "hourly"},
-        {"kind": "interval", "minutes": 1},
+        {"kind": "interval", "seconds": 4},
         {"kind": "interval", "minutes": True},
+        {"kind": "interval", "minutes": 1, "seconds": 30},
+        {"kind": "interval"},
         {"kind": "daily", "time": "24:00"},
         {"kind": "daily", "time": "8:30"},
         {"kind": "weekly", "days": [], "time": "08:00"},
@@ -122,7 +124,7 @@ def test_the_service_validates_and_schedules(services) -> None:
         {"project_id": "prj_missing"},
         {"model": "no-such-model"},
         {"grants": [{"target": "x"}]},
-        {"schedule": {"kind": "interval", "minutes": 2}},
+        {"schedule": {"kind": "interval", "seconds": 2}},
     ):
         with pytest.raises(ScheduledTaskError):
             schedules.create(_task(**bad))
@@ -490,3 +492,19 @@ def test_command_tasks_are_validated(server) -> None:
     assert bad["ok"] is False
     bad = _call(server, "schedule.create", {"task": _command_task("echo", timeout_s=99999)})
     assert bad["ok"] is False
+
+
+def test_an_interval_may_be_seconds_with_no_minimum_but_the_scheduler_tick() -> None:
+    """The owner asked a team for 30 s cycles and the scheduler refused anything
+    under 5 minutes, a floor nobody had decided (22-oct)."""
+    every_30s = parse_schedule({"kind": "interval", "seconds": 30})
+    assert next_run(every_30s, 1000.0) == 1030.0
+    assert every_30s.to_dict() == {"kind": "interval", "seconds": 30}
+    every_minute = parse_schedule({"kind": "interval", "minutes": 1})
+    assert next_run(every_minute, 1000.0) == 1060.0
+    # Whole minutes keep the form every client already reads.
+    assert parse_schedule({"kind": "interval", "seconds": 120}).to_dict() == {
+        "kind": "interval",
+        "minutes": 2,
+    }
+

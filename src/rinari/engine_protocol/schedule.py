@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING, Any
 from rinari.engine_protocol.errors import INVALID_PARAMS, TURN_RUNNING, EngineProtocolError
 from rinari.engine_protocol.messages import event
 from rinari.policy.approvals import ApprovalGrant, GrantScope
-from rinari.schedule.rules import CATCH_UP_WINDOW_S
+from rinari.schedule.rules import CATCH_UP_WINDOW_S, SCHEDULER_TICK_S
 from rinari.schedule.service import MAX_PER_DAY, RESULT_PLACEHOLDER, ScheduledTaskError
 from rinari.shared.errors import NotFoundError
 
@@ -44,7 +44,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-TICK_S = 20.0
+TICK_S = float(SCHEDULER_TICK_S)
 SUMMARY_CHARS = 600
 #: Failed runs on the same change of a watched folder before the change is
 #: taken anyway and the rule is told as blocked (#75).

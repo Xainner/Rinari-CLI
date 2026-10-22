@@ -5,6 +5,7 @@ on this machine, so its clock and daylight-saving rules are the right ones):
 
     {"kind": "once", "at": "2026-09-25T09:00"}
     {"kind": "interval", "minutes": 30}
+    {"kind": "interval", "seconds": 30}
     {"kind": "daily", "time": "08:30"}
     {"kind": "weekly", "days": [0, 2, 4], "time": "08:30"}   # 0 = Monday
     {"kind": "cron", "expr": "*/15 9-18 * * 1-5"}            # minute hour day month weekday
@@ -26,8 +27,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-MIN_INTERVAL_MINUTES = 5
-MAX_INTERVAL_MINUTES = 7 * 24 * 60
+#: How often the scheduler looks for what is due. It is the only floor of an
+#: interval: a shorter one could not be kept. There is no other minimum (the
+#: owner, 22-oct): how often an agent works is governed by budgets, and a run
+#: never overlaps the previous one of its task (it is skipped).
+SCHEDULER_TICK_S = 5
+MIN_INTERVAL_SECONDS = SCHEDULER_TICK_S
+MAX_INTERVAL_SECONDS = 7 * 24 * 3600
 # A run that was due while the app was closed still runs when it comes back,
 # but not a stale one: after this it is recorded as skipped.
 CATCH_UP_WINDOW_S = 12 * 3600
@@ -49,7 +55,7 @@ class ScheduleError(ValueError):
 class Schedule:
     kind: str
     at: datetime | None = None  # once: naive local datetime
-    minutes: int = 0  # interval
+    seconds: int = 0  # interval
     hour: int = 0
     minute: int = 0
     days: tuple[int, ...] = ()  # weekly, 0 = Monday
@@ -60,7 +66,10 @@ class Schedule:
             assert self.at is not None
             return {"kind": "once", "at": self.at.strftime("%Y-%m-%dT%H:%M")}
         if self.kind == "interval":
-            return {"kind": "interval", "minutes": self.minutes}
+            # Whole minutes keep the form every client already reads.
+            if self.seconds % 60 == 0:
+                return {"kind": "interval", "minutes": self.seconds // 60}
+            return {"kind": "interval", "seconds": self.seconds}
         if self.kind == "cron":
             return {"kind": "cron", "expr": self.expr}
         time = f"{self.hour:02d}:{self.minute:02d}"
@@ -122,16 +131,19 @@ def parse_schedule(raw: Any) -> Schedule:
             raise ScheduleError("'at' is local time: leave the timezone out.")
         return Schedule("once", at=moment.replace(second=0, microsecond=0))
     if kind == "interval":
-        minutes = raw.get("minutes")
-        if (
-            not isinstance(minutes, int)
-            or isinstance(minutes, bool)
-            or not MIN_INTERVAL_MINUTES <= minutes <= MAX_INTERVAL_MINUTES
-        ):
+        given = [unit for unit in ("minutes", "seconds") if raw.get(unit) is not None]
+        if len(given) != 1:
+            raise ScheduleError("An interval takes 'minutes' or 'seconds'.")
+        value = raw[given[0]]
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ScheduleError(f"'{given[0]}' must be a whole number.")
+        seconds = value * 60 if given[0] == "minutes" else value
+        if not MIN_INTERVAL_SECONDS <= seconds <= MAX_INTERVAL_SECONDS:
             raise ScheduleError(
-                f"The interval must be {MIN_INTERVAL_MINUTES}..{MAX_INTERVAL_MINUTES} minutes."
+                f"The interval must be {MIN_INTERVAL_SECONDS} seconds to "
+                f"{MAX_INTERVAL_SECONDS // 86400} days."
             )
-        return Schedule("interval", minutes=minutes)
+        return Schedule("interval", seconds=seconds)
     time = raw.get("time")
     match = _TIME.match(time) if isinstance(time, str) else None
     if match is None:
@@ -168,7 +180,7 @@ def next_run(schedule: Schedule, after: float) -> float | None:
         due = _epoch(schedule.at)
         return due if due > after else None
     if schedule.kind == "interval":
-        return after + schedule.minutes * 60
+        return after + schedule.seconds
     if schedule.kind == "cron":
         return _cron_next(schedule.expr, after)
     base = _local(after)
@@ -190,7 +202,9 @@ def describe(schedule: Schedule) -> str:
         assert schedule.at is not None
         return f"once at {schedule.at.strftime('%Y-%m-%d %H:%M')}"
     if schedule.kind == "interval":
-        return f"every {schedule.minutes} min"
+        if schedule.seconds % 60:
+            return f"every {schedule.seconds} s"
+        return f"every {schedule.seconds // 60} min"
     if schedule.kind == "cron":
         return f"cron {schedule.expr}"
     time = f"{schedule.hour:02d}:{schedule.minute:02d}"

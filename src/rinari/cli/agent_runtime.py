@@ -464,6 +464,14 @@ def _agency_place(services: ServiceContainer, record: SessionRecord, agent: dict
         "with file.present, besides saying it in the office. A connector's link or URI is not "
         "something the owner can open in Rinari: download it first and present the file."
     )
+    # A team member told to check something every 30 s said it had no scheduler
+    # of its own (22-oct): schedule.propose is loaded on demand, so it is named.
+    lines.append(
+        "What you must do on your own every so often (every N seconds, minutes or hours) is "
+        "one of your rules: create it with schedule.propose (in_this_conversation, so it runs "
+        "here with this post's history) and say it is active. A run never overlaps the "
+        "previous one; between runs, end your turn instead of waiting."
+    )
     return lines
 
 

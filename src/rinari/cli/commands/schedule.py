@@ -83,7 +83,7 @@ def schedule_add(
     prompt: str = typer.Option(..., "--prompt", help="What Rinari does (or reminds)."),
     reminder: bool = typer.Option(False, "--reminder", help="Only notify, no agent turn."),
     at: str | None = typer.Option(None, "--at", help="Once, local time YYYY-MM-DDTHH:MM."),
-    every: int | None = typer.Option(None, "--every", help="Every N minutes (5 or more)."),
+    every: int | None = typer.Option(None, "--every", help="Every N minutes."),
     daily: str | None = typer.Option(None, "--daily", help="Every day at HH:MM."),
     weekly: str | None = typer.Option(None, "--weekly", help="DAYS@HH:MM, e.g. 0,2,4@08:30."),
     project: str | None = typer.Option(None, "--project", help="Project id to run in."),

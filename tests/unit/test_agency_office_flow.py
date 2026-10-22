@@ -298,3 +298,15 @@ def test_an_errand_names_the_teammates_and_their_jobs_to_pass_their_part(server,
     assert "- Investigador: Buscar noticias del oro" in prompt
     assert "- Operator" not in prompt
     assert "office.wait" in prompt
+
+
+def test_a_post_knows_its_periodic_work_is_a_rule(server, turns) -> None:
+    """Told to check something every 30 s, a team member said it had no scheduler of
+    its own (22-oct): the post's prompt names schedule.propose."""
+    from rinari.cli.agent_runtime import _agency_place
+
+    team, writer, *_ = _studio(server)
+    services = server._services
+    record = services.sessions.show(_post(team, writer))
+    text = "\n".join(_agency_place(services, record, services.ctx.agency_repo.get(writer["id"])))
+    assert "schedule.propose" in text and "in_this_conversation" in text
