@@ -22,6 +22,8 @@ MODEL_CALL_TIMEOUT = 600.0
 # byte makes a dead provider look like a permanently thinking model.
 MODEL_STREAM_TIMEOUT = httpx.Timeout(connect=15.0, read=30.0, write=30.0, pool=10.0)
 DEFAULT_MODEL_STREAM_READ_TIMEOUT_S = 30.0
+#: A stream sending only heartbeats for this long (at least) has stalled.
+STALLED_FLOOR_S = 120.0
 MIN_MODEL_STREAM_READ_TIMEOUT_S = 1.0
 MAX_MODEL_STREAM_READ_TIMEOUT_S = 600.0
 
@@ -403,7 +405,11 @@ def iter_model_lines(response, request, started_at, stats: dict | None = None):
     channel = queue.Queue(maxsize=64)
     stopped = threading.Event()
     received = stats if stats is not None else {}
-    received.update({"bytes": 0, "last": started_at, "eof": False})
+    received.update({"bytes": 0, "last": started_at, "payload": started_at, "eof": False})
+    # Heartbeats (blank lines, SSE «:» comments) keep a slow provider alive, but a
+    # stream that only sends them for this long has stalled: a turn hung on
+    # «Respondiendo…» with four tokens out (audit 21-oct).
+    stalled_after = max(limits["idle"] * 4, STALLED_FLOOR_S)
 
     def put(value):
         while not stopped.is_set():
@@ -425,7 +431,10 @@ def iter_model_lines(response, request, started_at, stats: dict | None = None):
                 buffer += decoder.decode(chunk)
                 while "\n" in buffer:
                     line, buffer = buffer.split("\n", 1)
-                    put(("line", line.rstrip("\r")))
+                    line = line.rstrip("\r")
+                    if line.strip() and not line.startswith(":"):
+                        received["payload"] = time.monotonic()
+                    put(("line", line))
                 if len(buffer) > 16 * 1024 * 1024:
                     raise NetworkError("Provider SSE line exceeds transport buffer")
             buffer += decoder.decode(b"", final=True)
@@ -445,6 +454,8 @@ def iter_model_lines(response, request, started_at, stats: dict | None = None):
             limit = limits["idle"] if received["bytes"] else limits["first_byte"]
             if now - started_at >= limits["total"]:
                 phase, limit = "total", limits["total"]
+            elif received["bytes"] and now - received["payload"] >= stalled_after:
+                phase, limit = "stalled", stalled_after
             elif not channel.empty() or now - received["last"] < limit:
                 phase = None
             if phase:
