@@ -506,7 +506,7 @@ def test_an_owner_must_be_an_existing_agent(server) -> None:
         assert refused["ok"] is False
 
 
-def test_an_agent_only_proposes_its_rules_for_the_owner_to_confirm(server) -> None:
+def test_an_agent_creates_its_rules_as_its_permissions_allow(server) -> None:
     from types import SimpleNamespace
 
     from rinari.schedule.tools import ScheduleToolHost, schedule_tools
@@ -519,11 +519,11 @@ def test_an_agent_only_proposes_its_rules_for_the_owner_to_confirm(server) -> No
     [tool] = schedule_tools(ScheduleToolHost(service=services.schedules, agent_id=agent["id"]))
     ctx = SimpleNamespace(session_id=agent["session_id"], origin_kind="user")
     result = tool.handler(_rule(), ctx)
-    assert result.ok and result.data["status"] == "proposed"
-    assert result.data["proposal"]["agent_id"] == agent["id"]
-    assert result.data["proposal"]["kind"] == "tool"
-    # Nothing is stored until the owner confirms the card.
-    assert services.schedules.list() == []
+    # The owner asked the agent (owner, 2026-10-21): with its permissions it
+    # is created, not left as a card to confirm.
+    assert result.ok and result.data["status"] == "created"
+    [rule] = services.schedules.list()
+    assert rule["agent_id"] == agent["id"] and rule["kind"] == "tool"
     # Outside an agent's conversation, a connector call without the model is refused.
     [plain] = schedule_tools(ScheduleToolHost(service=services.schedules))
     refused = plain.handler(_rule(), SimpleNamespace(session_id="s", origin_kind="user"))

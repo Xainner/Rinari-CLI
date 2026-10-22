@@ -348,15 +348,28 @@ def test_the_owner_asking_creates_the_task_without_grants(services) -> None:
     assert bad.ok is False and "HH:MM" in bad.error.message
 
 
-@pytest.mark.parametrize("origin", ["peer", "schedule"])
-def test_a_request_from_elsewhere_is_only_proposed(services, origin) -> None:
+def test_a_request_from_another_pane_goes_by_permissions(services) -> None:
+    """Scheduling is a `state.write` like any other: the permissions of the
+    session decide (read-only refuses it), not where the request came from."""
     from types import SimpleNamespace
 
     from rinari.schedule.tools import ScheduleToolHost, schedule_tools
 
     [tool] = schedule_tools(ScheduleToolHost(service=services.schedules, project_id=None))
-    result = tool.handler(_task(), SimpleNamespace(session_id="ses_2", origin_kind=origin))
-    assert result.ok is True and result.data["status"] == "proposed"
+    result = tool.handler(_task(), SimpleNamespace(session_id="ses_2", origin_kind="peer"))
+    assert result.ok is True and result.data["status"] == "created"
+    assert len(services.schedules.list()) == 1
+    assert tool.capabilities == ("state.write",)
+
+
+def test_a_scheduled_run_does_not_schedule_more(services) -> None:
+    from types import SimpleNamespace
+
+    from rinari.schedule.tools import ScheduleToolHost, schedule_tools
+
+    [tool] = schedule_tools(ScheduleToolHost(service=services.schedules, project_id=None))
+    result = tool.handler(_task(), SimpleNamespace(session_id="ses_2", origin_kind="schedule"))
+    assert result.ok is False and "scheduled run" in result.error.message
     assert services.schedules.list() == []
 
 

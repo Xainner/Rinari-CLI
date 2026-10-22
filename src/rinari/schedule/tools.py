@@ -53,14 +53,22 @@ def schedule_tools(host: ScheduleToolHost):
         # Grants are the owner's to give, in the confirmation card.
         args.pop("grants", None)
         args.pop("enabled", None)
-        # The owner asking in their own turn is the confirmation. A turn that
-        # came from another pane, another task or a channel only proposes.
-        owner_asked = (getattr(ctx, "origin_kind", "user") or "user") == "user"
+        # Scheduling goes by permissions like any other action: the tool is a
+        # `state.write`, which read-only refuses and the writing modes allow,
+        # and each run asks for what it needs (no grants). The one exception
+        # is structural: a run of a scheduled task does not schedule more,
+        # or a task every few minutes would multiply.
+        if (getattr(ctx, "origin_kind", "user") or "user") == "schedule":
+            return ToolResult(
+                ok=False,
+                error=ToolErrorInfo(
+                    ToolErrorCode.INVALID_ARGUMENT,
+                    "A scheduled run cannot schedule more tasks.",
+                ),
+                origin="schedule",
+            )
         if host.agent_id:
-            # Rinari Agency: a permanent rule may move data out, so it is
-            # always a card the owner confirms (never created by the model).
             args["agent_id"] = host.agent_id
-            owner_asked = False
         elif args.get("kind") == "tool":
             return ToolResult(
                 ok=False,
@@ -72,7 +80,7 @@ def schedule_tools(host: ScheduleToolHost):
             )
         try:
             proposed = host.service.propose(
-                args, session_id=getattr(ctx, "session_id", "") or "", create=owner_asked
+                args, session_id=getattr(ctx, "session_id", "") or "", create=True
             )
         except ScheduledTaskError as exc:
             return ToolResult(
@@ -111,10 +119,9 @@ def schedule_tools(host: ScheduleToolHost):
             name="schedule.propose",
             description=(
                 "Schedule a task when the owner asks for something to happen later or "
-                "repeatedly (a reminder, or a prompt Rinari runs at that time). When the owner "
-                "asked in this conversation it is created at once; a request that came from "
-                "another pane or task is only proposed for the owner to confirm. It never "
-                "carries permissions: a run asks for what it needs. "
+                "repeatedly (a reminder, or a prompt Rinari runs at that time). It is created "
+                "at once, as permissions allow. It never carries permissions: a run asks for "
+                "what it needs. "
                 "schedule is local time: {kind: once, at: 'YYYY-MM-DDTHH:MM'} | "
                 "{kind: once, after: {minutes, hours, days}} (counted from now, no need to "
                 "know the time) | {kind: interval, minutes} (5 or more) | "
@@ -123,8 +130,8 @@ def schedule_tools(host: ScheduleToolHost):
                 "'agent' each run starts in a fresh session, so the prompt must stand alone, "
                 "unless in_this_conversation is true: then it runs in this conversation as a "
                 "new message, with its history. In a Rinari "
-                "Agency agent's conversation this proposes one of its permanent rules (always "
-                "for the owner to confirm), and kind 'tool' calls one of its connectors with "
+                "Agency agent's conversation this creates one of its permanent rules, and "
+                "kind 'tool' calls one of its connectors with "
                 "fixed arguments and no model: tool = {server, tool, arguments, on_result: "
                 "nothing | notify | agent | deliver, deliver: {server, tool, arguments with "
                 "'{result}'}, max_per_day, only_if_contains: exact text the result must "
