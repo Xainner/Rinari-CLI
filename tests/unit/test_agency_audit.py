@@ -859,3 +859,30 @@ def test_a_post_reads_what_a_teammate_made_and_nothing_outside_its_team(server) 
     outsider = replace(ctx, session_id=other["session_id"], shared_artifact_sessions=())
     _, denied = _path_for(made.uri(), outsider)
     assert denied is not None and denied.error.code.value == "PERMISSION_DENIED"
+
+
+def test_the_message_that_wakes_an_agent_arrives_whole(server, turns) -> None:
+    """Video got Writer's story cut at a line's length and had to ask for the rest."""
+    ana, beto = _agent(server, "Ana"), _agent(server, "Beto")
+    team = _team(server, "Canal", [ana, beto])
+    story = "@Beto " + " ".join(f"latido{n}" for n in range(200))
+    _ok(_call(server, "agency.office.post", {"team_id": team["id"], "text": story}))
+    assert "latido199" in turns[-1]["message"]
+
+
+def test_a_connectors_artifact_uri_says_where_it_comes_from(server) -> None:
+    """Visual Lab returns artifact://sess_…; Rinari's tools said «only the current session»."""
+    from dataclasses import replace
+
+    from rinari.tools.definition import ToolContext
+    from rinari.tools.native.artifact import FOREIGN_ARTIFACT, _path_for
+
+    store = server._services.artifacts
+    fields = {f: None for f in ToolContext.__dataclass_fields__}
+    ctx = replace(
+        ToolContext(**{**fields, "session_id": "ses_mine", "artifact_root": store._root()}),
+        artifact_store=store,
+        shared_artifact_sessions=(),
+    )
+    _, error = _path_for("artifact://sess_426509106af5/images/f885734d066a.png", ctx)
+    assert error is not None and error.error.message == FOREIGN_ARTIFACT

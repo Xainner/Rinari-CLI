@@ -1331,7 +1331,7 @@ class AgencyTeams:
         agent = self._services.ctx.agency_repo.get(agent_id)
         return agent["name"] if agent else agent_id
 
-    def _line(self, item: dict[str, Any]) -> str:
+    def _line(self, item: dict[str, Any], limit: int = LINE_CHARS) -> str:
         """One office message as one line of data, its author set by the Engine (I2)."""
         author = self._author(item.get("agent_id"))
         notice = item.get("notice") or {}
@@ -1348,7 +1348,7 @@ class AgencyTeams:
             author = "Rinari"
             body = f"{one_line(notice.get('agent', ''), 80)} left the team"
         else:
-            body = one_line(item["text"])
+            body = one_line(item["text"], limit)
         return f"⟦{author}⟧ {body}"
 
     def _office(self, team: dict, limit: int) -> tuple[str, bool]:
@@ -1506,7 +1506,10 @@ class AgencyTeams:
         )
         prompt = (
             f"[Office of the team «{team['name']}»] {why}\n"
-            f"{from_agent}{together}The message, as one line: {self._line(message)}\n\n"
+            # The message that woke it, whole: a handoff cut at a line's length made the
+            # next agent ask for the rest (audit 21-oct).
+            f"{from_agent}{together}The message, as one line: "
+            f"{self._line(message, MAX_OFFICE_TEXT)}\n\n"
             f"{self._office_block(lines)}"
             "Your final answer is posted in the office, unless you already posted there with "
             "office.say in this turn (then it stays in your post: say everything with "

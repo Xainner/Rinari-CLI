@@ -57,6 +57,10 @@ def image_read(arguments, ctx):
             source = _own_copy(ctx, source)
             session_id, _, _ = parse_uri(source)
             if session_id != ctx.session_id:
+                from rinari.tools.native.artifact import FOREIGN_ARTIFACT, foreign_artifact
+
+                if foreign_artifact(ctx, session_id):
+                    return _fail(ToolErrorCode.NOT_FOUND, FOREIGN_ARTIFACT)
                 return _fail(
                     ToolErrorCode.PERMISSION_DENIED,
                     "Image artifacts are readable only from the current session",
@@ -150,6 +154,10 @@ def pdf_pages_read(arguments, ctx):
             source = _own_copy(ctx, source)
             session_id, _, _ = parse_uri(source)
             if session_id != ctx.session_id:
+                from rinari.tools.native.artifact import FOREIGN_ARTIFACT, foreign_artifact
+
+                if foreign_artifact(ctx, session_id):
+                    return _fail(ToolErrorCode.NOT_FOUND, FOREIGN_ARTIFACT)
                 return _fail(
                     ToolErrorCode.PERMISSION_DENIED,
                     "PDF artifacts are readable only from the current session",

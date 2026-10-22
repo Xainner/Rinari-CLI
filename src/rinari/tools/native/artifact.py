@@ -24,6 +24,26 @@ from rinari.tools.definition import (
 MAX_ARTIFACT_SLICE = 32 * 1024
 
 
+#: An artifact:// a connector returned (its own store uses the same scheme).
+FOREIGN_ARTIFACT = (
+    "This artifact:// URI is not from Rinari's store: it belongs to the connector that "
+    "returned it. Use that connector's tools to inspect or download it; to show it to the "
+    "owner, download the file and present it."
+)
+
+
+def foreign_artifact(ctx, session_id: str) -> bool:
+    """Whether an artifact:// names a session Rinari does not have (a connector's URI)."""
+    store = getattr(ctx, "artifact_store", None)
+    sessions = getattr(getattr(store, "_ctx", None), "session_repo", None)
+    if sessions is None:
+        return False
+    try:
+        return sessions.get(session_id) is None
+    except Exception:
+        return False
+
+
 def _error(code: ToolErrorCode, message: str) -> ToolResult:
     return ToolResult(ok=False, error=ToolErrorInfo(code=code, message=message))
 
@@ -40,6 +60,8 @@ def _path_for(uri: object, ctx: ToolContext) -> tuple[Path | None, ToolResult | 
     session_id, namespace, name = parts
     shared = getattr(ctx, "shared_artifact_sessions", ()) or ()
     if session_id != ctx.session_id and session_id not in shared:
+        if foreign_artifact(ctx, session_id):
+            return None, _error(ToolErrorCode.NOT_FOUND, FOREIGN_ARTIFACT)
         return None, _error(
             ToolErrorCode.PERMISSION_DENIED,
             "artifacts are readable only from the current session or a teammate's post",

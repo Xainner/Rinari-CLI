@@ -76,6 +76,11 @@ def _artifact_path(ctx: ToolContext, uri: str) -> tuple[Path | None, ToolResult 
     owner = session if session in shared else ctx.session_id
     base = (Path(ctx.artifact_root) / owner).resolve()
     target = (base / relative).resolve() if relative else base
+    if session != owner and session != ctx.session_id:
+        from rinari.tools.native.artifact import FOREIGN_ARTIFACT, foreign_artifact
+
+        if foreign_artifact(ctx, session):
+            return None, _fail(ToolErrorCode.NOT_FOUND, FOREIGN_ARTIFACT)
     if session != owner or not (target == base or base in target.parents):
         return None, _fail(
             ToolErrorCode.SANDBOX_VIOLATION, "Only this conversation's saved outputs can be read"

@@ -438,6 +438,11 @@ def _agency_place(services: ServiceContainer, record: SessionRecord, agent: dict
         "Use the office, the board and team.members (who is free right now). If what you are "
         "asked depends on a teammate doing something first, call office.wait with their name."
     )
+    lines.append(
+        "When you finish something for the owner (a file, an image, a video), show it to them "
+        "with file.present, besides saying it in the office. A connector's link or URI is not "
+        "something the owner can open in Rinari: download it first and present the file."
+    )
     return lines
 
 
