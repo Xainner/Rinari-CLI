@@ -242,6 +242,10 @@ class AgencyTeams:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._recovered = False
+        from rinari.engine_protocol.agency_work import TeamWork
+
+        # Routines, flows and the team's overview (replan 22-oct, phases 2 to 4).
+        self.work = TeamWork(self)
         teams = self._services.teams
         teams.open_post = self._open_post
         teams.on_changed = self._changed
@@ -2268,6 +2272,8 @@ class AgencyTeams:
             },
             external=delivered["external"],
         )
+        if self.work.on_delivered(delivered):
+            return  # a flow step that approves itself (replan, phase 3)
         if requester_agent is None:
             return  # the owner reviews it
         if errand["hop"] + 1 >= MAX_HOPS:

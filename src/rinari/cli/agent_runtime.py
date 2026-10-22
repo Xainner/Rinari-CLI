@@ -444,10 +444,11 @@ def _agency_place(services: ServiceContainer, record: SessionRecord, agent: dict
         chief = " (chief)" if mate["id"] == team.get("chief_agent_id") else ""
         job = f" — {mate['role']}" if mate.get("role") else ""
         mates.append(f"- {mate['name']}{chief}{job}")
-    if agent["id"] == team.get("chief_agent_id"):
+    chief = agent["id"] == team.get("chief_agent_id")
+    if chief:
         lines.append(
             "You are the team's chief: errands with no one assigned come to you, to do or "
-            "to pass to a teammate."
+            "to pass to a teammate, and so do the owner's messages that name nobody."
         )
     if mates:
         lines += [
@@ -465,13 +466,35 @@ def _agency_place(services: ServiceContainer, record: SessionRecord, agent: dict
         "something the owner can open in Rinari: download it first and present the file."
     )
     # A team member told to check something every 30 s said it had no scheduler
-    # of its own (22-oct): schedule.propose is loaded on demand, so it is named.
+    # of its own (22-oct): what repeats is a routine, named here.
     lines.append(
-        "What you must do on your own every so often (every N seconds, minutes or hours) is "
-        "one of your rules: create it with schedule.propose (in_this_conversation, so it runs "
-        "here with this post's history) and say it is active. A run never overlaps the "
-        "previous one; between runs, end your turn instead of waiting."
+        "What must happen on its own every so often (every N seconds, minutes or hours) is "
+        "a routine: team.routine.create (yours; the chief sets a teammate's too), and "
+        "team.routines lists them. A run never overlaps the previous one; between runs, end "
+        "your turn instead of waiting. Work in steps that hand on to each other is a flow: "
+        "flow.list shows them and flow.start runs one."
     )
+    # A quieter office (replan, phase 4): the owner reads one voice.
+    lines.append(
+        "In the office, only the chief answers the owner, unless the owner names you. "
+        "Never post a message with nothing in it (a «received», «on it», «ok»): post when "
+        "you have a result, a question or something blocking you."
+    )
+    manual = (team.get("manual") or "").strip()
+    if manual:
+        lines += [
+            "",
+            "## The team's manual",
+            "How this team works, written by the owner. It is the procedure to follow:",
+            manual,
+        ]
+        if chief:
+            lines.append(
+                "As chief, keep the team set up as the manual says: what it asks to happen "
+                "every so often exists as routines (team.routines, team.routine.create) and "
+                "what it describes as steps that hand on exists as flows (flow.list, "
+                "flow.save), without duplicating what is already there."
+            )
     return lines
 
 

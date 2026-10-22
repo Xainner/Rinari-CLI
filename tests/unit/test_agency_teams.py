@@ -740,6 +740,11 @@ def test_the_agency_tools_are_always_loaded_where_they_exist(server) -> None:
         "errand.review": True,
         "board.list": True,
         "team.members": True,
+        "team.routines": True,
+        "team.routine.create": True,
+        "flow.list": True,
+        "flow.save": True,
+        "flow.start": True,
     }
     assert {tool.name for tool in direct_tools(host)} == {
         "teams.list",
@@ -907,6 +912,11 @@ def test_the_agency_tools_work_in_a_read_only_post_or_chat(server) -> None:
 
     host = TeamToolHost(server._services, "ses_x")
     for tool in [*team_tools(host), *direct_tools(host)]:
+        if tool.name == "team.routine.create":
+            # A routine runs on its own later: it goes by the post's permissions, as
+            # schedule.propose does (replan, 22-oct).
+            assert tool.classify({}).capability == "state.write"
+            continue
         action = tool.classify({})
         assert action.capability in ("state.read", "state.mutate"), tool.name
         assert set(tool.capabilities) <= {"state.read", "state.mutate"}, tool.name

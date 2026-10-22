@@ -81,11 +81,14 @@ def agency_settings(services: Any) -> dict[str, Any]:
     }
 
 
-def spend_of(services: Any, scope: str, ref: str | None, budget: dict[str, Any]) -> dict:
-    """Today's spend of an agent, a team or the whole Agency, against its cap."""
+def spend_of(
+    services: Any, scope: str, ref: str | None, budget: dict[str, Any], *, days: int = 1
+) -> dict:
+    """Today's spend of an agent, a team or the whole Agency, against its cap (or
+    over the last `days` days, for the team's overview)."""
     from rinari.engine_protocol.usage_report import build_report
 
-    report = build_report(services, scope, ref)
+    report = build_report(services, scope, ref, days=days)
     totals = report["totals"]
     tokens = int(totals.get("input_tokens") or 0) + int(totals.get("output_tokens") or 0)
     priced = all(row.get("cost") is not None for row in report["models"])

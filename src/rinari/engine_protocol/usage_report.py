@@ -14,7 +14,7 @@ from __future__ import annotations
 import contextlib
 import json
 from collections import Counter
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from rinari.engine_protocol.errors import INVALID_PARAMS, EngineProtocolError
@@ -46,8 +46,18 @@ def register_usage_report(dispatcher: Any, services: Any) -> None:
     dispatcher.register("usage.report.list", lambda params: report_list(services, params or {}))
 
 
-def _sessions(services: Any, scope: str, ref: str | None) -> tuple[list[str] | None, str | None]:
-    """The sessions a scope covers (None = every one) and since when."""
+def _since(days: int) -> str:
+    """The start of today, or of the day `days - 1` days ago, in UTC."""
+    start = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    start -= timedelta(days=max(1, days) - 1)
+    return start.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _sessions(
+    services: Any, scope: str, ref: str | None, days: int = 1
+) -> tuple[list[str] | None, str | None]:
+    """The sessions a scope covers (None = every one) and since when (the Agency's
+    scopes: today, or the last `days` days)."""
     if scope == "session":
         if not ref:
             raise EngineProtocolError(INVALID_PARAMS, "A conversation report needs 'ref'.")
@@ -69,14 +79,9 @@ def _sessions(services: Any, scope: str, ref: str | None) -> tuple[list[str] | N
         # Rinari Agency: what an agent spent today, over its conversations.
         if not ref:
             raise EngineProtocolError(INVALID_PARAMS, "An agent report needs 'ref'.")
-        start = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
-        return (
-            list(services.ctx.agency_repo.session_ids(ref)),
-            start.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S"),
-        )
+        return list(services.ctx.agency_repo.session_ids(ref)), _since(days)
     if scope in ("team", "agency"):
         # Rinari Agency A2: a team's posts today, or every agent's conversations today.
-        start = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
         if scope == "team":
             if not ref:
                 raise EngineProtocolError(INVALID_PARAMS, "A team report needs 'ref'.")
@@ -84,7 +89,7 @@ def _sessions(services: Any, scope: str, ref: str | None) -> tuple[list[str] | N
         else:
             rows = services.ctx.db.query("SELECT id FROM sessions WHERE agent_id IS NOT NULL")
             ids = [str(row["id"]) for row in rows]
-        return ids, start.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S")
+        return ids, _since(days)
     return None, None
 
 
@@ -122,12 +127,13 @@ def build_report(
     limits_of: Any = None,
     context_of: Any = None,
     app_version: str | None = None,
+    days: int = 1,
 ) -> dict[str, Any]:
     if scope not in SCOPES:
         raise EngineProtocolError(
             INVALID_PARAMS, f"Param 'scope' must be one of: {', '.join(SCOPES)}."
         )
-    sessions, since = _sessions(services, scope, ref)
+    sessions, since = _sessions(services, scope, ref, days)
     # An agent without conversations spent nothing (never «every session»).
     if sessions == [] and scope not in ("agent", "team", "agency"):
         sessions = None

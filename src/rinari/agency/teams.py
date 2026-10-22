@@ -38,7 +38,9 @@ OPEN_STATUSES = ("pending", "in_progress", "returned", "blocked")
 #: What a free post takes from the board, in order.
 READY_STATUSES = ("pending", "returned")
 
-TEAM_EDITABLE = ("name", "purpose", "chief_agent_id", "connectors", "budget")
+TEAM_EDITABLE = ("name", "purpose", "chief_agent_id", "connectors", "budget", "manual")
+#: The team's manual (its procedure, every post reads it): as long as an office message.
+MAX_MANUAL = 20000
 #: Where an agent's rule can deliver its result besides its run.
 DELIVERY_KINDS = ("office", "agent")
 
@@ -80,6 +82,8 @@ class TeamService:
         self.open_post: Callable[[dict[str, Any], dict[str, Any]], str] | None = None
         self.on_changed: Callable[[str, str], None] | None = None
         self.on_stopped: Callable[[str, str, str], None] | None = None
+        # An errand accepted: a flow run may move to its next step (replan, phase 3).
+        self.on_reviewed: Callable[[dict[str, Any]], None] | None = None
 
     # -- teams ---------------------------------------------------------------------
 
@@ -127,6 +131,7 @@ class TeamService:
             "chief_agent_id": merged.get("chief_agent_id") or None,
             "connectors": seen,
             "budget": normalize_budget(merged.get("budget")),
+            "manual": _text(merged.get("manual"), "The manual", MAX_MANUAL),
         }
 
     def create(self, raw: dict[str, Any], rinari_profile_id: str = "default") -> dict[str, Any]:
@@ -390,6 +395,7 @@ class TeamService:
                 "chain_id": chain_id or self._ids.new("chain"),
                 "hop": hop,
                 "production_run_id": raw.get("production_run_id"),
+                "flow_step": raw.get("flow_step"),
                 "external": external,
                 "created_at": now,
                 "updated_at": now,
@@ -444,6 +450,8 @@ class TeamService:
                 },
             )
         self._changed(errand["team_id"], "errand")
+        if accepted and self.on_reviewed is not None:
+            self.on_reviewed(saved)
         return saved
 
     def retry(self, errand_id: Any) -> dict[str, Any]:

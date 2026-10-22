@@ -310,6 +310,18 @@ CAPABILITIES: dict[str, bool] = {
     # agency.agent.delete remove an archived team or agent with its
     # conversations, rules and memory.
     "agency_audit_v1": True,
+    # How a team works on its own (replan 22-oct, phases 2 to 4): the team's
+    # `manual` (agency.team.update patch, read by every post); routines
+    # (agency.routine.list / agency.routine.create {team_id, agent_id, name,
+    # schedule, prompt}: an agent's rule in its post); flows
+    # (agency.flow.list / save {team_id, flow: {id?, name, description, steps:
+    # [{name, agents, instructions, approval: auto | chief | owner}]}} / delete /
+    # start {team_id, flow_id, input} / agency.flow.run.cancel {run_id}; an
+    # errand of a run carries production_run_id and flow_step; office notices
+    # {kind: flow, state: started | step | done, flow, step?, run_id}); and
+    # agency.team.overview {team_id}: members, routines, flows and runs, the
+    # board's counts, recent activity and spend today and over 7 days.
+    "agency_team_work_v1": True,
     # soul.settings.get/set: character intensity (minimal | balanced | full),
     # separate from Soul selection; bundled default Soul 4.0.
     "soul_character_intensity_v1": True,

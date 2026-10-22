@@ -126,6 +126,7 @@ _TEAM_COLUMNS = (
     "created_at",
     "updated_at",
     "archived_at",
+    "manual",
 )
 _ERRAND_COLUMNS = (
     "team_id",
@@ -151,6 +152,7 @@ _ERRAND_COLUMNS = (
     "returns",
     "external",
     "halted_json",
+    "flow_step",
 )
 
 
@@ -158,6 +160,18 @@ def _team(row: Any) -> dict[str, Any]:
     item = dict(row)
     item["connectors"] = json.loads(item.pop("connectors_json") or "[]")
     item["budget"] = json.loads(item.pop("budget_json") or "{}")
+    return item
+
+
+def _flow(row: Any) -> dict[str, Any]:
+    item = dict(row)
+    item["steps"] = json.loads(item.pop("steps_json") or "[]")
+    return item
+
+
+def _flow_run(row: Any) -> dict[str, Any]:
+    item = dict(row)
+    item["outputs"] = json.loads(item.pop("outputs_json") or "[]")
     return item
 
 
@@ -218,6 +232,7 @@ class TeamRepository:
             "created_at": team["created_at"],
             "updated_at": team["updated_at"],
             "archived_at": team.get("archived_at"),
+            "manual": team.get("manual") or "",
         }
         self._db.execute(
             f"""
@@ -238,6 +253,8 @@ class TeamRepository:
                 self._db.execute("DELETE FROM agency_waits WHERE session_id = ?", (session_id,))
             self._db.execute("DELETE FROM agency_waits WHERE team_id = ?", (team_id,))
             self._db.execute("DELETE FROM agency_errands WHERE team_id = ?", (team_id,))
+            self._db.execute("DELETE FROM agency_flow_runs WHERE team_id = ?", (team_id,))
+            self._db.execute("DELETE FROM agency_flows WHERE team_id = ?", (team_id,))
             self._db.execute("DELETE FROM agency_office_messages WHERE team_id = ?", (team_id,))
             self._db.execute("DELETE FROM agency_posts WHERE team_id = ?", (team_id,))
             self._db.execute("UPDATE sessions SET team_id = NULL WHERE team_id = ?", (team_id,))
@@ -418,6 +435,7 @@ class TeamRepository:
             "halted_json": (
                 json.dumps(errand["halted"], sort_keys=True) if errand.get("halted") else None
             ),
+            "flow_step": errand.get("flow_step"),
         }
         self._db.execute(
             f"""
@@ -429,6 +447,94 @@ class TeamRepository:
             (errand_id, *(row[column] for column in _ERRAND_COLUMNS)),
         )
         return self.errand(errand_id) or {}
+
+    # -- flows and their runs (replan 22-oct, phase 3) ------------------------------
+
+    def flows(self, team_id: str) -> list[dict[str, Any]]:
+        rows = self._db.query(
+            "SELECT * FROM agency_flows WHERE team_id = ? ORDER BY created_at", (team_id,)
+        )
+        return [_flow(row) for row in rows]
+
+    def flow(self, flow_id: str) -> dict[str, Any] | None:
+        row = self._db.query_one("SELECT * FROM agency_flows WHERE id = ?", (flow_id,))
+        return _flow(row) if row else None
+
+    def save_flow(self, flow_id: str, flow: dict[str, Any]) -> dict[str, Any]:
+        self._db.execute(
+            """
+            INSERT INTO agency_flows
+                (id, team_id, name, description, steps_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name, description = excluded.description,
+                steps_json = excluded.steps_json, updated_at = excluded.updated_at
+            """,
+            (
+                flow_id,
+                flow["team_id"],
+                flow["name"],
+                flow.get("description") or "",
+                json.dumps(flow["steps"]),
+                flow["created_at"],
+                flow["updated_at"],
+            ),
+        )
+        return self.flow(flow_id) or {}
+
+    def delete_flow(self, flow_id: str) -> None:
+        self._db.execute("DELETE FROM agency_flows WHERE id = ?", (flow_id,))
+
+    def flow_run(self, run_id: str) -> dict[str, Any] | None:
+        row = self._db.query_one("SELECT * FROM agency_flow_runs WHERE id = ?", (run_id,))
+        return _flow_run(row) if row else None
+
+    def flow_runs(
+        self,
+        team_id: str | None = None,
+        *,
+        statuses: tuple[str, ...] | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM agency_flow_runs WHERE 1=1"
+        params: list[object] = []
+        if team_id is not None:
+            sql += " AND team_id = ?"
+            params.append(team_id)
+        if statuses:
+            sql += f" AND status IN ({', '.join('?' for _ in statuses)})"
+            params.extend(statuses)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        return [_flow_run(row) for row in self._db.query(sql, params)]
+
+    def save_flow_run(self, run_id: str, run: dict[str, Any]) -> dict[str, Any]:
+        self._db.execute(
+            """
+            INSERT INTO agency_flow_runs (id, flow_id, team_id, status, step, input, outputs_json,
+                started_by, chain_id, created_at, updated_at, finished_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                status = excluded.status, step = excluded.step,
+                outputs_json = excluded.outputs_json, updated_at = excluded.updated_at,
+                finished_at = excluded.finished_at
+            """,
+            (
+                run_id,
+                run["flow_id"],
+                run["team_id"],
+                run["status"],
+                int(run.get("step") or 0),
+                run.get("input") or "",
+                json.dumps(run.get("outputs") or []),
+                run.get("started_by"),
+                run["chain_id"],
+                run["created_at"],
+                run["updated_at"],
+                run.get("finished_at"),
+            ),
+        )
+        return self.flow_run(run_id) or {}
 
     # -- the posts' queues (replan 22-oct) ------------------------------------------
 
