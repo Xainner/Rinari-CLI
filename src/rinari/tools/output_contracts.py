@@ -91,6 +91,9 @@ FIELDS = {
     "skills.propose": "name:s status:s version:s update:b review:s warnings:a previous_version:s?",
     "skills.activate": "name:s version:s active:b procedure:s? tools_through_door:s?",
     "schedule.propose": "status:s proposal:o? task_id:s? next_run_at:n? description:s note:s",
+    "schedule.list": "tasks:a",
+    "schedule.update": "status:s id:s name:s when:s? enabled:b next_run_local:s? here:b prompt:s",
+    "schedule.cancel": "status:s id:s name:s",
     "rinari.status": (
         "engine:o providers:a models:a? models_total:i context:o soul:s? skills:a "
         "sessions_total:i note:s"

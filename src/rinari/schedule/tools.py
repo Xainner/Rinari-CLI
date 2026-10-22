@@ -187,7 +187,10 @@ def schedule_tools(host: ScheduleToolHost):
                 ok=True,
                 data={
                     "status": "updated",
-                    **view(saved),
+                    "task_id": saved["id"],
+                    "description": saved.get("description") or "",
+                    "next_run_at": saved.get("next_run_at"),
+                    "next_run_local": _local(saved.get("next_run_at")),
                     "note": "A task of yours had this name here: it was changed, not duplicated.",
                 },
                 origin="schedule",
