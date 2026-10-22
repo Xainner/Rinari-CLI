@@ -434,3 +434,20 @@ def test_saving_the_agency_settings_keeps_a_stopped_team_stopped(
     _ok(_call(server, "agency.settings.set", {"errand_mode": "turn"}))
     teams = {t["id"]: t for t in _ok(_call(server, "agency.team.list", {}))["teams"]}
     assert teams[team["id"]]["stopped"] is True
+
+
+# -- phase 1 of the Agency replan (22-oct) -----------------------------------------------------
+
+
+def test_an_owner_message_naming_nobody_goes_to_the_chief(server, turns) -> None:
+    team, writer, image, _video = _studio(server)
+    assert team["chief_agent_id"] == writer["id"]
+    before = len(turns)
+    _ok(_call(server, "agency.office.post", {"team_id": team["id"], "text": "Equipo, empiecen"}))
+    woken = turns[before:]
+    assert [t["session_id"] for t in woken] == [_post(team, writer)]
+    assert "as its chief, it comes to you" in woken[0]["message"]
+    # Naming someone still goes straight to them, not to the chief.
+    before = len(turns)
+    _ok(_call(server, "agency.office.post", {"team_id": team["id"], "text": "@Image hola"}))
+    assert [t["session_id"] for t in turns[before:]] == [_post(team, image)]

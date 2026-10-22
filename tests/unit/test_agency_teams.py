@@ -211,14 +211,23 @@ def test_mentions_are_read_by_the_longest_name_and_in_order() -> None:
     assert find_mentions("@Content, ¿vienes?", names) == ["a1"]
 
 
-def test_a_message_without_a_mention_wakes_nobody(server, turns) -> None:
+def test_a_message_without_a_mention_goes_to_the_chief_and_with_no_chief_wakes_nobody(
+    server, turns
+) -> None:
+    """Owner, 22-oct: a message naming nobody goes to the chief (it woke nobody before)."""
     writer = _agent(server, "Writer")
     team = _team(server, "Canal", [writer])
     message = _ok(
         _call(server, "agency.office.post", {"team_id": team["id"], "text": "Buenos días"})
     )["message"]
-    assert message["author_kind"] == "owner" and message["mentions"] == []
-    assert turns == []
+    assert message["author_kind"] == "owner" and message["mentions"] == [writer["id"]]
+    assert [t["session_id"] for t in turns] == [_post(team, writer)]
+    empty = _team(server, "Vacío", [])
+    before = len(turns)
+    message = _ok(_call(server, "agency.office.post", {"team_id": empty["id"], "text": "Hola"}))[
+        "message"
+    ]
+    assert message["mentions"] == [] and len(turns) == before
 
 
 def test_a_mention_wakes_the_agent_in_its_post_and_its_answer_goes_to_the_office(

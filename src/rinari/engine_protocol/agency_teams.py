@@ -912,7 +912,9 @@ class AgencyTeams:
         return {"messages": self._repo.messages(team["id"])}
 
     def office_post(self, params: dict[str, Any]) -> dict[str, Any]:
-        """The owner writes in the office. Only @mentions wake someone (D-1)."""
+        """The owner writes in the office. His @mentions wake whom they name (D-1); a
+        message that names nobody goes to the team's chief, who answers or passes the
+        work on (owner, 22-oct: before, it woke nobody)."""
         team = self._team(params)
         text = params.get("text")
         if not isinstance(text, str) or not text.strip() or len(text) > MAX_OFFICE_TEXT:
@@ -920,8 +922,25 @@ class AgencyTeams:
                 INVALID_PARAMS, f"Param 'text' must be 1..{MAX_OFFICE_TEXT} characters."
             )
         self._owner_acts(team)
-        message = self.post_message(team, text.strip(), author_agent_id=None, chain_id=None, hop=0)
+        found, _ = resolve_mentions(text, self._names(team["id"]))
+        chief = self._active_chief(team)
+        message = self.post_message(
+            team,
+            text.strip(),
+            author_agent_id=None,
+            chain_id=None,
+            hop=0,
+            mentions=None if found or chief is None else [chief],
+        )
         return {"message": message}
+
+    def _active_chief(self, team: dict[str, Any]) -> str | None:
+        """The chief, while it works in the team (a post, not archived)."""
+        chief = team.get("chief_agent_id")
+        if not chief or self._repo.post(team["id"], chief) is None:
+            return None
+        agent = self._services.ctx.agency_repo.get(chief)
+        return chief if agent is not None and agent.get("archived_at") is None else None
 
     def _owner_acts(self, team: dict[str, Any]) -> None:
         # The owner's own message, errand or retry in an office resumes a halted
@@ -1774,8 +1793,18 @@ class AgencyTeams:
         message = mention["message"]
         author = self._author(message.get("agent_id"))
         lines, office_external = self._office(team, OFFICE_IN_MENTION)
+        to_chief = not message.get("agent_id") and not find_mentions(
+            message.get("text") or "", self._names(team["id"])
+        )
         if mention.get("released"):
             why = f"⟦{author}⟧ posted what you were waiting for."
+        elif to_chief:
+            why = (
+                f"⟦{author}⟧ wrote to the team without naming anyone: as its chief, it comes "
+                "to you. Answer them, or pass the work to the teammates whose job it is "
+                "(errand.create, or office.say with @ and their name) and follow it until "
+                "it is done."
+            )
         else:
             why = f"⟦{author}⟧ mentioned you."
         from_agent = (
