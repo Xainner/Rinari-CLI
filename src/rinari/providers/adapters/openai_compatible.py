@@ -141,12 +141,14 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         *,
         stream: bool,
         tool_aliases: dict[str, str] | None = None,
+        fold_system: bool = False,
     ) -> dict[str, Any]:
+        messages = _joined_user_messages(
+            [_message_to_openai(m, tool_aliases) for m in expand_tool_images(request.messages)]
+        )
         payload: dict[str, Any] = {
             "model": request.model,
-            "messages": _joined_user_messages(
-                [_message_to_openai(m, tool_aliases) for m in expand_tool_images(request.messages)]
-            ),
+            "messages": _folded_system(messages) if fold_system else messages,
             "stream": stream,
         }
         if request.tools:
@@ -193,6 +195,30 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                 request, secret, endpoint, tool_aliases=tool_aliases
             )
         url = self._chat_url(endpoint)
+        key = (url, request.model)
+        fold = _SYSTEM_FOLD.get(key) is True
+        try:
+            return self._chat_once(request, secret, url, tool_aliases, fold_system=fold)
+        except ProviderModelError as exc:
+            if fold or not _may_refuse_system(exc, request, key):
+                raise
+            try:
+                response = self._chat_once(request, secret, url, tool_aliases, fold_system=True)
+            except ProviderModelError:
+                _SYSTEM_FOLD[key] = False
+                raise exc from None
+            _SYSTEM_FOLD[key] = True
+            return response
+
+    def _chat_once(
+        self,
+        request: ModelRequest,
+        secret: str | None,
+        url: str,
+        tool_aliases: dict[str, str] | None,
+        *,
+        fold_system: bool,
+    ) -> ModelResponse:
         headers = {
             **self.request_headers(secret, request),
             **session_affinity_headers(url, request.session_id),
@@ -203,7 +229,11 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             url,
             headers=headers,
             json_body=openai_cache_key(
-                self._payload(request, stream=False, tool_aliases=tool_aliases), url, request
+                self._payload(
+                    request, stream=False, tool_aliases=tool_aliases, fold_system=fold_system
+                ),
+                url,
+                request,
             ),
             timeout=MODEL_CALL_TIMEOUT,
         )
@@ -229,6 +259,40 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                 request, secret, endpoint, on_delta, tool_aliases=tool_aliases
             )
         url = self._chat_url(endpoint)
+        key = (url, request.model)
+        fold = _SYSTEM_FOLD.get(key) is True
+        sent = False
+
+        def relay(text: str) -> None:
+            nonlocal sent
+            sent = True
+            on_delta(text)
+
+        try:
+            return self._chat_stream(request, secret, url, relay, tool_aliases, fold_system=fold)
+        except ProviderModelError as exc:
+            if fold or sent or not _may_refuse_system(exc, request, key):
+                raise
+            try:
+                response = self._chat_stream(
+                    request, secret, url, on_delta, tool_aliases, fold_system=True
+                )
+            except ProviderModelError:
+                _SYSTEM_FOLD[key] = False
+                raise exc from None
+            _SYSTEM_FOLD[key] = True
+            return response
+
+    def _chat_stream(
+        self,
+        request: ModelRequest,
+        secret: str | None,
+        url: str,
+        on_delta: Callable[[str], None],
+        tool_aliases: dict[str, str] | None,
+        *,
+        fold_system: bool,
+    ) -> ModelResponse:
         content_parts: list[str] = []
         continuation_message: dict[str, Any] = {"role": "assistant"}
         continuation_tools: dict[int, dict[str, Any]] = {}
@@ -261,7 +325,11 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                 "POST",
                 url,
                 json=openai_cache_key(
-                    self._payload(request, stream=True, tool_aliases=tool_aliases), url, request
+                    self._payload(
+                        request, stream=True, tool_aliases=tool_aliases, fold_system=fold_system
+                    ),
+                    url,
+                    request,
                 ),
                 headers=headers,
             ) as response:
@@ -437,6 +505,51 @@ def _wire_tool_name(name: str, tool_aliases: dict[str, str] | None) -> str:
         return name
     alias_of = {real: alias for alias, real in tool_aliases.items()}
     return alias_of.get(name, sanitize_tool_name(name))
+
+
+# Servers whose chat template refused a system message, by (url, model):
+# True once the same request went through with the system folded into the
+# first user message, False when folding did not help either.
+_SYSTEM_FOLD: dict[tuple[str, str], bool] = {}
+# A plain refusal of the request: no provider code that says something more
+# specific (a limit, the context, a tool schema), and not an overload.
+_REFUSAL_STATUSES = frozenset({400, 422, 500})
+
+
+def _may_refuse_system(error: ProviderModelError, request: ModelRequest, key) -> bool:
+    """Whether to try the request once more with the system message folded.
+
+    Templates such as Gemma 2's reject the system role outright and llama.cpp
+    or vLLM answer with a plain 400/500. Nothing is read from the message:
+    only the status, the absence of a more specific code, and whether this
+    server and model were already tried.
+    """
+    if key in _SYSTEM_FOLD or error.details.get("partial"):
+        return False
+    if not any(message.role == "system" for message in request.messages):
+        return False
+    code = error.details.get("provider_error_code")
+    if code != "SERVER_ERROR" or error.details.get("http_status") not in _REFUSAL_STATUSES:
+        return False
+    # A refusal with a cause of its own is handled where that cause is: the
+    # reasoning control is repeated without it by the router.
+    from rinari.models.router import rejects_reasoning_control
+
+    return not (request.reasoning_effort and rejects_reasoning_control(error))
+
+
+def _folded_system(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The system message as the start of the first user message."""
+    system = [m for m in messages if m.get("role") == "system"]
+    rest = [m for m in messages if m.get("role") != "system"]
+    text = "\n\n".join(str(m.get("content") or "") for m in system if m.get("content"))
+    if not text:
+        return rest
+    for index, message in enumerate(rest):
+        if message.get("role") == "user":
+            rest[index] = {**message, "content": _joined_content(text, message.get("content"))}
+            return rest
+    return [{"role": "user", "content": text}, *rest]
 
 
 def _joined_user_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
