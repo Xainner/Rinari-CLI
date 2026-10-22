@@ -799,7 +799,7 @@ def test_an_agent_waits_for_a_teammate_and_is_woken_with_what_it_posts(server, t
     ]
 
 
-def test_waiting_is_only_for_a_mention_and_for_someone_else(server, turns) -> None:
+def test_waiting_is_for_a_mention_or_an_errand_and_for_someone_else(server, turns) -> None:
     writer, editor = _agent(server, "Writer"), _agent(server, "Editor")
     team = _team(server, "Canal", [writer, editor])
     tools = _tools(server, _post(team, editor))
@@ -809,8 +809,9 @@ def test_waiting_is_only_for_a_mention_and_for_someone_else(server, turns) -> No
     assert tools["office.wait"].handler({"for": "Nadie"}, None).ok is False
     errand = {"title": "Guion", "to_agent_id": writer["id"]}
     _ok(_call(server, "agency.errand.create", {"team_id": team["id"], "errand": errand}))
+    # Inside an errand too (studio run, 21-oct): the errand stays in progress.
     in_errand = _tools(server, _post(team, writer))["office.wait"].handler({"for": "Editor"}, None)
-    assert in_errand.ok is False
+    assert in_errand.ok is True
 
 
 def test_a_teammate_that_already_posted_releases_the_wait_at_once(server, turns) -> None:

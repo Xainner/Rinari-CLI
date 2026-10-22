@@ -294,7 +294,11 @@ CAPABILITIES: dict[str, bool] = {
     # and paused_by; agency.templates.list {language?} and
     # agency.team.from_template {template_id, language?, model?, name?}; the
     # direct chat's office.say {team, text}; an agent's conversations never
-    # reach the Engine's home (policy rule engine_home).
+    # reach the Engine's home (policy rule engine_home); office.wait inside an
+    # errand (it stays in progress; reasons wait_expired / wait_cancelled block
+    # it); a delivery is posted whole; what a post presents with file.present
+    # leaves an office notice {kind: files, items: [{uri | url, name, kind?,
+    # mime?, caption?, size_bytes?}]}.
     "agency_audit_v1": True,
     # soul.settings.get/set: character intensity (minimal | balanced | full),
     # separate from Soul selection; bundled default Soul 4.0.

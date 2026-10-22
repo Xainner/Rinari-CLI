@@ -398,9 +398,10 @@ def team_tools(host: TeamToolHost):
         ToolDefinition(
             name="office.wait",
             description=(
-                "Wait for a teammate: when what you were asked depends on something another "
-                "agent must do first, call this with their name and end your turn without an "
-                "answer. You are woken again with what they post."
+                "Wait for a teammate: when what you were asked (a mention or an errand) "
+                "depends on something another agent must do first, call this with their name "
+                "and end your turn without an answer. You are woken again with what they post; "
+                "an errand stays yours meanwhile."
             ),
             input_schema={
                 "type": "object",
