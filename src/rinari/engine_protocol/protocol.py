@@ -302,6 +302,13 @@ CAPABILITIES: dict[str, bool] = {
     # Since 2026-10-22 a chain is no longer cut at 20 deliveries: hops (8),
     # one queued turn per agent and chain, 5 mentions per message and the
     # budgets bound it (too_many_deliveries only appears in older notices).
+    # One team's life (22-oct): agency.team.stop / agency.team.resume (just
+    # that team, as stop_all does; the owner writing in its office resumes it;
+    # agency.team.list says `stopped`), agency.team.archive also cuts its turns
+    # and pauses the rules that work for it (paused_rules), agency.team.unarchive
+    # resumes them, agency.team.list {archived: true}, and agency.team.delete /
+    # agency.agent.delete remove an archived team or agent with its
+    # conversations, rules and memory.
     "agency_audit_v1": True,
     # soul.settings.get/set: character intensity (minimal | balanced | full),
     # separate from Soul selection; bundled default Soul 4.0.

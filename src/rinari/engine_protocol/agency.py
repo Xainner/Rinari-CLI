@@ -68,6 +68,7 @@ def agency_settings(services: Any) -> dict[str, Any]:
     budget = stored.get("budget") if isinstance(stored, dict) else None
     mode = stored.get("errand_mode") if isinstance(stored, dict) else None
     stopped = stored.get("stopped_profiles") if isinstance(stored, dict) else None
+    teams = stored.get("stopped_teams") if isinstance(stored, dict) else None
     return {
         "budget": budget if isinstance(budget, dict) else {},
         "errand_mode": mode if mode in AVAILABLE_ERRAND_MODES else "turn",
@@ -75,6 +76,8 @@ def agency_settings(services: Any) -> dict[str, Any]:
         "available_errand_modes": list(AVAILABLE_ERRAND_MODES),
         # Profiles whose board «Detener a todos» halted, until the owner resumes it.
         "stopped_profiles": list(stopped) if isinstance(stopped, list) else [],
+        # Teams the owner stopped alone («Detener equipo»), until he resumes them.
+        "stopped_teams": list(teams) if isinstance(teams, list) else [],
     }
 
 
@@ -126,6 +129,16 @@ def spend_today(services: Any, agent: dict[str, Any]) -> dict[str, Any]:
         "budget": budget,
         "over_budget": over,
     }
+
+
+def forget_place(services: Any, place: str, ref: str) -> int:
+    """Forget every memory kept for an agent or a team being deleted."""
+    gone = 0
+    for row in services.memory.repo.user_live():
+        mine = row.get("place") == place and row.get("place_ref") == ref
+        if mine and services.memory.forget_user(row["id"]):
+            gone += 1
+    return gone
 
 
 class AgencyMethods:
@@ -324,6 +337,46 @@ class AgencyMethods:
         agent = self._agent(params)
         return {"agent": self._view(self.agency.unarchive(agent["id"]))}
 
+    def delete(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Delete an archived agent for good: its conversations, rules and memory
+        (owner, 22-oct). Archive first: that is what takes it out of its teams and
+        stops its rules and turns."""
+        agent = self._agent(params)
+        if agent.get("archived_at") is None:
+            raise EngineProtocolError(INVALID_PARAMS, "Archive the agent before deleting it.")
+        repo = self._services.ctx.agency_repo
+        sessions = sorted(set(repo.session_ids(agent["id"])) | ({agent.get("session_id")} - {None}))
+        running = [sid for sid in sessions if self._turns.has_active_turn(sid)]
+        if running:
+            raise EngineProtocolError(
+                INVALID_PARAMS,
+                "A conversation of this agent is still finishing a turn: try again in a moment.",
+                details={"session_ids": running},
+            )
+        rules = [
+            task["id"]
+            for task in self._services.ctx.schedule_repo.list()
+            if task.get("agent_id") == agent["id"]
+        ]
+        for task_id in rules:
+            self._services.ctx.schedule_repo.delete(task_id)
+            self._turns.emit_external(
+                event("schedule.changed", {"task_id": task_id, "change": "deleted"})
+            )
+        deleted = 0
+        for session_id in sessions:
+            try:
+                self._server._session_delete({"ref": session_id, "cascade": True})
+                deleted += 1
+            except NotFoundError:
+                continue
+        forget_place(self._services, "agent", agent["id"])
+        repo.delete(agent["id"])
+        self._turns.emit_external(
+            event("agency.agent.changed", {"agent_id": agent["id"], "change": "deleted"})
+        )
+        return {"deleted": agent["id"], "deleted_sessions": deleted, "deleted_rules": len(rules)}
+
     def _draft_caller(self):
         """The owner's default model (the one a new conversation uses), or None."""
         from rinari.models.router import ModelRouter
@@ -482,6 +535,7 @@ class AgencyMethods:
             "budget": current["budget"],
             "errand_mode": current["errand_mode"],
             "stopped_profiles": current["stopped_profiles"],
+            "stopped_teams": current["stopped_teams"],
         }
         if "budget" in params:
             try:

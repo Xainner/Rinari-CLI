@@ -203,6 +203,16 @@ class TeamService:
             self._changed(current["id"], "archived")
         return self.view(current)
 
+    def unarchive(self, team_id: Any) -> dict[str, Any]:
+        """Back from the archive, with its members and posts as they were."""
+        current = self.get(team_id)
+        if current.get("archived_at") is not None:
+            current = self._repo.save(
+                current["id"], {**current, "archived_at": None, "updated_at": self._clock.now()}
+            )
+            self._changed(current["id"], "unarchived")
+        return self.view(current)
+
     # -- posts -----------------------------------------------------------------------
 
     def _add_post(self, team: dict[str, Any], agent: dict[str, Any]) -> None:

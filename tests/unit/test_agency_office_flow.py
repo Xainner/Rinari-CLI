@@ -310,3 +310,127 @@ def test_a_post_knows_its_periodic_work_is_a_rule(server, turns) -> None:
     record = services.sessions.show(_post(team, writer))
     text = "\n".join(_agency_place(services, record, services.ctx.agency_repo.get(writer["id"])))
     assert "schedule.propose" in text and "in_this_conversation" in text
+
+
+# -- one team's life (owner, 22-oct) ----------------------------------------------------------
+
+
+def _rule_in_post(server, agent, session_id, name="Vigilancia"):
+    task = server._services.schedules.create(
+        {
+            "name": name,
+            "kind": "agent",
+            "schedule": {"kind": "interval", "seconds": 30},
+            "prompt": "Revisa",
+            "agent_id": agent["id"],
+            "target": "this_conversation",
+            "session_id": session_id,
+        }
+    )
+    return task["id"]
+
+
+def test_archiving_a_team_stops_its_turns_waits_and_rules_and_unarchiving_resumes_them(
+    server, turns, monkeypatch
+) -> None:
+    """An archived team kept its agents working: turns, waits and a rule in a post."""
+    team, writer, image, _video = _studio(server)
+    pw, pi = _post(team, writer), _post(team, image)
+    rule = _rule_in_post(server, writer, pw)
+    _ok(
+        _call(server, "agency.office.post", {"team_id": team["id"], "text": "@Writer @Image hagan"})
+    )
+    assert _tools(server, pi)["office.wait"].handler({"for": "Writer"}, None).ok
+    cancelled = []
+    monkeypatch.setattr(server._turns, "cancel_turn", lambda sid, **kw: cancelled.append(sid))
+    archived = _ok(_call(server, "agency.team.archive", {"team_id": team["id"]}))
+    assert archived["paused_rules"] == 1
+    assert pw in cancelled and pi in cancelled
+    assert pi not in server._teams._waits
+    repo = server._services.ctx.schedule_repo
+    assert repo.get(rule)["enabled"] is False and repo.get(rule)["paused_by"] == "team_archived"
+    # Nothing of it starts any more, not even a message that mentions one of its posts.
+    before = len(turns)
+    server._teams.post_message(
+        team, "@Image ya", author_agent_id=writer["id"], chain_id=None, hop=1
+    )
+    server._teams.tick()
+    assert len(turns) == before
+    listed = _ok(_call(server, "agency.team.list", {"archived": True}))["teams"]
+    assert [t["id"] for t in listed] == [team["id"]]
+    back = _ok(_call(server, "agency.team.unarchive", {"team_id": team["id"]}))
+    assert back["resumed_rules"] == 1 and repo.get(rule)["enabled"] is True
+
+
+def test_a_team_is_stopped_and_resumed_alone(server, turns, monkeypatch) -> None:
+    team, writer, image, _video = _studio(server)
+    other, *_ = _studio(server)
+    _rule_in_post(server, writer, _post(team, writer))
+    errand = {"title": "Algo", "to_agent_id": image["id"]}
+    made = _ok(_call(server, "agency.errand.create", {"team_id": team["id"], "errand": errand}))
+    monkeypatch.setattr(server._turns, "cancel_turn", lambda sid, **kw: None)
+    stopped = _ok(_call(server, "agency.team.stop", {"team_id": team["id"]}))
+    assert stopped["paused_rules"] == 1 and stopped["blocked_errands"] == 1
+    teams = {t["id"]: t for t in _ok(_call(server, "agency.team.list", {}))["teams"]}
+    assert teams[team["id"]]["stopped"] is True and teams[other["id"]]["stopped"] is False
+    # The other team keeps working.
+    before = len(turns)
+    _ok(_call(server, "agency.office.post", {"team_id": other["id"], "text": "@Writer hola"}))
+    assert len(turns) == before + 1
+    before = len(turns)
+    server._teams.post_message(
+        team, "@Image ya", author_agent_id=writer["id"], chain_id=None, hop=1
+    )
+    server._teams.tick()
+    assert len(turns) == before
+    resumed = _ok(_call(server, "agency.team.resume", {"team_id": team["id"]}))
+    assert resumed["resumed_rules"] == 1 and resumed["restored_errands"] == 1
+    assert server._services.ctx.team_repo.errand(made["errand"]["id"])["status"] in (
+        "pending",
+        "in_progress",
+    )
+
+
+def test_the_owner_writing_in_a_stopped_teams_office_resumes_it(server, turns, monkeypatch) -> None:
+    team, *_ = _studio(server)
+    monkeypatch.setattr(server._turns, "cancel_turn", lambda sid, **kw: None)
+    _ok(_call(server, "agency.team.stop", {"team_id": team["id"]}))
+    before = len(turns)
+    _ok(_call(server, "agency.office.post", {"team_id": team["id"], "text": "@Writer sigue"}))
+    assert len(turns) == before + 1
+
+
+def test_a_team_or_agent_is_deleted_only_archived_and_takes_what_is_only_its(
+    server, turns, monkeypatch
+) -> None:
+    team, writer, image, _video = _studio(server)
+    pw = _post(team, writer)
+    rule = _rule_in_post(server, writer, pw)
+    refused = _call(server, "agency.team.delete", {"team_id": team["id"]})
+    assert refused["ok"] is False
+    monkeypatch.setattr(server._turns, "cancel_turn", lambda sid, **kw: None)
+    _ok(_call(server, "agency.team.archive", {"team_id": team["id"]}))
+    gone = _ok(_call(server, "agency.team.delete", {"team_id": team["id"]}))
+    assert gone["deleted_rules"] == 1 and gone["deleted_sessions"] >= 3
+    assert server._services.ctx.team_repo.get(team["id"]) is None
+    assert server._services.ctx.schedule_repo.get(rule) is None
+    # An agent: archived first, then its conversations and rules go with it.
+    refused = _call(server, "agency.agent.delete", {"agent_id": image["id"]})
+    assert refused["ok"] is False
+    _ok(_call(server, "agency.agent.archive", {"agent_id": image["id"]}))
+    direct = image["session_id"]
+    deleted = _ok(_call(server, "agency.agent.delete", {"agent_id": image["id"]}))
+    assert deleted["deleted"] == image["id"]
+    assert server._services.ctx.agency_repo.get(image["id"]) is None
+    assert server._services.ctx.session_repo.get(direct) is None
+
+
+def test_saving_the_agency_settings_keeps_a_stopped_team_stopped(
+    server, turns, monkeypatch
+) -> None:
+    team, *_ = _studio(server)
+    monkeypatch.setattr(server._turns, "cancel_turn", lambda sid, **kw: None)
+    _ok(_call(server, "agency.team.stop", {"team_id": team["id"]}))
+    _ok(_call(server, "agency.settings.set", {"errand_mode": "turn"}))
+    teams = {t["id"]: t for t in _ok(_call(server, "agency.team.list", {}))["teams"]}
+    assert teams[team["id"]]["stopped"] is True

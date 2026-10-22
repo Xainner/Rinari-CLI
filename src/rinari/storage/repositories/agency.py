@@ -103,6 +103,13 @@ class AgencyRepository:
         rows = self._db.query("SELECT id FROM sessions WHERE agent_id = ?", (agent_id,))
         return [row["id"] for row in rows]
 
+    def delete(self, agent_id: str) -> None:
+        """The agent and its posts in any team (an archived team keeps its posts)."""
+        with self._db.transaction():
+            self._db.execute("DELETE FROM agency_posts WHERE agent_id = ?", (agent_id,))
+            self._db.execute("UPDATE sessions SET agent_id = NULL WHERE agent_id = ?", (agent_id,))
+            self._db.execute("DELETE FROM agency_agents WHERE id = ?", (agent_id,))
+
     def set_session_agent(self, session_id: str, agent_id: str | None) -> None:
         self._db.execute("UPDATE sessions SET agent_id = ? WHERE id = ?", (agent_id, session_id))
 
@@ -222,6 +229,19 @@ class TeamRepository:
             (team_id, *(row[column] for column in _TEAM_COLUMNS)),
         )
         return self.get(team_id) or {}
+
+    def delete(self, team_id: str) -> None:
+        """The team and what is only its: posts, office, errands and waits."""
+        posts = [row["session_id"] for row in self.posts(team_id)]
+        with self._db.transaction():
+            for session_id in posts:
+                self._db.execute("DELETE FROM agency_waits WHERE session_id = ?", (session_id,))
+            self._db.execute("DELETE FROM agency_waits WHERE team_id = ?", (team_id,))
+            self._db.execute("DELETE FROM agency_errands WHERE team_id = ?", (team_id,))
+            self._db.execute("DELETE FROM agency_office_messages WHERE team_id = ?", (team_id,))
+            self._db.execute("DELETE FROM agency_posts WHERE team_id = ?", (team_id,))
+            self._db.execute("UPDATE sessions SET team_id = NULL WHERE team_id = ?", (team_id,))
+            self._db.execute("DELETE FROM agency_teams WHERE id = ?", (team_id,))
 
     # -- posts ---------------------------------------------------------------
 

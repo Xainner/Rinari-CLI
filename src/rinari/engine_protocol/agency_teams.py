@@ -73,6 +73,10 @@ EXTERNAL_SOURCE = "agency office"
 PAUSED_BY_STOP = "agency_stop"
 #: Why a rule is off when its agent was archived (it stays off when it comes back).
 PAUSED_BY_ARCHIVE = "agent_archived"
+#: Why a rule tied to a team is off while the owner stopped that team alone.
+PAUSED_BY_TEAM_STOP = "team_stopped"
+#: Why a rule tied to a team is off while the team is archived (unarchiving resumes it).
+PAUSED_BY_TEAM_ARCHIVE = "team_archived"
 _TERMINAL = ("turn.completed", "turn.failed", "turn.cancelled", "turn.stopped")
 _BUSY = "busy"
 #: Why nothing starts on a board the owner stopped («Detener a todos»).
@@ -414,7 +418,41 @@ class AgencyTeams:
 
     def _team_halted(self, team_id: str | None) -> bool:
         team = self._repo.get(team_id) if team_id else None
-        return team is not None and team["rinari_profile_id"] in self._halted_profiles()
+        return team is not None and self._halts(
+            team, self._halted_profiles(), self._stopped_teams()
+        )
+
+    @staticmethod
+    def _halts(team: dict[str, Any], profiles: set[str], stopped: set[str]) -> bool:
+        """Nothing of this team starts: its profile or the team itself is stopped, or archived."""
+        return (
+            team["rinari_profile_id"] in profiles
+            or team["id"] in stopped
+            or team.get("archived_at") is not None
+        )
+
+    def _stopped_teams(self) -> set[str]:
+        from rinari.engine_protocol.agency import agency_settings
+
+        return set(agency_settings(self._services).get("stopped_teams") or [])
+
+    def _set_team_stopped(self, team_id: str, stopped: bool) -> None:
+        from rinari.engine_protocol.agency import SETTINGS_KEY
+        from rinari.shared.clock import now_iso
+
+        config = self._services.ctx.config_repo
+        stored = config.get_json(SETTINGS_KEY) or {}
+        stored = stored if isinstance(stored, dict) else {}
+        teams = set(stored.get("stopped_teams") or [])
+        if stopped:
+            teams.add(team_id)
+        else:
+            teams.discard(team_id)
+        config.set_json(
+            SETTINGS_KEY,
+            {**stored, "stopped_teams": sorted(teams)},
+            now_iso(self._services.ctx.clock),
+        )
 
     def hold_if_halted(self, errand_id: str) -> bool:
         """An errand left or sent back while the board is halted waits, blocked, for the owner.
@@ -470,6 +508,14 @@ class AgencyTeams:
             for agent in self._services.agency.list(profile)
             if agent.get("session_id")
         }
+        return {"blocked_errands": self._halt_teams(teams, directs)}
+
+    def _halt_teams(self, teams: set[str], directs: set[str] = frozenset()) -> int:
+        """Clear what these teams have queued, block what is open and cut their turns.
+
+        The caller marks them halted first, so the tick a cancelled turn runs
+        finds nothing to start (#75). Returns how many errands it blocked.
+        """
         with self._lock:
             for session_id in [s for s, w in self._waits.items() if w["team_id"] in teams]:
                 self._waits.pop(session_id, None)
@@ -522,7 +568,7 @@ class AgencyTeams:
                 self._turns.cancel_turn(session_id)
             except Exception:  # already over
                 logger.info("agency post %s: turn already over", session_id)
-        return {"blocked_errands": blocked}
+        return blocked
 
     def resume(self, profile: str) -> dict[str, int]:
         """The owner lets the board work again, as it was before «Detener a todos» (#18).
@@ -538,9 +584,18 @@ class AgencyTeams:
         by_all = self._halted_by_all()
         if profile in by_all:
             self._halted_by_all(by_all - {profile})
+        restored = self._restore_teams([team["id"] for team in self._repo.list(profile)])
+        rules = self._resume_rules(profile)
+        self.tick()
+        return {"restored_errands": restored, "resumed_rules": rules}
+
+    def _restore_teams(self, team_ids: list[str]) -> int:
+        """What a stop blocked goes back as it was; returns how many errands."""
         restored = 0
         now = self._clock.now()
-        for team in self._repo.list(profile):
+        for team in (self._repo.get(team_id) for team_id in team_ids):
+            if team is None:
+                continue
             changed = False
             for errand in self._repo.errands(team["id"], statuses=("blocked",)):
                 was = errand.get("halted")
@@ -563,9 +618,7 @@ class AgencyTeams:
                 changed = True
             if changed:
                 self._changed(team["id"], "errand")
-        rules = self._resume_rules(profile)
-        self.tick()
-        return {"restored_errands": restored, "resumed_rules": rules}
+        return restored
 
     def _resume_rules(self, profile: str) -> int:
         """Switch back on the rules «Detener a todos» paused (never the owner's own pauses)."""
@@ -605,8 +658,21 @@ class AgencyTeams:
     # -- teams ---------------------------------------------------------------------------
 
     def list(self, params: dict[str, Any]) -> dict[str, Any]:
+        """The teams of a profile; with archived: true, only the archived ones. Each
+        says whether the owner stopped it alone (`stopped`)."""
+        archived = params.get("archived", False)
+        if not isinstance(archived, bool):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'archived' must be a boolean.")
+        if archived:
+            return {"teams": self.list_archived(params)}
         profile = self._server._profile_filter(params)
-        return {"teams": [self.teams.view(team) for team in self.teams.list(profile)]}
+        stopped = self._stopped_teams()
+        return {
+            "teams": [
+                {**self.teams.view(team), "stopped": team["id"] in stopped}
+                for team in self.teams.list(profile)
+            ]
+        }
 
     def get(self, params: dict[str, Any]) -> dict[str, Any]:
         team = self._team(params)
@@ -632,9 +698,166 @@ class AgencyTeams:
         self.tick()  # a new chief takes the errands left to nobody
         return {"team": updated}
 
-    def archive(self, params: dict[str, Any]) -> dict[str, Any]:
+    def list_archived(self, params: dict[str, Any]) -> list[dict[str, Any]]:
+        profile = self._server._profile_filter(params)
+        return [
+            self.teams.view(team)
+            for team in self.teams.list(profile, include_archived=True)
+            if team.get("archived_at") is not None
+        ]
+
+    # -- one team: stop, resume, archive, delete (owner, 22-oct) --------------------------
+
+    def _team_rules(self, team_id: str) -> list[dict[str, Any]]:
+        """The rules that work for this team: run in one of its posts, or post in its office."""
+        posts = {post["session_id"] for post in self._repo.posts(team_id)}
+        posts.update(self._repo.team_session_ids(team_id))
+        tied = []
+        for task in self._services.ctx.schedule_repo.list():
+            deliver = task.get("deliver_to") or {}
+            if task.get("session_id") in posts or deliver.get("team_id") == team_id:
+                tied.append(task)
+        return tied
+
+    def _pause_team_rules(self, team_id: str, paused_by: str) -> int:
+        now = self._clock.now()
+        paused = 0
+        for task in self._team_rules(team_id):
+            if not task.get("enabled"):
+                continue
+            # A direct write: pausing never fails on a rule that no longer validates.
+            self._services.ctx.schedule_repo.set_enabled(
+                task["id"], False, now, paused_by=paused_by
+            )
+            paused += 1
+            self._turns.emit_external(
+                event("schedule.changed", {"task_id": task["id"], "change": "updated"})
+            )
+        return paused
+
+    def _resume_team_rules(self, team_id: str, paused_by: str) -> int:
+        from rinari.schedule.service import ScheduledTaskError
+
+        resumed = 0
+        for task in self._team_rules(team_id):
+            if task.get("enabled") or task.get("paused_by") != paused_by:
+                continue  # the owner's own pauses stay
+            try:
+                self._services.schedules.update(task["id"], {"enabled": True})
+            except (ScheduledTaskError, KeyError):
+                continue  # it no longer validates: it stays off, and says why when switched on
+            resumed += 1
+            self._turns.emit_external(
+                event("schedule.changed", {"task_id": task["id"], "change": "updated"})
+            )
+        return resumed
+
+    def stop_team(self, params: dict[str, Any]) -> dict[str, Any]:
+        """«Detener equipo»: this team alone, as «Detener a todos» does for every one.
+
+        Its turns are cut, what it had queued is dropped, its open errands wait
+        blocked and the rules that work for it are paused, until the owner
+        resumes it (or writes in its office).
+        """
         team = self._team(params)
-        return {"team": self._guard(lambda: self.teams.archive(team["id"]))}
+        if team.get("archived_at") is not None:
+            raise EngineProtocolError(INVALID_PARAMS, "An archived team is already stopped.")
+        self._set_team_stopped(team["id"], True)
+        blocked = self._halt_teams({team["id"]})
+        paused = self._pause_team_rules(team["id"], PAUSED_BY_TEAM_STOP)
+        self._changed(team["id"], "stopped")
+        return {"team": self.teams.view(team), "blocked_errands": blocked, "paused_rules": paused}
+
+    def resume_team(self, params_or_id: dict[str, Any] | str) -> dict[str, Any]:
+        team = self._team(
+            params_or_id if isinstance(params_or_id, dict) else {"team_id": params_or_id}
+        )
+        self._set_team_stopped(team["id"], False)
+        restored = self._restore_teams([team["id"]])
+        resumed = self._resume_team_rules(team["id"], PAUSED_BY_TEAM_STOP)
+        self._changed(team["id"], "resumed")
+        self.tick()
+        return {
+            "team": self.teams.view(team),
+            "restored_errands": restored,
+            "resumed_rules": resumed,
+        }
+
+    def archive(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Archived, the team stops for good: its turns are cut, its waits and queued
+        work dropped, its open errands cancelled and the rules that work for it
+        paused (an archived team kept its agents working before, 22-oct)."""
+        team = self._team(params)
+        if team.get("archived_at") is not None:
+            return {"team": self.teams.view(team), "paused_rules": 0}
+        archived = self._guard(lambda: self.teams.archive(team["id"]))
+        self._halt_teams({team["id"]})
+        # Archived wins over a stop: unarchiving resumes it ready to work.
+        paused = self._pause_team_rules(team["id"], PAUSED_BY_TEAM_ARCHIVE)
+        for task in self._team_rules(team["id"]):
+            if task.get("paused_by") == PAUSED_BY_TEAM_STOP:
+                self._services.ctx.schedule_repo.set_enabled(
+                    task["id"], False, self._clock.now(), paused_by=PAUSED_BY_TEAM_ARCHIVE
+                )
+        self._set_team_stopped(team["id"], False)
+        return {"team": archived, "paused_rules": paused}
+
+    def unarchive(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Back from the archive: its rules on again; cancelled errands stay cancelled."""
+        team = self._team(params)
+        if team.get("archived_at") is None:
+            return {"team": self.teams.view(team), "resumed_rules": 0}
+        restored = self._guard(lambda: self.teams.unarchive(team["id"]))
+        resumed = self._resume_team_rules(team["id"], PAUSED_BY_TEAM_ARCHIVE)
+        self.tick()
+        return {"team": restored, "resumed_rules": resumed}
+
+    def delete(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Delete an archived team for good: its office, errands, rules, memory and the
+        conversations of its posts. Archive first: that is what stops it."""
+        team = self._team(params)
+        if team.get("archived_at") is None:
+            raise EngineProtocolError(INVALID_PARAMS, "Archive the team before deleting it.")
+        sessions = sorted(
+            {post["session_id"] for post in self._repo.posts(team["id"])}
+            | set(self._repo.team_session_ids(team["id"]))
+        )
+        running = [sid for sid in sessions if self._turns.has_active_turn(sid)]
+        if running:
+            raise EngineProtocolError(
+                INVALID_PARAMS,
+                "A conversation of this team is still finishing a turn: try again in a moment.",
+                details={"session_ids": running},
+            )
+        rules = [task["id"] for task in self._team_rules(team["id"])]
+        for task_id in rules:
+            self._services.ctx.schedule_repo.delete(task_id)
+            self._turns.emit_external(
+                event("schedule.changed", {"task_id": task_id, "change": "deleted"})
+            )
+        with self._lock:
+            for session_id in sessions:
+                self._mentions.pop(session_id, None)
+                self._waits.pop(session_id, None)
+                self._direct.pop(session_id, None)
+        deleted = 0
+        for session_id in sessions:
+            try:
+                self._server._session_delete({"ref": session_id, "cascade": True})
+                deleted += 1
+            except NotFoundError:
+                continue
+        from rinari.engine_protocol.agency import forget_place
+
+        forget_place(self._services, "team", team["id"])
+        self._repo.delete(team["id"])
+        self._set_team_stopped(team["id"], False)
+        self._changed(team["id"], "deleted")
+        return {
+            "deleted": team["id"],
+            "deleted_sessions": deleted,
+            "deleted_rules": len(rules),
+        }
 
     def join(self, params: dict[str, Any]) -> dict[str, Any]:
         team = self._team(params)
@@ -705,6 +928,8 @@ class AgencyTeams:
         # board, as «Reanudar» does.
         if team["rinari_profile_id"] in self._halted_profiles():
             self.resume(team["rinari_profile_id"])
+        if team["id"] in self._stopped_teams():
+            self.resume_team(team["id"])
 
     def post_message(
         self,
@@ -764,7 +989,7 @@ class AgencyTeams:
             event("agency.office.message", {"team_id": team["id"], "message": message})
         )
         outcome: dict[str, str] = {}
-        if author_agent_id and team["rinari_profile_id"] in self._halted_profiles():
+        if author_agent_id and self._halts(team, self._halted_profiles(), self._stopped_teams()):
             # Posted by a turn that ended during «Detener a todos»: it stays in
             # the office, but nothing is queued to fire when the owner resumes.
             outcome = dict.fromkeys(mentions if wake else [], _HALTED)
@@ -1354,9 +1579,10 @@ class AgencyTeams:
                 self._recover()
         self._expire_waits()
         halted = self._halted_profiles()
-        self._tick_direct(halted)
+        stopped = self._stopped_teams()
+        self._tick_direct(halted, stopped)
         for team in self._repo.list(None):
-            if team["rinari_profile_id"] in halted:
+            if self._halts(team, halted, stopped):
                 continue
             for post in self._repo.posts(team["id"]):
                 session_id = post["session_id"]
@@ -1954,7 +2180,7 @@ class AgencyTeams:
                     {"team_id": team["id"], "errand_id": errand["id"]}
                 )
 
-    def _tick_direct(self, halted: set[str]) -> None:
+    def _tick_direct(self, halted: set[str], stopped: set[str] = frozenset()) -> None:
         """Tell an agent, in its direct chat, that the errand it left to a team was delivered."""
         with self._lock:
             ready = [sid for sid, queue in self._direct.items() if queue]
@@ -1970,7 +2196,7 @@ class AgencyTeams:
             errand = self._repo.errand(item["errand_id"])
             if team is None or errand is None or errand["status"] != "delivered":
                 continue
-            if team["rinari_profile_id"] in halted:
+            if self._halts(team, halted, stopped):
                 with self._lock:
                     self._direct.setdefault(session_id, []).insert(0, item)
                 continue
