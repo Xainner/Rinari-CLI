@@ -205,6 +205,19 @@ def _runtime_facts(services: ServiceContainer, record: SessionRecord) -> dict[st
         )
     else:
         facts["shell"] = f"shell.exec `command` runs in {os.environ.get('SHELL') or '/bin/sh'}"
+    # Asked to «check every minute» (22-oct), Rinari answered she could not and held
+    # her turn with a wait: the tool is on demand, so the fact says it exists. Not in
+    # a team post (its routines say it) nor in a scheduled run (it cannot schedule).
+    if (
+        getattr(services, "schedules", None) is not None
+        and not getattr(record, "team_id", None)
+        and getattr(record, "lineage_kind", None) != "schedule"
+    ):
+        facts["scheduling"] = (
+            "what must happen later or every N seconds, minutes or hours is scheduled with "
+            "schedule.propose (in_this_conversation repeats it here; load it with "
+            "capability.search); never wait for time inside a turn"
+        )
     try:
         provider = services.providers.get(record.provider_id)
         model = services.models.resolve(record.model_id, record.provider_id)

@@ -379,3 +379,37 @@ def test_mcp_output_with_nothing_usable_fails(project) -> None:
     result = rt.execute("mcp.Lab.prompt_guide", _args(root), _ctx(tmp_path, root))
     assert not result.ok
     assert result.error.code == ToolErrorCode.VALIDATION_FAILED
+
+
+#: The core every request carries (docs/tools.md §63, AGENTS.md «Herramientas»). A
+#: tool joins it only by the owner's decision: everything else is found on demand.
+CORE_TOOLS = frozenset(
+    {
+        "agent.cancel", "agent.message", "agent.result", "agent.spawn", "agent.status",
+        "agent.synthesize", "agent.wait", "artifact.read", "audio.transcribe",
+        "capability.activate", "capability.search", "checklist.update", "file.present",
+        "followup.suggest", "fs.glob", "fs.list", "fs.patch", "fs.read", "fs.read_image",
+        "fs.read_lines", "fs.read_pdf_pages", "fs.search_text", "fs.stat", "fs.write",
+        "git.diff", "git.status", "goal.update", "http.request", "memory.episodic",
+        "memory.propose", "memory.recall", "memory.remember", "process.list",
+        "process.logs", "process.output", "process.signal", "process.start",
+        "process.stop", "process.wait", "search.regex", "shell.exec", "skills.activate",
+        "skills.deactivate", "skills.list", "skills.read", "skills.show", "user.ask",
+        "verify.evaluate", "verify.plan", "verify.record", "wait.for", "web.download",
+        "web.fetch", "web.open", "web.search",
+    }
+)  # fmt: skip
+
+
+def test_the_always_loaded_core_does_not_grow_by_itself():
+    """22-oct: schedule.propose was made always loaded to fix one model's answer, against
+    the standard. A model learns that an on-demand tool exists from a line of its prompt
+    (a fact, a skill, a team's section), not from loading its schema everywhere."""
+    from rinari.tools.catalog import builtin_catalog
+
+    registry = builtin_catalog()
+    core = {name for name in registry.names() if registry.get(name).always_loaded}
+    assert core == CORE_TOOLS, (
+        f"added: {sorted(core - CORE_TOOLS)}, removed: {sorted(CORE_TOOLS - core)} — "
+        "the core changes only by the owner's decision (AGENTS.md «Herramientas»)"
+    )

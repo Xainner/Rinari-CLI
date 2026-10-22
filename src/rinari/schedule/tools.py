@@ -300,9 +300,9 @@ def schedule_tools(host: ScheduleToolHost):
             },
             capabilities=("state.write",),
             side_effects="local_reversible",
-            # Always in the list: a model that had to search for it answered «I can't
-            # check every minute» and held its turn with a wait instead (22-oct).
-            always_loaded=True,
+            # On demand, as the standard says (docs/tools.md §63): the conversation's
+            # facts name it, so a model knows it can schedule before it answers.
+            always_loaded=False,
             classify=lambda _i: ClassifiedAction("state.write"),
             handler=propose,
         ),

@@ -594,9 +594,10 @@ def test_a_task_says_how_much_it_notifies_and_a_model_can_quiet_it(services) -> 
     assert next(t for t in services.schedules.list() if t["name"] == "Callado")["notify"] == "none"
 
 
-def test_scheduling_is_always_in_the_tool_list() -> None:
-    """Rinari answered «I can't check every minute» before searching for it (22-oct)."""
+def test_the_conversation_knows_it_can_schedule_without_loading_the_tool(services) -> None:
+    """Rinari answered «I can't check every minute» (22-oct). The tool stays on demand
+    (docs/tools.md §63); one line of the conversation's facts names it."""
     tools = {tool.name: tool for tool in schedule_tools(ScheduleToolHost(service=None))}
-    assert tools["schedule.propose"].always_loaded is True
-    # Changing or stopping one is found from the proposal's description.
-    assert not tools["schedule.update"].always_loaded
+    assert tools["schedule.propose"].always_loaded is False
+    facts = agent_runtime._runtime_facts(services, services.sessions.show(_chat(services)))
+    assert "schedule.propose" in facts["scheduling"]
