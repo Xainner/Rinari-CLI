@@ -483,3 +483,19 @@ def test_queued_turns_survive_a_restart_and_a_stop(
         ]
     finally:
         again.close()
+
+
+def test_changing_the_card_reaches_the_agents_posts(server, turns) -> None:
+    """A post kept the model and permission the card had when the agent joined."""
+    team, writer, *_ = _studio(server)
+    pw = _post(team, writer)
+    _ok(
+        _call(
+            server,
+            "agency.agent.update",
+            {"agent_id": writer["id"], "patch": {"permission_profile": "read-only"}},
+        )
+    )
+    record = server._services.sessions.show(pw)
+    assert record.permission_profile == "read-only"
+    assert server._services.sessions.show(writer["session_id"]).permission_profile == "read-only"

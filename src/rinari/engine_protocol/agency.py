@@ -274,17 +274,20 @@ class AgencyMethods:
             updated = self.agency.update(agent["id"], patch)
         except AgencyError as exc:
             raise EngineProtocolError(INVALID_PARAMS, str(exc)) from None
-        # The direct chat follows the card's model and permission mode.
-        if updated.get("session_id"):
+        # Its direct chat and every post follow the card's model and permission mode:
+        # a post kept what the card said when the agent joined (replan, 22-oct).
+        sessions = [updated["session_id"]] if updated.get("session_id") else []
+        sessions += [
+            post["session_id"]
+            for post in self._services.ctx.team_repo.posts_of_agent(updated["id"])
+        ]
+        for session_id in sessions:
             if "permission_profile" in patch:
                 self._server._session_permission_set(
-                    {
-                        "ref": updated["session_id"],
-                        "permission_profile": updated["permission_profile"],
-                    }
+                    {"ref": session_id, "permission_profile": updated["permission_profile"]}
                 )
             if patch.get("model"):
-                self._services.sessions.set_model(updated["session_id"], updated["model"], None)
+                self._services.sessions.set_model(session_id, updated["model"], None)
         return {"agent": self._view(updated)}
 
     def archive(self, params: dict[str, Any]) -> dict[str, Any]:
