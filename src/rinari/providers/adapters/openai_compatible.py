@@ -144,9 +144,9 @@ class OpenAICompatibleAdapter(ProviderAdapter):
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": request.model,
-            "messages": [
-                _message_to_openai(m, tool_aliases) for m in expand_tool_images(request.messages)
-            ],
+            "messages": _joined_user_messages(
+                [_message_to_openai(m, tool_aliases) for m in expand_tool_images(request.messages)]
+            ),
             "stream": stream,
         }
         if request.tools:
@@ -437,6 +437,46 @@ def _wire_tool_name(name: str, tool_aliases: dict[str, str] | None) -> str:
         return name
     alias_of = {real: alias for alias, real in tool_aliases.items()}
     return alias_of.get(name, sanitize_tool_name(name))
+
+
+def _joined_user_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Consecutive user messages as one: the turn's message and the harness notes
+    after it (the local time, the tools note, the turn context).
+
+    Chat templates that require user and assistant to alternate (Gemma and
+    Mistral on llama.cpp or vLLM) reject two user messages in a row. The join
+    is the same on every request, so the cached prefix does not move.
+    """
+    joined: list[dict[str, Any]] = []
+    for message in messages:
+        previous = joined[-1] if joined else None
+        if (
+            previous is not None
+            and message.get("role") == "user"
+            and previous.get("role") == "user"
+            and set(message) <= {"role", "content"}
+            and set(previous) <= {"role", "content"}
+        ):
+            joined[-1] = {
+                "role": "user",
+                "content": _joined_content(previous.get("content"), message.get("content")),
+            }
+            continue
+        joined.append(message)
+    return joined
+
+
+def _joined_content(first: Any, second: Any) -> Any:
+    if isinstance(first, list) or isinstance(second, list):
+        return _content_parts(first) + _content_parts(second)
+    texts = [text for text in (first, second) if text]
+    return "\n\n".join(str(text) for text in texts)
+
+
+def _content_parts(content: Any) -> list[dict[str, Any]]:
+    if isinstance(content, list):
+        return list(content)
+    return [{"type": "text", "text": str(content)}] if content else []
 
 
 def _message_to_openai(

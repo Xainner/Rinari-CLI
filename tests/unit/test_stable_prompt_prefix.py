@@ -109,8 +109,45 @@ def test_openai_transports_send_the_note_as_the_last_user_message(transport) -> 
         payload = CodexResponsesAdapter()._responses_payload(request, stream=True)
         assert payload["instructions"] == "rules"
         items = payload["input"]
+    if transport == "chat":
+        # Chat Completions: one user message, the note after the owner's text
+        # (templates that require user and assistant to alternate).
+        assert items[-1]["role"] == "user" and items[-2]["role"] == "system"
+        assert items[-1]["content"].startswith("hola\n\n<turn-context>")
+        return
     assert items[-2]["content"] == "hola"
     assert items[-1]["role"] == "user" and "<turn-context>" in items[-1]["content"]
+
+
+def test_chat_completions_never_send_two_user_messages_in_a_row() -> None:
+    from types import SimpleNamespace
+
+    from rinari.providers.adapters.openai_compatible import OpenAICompatibleAdapter
+
+    image = SimpleNamespace(encoded=lambda: "AAAA")
+    request = ModelRequest(
+        model="m",
+        messages=(
+            ChatMessage.system("rules"),
+            ChatMessage(role="user", content="mira esto", images=(image,)),
+            ChatMessage.harness("Local time now: 2026-10-21 18:30 (Wednesday).", "clock"),
+            ChatMessage.assistant("Veo un gráfico."),
+            ChatMessage.user("¿y ahora?"),
+            ChatMessage.harness("Local time now: 2026-10-21 18:31 (Wednesday).", "clock"),
+            _note(),
+        ),
+    )
+    items = OpenAICompatibleAdapter()._payload(request, stream=True)["messages"]
+    roles = [item["role"] for item in items]
+    assert roles == ["system", "user", "assistant", "user"]
+    # The image keeps its parts, and the note follows as one more text part.
+    first = items[1]["content"]
+    assert first[0] == {"type": "text", "text": "mira esto"}
+    assert first[1]["type"] == "image_url"
+    assert first[-1]["text"].startswith("Local time now: 2026-10-21 18:30")
+    last = items[-1]["content"]
+    assert last.startswith("¿y ahora?\n\nLocal time now: 2026-10-21 18:31")
+    assert last.endswith("</turn-context>")
 
 
 # -- end to end: a PROJECT session, one runtime per turn (as the desktop) -----
