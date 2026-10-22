@@ -221,6 +221,19 @@ def _about(client: McpClient) -> dict[str, str]:
     return about
 
 
+def owned_by(owner: str, tags: Any) -> bool:
+    """Whether an account's owner is one of a conversation's owner tags.
+
+    `tags` is one tag ("agent:ID"), several (a post: the agent's and its
+    team's) or None.
+    """
+    if not owner or not tags:
+        return False
+    if isinstance(tags, str):
+        return owner == tags
+    return owner in tags
+
+
 class McpService:
     def __init__(
         self,
@@ -506,8 +519,9 @@ class McpService:
         """
         if not self._visible(state.scope, project, state.root):
             return False
-        # `agent` is the conversation's owner tag: "agent:ID" or, in a post, "team:ID".
-        mine = bool(agent) and state.owner == agent
+        # `agent` is the conversation's owner tag ("agent:ID") or, in a post,
+        # its tags (the agent's and "team:ID", D-33).
+        mine = owned_by(state.owner, agent)
         if state.owner and not mine:
             return False
         return allowed is None or mine or name in allowed
@@ -534,7 +548,7 @@ class McpService:
         if row is None or not row.get("enabled"):
             return False
         owner = row.get("owner") or ""
-        mine = bool(agent) and owner == agent
+        mine = owned_by(owner, agent)
         if owner and not mine:
             return False
         return allowed is None or mine or name in allowed

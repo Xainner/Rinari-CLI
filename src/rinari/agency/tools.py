@@ -3,7 +3,10 @@
 A post (its conversation in a team) has the office, the board and its team:
 `office.say`, `office.wait`, `errand.create`, `errand.review`, `board.list`
 and `team.members`. An agent's direct chat has the Agency's teams:
-`teams.list`, `errand.create` (to a team) and `errand.review`.
+`teams.list`, `office.say` (in the office of one of its teams), `errand.create`
+(to a team) and `errand.review`. `office.say` says which mentions woke their
+agent and which did not, and why (D-31), so the agent never claims it told
+someone it did not.
 
 What they do is counted by the Engine from the turn that runs, never from
 the model's arguments (D-2): the chain and the hop come from the work the
@@ -18,6 +21,18 @@ from dataclasses import dataclass
 from typing import Any
 
 MAX_TEXT = 8000
+
+#: What each reason a mention did not wake its agent means, for the model.
+_NOT_WOKEN = {
+    "too_many_hops": "this chain of work reached its hop limit",
+    "too_many_mentions": "a message wakes at most 5 agents",
+    "too_many_deliveries": "this chain of work reached its delivery limit",
+    "already_woken": "this turn already woke them in this chain",
+    "stopped_by_owner": "the owner stopped the Agency",
+    "not_in_team": "they are not in this team",
+    "unknown_name": "no teammate has that name",
+    "ambiguous_name": "several teammates match that name",
+}
 
 
 @dataclass
@@ -60,6 +75,34 @@ def _work_of(board, session_id: str) -> dict[str, Any]:
         return dict(board._live.get(session_id) or {})
 
 
+def _said(team: dict, message: dict, report: dict, names: list[str]) -> Any:
+    """`office.say`'s result: what was posted, who was woken and who was not (D-31)."""
+    not_woken = report.get("not_woken") or []
+    data: dict[str, Any] = {
+        "posted": True,
+        "team": team["name"],
+        "hop": message["hop"],
+        "mentions": len(report.get("woken") or []),
+        "woken": report.get("woken") or [],
+        "not_woken": not_woken,
+    }
+    if not_woken:
+        lines = []
+        for item in not_woken:
+            why = _NOT_WOKEN.get(item["reason"], item["reason"])
+            if item.get("candidates"):
+                why += f" ({', '.join(item['candidates'])})"
+            lines.append(f"@{item['name']}: {why}")
+        data["note"] = (
+            "Posted, but these mentions were NOT delivered, so do not say they were told: "
+            + "; ".join(lines)
+            + ". Mention a teammate by one of these exact names: "
+            + ", ".join(names)
+            + "."
+        )
+    return _ok(data)
+
+
 def _team_named(repo, profile: str, name: Any) -> dict[str, Any] | None:
     wanted = str(name or "").strip().lstrip("@").lower()
     if not wanted:
@@ -67,8 +110,13 @@ def _team_named(repo, profile: str, name: Any) -> dict[str, Any] | None:
     return next((item for item in repo.list(profile) if item["name"].lower() == wanted), None)
 
 
-def _teams_directory(host: TeamToolHost, profile: str, but: str | None = None) -> list[dict]:
-    """The profile's teams as an agent may see them: never their memory nor accounts."""
+def _teams_directory(
+    host: TeamToolHost, profile: str, but: str | None = None, mine: set[str] | None = None
+) -> list[dict]:
+    """The profile's teams as an agent may see them: never their memory nor accounts.
+
+    With `mine` (the ids of the agent's teams), each says whether it is one of them.
+    """
     repo = host.services.ctx.team_repo
     agents = host.services.ctx.agency_repo
     out = []
@@ -77,14 +125,15 @@ def _teams_directory(host: TeamToolHost, profile: str, but: str | None = None) -
             continue
         chief = agents.get(team["chief_agent_id"]) if team.get("chief_agent_id") else None
         members = [agents.get(post["agent_id"]) for post in repo.posts(team["id"])]
-        out.append(
-            {
-                "name": team["name"],
-                "purpose": team.get("purpose") or "",
-                "chief": chief["name"] if chief else None,
-                "members": [agent["name"] for agent in members if agent],
-            }
-        )
+        item = {
+            "name": team["name"],
+            "purpose": team.get("purpose") or "",
+            "chief": chief["name"] if chief else None,
+            "members": [agent["name"] for agent in members if agent],
+        }
+        if mine is not None:
+            item["yours"] = team["id"] in mine
+        out.append(item)
     return out
 
 
@@ -125,7 +174,8 @@ def _leave_errand(
         board._stopped(target_team, work.get("chain_id") or "", "too_many_hops")
         return _fail(
             ToolErrorCode.PERMISSION_DENIED,
-            "This chain of work is already 3 hops long; the owner was told.",
+            f"This chain of work is already {board.MAX_HOPS} hops long: the errand was not "
+            "left, and the owner was told.",
         )
     try:
         errand = host.services.teams.create_errand(
@@ -227,6 +277,7 @@ def team_tools(host: TeamToolHost):
                 "You already wrote 3 times in the office this turn: put the rest in your answer.",
             )
         work = _work_of(board, host.session_id)
+        report: dict[str, Any] = {}
         message = board.post_message(
             team,
             text.strip(),
@@ -234,8 +285,9 @@ def team_tools(host: TeamToolHost):
             chain_id=work.get("chain_id"),
             hop=int(work.get("hop") or 0) + 1,
             external=_external(ctx),
+            report=report,
         )
-        return _ok({"posted": True, "mentions": len(message["mentions"]), "hop": message["hop"]})
+        return _said(team, message, report, list(board._display_names(team["id"])))
 
     def wait(arguments, ctx):
         found = context()
@@ -330,8 +382,9 @@ def team_tools(host: TeamToolHost):
         ToolDefinition(
             name="office.say",
             description=(
-                "Write in your team's office chat. Mention a teammate with @Name to wake "
-                "them; a message without a mention wakes nobody."
+                "Write in your team's office chat. Mention a teammate with @ and their exact "
+                "name (see team.members) to wake them; a message without a mention wakes "
+                "nobody. The result says who was woken and who was not."
             ),
             input_schema={
                 "type": "object",
@@ -427,7 +480,46 @@ def direct_tools(host: TeamToolHost):
         found = context()
         if found is None:
             return _fail(ToolErrorCode.DEPENDENCY_ERROR, not_agent)
-        return _ok({"teams": _teams_directory(host, found[0]["rinari_profile_id"])})
+        agent = found[0]
+        mine = {team["id"] for team in host.services.teams.teams_of(agent["id"])}
+        return _ok({"teams": _teams_directory(host, agent["rinari_profile_id"], mine=mine)})
+
+    def say(arguments, ctx):
+        found = context()
+        if found is None:
+            return _fail(ToolErrorCode.DEPENDENCY_ERROR, not_agent)
+        agent, board = found
+        args = arguments or {}
+        team = host.services.teams.team_of(agent["id"], args.get("team"))
+        if team is None:
+            mine = [team["name"] for team in host.services.teams.teams_of(agent["id"])]
+            return _fail(
+                ToolErrorCode.NOT_FOUND,
+                "You can only write in the office of a team you work in: "
+                + (", ".join(mine) if mine else "you are in no team")
+                + ".",
+            )
+        text = args.get("text")
+        if not isinstance(text, str) or not text.strip() or len(text) > MAX_TEXT:
+            return _fail(ToolErrorCode.INVALID_ARGUMENT, f"text must be 1..{MAX_TEXT} characters")
+        if not board.count_say(host.session_id):
+            return _fail(
+                ToolErrorCode.RESOURCE_EXHAUSTED,
+                "You already wrote 3 times in an office this turn: put the rest in your answer.",
+            )
+        work = _work_of(board, host.session_id)
+        report: dict[str, Any] = {}
+        message = board.post_message(
+            team,
+            text.strip(),
+            author_agent_id=agent["id"],
+            chain_id=work.get("chain_id"),
+            hop=int(work.get("hop") or 0) + 1,
+            external=_external(ctx),
+            woken=board.turn_woken(host.session_id),
+            report=report,
+        )
+        return _said(team, message, report, list(board._display_names(team["id"])))
 
     def create(arguments, ctx):
         found = context()
@@ -461,12 +553,32 @@ def direct_tools(host: TeamToolHost):
         ToolDefinition(
             name="teams.list",
             description=(
-                "The owner's Agency teams: what each is for, its chief and its agents. Use it "
-                "to pass work to a team with errand.create."
+                "The owner's Agency teams: what each is for, its chief, its agents and whether "
+                "you work in it (yours). Pass work to a team with errand.create, or write in "
+                "the office of one of yours with office.say."
             ),
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
             handler=teams_list,
             **read,
+        ),
+        ToolDefinition(
+            name="office.say",
+            description=(
+                "Write in the office chat of a team you work in (team: its name), as yourself. "
+                "Mention a teammate with @ and their exact name to wake them; a message without "
+                "a mention wakes nobody. The result says who was woken and who was not."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "team": {"type": "string", "description": "The team's name."},
+                    "text": {"type": "string", "maxLength": MAX_TEXT},
+                },
+                "required": ["team", "text"],
+                "additionalProperties": False,
+            },
+            handler=say,
+            **write,
         ),
         ToolDefinition(
             name="errand.create",

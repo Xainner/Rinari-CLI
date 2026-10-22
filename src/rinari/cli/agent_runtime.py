@@ -241,29 +241,99 @@ def _ask_new_destinations(services: ServiceContainer, record: SessionRecord) -> 
     return default
 
 
+def _agency_agent(services: ServiceContainer, record: SessionRecord) -> dict | None:
+    """The Agency agent whose conversation this is (direct chat, post, rule run, child)."""
+    if not getattr(record, "agent_id", None) or getattr(services, "agency", None) is None:
+        return None
+    return services.agency.for_session(record.id)
+
+
+def _agent_soul(services: ServiceContainer, agent: dict, record: SessionRecord) -> str:
+    """D-34: the Soul an agent speaks with: the one on its card (or the one the owner set
+    on this conversation), never Rinari's active Soul. Empty: its card is its identity."""
+    soul_id = agent.get("soul_id") or record.soul_id
+    if not soul_id:
+        return ""
+    try:
+        return load_named_soul(services.ctx.home, soul_id).text
+    except Exception:
+        return ""  # a Soul that was removed: the card alone, never Rinari's
+
+
+def _without_self_section(constitution: str) -> str:
+    """The constitution without its «Yourself» section, where Rinari speaks of the app,
+    the Engine and the CLI as herself: an agent is not Rinari (D-34)."""
+    import re
+
+    return re.sub(r"\n## Yourself\n.*?(?=\n---|\n## |\Z)", "\n", constitution, flags=re.S)
+
+
+def _voice_for(services: ServiceContainer, record: SessionRecord) -> str:
+    """Character intensity applies to a Soul: an agent without one has no voice rules."""
+    agent = _agency_agent(services, record)
+    if agent is not None and not _agent_soul(services, agent, record):
+        return ""
+    return _voice_text(services)
+
+
 def _agent_identity(services: ServiceContainer, record: SessionRecord) -> str | None:
     """Rinari Agency: who this conversation's agent is, from the owner's card.
 
     The card is written by the owner only (never by the model), so its
-    instructions are the owner's words for this agent. It changes only when
-    the owner edits the card, so it is cached with the session.
+    instructions are the owner's words for this agent. D-34: they are its
+    identity; it never speaks as Rinari nor with her personality. With a
+    saved Soul on its card, that Soul (its own prompt segment) is its
+    character and the card says what it does.
     """
-    if not getattr(record, "agent_id", None) or services.agency is None:
-        return None
-    agent = services.agency.for_session(record.id)
+    agent = _agency_agent(services, record)
     if agent is None:
         return None
     lines = [
-        "## Your role in Rinari Agency",
-        f"In this conversation you work as the agent «{agent['name']}» of the owner's "
-        "Rinari Agency, not as Rinari's general assistant.",
+        "## Who you are",
+        f"You are «{agent['name']}», an agent of the owner's Rinari Agency. You are not "
+        "Rinari, the owner's general assistant: do not speak as her or with her personality, "
+        "and do not call yourself Rinari.",
     ]
+    if _agent_soul(services, agent, record):
+        lines.append(
+            "Your character and voice are the Soul above, as the owner chose it for you; "
+            "your name and your work are these."
+        )
+    else:
+        lines.append(
+            "Your identity is this card, written by the owner: your name, your job and your "
+            "instructions. Speak plainly, in your own voice as this agent."
+        )
     if agent.get("role"):
         lines.append(f"Your job: {agent['role']}")
     if agent.get("instructions"):
-        lines += ["The owner's instructions for this agent:", agent["instructions"]]
+        lines += ["The owner's instructions for you:", agent["instructions"]]
     lines += _agency_place(services, record, agent)
     return "\n".join(lines)
+
+
+def _engine_home_guard(services: ServiceContainer, record: SessionRecord, cwd: Path) -> dict:
+    """Rinari's own home is off limits to an Agency agent's conversation (#4).
+
+    Any conversation of an agent (its direct chat, a post, a rule's run, and
+    their children), whatever its mode: it keeps its own workspace and its
+    own outputs, and may read installed skills (their scripts run from
+    there). Rinari's own conversations keep today's behaviour.
+    """
+    if not getattr(record, "agent_id", None):
+        return {}
+    layout = services.ctx.layout
+    home = layout.root.resolve()
+    workspace = Path(cwd).resolve()
+    opened = [layout.artifacts_dir / record.id]
+    if workspace != home and home in workspace.parents:
+        # Its own chat workspace (workspaces/<id>), never the home itself.
+        opened.append(workspace)
+    return {
+        "engine_home": home,
+        "engine_home_open": tuple(opened),
+        "engine_home_readable": (services.skills.user_skills_dir(),),
+    }
 
 
 def _agency_pack(services: ServiceContainer, record: SessionRecord) -> str | None:
@@ -302,13 +372,21 @@ def _agency_place(services: ServiceContainer, record: SessionRecord, agent: dict
     if pack is None:
         return []  # a child or a fork: no Agency tools to speak of
     if pack == "direct":
-        return [
+        mine = [team["name"] for team in teams.teams_of(agent["id"])]
+        lines = [
             "",
             "## The Agency's teams",
             "You can pass work to one of the owner's teams: teams.list shows them and "
             "errand.create leaves one an errand (its chief takes it). You are told here when "
             "it is delivered, to review it with errand.review.",
         ]
+        if mine:
+            lines.append(
+                "You work in these teams, and office.say writes in their office as you: "
+                + ", ".join(f"«{name}»" for name in mine)
+                + "."
+            )
+        return lines
     team = repo.get(record.team_id)
     if team is None:
         return []
@@ -333,7 +411,11 @@ def _agency_place(services: ServiceContainer, record: SessionRecord, agent: dict
             "to pass to a teammate."
         )
     if mates:
-        lines += ["Your teammates (write @Name in the office to wake one):", *mates]
+        lines += [
+            "Your teammates (write @ and their exact name in the office to wake one; a "
+            "mention wakes them, so only mention whoever you need something from):",
+            *mates,
+        ]
     lines.append(
         "Use the office, the board and team.members (who is free right now). If what you are "
         "asked depends on a teammate doing something first, call office.wait with their name."
@@ -350,9 +432,15 @@ def build_assembler_context(
     # Canonical assets through the identity loader (user override supported,
     # harness.md 37; version/sha256 traced by the build manifest).
     constitution = load_constitution(services.ctx.home).text
+    agent = _agency_agent(services, record)
+    if agent is not None:
+        # D-34: an Agency agent never takes Rinari's persona: its card's Soul,
+        # or none (its card is its identity), and not her «Yourself» either.
+        constitution = _without_self_section(constitution)
+        soul = _agent_soul(services, agent, record)
     # Session-scope Soul override wins; None falls through to the global
     # Soul 3.0 chain (active custom → legacy ~/soul.md → bundled default).
-    if record.soul_id is not None:
+    elif record.soul_id is not None:
         soul = load_named_soul(services.ctx.home, record.soul_id).text
     else:
         soul = load_active_soul(services.ctx.home).text
@@ -437,7 +525,7 @@ def build_assembler_context(
             "inspect and stop those processes from the desktop Processes panel."
         ),
         soul=canonical,
-        voice=_voice_text(services),
+        voice=_voice_for(services, record),
         extended_identity=extended,
         agent_identity=_agent_identity(services, record),
         project_instructions=instructions,
@@ -1100,6 +1188,7 @@ def build_agent_session(
         pty=_build_pty_registry(),
         worktree=_ensure_worktree_baseline(services, record),
         private_roots=(services.changes.blobs.root, services.ctx.layout.root / "ssh"),
+        **_engine_home_guard(services, record, cwd if root is None else root),
         lsp=_build_lsp_manager(root),
         validation=services.verification,
         memory=services.memory,
@@ -2681,7 +2770,7 @@ def _run_turn_unlocked(
         base = replace(base, memory=memory)
         session.context.assembler_base = base
     # A level changed in Settings (or by the CLI) applies on the next turn.
-    voice = _voice_text(services)
+    voice = _voice_for(services, session.record)
     if voice != base.voice:
         base = replace(base, voice=voice)
         session.context.assembler_base = base

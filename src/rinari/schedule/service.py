@@ -212,6 +212,9 @@ class ScheduleService:
         # Set by the Engine server: a validated proposal becomes the
         # `schedule.proposed` event the desktop shows as a card.
         self.on_proposed: Callable[[dict[str, Any]], None] | None = None
+        # Rinari Agency: checks where an agent's rule delivers (`deliver_to`)
+        # and returns it with ids; raises ValueError with a safe message.
+        self.check_delivery: Callable[[str, Any], dict[str, Any]] | None = None
 
     # -- validation --------------------------------------------------------
 
@@ -297,6 +300,7 @@ class ScheduleService:
             model, skills, permission_profile = None, [], None
         else:
             session_id = None
+        deliver_to = self._delivery(agent_id, merged.get("deliver_to"))
         return {
             "name": name.strip(),
             "kind": kind,
@@ -314,8 +318,23 @@ class ScheduleService:
             "agent_id": agent_id,
             "target": target,
             "session_id": session_id,
+            "deliver_to": deliver_to,
             "enabled": enabled,
         }
+
+    def _delivery(self, agent_id: str | None, raw: Any) -> dict[str, Any] | None:
+        """Where an agent's rule also delivers its result: its team's office or a
+        teammate (Rinari Agency). Only an agent's rule has an office."""
+        if raw is None or raw == {}:
+            return None
+        if agent_id is None:
+            raise ScheduledTaskError("Only a Rinari Agency agent's rule delivers to an office.")
+        if self.check_delivery is None:
+            raise ScheduledTaskError("Delivering to an office needs the Agency.")
+        try:
+            return self.check_delivery(agent_id, raw)
+        except ValueError as exc:
+            raise ScheduledTaskError(str(exc)) from None
 
     def validate(self, raw: dict[str, Any]) -> dict[str, Any]:
         """A task as `create` would store it, without storing it (proposals)."""
@@ -383,6 +402,10 @@ class ScheduleService:
         # A new schedule, or switching a task back on, counts from now: runs
         # missed while it was off are not caught up.
         task["next_run_at"] = self._first_run(task, now) if rescheduled else current["next_run_at"]
+        if "enabled" not in patch and not task["enabled"]:
+            # Still off, and not by the owner's hand now: who paused it stays known
+            # («Detener a todos» switches back on only what it switched off).
+            task["paused_by"] = current.get("paused_by")
         return self.view(self._repo.save(task_id, task))
 
     def delete(self, task_id: str) -> bool:

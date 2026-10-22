@@ -193,10 +193,15 @@ def test_stop_all_halts_the_board_until_the_owner_resumes(
     assert len(turns) == before  # nothing started after the stop
     blocked = server._services.ctx.team_repo.errand(queued["id"])
     assert blocked["status"] == "blocked" and blocked["return_reason"] == "stopped_by_owner"
-    _ok(_call(server, "agency.resume", {}))
-    assert len(turns) == before  # resuming does not retry what was blocked
-    _ok(_call(server, "agency.errand.retry", {"errand_id": queued["id"]}))
+    _finish(server, _post(team, beto), None, name="turn.cancelled")
+    resumed = _ok(_call(server, "agency.resume", {}))
+    # #18: what the stop blocked goes back as it was and runs.
+    assert resumed["restored_errands"] >= 1
+    assert server._services.ctx.team_repo.errand(queued["id"])["status"] == "in_progress"
     assert turns[-1]["session_id"] == _post(team, beto)
+    # The rule whose folder was deleted cannot come back on: it stays paused by the stop.
+    kept = server._services.ctx.schedule_repo.get(rule["id"])
+    assert kept["enabled"] is False and kept["paused_by"] == "agency_stop"
 
 
 # -- I1: an agent's children work for the same agent --------------------------------------------

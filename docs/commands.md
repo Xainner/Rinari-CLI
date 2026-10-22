@@ -1084,6 +1084,68 @@ start (within the 12 h window), and `session.queue.clear` ends it `cancelled`
 (`cancelled_by_owner`). An archived conversation is used as it is and stays
 archived; a deleted one fails the run (`conversation_deleted`) and switches
 the task off. A conversation left out of memory still runs.
+Rinari Agency audit (`agency_audit_v1`, 2026-10-21). A chain of work stops
+at 8 hops (D-31; 5 mentions per message, 20 deliveries per chain). Whatever
+stops it (`too_many_hops`, `too_many_mentions`, `too_many_deliveries`,
+`too_many_returns`, `no_chief`, `could_not_start`, `wait_expired`,
+`wait_cancelled`) leaves one office message per chain and reason
+(`system: true`, `author_kind: "system"`, `notice {kind: "stopped", reason,
+detail?, chain_id}`) and `agency.chain.stopped` carries `team_id`,
+`chain_id`, `reason`, `detail?` and its `message_id`. `agency.chain.dismiss
+{team_id, message_id? | chain_id?}` → `{dismissed: [ids]}` marks it seen
+(`notice.dismissed_at`); it stays in the office. An agent leaving a team
+(also by archive) posts `notice {kind: "left", agent, chief}` (`chief` null:
+no chief left). The post tool `office.say` answers `{posted, team, hop,
+mentions, woken: [names], not_woken: [{name, reason, candidates?}], note?}`
+with reasons `too_many_hops`, `too_many_mentions`, `too_many_deliveries`,
+`already_woken`, `stopped_by_owner`, `not_in_team`, `unknown_name` and
+`ambiguous_name`; `note` tells the model plainly which mentions were not
+delivered and the exact names to use. A mention is a teammate's full name
+or, when it is unambiguous, the first whole words of one («@Operator» →
+«Operator de MetaTrader»). A delivered errand wakes only the agent that
+asked: in its post a review turn (`origin.kind: "agency_delivery"`) whose
+answer stays in the post; the owner's own errands wake no agent. The office
+message of a delivery mentions only the asker. `agency.status` adds
+`session_ids {working, needs_you}`, `stopped` (the profile, or the active
+one, is halted) and `waiting_for_owner {errands, chains}` (delivered errands
+only the owner will review and stopped chains not dismissed); `needs_you` is
+the agents waiting for an approval plus those two. `agency.resume` →
+`{resumed, restored_errands, resumed_rules}`: errands «Detener a todos»
+blocked go back as they were (in progress → pending) and the rules it paused
+(`paused_by: "agency_stop"`) are switched on again; errands a cut turn left
+during the stop, and rules the owner switched off, stay. While halted, the
+owner's own message in an agent's chat runs; nothing else wakes.
+`agency.agent.archive` → `{agent, left_teams, paused_rules}`: it leaves every
+team (as `agency.team.leave`: turn cut, errands to the chief, next member as
+chief), its rules are paused (`paused_by: "agent_archived"`) and its running
+turns cancelled. `agency.agent.unarchive {agent_id}` brings it back without
+teams, rules still off. `agency.agent.list {archived: true}` lists only the
+archived ones. `agency.agent.get {agent_id, limit?}` sessions carry `agency
+{kind: "direct" | "post" | "former_post" | "rule_run" | "child" | "other",
+team_id?, team_name?, task_id?, run_id?, parent_session_id?}`. The agent card
+has `soul_id` (a saved Soul, `soul.list`; unknown → INVALID_PARAMS): an
+agent never gets Rinari's active Soul, her character intensity nor the
+constitution's «Yourself»; its card is its identity and, with `soul_id`,
+that Soul is its character (D-34). In a post an agent sees its own
+connectors and accounts plus the team's (D-33). A task of an agent takes
+`deliver_to {kind: "office", team}` (one of its teams) or `{kind: "agent",
+agent, team?}` (a teammate), by id or name, stored as `{kind: "office",
+team_id}` / `{kind: "agent", agent_id, team_id}`: a completed run's result
+(the final answer, the reminder or the connector's result) is posted in that
+office as the agent, mentioning only the teammate for `agent`; a failed
+delivery is the run's `reason` (`not delivered: …`). `schedule.propose`
+takes `deliver_to` with names. An agent's direct chat has `office.say {team,
+text}` for the offices of its teams, and `teams.list` says which are `yours`.
+`agency.templates.list {language?}` → `{templates: [{id, language,
+languages, team {name, purpose}, agents [{name, role, instructions,
+permission_profile}]}]}` (English when the language is missing) and
+`agency.team.from_template {template_id, language?, model?, name?,
+rinari_profile_id?}` → `{team, agents}` creates them (no connectors,
+accounts nor budget). Every conversation of an agent is refused, in every
+mode, any `fs.*` path or shell command (its folder or a path in its text,
+quoted, relative, `~` or a variable) inside the Engine's home, except its own
+workspace and outputs and, for reading, installed skills (policy rule
+`engine_home`); a path a command builds at run time is not seen.
 Remote MCP (`mcp_remote_v1`): servers are `transport: "stdio"` (a
 `command` array) or `"http"` (a `url`, http/https, no userinfo) speaking the
 Streamable HTTP transport of MCP 2025-03-26: one POST per JSON-RPC message

@@ -183,17 +183,61 @@ class AgencyMethods:
         include = params.get("include_archived", False)
         if not isinstance(include, bool):
             raise EngineProtocolError(INVALID_PARAMS, "Param 'include_archived' must be a boolean.")
+        archived = params.get("archived", False)
+        if not isinstance(archived, bool):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'archived' must be a boolean.")
         profile = self._server._profile_filter(params)
-        agents = self.agency.list(profile, include_archived=include)
+        # archived: only the archived ones (to bring one back); include_archived: all.
+        agents = self.agency.list(profile, include_archived=include, archived_only=archived)
         return {"agents": [self._view(agent) for agent in agents]}
 
     def get(self, params: dict[str, Any]) -> dict[str, Any]:
+        """The card, and its conversations with what each one is (E12): its direct
+        chat, a post (with its team), a run of one of its rules (with the task and
+        the run) or a child of one of those."""
         agent = self._agent(params)
-        sessions = self._services.sessions.list(agent_id=agent["id"], limit=50)
+        limit = params.get("limit", 100)
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 500:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'limit' must be an int in 1..500.")
+        sessions = self._services.sessions.list(agent_id=agent["id"], limit=limit)
         return {
             "agent": self._view(agent),
-            "sessions": [session_to_dict(record) for record in sessions],
+            "sessions": [
+                {**session_to_dict(record), "agency": self._session_kind(agent, record)}
+                for record in sessions
+            ],
         }
+
+    def _session_kind(self, agent: dict[str, Any], record: Any) -> dict[str, Any]:
+        repo = self._services.ctx.team_repo
+        if record.id == agent.get("session_id"):
+            return {"kind": "direct"}
+        post = repo.post_for_session(record.id)
+        if post is not None:
+            team = repo.get(post["team_id"])
+            return {
+                "kind": "post",
+                "team_id": post["team_id"],
+                "team_name": team["name"] if team else None,
+            }
+        if getattr(record, "parent_session_id", None):
+            return {"kind": "child", "parent_session_id": record.parent_session_id}
+        if getattr(record, "team_id", None):
+            # The post of a team it left: still readable, no longer working there.
+            team = repo.get(record.team_id)
+            return {
+                "kind": "former_post",
+                "team_id": record.team_id,
+                "team_name": team["name"] if team else None,
+            }
+        if getattr(record, "lineage_kind", None) == "schedule":
+            brief = getattr(record, "brief", None) or {}
+            return {
+                "kind": "rule_run",
+                "task_id": brief.get("task_id"),
+                "run_id": brief.get("run_id"),
+            }
+        return {"kind": "other"}
 
     def create(self, params: dict[str, Any]) -> dict[str, Any]:
         raw = params.get("agent")
@@ -231,8 +275,54 @@ class AgencyMethods:
         return {"agent": self._view(updated)}
 
     def archive(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Archive an agent (E5): it stops, leaves every team and its rules are paused.
+
+        Leaving is `agency.team.leave`: its post's turn is cut, its open errands
+        go to the chief and, if it was the chief, the next member is (or no one,
+        and the office says so). Its rules are switched off and stay off if it
+        comes back. Its conversations and spend stay readable.
+        """
+        from rinari.engine_protocol.agency_teams import PAUSED_BY_ARCHIVE
+
         agent = self._agent(params)
-        return {"agent": self._view(self.agency.archive(agent["id"]))}
+        if agent.get("archived_at") is not None:
+            return {"agent": self._view(agent), "left_teams": [], "paused_rules": 0}
+        board = getattr(self._server, "_teams", None)
+        left = []
+        for team in self._services.teams.teams_of(agent["id"]):
+            if board is not None:
+                board.leave({"team_id": team["id"], "agent_id": agent["id"]})
+            else:
+                self._services.teams.leave(team["id"], agent["id"])
+            left.append(team["id"])
+        repo = self._services.ctx.schedule_repo
+        now = self._services.ctx.clock.now()
+        paused = []
+        for task in repo.list():
+            if task.get("agent_id") != agent["id"]:
+                continue
+            if task.get("enabled") or task.get("paused_by"):
+                # Off by the archive, whatever paused it before (a stop's resume
+                # must not switch on a rule of an archived agent).
+                repo.set_enabled(task["id"], False, now, paused_by=PAUSED_BY_ARCHIVE)
+                paused.append(task["id"])
+        for session_id in self._services.ctx.agency_repo.session_ids(agent["id"]):
+            if self._turns.has_active_turn(session_id):
+                try:
+                    self._turns.cancel_turn(session_id)
+                except Exception:  # already over
+                    continue
+        archived = self.agency.archive(agent["id"])
+        for task_id in paused:
+            self._turns.emit_external(
+                event("schedule.changed", {"task_id": task_id, "change": "updated"})
+            )
+        return {"agent": self._view(archived), "left_teams": left, "paused_rules": len(paused)}
+
+    def unarchive(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Bring an archived agent back (E5): not into its teams, its rules still off."""
+        agent = self._agent(params)
+        return {"agent": self._view(self.agency.unarchive(agent["id"]))}
 
     def _draft_caller(self):
         """The owner's default model (the one a new conversation uses), or None."""
@@ -438,13 +528,16 @@ class AgencyMethods:
             profiles = {profile} if profile else halt_profiles(self._services, listed)
             for each in sorted(profiles):
                 halted["blocked_errands"] += board.halt(each, by_all=not profile)["blocked_errands"]
+        from rinari.engine_protocol.agency_teams import PAUSED_BY_STOP
+
         paused = []
         for task in self._services.ctx.schedule_repo.list():
             if task.get("agent_id") in agents and task.get("enabled"):
                 # A direct write: pausing never fails on a rule that no longer
                 # validates (a watched folder that was deleted, for example).
+                # Marked, so «Reanudar» switches back on only these (#18).
                 self._services.ctx.schedule_repo.set_enabled(
-                    task["id"], False, self._services.ctx.clock.now()
+                    task["id"], False, self._services.ctx.clock.now(), paused_by=PAUSED_BY_STOP
                 )
                 paused.append(task["id"])
         cancelled = []
@@ -476,7 +569,14 @@ class AgencyMethods:
         }
 
     def status(self, params: dict[str, Any]) -> dict[str, Any]:
-        """What the Agency card says: how many agents, working and waiting."""
+        """What the Agency card says: how many agents, working and waiting (E9).
+
+        `needs_you` counts the agents waiting for an approval plus what only
+        the owner can move: delivered errands he reviews and stopped chains he
+        has not dismissed (`waiting_for_owner`). `session_ids` says which
+        conversations work or wait, for the app to mark each post. `stopped`:
+        «Detener a todos» halted this profile (the active one with no profile).
+        """
         profile = self._server._profile_filter(params)
         agents = self.agency.list(profile)
         sessions = {
@@ -485,19 +585,83 @@ class AgencyMethods:
             for session_id in self._services.ctx.agency_repo.session_ids(agent["id"])
         }
         state = self._turns.runtime_state()
-        working = {
-            sessions[turn["session_id"]]
-            for turn in state["active_turns"]
-            if turn["session_id"] in sessions
+        working_sessions = {
+            turn["session_id"] for turn in state["active_turns"] if turn["session_id"] in sessions
         }
-        waiting = {
-            sessions[item["session_id"]]
+        waiting_sessions = {
+            item["session_id"]
             for item in state["pending_approvals"]
             if item.get("session_id") in sessions
         }
+        working = {sessions[session_id] for session_id in working_sessions}
+        waiting = {sessions[session_id] for session_id in waiting_sessions}
+        board = getattr(self._server, "_teams", None)
+        owner = (
+            board.waiting_for_owner(profile) if board is not None else {"errands": 0, "chains": 0}
+        )
+        stopped_profiles = set(agency_settings(self._services)["stopped_profiles"])
         return {
             "agents": len(agents),
             "working": len(working),
-            "needs_you": len(waiting),
+            "needs_you": len(waiting) + owner["errands"] + owner["chains"],
             "agent_ids": {"working": sorted(working), "needs_you": sorted(waiting)},
+            "session_ids": {
+                "working": sorted(working_sessions),
+                "needs_you": sorted(waiting_sessions),
+            },
+            "stopped": (profile or self._services.rinari_profiles.active_id()) in stopped_profiles,
+            "waiting_for_owner": owner,
         }
+
+    # -- templates (E11, «Usar una plantilla») -----------------------------------
+
+    def templates_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        from rinari.agency.templates import TemplateError, templates
+
+        try:
+            return {"templates": templates(params.get("language"))}
+        except TemplateError as exc:
+            raise EngineProtocolError(INVALID_PARAMS, str(exc)) from None
+
+    def team_from_template(self, params: dict[str, Any]) -> dict[str, Any]:
+        """A team and its agents from a built-in template, in the profile (the active one).
+
+        `model`: the model every new agent uses (else the owner's default). No
+        connector, account nor budget comes with a template.
+        """
+        from rinari.agency.templates import TemplateError, template
+
+        try:
+            chosen = template(params.get("template_id"), params.get("language"))
+        except TemplateError as exc:
+            raise EngineProtocolError(INVALID_PARAMS, str(exc)) from None
+        except LookupError:
+            raise NotFoundError(f"Unknown template: {params.get('template_id')}") from None
+        model = params.get("model")
+        if model is not None and not isinstance(model, str):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'model' must be a string.")
+        name = params.get("name") or chosen["team"]["name"]
+        profile = self._server._profile_param(params) or self._services.rinari_profiles.active_id()
+        board = getattr(self._server, "_teams", None)
+        created: list[dict[str, Any]] = []
+        try:
+            for card in chosen["agents"]:
+                created.append(
+                    self.agency.create({**card, **({"model": model} if model else {})}, profile)
+                )
+            team = self._services.teams.create(
+                {
+                    "name": name,
+                    "purpose": chosen["team"]["purpose"],
+                    "members": [agent["id"] for agent in created],
+                },
+                profile,
+            )
+        except AgencyError as exc:
+            # Nothing half made: the agents created so far are archived again.
+            for agent in created:
+                self.agency.archive(agent["id"])
+            raise EngineProtocolError(INVALID_PARAMS, str(exc)) from None
+        if board is not None:
+            board.tick()
+        return {"team": team, "agents": [self._view(agent) for agent in created]}

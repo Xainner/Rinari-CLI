@@ -111,6 +111,9 @@ def scope_from_context(ctx: ToolContext) -> SessionScope:
         external_origins=frozenset(getattr(ctx.turn_state, "origins", None) or ()),
         ask_new_destinations=bool(getattr(ctx, "ask_new_destinations", False)),
         extra_roots=tuple(getattr(ctx, "extra_project_roots", ()) or ()),
+        engine_home=getattr(ctx, "engine_home", None),
+        engine_home_open=tuple(getattr(ctx, "engine_home_open", ()) or ()),
+        engine_home_readable=tuple(getattr(ctx, "engine_home_readable", ()) or ()),
     )
 
 

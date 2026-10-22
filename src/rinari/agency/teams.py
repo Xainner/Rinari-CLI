@@ -42,6 +42,8 @@ READY_STATUSES = ("pending", "returned")
 MAX_RETURNS = 3
 
 TEAM_EDITABLE = ("name", "purpose", "chief_agent_id", "connectors", "budget")
+#: Where an agent's rule can deliver its result besides its run.
+DELIVERY_KINDS = ("office", "agent")
 
 
 def normalize_done_when(raw: Any) -> list[str]:
@@ -285,6 +287,58 @@ class TeamService:
                 )
         self._changed(team["id"], "updated")
         return self.view(team)
+
+    def teams_of(self, agent_id: str) -> list[dict[str, Any]]:
+        """The live teams an agent works in (it has a post there)."""
+        return [
+            team
+            for post in self._repo.posts_of_agent(agent_id)
+            if (team := self._repo.get(post["team_id"])) is not None
+            and team.get("archived_at") is None
+        ]
+
+    def team_of(self, agent_id: str, ref: Any) -> dict[str, Any] | None:
+        """One of the agent's teams, by id or by name (any case)."""
+        wanted = str(ref or "").strip().lstrip("@")
+        for team in self.teams_of(agent_id):
+            if team["id"] == wanted or team["name"].lower() == wanted.lower():
+                return team
+        return None
+
+    def delivery_target(self, agent_id: str, raw: Any) -> dict[str, Any]:
+        """Where an agent's rule delivers its result, with ids (vision 10.1).
+
+        {kind: office, team}: posted in the office of one of its teams, as
+        the agent. {kind: agent, agent, team?}: a teammate is mentioned in the
+        office they share. Teams and agents go by id or by name.
+        """
+        if not isinstance(raw, dict) or raw.get("kind") not in DELIVERY_KINDS:
+            raise AgencyError(
+                "deliver_to must be {kind: office, team} or {kind: agent, agent, team?}."
+            )
+        team_ref = raw.get("team_id") or raw.get("team")
+        if raw["kind"] == "office":
+            team = self.team_of(agent_id, team_ref)
+            if team is None:
+                raise AgencyError("The office must be one of a team this agent works in.")
+            return {"kind": "office", "team_id": team["id"]}
+        if team_ref:
+            team = self.team_of(agent_id, team_ref)
+            if team is None:
+                raise AgencyError("The team must be one this agent works in.")
+            teams = [team]
+        else:
+            teams = self.teams_of(agent_id)
+        ref = str(raw.get("agent_id") or raw.get("agent") or "").strip().lstrip("@")
+        for team in teams:
+            for post in self._repo.posts(team["id"]):
+                mate = self._agents.get(post["agent_id"])
+                if mate["id"] != ref and mate["name"].lower() != ref.lower():
+                    continue
+                if mate["id"] == agent_id:
+                    raise AgencyError("A rule delivers to a teammate, not to its own agent.")
+                return {"kind": "agent", "agent_id": mate["id"], "team_id": team["id"]}
+        raise AgencyError("The agent must be a teammate (in a team with this rule's agent).")
 
     # -- errands ---------------------------------------------------------------------
 

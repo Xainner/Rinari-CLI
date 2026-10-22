@@ -336,6 +336,9 @@ class EngineServer:
         self._dispatcher.register("agency.agent.create", self._agency.create)
         self._dispatcher.register("agency.agent.update", self._agency.update)
         self._dispatcher.register("agency.agent.archive", self._agency.archive)
+        self._dispatcher.register("agency.agent.unarchive", self._agency.unarchive)
+        self._dispatcher.register("agency.templates.list", self._agency.templates_list)
+        self._dispatcher.register("agency.team.from_template", self._agency.team_from_template)
         self._dispatcher.register("agency.status", self._agency.status)
         self._dispatcher.register("agency.agent.draft", self._agency.draft)
         self._dispatcher.register("agency.stop_all", self._agency.stop_all)
@@ -364,6 +367,7 @@ class EngineServer:
         self._dispatcher.register("agency.team.template", self._teams.template)
         self._dispatcher.register("agency.team.duplicate", self._teams.duplicate)
         self._dispatcher.register("agency.resume", self._teams.resume_params)
+        self._dispatcher.register("agency.chain.dismiss", self._teams.dismiss_stopped)
         self._dispatcher.register("agency.settings.get", self._agency.settings_get)
         self._dispatcher.register("agency.settings.set", self._agency.settings_set)
         from rinari.engine_protocol.resume import ResumeRunner

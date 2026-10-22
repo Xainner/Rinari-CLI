@@ -135,6 +135,14 @@ class SessionScope:
     # A project's other trusted working folders: inside them is inside the
     # project, exactly as the primary root. Untrusted ones are not listed.
     extra_roots: tuple[Path, ...] = ()
+    # Rinari Agency: the Engine's own home (its database, sessions, other
+    # conversations' outputs, credentials...) is off limits to an agent's
+    # conversation in every mode. `engine_home_open` are the folders of it this
+    # conversation may still use (its own workspace and outputs) and
+    # `engine_home_readable` the ones it may only read (installed skills).
+    engine_home: Path | None = None
+    engine_home_open: tuple[Path, ...] = ()
+    engine_home_readable: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -337,6 +345,68 @@ def is_sensitive_file(path: Path) -> bool:
 
 def _inside_any(path: Path, roots: tuple[Path, ...]) -> bool:
     return any(path == root.resolve() or root.resolve() in path.parents for root in roots)
+
+
+#: What separates the pieces of a command that may be paths: blanks, quotes,
+#: shell operators, brackets, commas and `=` (so `--out=../x` and the path in
+#: `python -c "open('../x')"` are pieces of their own).
+_PIECES = re.compile(r"""[\s'"`;|&<>(){}\[\],=]+""")
+
+
+_QUOTED = re.compile(r""""([^"]*)"|'([^']*)'""")
+
+
+def _looks_path(piece: str) -> bool:
+    if "://" in piece or piece.startswith(("//", "\\\\")):
+        return False  # a URL or a network share: not this machine's folders
+    return (
+        "/" in piece or "\\" in piece or piece in (".", "..") or piece.startswith(("~", "$", "%"))
+    )
+
+
+def _expand(piece: str) -> str:
+    import os
+
+    if piece.lower().startswith("$env:"):
+        piece = "$" + piece[5:]  # PowerShell's $env:NAME
+    return os.path.expanduser(os.path.expandvars(piece))
+
+
+def engine_home_targets(command: str, scope: SessionScope) -> list[Path]:
+    """The places in Rinari's home a shell command names, as resolved paths.
+
+    The folder it runs in counts, and so does every piece of it that reads
+    as a path, quoted or not, resolved against that folder with ~ and
+    variables expanded. What a command builds at run time (a path put
+    together from pieces, encoded, read from a file, or a script written
+    first and run after) cannot be seen in its text: this check stops a
+    direct reach and is no substitute for an operating-system sandbox.
+    """
+    home = scope.engine_home
+    if home is None:
+        return []
+    home = home.resolve()
+    base = Path(scope.command_cwd if scope.command_cwd is not None else scope.cwd)
+    found: list[Path] = []
+
+    def note(raw: str | Path) -> None:
+        try:
+            candidate = Path(raw)
+            path = (candidate if candidate.is_absolute() else base / candidate).resolve()
+        except (OSError, RuntimeError, ValueError):
+            return
+        if (path == home or home in path.parents) and path not in found:
+            found.append(path)
+
+    note(base)
+    text = command or ""
+    # A quoted path may hold blanks: the whole quote is a piece too.
+    quoted = [a or b for a, b in _QUOTED.findall(text)]
+    for piece in [*quoted, *_PIECES.split(text)]:
+        piece = piece.strip()
+        if piece and _looks_path(piece):
+            note(_expand(piece))
+    return found
 
 
 def classify_git_remote(command: str) -> str | None:
@@ -630,6 +700,9 @@ class PolicyEngine:
         cost_basis: str | None = None,
         mcp: McpToolFacts | None = None,
     ) -> PolicyDecision:
+        guarded = self._engine_home(scope, capability, path, command)
+        if guarded is not None:
+            return guarded
         read_only = scope.profile is PermissionProfile.READ_ONLY
         if read_only and capability == CAPABILITY_SHELL:
             # A review re-runs the tests; a command can also change files, so
@@ -1394,6 +1467,80 @@ class PolicyEngine:
                 rule_id="shell_cwd_outside",
             )
         return self._allow(CAPABILITY_SHELL, "local command in the workspace", risk, risk_class)
+
+    # -- Rinari's own home (Rinari Agency) -------------------------------------
+
+    def _engine_home(
+        self,
+        scope: SessionScope,
+        capability: str,
+        path: str | Path | None,
+        command: str | None,
+    ) -> PolicyDecision | None:
+        """An agent's conversation never reads or writes Rinari's own home.
+
+        In every mode: its database, the other conversations and their
+        outputs, credentials and settings are the Engine's, not an agent's.
+        Its own workspace and outputs stay usable, and installed skills
+        readable. None when the action does not reach the home.
+        """
+        home = scope.engine_home
+        if home is None:
+            return None
+        if capability in (CAPABILITY_FS_READ, CAPABILITY_GIT_LOCAL, CAPABILITY_FS_WRITE):
+            if path is None:
+                return None
+            target = self._resolve(scope, path)
+            writes = [target] if capability == CAPABILITY_FS_WRITE else []
+            if self._home_allows(scope, [target], writes):
+                return None
+            return self._deny(
+                capability,
+                "Rinari's own data folder is off limits to an Agency agent",
+                target=str(target),
+                risk="critical",
+                risk_class="private-runtime-state",
+                rule_id="engine_home",
+            )
+        if capability == CAPABILITY_SHELL:
+            targets = engine_home_targets(command or "", scope)
+            if not targets:
+                return None
+            # What it writes outside its folder (a redirect, cp, mv...): read-only
+            # places of the home (installed skills) are only run or read.
+            risk = classify_shell_risk(command or "", scope)
+            writes = [Path(item) for item in risk.external_path_targets]
+            if self._home_allows(scope, targets, writes):
+                return None
+            return self._deny(
+                capability,
+                "the command reaches Rinari's own data folder, off limits to an Agency agent",
+                target=command,
+                risk="critical",
+                risk_class="private-runtime-state",
+                rule_id="engine_home",
+            )
+        return None
+
+    def _home_allows(self, scope: SessionScope, targets: list[Path], writes: list[Path]) -> bool:
+        """Every place of the home it reads is open or readable, and every place it writes, open."""
+        home = scope.engine_home.resolve() if scope.engine_home is not None else None
+        if home is None:
+            return True
+
+        def inside_home(path: Path) -> bool:
+            return path == home or home in path.parents
+
+        for target in targets:
+            if inside_home(target) and not (
+                _inside_any(target, scope.engine_home_open)
+                or _inside_any(target, scope.engine_home_readable)
+            ):
+                return False
+        return all(
+            not inside_home(written) or _inside_any(written, scope.engine_home_open)
+            for written in writes
+        )
 
     # -- helpers --------------------------------------------------------------
 

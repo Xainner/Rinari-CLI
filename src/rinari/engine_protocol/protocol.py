@@ -272,6 +272,30 @@ CAPABILITIES: dict[str, bool] = {
     # (or an owner's message, errand or retry), and agency.chain.stopped
     # reasons too_many_returns, no_chief and could_not_start.
     "agency_board_v2": True,
+    # Agency audit (2026-10-21): 8 hops per chain (D-31); a stopped chain
+    # leaves an office message (system, author_kind "system", notice {kind:
+    # stopped, reason, detail?, chain_id}) and agency.chain.stopped carries
+    # message_id; agency.chain.dismiss {team_id, message_id? | chain_id?};
+    # office.say answers woken / not_woken (reasons too_many_hops,
+    # too_many_mentions, too_many_deliveries, already_woken, stopped_by_owner,
+    # not_in_team, unknown_name, ambiguous_name with candidates) and an @ that
+    # starts exactly one teammate's name wakes them; a delivery wakes only the
+    # agent that asked (a review turn in its post, origin agency_delivery);
+    # office notice kind "left" {agent, chief}; agency.status session_ids,
+    # stopped and waiting_for_owner {errands, chains}; agency.resume restores
+    # what the stop blocked and paused (restored_errands, resumed_rules);
+    # agency.agent.archive leaves its teams and pauses its rules (left_teams,
+    # paused_rules), agency.agent.unarchive, agency.agent.list {archived};
+    # agency.agent.get sessions carry agency {kind: direct | post |
+    # former_post | rule_run | child | other, ...}; agent card soul_id (D-34,
+    # an agent never speaks with Rinari's Soul); posts see the agent's
+    # connectors and accounts plus the team's (D-33); schedule task
+    # deliver_to {kind: office, team_id} | {kind: agent, agent_id, team_id}
+    # and paused_by; agency.templates.list {language?} and
+    # agency.team.from_template {template_id, language?, model?, name?}; the
+    # direct chat's office.say {team, text}; an agent's conversations never
+    # reach the Engine's home (policy rule engine_home).
+    "agency_audit_v1": True,
     # soul.settings.get/set: character intensity (minimal | balanced | full),
     # separate from Soul selection; bundled default Soul 4.0.
     "soul_character_intensity_v1": True,

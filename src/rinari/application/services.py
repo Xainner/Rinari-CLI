@@ -136,6 +136,7 @@ def build_services(
         connector_exists=lambda name: any(
             row.get("name") == name for row in ctx.mcp_server_repo.list(None)
         ),
+        soul_exists=lambda soul_id: _soul_exists(ctx.home, soul_id),
     )
     teams = TeamService(
         ctx.team_repo,
@@ -147,6 +148,8 @@ def build_services(
         ),
     )
     mcp.scope_of = lambda session_id: _agent_scope(agency, session_id, ctx)
+    # An agent's rule may deliver to the office of one of its teams or to a teammate.
+    schedules.check_delivery = teams.delivery_target
     return ServiceContainer(
         ctx=ctx,
         credentials=credentials,
@@ -184,22 +187,35 @@ def build_services(
 
 
 def _agent_scope(agency: AgencyService, session_id: str, ctx: AppContext):
-    """(allowed connectors, owner tag) of an agent's conversation, else (None, None).
+    """(allowed connectors, owner tags) of an agent's conversation, else (None, None).
 
-    A post (A2) sees its team's connectors and the team's own accounts, never
-    another team's nor the agent's personal ones: in each post, only that team.
+    D-33: a post (A2) sees the agent's own connectors and its team's, and the
+    accounts of both (owner agent:ID and team:ID), never another team's: in
+    each post, the agent plus that team. Elsewhere, only the agent's.
     """
     agent = agency.for_session(session_id)
     if agent is None:
         return None, None
+    own = frozenset(agent.get("connectors") or ())
+    tag = f"agent:{agent['id']}"
     record = ctx.session_repo.get(session_id) if ctx.team_repo else None
     team_id = ctx.team_repo.active_team(record) if record is not None else None
     if team_id is not None:
-        # A post, or a child of one: the team's connectors and accounts.
+        # A post, or a child of one: also the team's connectors and accounts.
         team = ctx.team_repo.get(team_id)
         if team is not None:
-            return frozenset(team.get("connectors") or ()), f"team:{team['id']}"
-    return frozenset(agent.get("connectors") or ()), f"agent:{agent['id']}"
+            return own | frozenset(team.get("connectors") or ()), (tag, f"team:{team['id']}")
+    return own, tag
+
+
+def _soul_exists(home, soul_id: str) -> bool:
+    from rinari.soul.store import SoulStore
+
+    try:
+        SoulStore(home).get(soul_id)
+    except Exception:
+        return False
+    return True
 
 
 def _model_id(models, ref: str) -> str | None:

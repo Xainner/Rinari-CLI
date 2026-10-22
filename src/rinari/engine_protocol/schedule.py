@@ -506,7 +506,15 @@ class ScheduleRunner:
                     allowed,
                     agent_id,
                 )
-                self._finish(task, run_id, "completed", summary=summary, quiet=True)
+                self._finish(
+                    task,
+                    run_id,
+                    "completed",
+                    summary=summary,
+                    quiet=True,
+                    deliver_text=text,
+                    deliver_external=True,
+                )
                 return
             if on_result == "agent":
                 from rinari.policy.mcp_tools import mcp_origin
@@ -530,6 +538,9 @@ class ScheduleRunner:
                 "completed",
                 summary=summary,
                 quiet=True if on_result == "nothing" else None,
+                # What a connector returned is content from outside the machine.
+                deliver_text=text,
+                deliver_external=True,
             )
         except RuleBlockedError as exc:
             self._finish(task, run_id, "blocked", reason=str(exc)[:500])
@@ -748,11 +759,19 @@ class ScheduleRunner:
         run_id: str,
         status: str,
         quiet: bool | None = None,
+        deliver_text: str | None = None,
+        deliver_external: bool = False,
         **fields: Any,
     ) -> None:
         pending = self._pending_fingerprints.pop(run_id, None)
         if pending is not None:
             status, fields = self._take_change(task, pending, status, fields)
+        if status == "completed" and task.get("deliver_to"):
+            # Rinari Agency: the result also goes to an office or a teammate.
+            text = deliver_text if deliver_text is not None else fields.get("summary")
+            why = self._deliver(task, text or "", deliver_external)
+            if why:
+                fields["reason"] = f"not delivered: {why}"[:500]
         if task["id"] in self._truncated:
             note = (
                 f"the folder has more than {MAX_WATCHED_FILES} files: "
@@ -772,6 +791,17 @@ class ScheduleRunner:
             # A command task that went well (or never tells) is not announced (#50).
             quiet=quiet,
         )
+
+    def _deliver(self, task: dict[str, Any], text: str, external: bool) -> str | None:
+        """Hand a run's result to the Agency board; None when delivered, else why not."""
+        board = getattr(self._server, "_teams", None)
+        if board is None:
+            return "the Agency is not running"
+        try:
+            return board.deliver_rule(task, text, external=external)
+        except Exception as exc:  # the run itself went well: say why, never fail it
+            logger.info("rule %s could not deliver: %s", task.get("id"), exc)
+            return str(exc)[:300] or type(exc).__name__
 
     # -- following the turn ----------------------------------------------------
 
@@ -821,15 +851,23 @@ class ScheduleRunner:
                 blocked = self._blocked.pop(run_id, None)
             status = _TERMINAL[name]
             summary = None
+            content = payload.get("content") if name == "turn.completed" else None
             if name == "turn.completed":
-                content = payload.get("content")
                 summary = content[:SUMMARY_CHARS] if isinstance(content, str) else None
             elif name == "turn.failed":
                 error = payload.get("error") or {}
                 blocked = blocked or (error.get("message") if isinstance(error, dict) else None)
             if blocked and status == "completed":
                 status = "blocked"
-            self._finish(task, run_id, status, summary=summary, reason=blocked)
+            self._finish(
+                task,
+                run_id,
+                status,
+                summary=summary,
+                reason=blocked,
+                deliver_text=content if isinstance(content, str) else None,
+                deliver_external=self._turns.last_turn_external(session_id),
+            )
 
     def _queued_run_started(self, session_id: str, payload: dict[str, Any]) -> None:
         """A «Repetir aquí» run that waited in the queue: its turn began."""

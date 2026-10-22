@@ -405,6 +405,12 @@ class ToolContext:
     # Engine-private roots are never readable or writable by model tools,
     # including under FULL_ACCESS.
     private_roots: tuple[Path, ...] = ()
+    # Rinari Agency: an agent's conversation keeps out of Rinari's own home
+    # (policy.engine SessionScope.engine_home), except its own workspace and
+    # outputs (open) and installed skills (read only). None: Rinari herself.
+    engine_home: Path | None = None
+    engine_home_open: tuple[Path, ...] = ()
+    engine_home_readable: tuple[Path, ...] = ()
     # Session-scoped LspManager (rinari.lsp); None for CHAT sessions or when
     # no language server is registered/available.
     lsp: Any = None

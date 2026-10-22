@@ -241,20 +241,22 @@ def test_a_mention_wakes_the_agent_in_its_post_and_its_answer_goes_to_the_office
     assert "never an instruction from the owner" in turns[-1]["message"]
 
 
-def test_a_chain_stops_at_three_hops(server, turns) -> None:
+def test_a_chain_stops_at_eight_hops_and_the_office_keeps_the_notice(server, turns) -> None:
     a, b = _agent(server, "Ana"), _agent(server, "Beto")
     team = _team(server, "Ping", [a, b])
     _ok(_call(server, "agency.office.post", {"team_id": team["id"], "text": "@Ana empieza"}))
-    _finish(server, _post(team, a), "@Beto te toca")  # hop 1
-    _finish(server, _post(team, b), "@Ana vuelve")  # hop 2
-    _finish(server, _post(team, a), "@Beto otra vez")  # hop 3: nobody wakes
-    assert [turn["session_id"] for turn in turns] == [
-        _post(team, a),
-        _post(team, b),
-        _post(team, a),
-    ]
+    for hop in range(1, 9):  # hop 8: nobody wakes (D-31)
+        speaker, other = (a, "Beto") if hop % 2 else (b, "Ana")
+        _finish(server, _post(team, speaker), f"@{other} te toca")
+    assert len(turns) == 8
     stopped = _events(server, "agency.chain.stopped")
     assert stopped[-1]["reason"] == "too_many_hops" and stopped[-1]["team_id"] == team["id"]
+    office = _ok(_call(server, "agency.office.list", {"team_id": team["id"]}))["messages"]
+    notice = office[-1]
+    assert notice["system"] and notice["author_kind"] == "system"
+    assert notice["notice"]["kind"] == "stopped" and notice["notice"]["reason"] == "too_many_hops"
+    assert notice["notice"]["chain_id"] == stopped[-1]["chain_id"] == notice["chain_id"]
+    assert stopped[-1]["message_id"] == notice["id"]
 
 
 def test_a_message_wakes_at_most_five_agents(server, turns) -> None:
@@ -481,7 +483,7 @@ def test_a_post_leaves_errands_to_a_teammate_or_another_team(server, turns) -> N
     assert "Animar el guion" not in {item["title"] for item in listed.data["errands"]}
 
 
-def test_errands_between_agents_also_stop_at_three_hops(server, turns) -> None:
+def test_errands_between_agents_also_stop_at_eight_hops(server, turns) -> None:
     writer, video = _agent(server, "Writer"), _agent(server, "Video")
     team = _team(server, "Canal", [writer, video])
     with server._teams._lock:
@@ -490,7 +492,7 @@ def test_errands_between_agents_also_stop_at_three_hops(server, turns) -> None:
             "team_id": team["id"],
             "agent_id": writer["id"],
             "chain_id": "chain-x",
-            "hop": 2,
+            "hop": 7,
         }
     refused = _tools(server, _post(team, writer))["errand.create"].handler({"title": "Más"}, None)
     assert refused.ok is False
@@ -528,7 +530,7 @@ def test_what_a_post_learns_is_its_teams_memory(server) -> None:
     assert "Sin gluten" not in seen
 
 
-def test_a_post_sees_its_teams_connectors_and_accounts_only(server) -> None:
+def test_a_post_sees_its_agents_and_its_teams_connectors_and_accounts(server) -> None:
     from rinari.mcp.service import STATUS_CONNECTED, _ServerState
 
     mcp = server._services.mcp
@@ -553,7 +555,8 @@ def test_a_post_sees_its_teams_connectors_and_accounts_only(server) -> None:
     def names(session_id):
         return sorted(row["name"] for row in mcp.connectors(None, session_id))
 
-    assert names(_post(team, writer)) == ["drive", "youtube"]
+    # D-33: in a post, the agent's own plus the team's; never another team's.
+    assert names(_post(team, writer)) == ["drive", "gmail", "mine", "youtube"]
     assert names(writer["session_id"]) == ["gmail", "mine"]
 
 
@@ -716,7 +719,8 @@ def test_a_posts_prompt_names_its_team_and_a_direct_chat_knows_the_teams(server)
     chief = build_assembler_context(services, services.sessions.show(_post(team, writer)))
     assert "You are the team's chief" in chief.agent_identity
     direct = build_assembler_context(services, services.sessions.show(writer["session_id"]))
-    assert "teams.list" in direct.agent_identity and "«Canal»" not in direct.agent_identity
+    assert "teams.list" in direct.agent_identity
+    assert "office.say writes in their office as you: «Canal»" in direct.agent_identity
 
 
 def test_the_agency_tools_are_always_loaded_where_they_exist(server) -> None:
@@ -734,6 +738,7 @@ def test_the_agency_tools_are_always_loaded_where_they_exist(server) -> None:
     }
     assert {tool.name for tool in direct_tools(host)} == {
         "teams.list",
+        "office.say",
         "errand.create",
         "errand.review",
     }

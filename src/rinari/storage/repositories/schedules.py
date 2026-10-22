@@ -28,6 +28,8 @@ _TASK_COLUMNS = (
     "agent_id",
     "target",
     "session_id",
+    "deliver_json",
+    "paused_by",
     "enabled",
     "next_run_at",
     "created_at",
@@ -61,6 +63,9 @@ def _task(row: Any) -> dict[str, Any]:
     item["agent_id"] = item.get("agent_id")
     item["target"] = item.get("target") or "new_session"
     item["session_id"] = item.get("session_id")
+    raw_deliver = item.pop("deliver_json", None)
+    item["deliver_to"] = json.loads(raw_deliver) if raw_deliver else None
+    item["paused_by"] = item.get("paused_by")
     item["enabled"] = bool(item["enabled"])
     return item
 
@@ -109,6 +114,11 @@ class ScheduleRepository:
             "agent_id": task.get("agent_id"),
             "target": task.get("target") or "new_session",
             "session_id": task.get("session_id"),
+            "deliver_json": (
+                json.dumps(task["deliver_to"], sort_keys=True) if task.get("deliver_to") else None
+            ),
+            # Kept only while the task stays off: switching it on clears it.
+            "paused_by": None if task.get("enabled", True) else task.get("paused_by"),
             "enabled": 1 if task.get("enabled", True) else 0,
             "next_run_at": task.get("next_run_at"),
             "created_at": task["created_at"],
@@ -125,11 +135,17 @@ class ScheduleRepository:
         )
         return self.get(task_id) or {}
 
-    def set_enabled(self, task_id: str, enabled: bool, updated_at: float) -> None:
-        """Turn a task on or off without validating it again («Detener a todos»)."""
+    def set_enabled(
+        self, task_id: str, enabled: bool, updated_at: float, *, paused_by: str | None = None
+    ) -> None:
+        """Turn a task on or off without validating it again («Detener a todos»).
+
+        `paused_by` says who switched it off when it was not the owner, so
+        resuming switches back on only what that pause switched off.
+        """
         self._db.execute(
-            "UPDATE scheduled_tasks SET enabled = ?, updated_at = ? WHERE id = ?",
-            (int(enabled), updated_at, task_id),
+            "UPDATE scheduled_tasks SET enabled = ?, paused_by = ?, updated_at = ? WHERE id = ?",
+            (int(enabled), None if enabled else paused_by, updated_at, task_id),
         )
 
     def set_watch_fingerprint(self, task_id: str, fingerprint: str) -> None:

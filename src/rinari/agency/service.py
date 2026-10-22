@@ -2,9 +2,11 @@
 
 An agent is created and changed only by the owner (the desktop form, or by
 accepting a draft that Rinari filled in): the model never creates one. Its
-card says who it is (name, role, instructions), how it works (model,
-permission mode) and what it may use (connectors, daily budget). Its direct
-chat is an ordinary conversation marked with its id.
+card says who it is (name, role, instructions and, if the owner gives it
+one, a saved Soul), how it works (model, permission mode) and what it may use
+(connectors, daily budget). Its direct chat is an ordinary conversation
+marked with its id. An agent never speaks as Rinari (D-34): its card, and its
+Soul when it has one, are its whole identity.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ EDITABLE = (
     "connectors",
     "budget",
     "ask_new_destinations",
+    "soul_id",
 )
 
 
@@ -94,6 +97,7 @@ class AgencyService:
         *,
         resolve_model: Callable[[str], str | None] = lambda model: model,
         connector_exists: Callable[[str], bool] = lambda name: True,
+        soul_exists: Callable[[str], bool] = lambda soul_id: True,
     ) -> None:
         self._repo = repo
         self._clock = clock
@@ -101,6 +105,8 @@ class AgencyService:
         # The model's id (the card keeps the id, whatever the owner typed).
         self._resolve_model = resolve_model
         self._connector_exists = connector_exists
+        # A saved Soul (soul.list): an agent can speak with one (D-34).
+        self._soul_exists = soul_exists
         # Set by the Engine server: opens the agent's direct chat and returns
         # its session id, and announces a change (agency.agent.changed).
         self.open_chat: Callable[[dict[str, Any]], str] | None = None
@@ -158,6 +164,13 @@ class AgencyService:
         if ask is not None and not isinstance(ask, bool):
             raise AgencyError("ask_new_destinations must be true, false or null.")
         agent["ask_new_destinations"] = ask
+        soul_id = merged.get("soul_id") or None
+        # Checked when it is set: a Soul removed later leaves the agent with its card
+        # alone (never Rinari's), and the rest of the card stays editable.
+        checked = soul_id is not None and ("soul_id" in raw or current is None)
+        if checked and (not isinstance(soul_id, str) or not self._soul_exists(soul_id)):
+            raise AgencyError(f"Unknown Soul: {soul_id}.")
+        agent["soul_id"] = soul_id
         return agent
 
     # -- reads -------------------------------------------------------------
@@ -170,8 +183,19 @@ class AgencyService:
             raise LookupError(f"Unknown agent: {agent_id}")
         return agent
 
-    def list(self, rinari_profile_id: str | None, *, include_archived: bool = False) -> list[dict]:
-        return self._repo.list(rinari_profile_id, include_archived=include_archived)
+    def list(
+        self,
+        rinari_profile_id: str | None,
+        *,
+        include_archived: bool = False,
+        archived_only: bool = False,
+    ) -> list[dict]:
+        agents = self._repo.list(
+            rinari_profile_id, include_archived=include_archived or archived_only
+        )
+        if archived_only:
+            return [agent for agent in agents if agent.get("archived_at") is not None]
+        return agents
 
     def for_session(self, session_id: str | None) -> dict[str, Any] | None:
         """The agent whose conversation this is, or None (also when archived)."""
@@ -222,6 +246,18 @@ class AgencyService:
         now = self._clock.now()
         saved = self._repo.save(current["id"], {**current, "archived_at": now, "updated_at": now})
         self._changed(current["id"], "archived")
+        return saved
+
+    def unarchive(self, agent_id: Any) -> dict[str, Any]:
+        """Back from the archive, as it was: it does not rejoin its teams, and its
+        rules stay off until the owner turns them on."""
+        current = self.get(agent_id)
+        if current.get("archived_at") is None:
+            return current
+        saved = self._repo.save(
+            current["id"], {**current, "archived_at": None, "updated_at": self._clock.now()}
+        )
+        self._changed(current["id"], "unarchived")
         return saved
 
     def _changed(self, agent_id: str, change: str) -> None:

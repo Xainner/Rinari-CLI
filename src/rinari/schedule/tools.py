@@ -136,7 +136,12 @@ def schedule_tools(host: ScheduleToolHost):
                 "nothing | notify | agent | deliver, deliver: {server, tool, arguments with "
                 "'{result}'}, max_per_day, only_if_contains: exact text the result must "
                 "contain (e.g. 'failure' for a CI)}. watch = {path} runs it only when that "
-                "folder changed since the last check."
+                "folder changed since the last check. deliver_to (an agent's rule only) also "
+                "posts each run's result: {kind: office, team: '<team name>'} writes it in the "
+                "office of a team you work in, as you (e.g. a one-line reminder every 30 "
+                "minutes: kind reminder, schedule {kind: interval, minutes: 30}, prompt the "
+                "line, deliver_to {kind: office, team}); {kind: agent, agent: '<teammate>'} "
+                "mentions that teammate in your shared office and wakes only them."
             ),
             input_schema={
                 "type": "object",
@@ -151,6 +156,16 @@ def schedule_tools(host: ScheduleToolHost):
                     "skills": {"type": "array", "items": {"type": "string"}},
                     "in_this_project": {"type": "boolean"},
                     "in_this_conversation": {"type": "boolean"},
+                    "deliver_to": {
+                        "type": "object",
+                        "properties": {
+                            "kind": {"type": "string", "enum": ["office", "agent"]},
+                            "team": {"type": "string", "description": "A team's name."},
+                            "agent": {"type": "string", "description": "A teammate's name."},
+                        },
+                        "required": ["kind"],
+                        "additionalProperties": False,
+                    },
                 },
                 "required": ["name", "kind", "schedule"],
                 "additionalProperties": False,

@@ -23,6 +23,7 @@ _COLUMNS = (
     "connectors_json",
     "budget_json",
     "ask_new_destinations",
+    "soul_id",
     "session_id",
     "created_at",
     "updated_at",
@@ -81,6 +82,7 @@ class AgencyRepository:
             "connectors_json": json.dumps(list(agent.get("connectors") or [])),
             "budget_json": json.dumps(dict(agent.get("budget") or {}), sort_keys=True),
             "ask_new_destinations": None if ask is None else int(bool(ask)),
+            "soul_id": agent.get("soul_id"),
             "session_id": agent.get("session_id"),
             "created_at": agent["created_at"],
             "updated_at": agent["updated_at"],
@@ -141,6 +143,7 @@ _ERRAND_COLUMNS = (
     "deliveries",
     "returns",
     "external",
+    "halted_json",
 )
 
 
@@ -159,6 +162,8 @@ def _errand(row: Any) -> dict[str, Any]:
     item["external"] = bool(item.get("external"))
     item["deliveries"] = int(item.get("deliveries") or 0)
     item["returns"] = int(item.get("returns") or 0)
+    halted = item.pop("halted_json", None)
+    item["halted"] = json.loads(halted) if halted else None
     return item
 
 
@@ -312,6 +317,34 @@ class TeamRepository:
         )
         return [_office(row) for row in rows]
 
+    def set_notice(self, message_id: str, notice: dict[str, Any] | None) -> None:
+        """Change what an Engine notice says (a stopped chain the owner dismissed)."""
+        self._db.execute(
+            "UPDATE agency_office_messages SET notice_json = ? WHERE id = ?",
+            (json.dumps(notice, sort_keys=True) if notice else None, message_id),
+        )
+
+    def stop_notices(
+        self, team_ids: list[str] | None = None, *, open_only: bool = False
+    ) -> list[dict[str, Any]]:
+        """The office notices of stopped chains, oldest first; open_only: not dismissed."""
+        sql = (
+            "SELECT * FROM agency_office_messages WHERE system = 1 "
+            'AND notice_json LIKE \'%"kind": "stopped"%\''
+        )
+        params: list[object] = []
+        if team_ids is not None:
+            if not team_ids:
+                return []
+            sql += f" AND team_id IN ({', '.join('?' for _ in team_ids)})"
+            params.extend(team_ids)
+        sql += " ORDER BY created_at"
+        rows = [_office(row) for row in self._db.query(sql, params)]
+        rows = [row for row in rows if (row.get("notice") or {}).get("kind") == "stopped"]
+        if open_only:
+            rows = [row for row in rows if not row["notice"].get("dismissed_at")]
+        return rows
+
     def chain_count(self, chain_id: str) -> int:
         row = self._db.query_one(
             "SELECT COUNT(*) AS n FROM agency_office_messages WHERE chain_id = ?", (chain_id,)
@@ -350,6 +383,9 @@ class TeamRepository:
             "deliveries": int(errand.get("deliveries") or 0),
             "returns": int(errand.get("returns") or 0),
             "external": int(bool(errand.get("external"))),
+            "halted_json": (
+                json.dumps(errand["halted"], sort_keys=True) if errand.get("halted") else None
+            ),
         }
         self._db.execute(
             f"""
