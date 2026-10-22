@@ -193,3 +193,72 @@ def test_an_errand_the_owner_left_is_released_by_the_teammates_post_in_another_c
     _finish(server, pi, "Aquí está el zorro.")
     woken = [turn for turn in turns[before:] if turn["session_id"] == pv]
     assert len(woken) == 1 and woken[0]["origin"]["errand_id"] == errand_id
+
+
+def test_a_post_reads_its_teammates_workspace_and_writes_only_its_own(server, turns) -> None:
+    """Video could not read the guion Writer left in its folder (POLICY_DENIED), so
+    both copied files to the owner's Desktop to pass them along (studio run 3)."""
+    from pathlib import Path
+
+    from rinari.cli.agent_runtime import _engine_home_guard
+    from rinari.policy.engine import PermissionProfile, PolicyAction, PolicyEngine, SessionScope
+
+    team, writer, _image, video = _studio(server)
+    other = _agent(server, "Otro")
+    _team(server, "Aparte", [other])
+    services = server._services
+    home = services.ctx.layout.root.resolve()
+
+    def guard_of(session_id):
+        record = services.sessions.show(session_id)
+        return Path(record.current_cwd).resolve(), _engine_home_guard(
+            services, record, Path(record.current_cwd)
+        )
+
+    writer_folder, _ = guard_of(_post(team, writer))
+    guion = writer_folder / "guion.md"
+    guion.parent.mkdir(parents=True, exist_ok=True)
+    guion.write_text("Pico y el copo", encoding="utf-8")
+    policy = PolicyEngine()
+
+    def decide(session_id, capability, path):
+        folder, guard = guard_of(session_id)
+        guard.pop("shared_artifact_sessions", None)  # the tools' part, not the policy's
+        scope = SessionScope(
+            kind="CHAT", root=folder, cwd=folder, profile=PermissionProfile.FULL_ACCESS, **guard
+        )
+        return policy.decide(capability, scope, path=str(path)).action
+
+    pv = _post(team, video)
+    assert decide(pv, "fs.read", guion) is PolicyAction.ALLOW
+    assert decide(pv, "fs.write", guion) is PolicyAction.DENY  # it reads, never writes there
+    assert decide(other["session_id"], "fs.read", guion) is PolicyAction.DENY
+    assert decide(pv, "fs.read", home / "state.db") is PolicyAction.DENY
+    assert decide(pv, "fs.read", home / "workspaces") is PolicyAction.DENY
+
+
+def test_a_workspace_file_a_post_presents_reaches_the_office_by_uri(server, turns) -> None:
+    from pathlib import Path
+
+    team, writer, *_ = _studio(server)
+    pw = _post(team, writer)
+    folder = Path(server._services.sessions.show(pw).current_cwd)
+    folder.mkdir(parents=True, exist_ok=True)
+    guion = folder / "pico-y-el-copo.md"
+    guion.write_text("# Pico y el copo", encoding="utf-8")
+    server._teams._observe(
+        {
+            "event": "file.presented",
+            "payload": {
+                "session_id": pw,
+                "items": [{"path": str(guion), "name": guion.name, "kind": "markdown"}],
+            },
+        }
+    )
+    files = [m for m in _office(server, team) if (m.get("notice") or {}).get("kind") == "files"]
+    assert len(files) == 1
+    (item,) = files[0]["notice"]["items"]
+    assert item["name"] == "pico-y-el-copo.md" and "path" not in item
+    assert item["uri"].startswith(f"artifact://{pw}/")
+    assert server._services.artifacts.get(item["uri"]) == guion.read_bytes()
+    assert guion.exists()  # copied, never moved out of the agent's folder

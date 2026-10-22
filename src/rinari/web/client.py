@@ -183,6 +183,20 @@ class Downloaded:
     bytes: int
     sha256: str
     elapsed_ms: float
+    #: The file name the server gave (Content-Disposition), if any.
+    filename: str = ""
+
+
+def disposition_name(header: str) -> str:
+    """The file name of a Content-Disposition header (`filename*` first), or ""."""
+    from email.message import Message
+
+    if not header:
+        return ""
+    message = Message()
+    message["content-disposition"] = header
+    name = message.get_filename() or ""
+    return name.replace("\\", "/").rsplit("/", 1)[-1].strip()
 
 
 def download_to(
@@ -241,6 +255,7 @@ def download_to(
                 bytes=size,
                 sha256=sha256,
                 elapsed_ms=(time.monotonic() - started) * 1000,
+                filename=disposition_name(response.headers.get("content-disposition", "")),
             )
     except httpx.TimeoutException as exc:
         raise WebRequestError(

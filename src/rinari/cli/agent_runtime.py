@@ -336,9 +336,30 @@ def _engine_home_guard(services: ServiceContainer, record: SessionRecord, cwd: P
         "engine_home_readable": (
             services.skills.user_skills_dir(),
             *(layout.artifacts_dir / session_id for session_id in teammates),
+            # What a teammate wrote in its own folder is for the team: a guion
+            # left there was out of reach and got copied to the Desktop (21-oct).
+            *_teammate_workspaces(services, teammates, home),
         ),
         "shared_artifact_sessions": teammates,
     }
+
+
+def _teammate_workspaces(
+    services: ServiceContainer, teammates: tuple[str, ...], home: Path
+) -> tuple[Path, ...]:
+    """Each teammate's own chat workspace inside Rinari's home (never the home itself)."""
+    folders = []
+    for session_id in teammates:
+        try:
+            cwd = services.sessions.show(session_id).current_cwd
+        except Exception:  # a post whose conversation is gone
+            continue
+        if not cwd:
+            continue
+        folder = Path(cwd).resolve()
+        if folder != home and home in folder.parents:
+            folders.append(folder)
+    return tuple(folders)
 
 
 def _teammate_sessions(services: ServiceContainer, session_id: str) -> tuple[str, ...]:

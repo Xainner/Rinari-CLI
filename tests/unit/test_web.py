@@ -704,3 +704,38 @@ def test_web_download_without_a_store_still_gets_its_extension(tmp_path) -> None
     result = _tool("web.download").handler({"url": url}, ctx)
     assert result.ok and Path(result.data["path"]).name == "abc.pdf"
     assert "uri" not in result.data
+
+
+def test_web_download_keeps_the_servers_or_the_asked_name(tmp_path, app_ctx) -> None:
+    """Image and Video presented `rvl_dl_T6cG30…png`: a download link's token as name."""
+    from dataclasses import replace
+
+    from rinari.artifacts.store import ArtifactStore
+
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+    named = "https://lab.example/mcp/files/rvl_dl_named"
+    bare = "https://lab.example/mcp/files/rvl_dl_bare"
+    routes = {
+        named: httpx.Response(
+            200,
+            content=png,
+            headers={
+                "content-type": "image/png",
+                "content-disposition": "attachment; filename*=UTF-8''pico%20zorro.png",
+            },
+        ),
+        bare: httpx.Response(200, content=png, headers={"content-type": "image/png"}),
+    }
+    store = ArtifactStore(app_ctx)
+    ctx = replace(
+        _ctx(tmp_path, web=_factory(_handler(routes))),
+        artifact_store=store,
+        artifact_root=store._root(),
+        session_id="ses_web",
+    )
+    by_server = _tool("web.download").handler({"url": named}, ctx)
+    assert by_server.ok and by_server.data["uri"].endswith("/downloads/pico-zorro.png")
+    asked = _tool("web.download").handler({"url": bare, "name": "Pico, ficha"}, ctx)
+    assert asked.ok and asked.data["uri"].endswith("/downloads/Pico-ficha.png")
+    plain = _tool("web.download").handler({"url": bare}, ctx)
+    assert plain.ok and plain.data["uri"].endswith("/downloads/rvl_dl_bare.png")

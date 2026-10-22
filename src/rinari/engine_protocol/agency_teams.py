@@ -1812,8 +1812,12 @@ class AgencyTeams:
         # The private path stays in the Engine: the app opens a file by its URI.
         items = [
             {key: item[key] for key in PRESENTED_KEYS if item.get(key) not in (None, "")}
-            for item in payload.get("items") or []
-            if isinstance(item, dict) and (item.get("uri") or item.get("url"))
+            for item in (
+                self._with_uri(session_id, item)
+                for item in payload.get("items") or []
+                if isinstance(item, dict)
+            )
+            if item.get("uri") or item.get("url")
         ][:MAX_PRESENTED]
         if not items:
             return
@@ -1831,6 +1835,28 @@ class AgencyTeams:
             notice={"kind": "files", "items": items},
             external=self._turns.last_turn_external(session_id),
         )
+
+    def _with_uri(self, session_id: str, item: dict[str, Any]) -> dict[str, Any]:
+        """A file the post presented from its workspace, copied into its saved
+        outputs: the office opens files by URI (a guion was missing, 21-oct)."""
+        path = item.get("path")
+        if item.get("uri") or item.get("url") or not path or item.get("kind") == "folder":
+            return item
+        from pathlib import Path
+
+        from rinari.artifacts.transfer import import_file
+
+        try:
+            record = import_file(
+                self._services.artifacts,
+                session_id,
+                Path(path),
+                provenance=f"file.present:{path}"[:500],
+            )
+        except Exception:
+            logger.info("agency office: could not keep a presented file", exc_info=True)
+            return item
+        return {**item, "uri": record.uri()}
 
     def _finish_errand(
         self, team: dict, live: dict, name: str, text: str, payload: dict, external: bool

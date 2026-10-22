@@ -483,7 +483,7 @@ def web_download(input: dict, ctx: ToolContext) -> ToolResult:
     if denied is not None:
         downloaded.path.unlink(missing_ok=True)
         return denied
-    path, uri, name = _keep_download(ctx, downloaded)
+    path, uri, name = _keep_download(ctx, downloaded, input.get("name"))
     data = {
         "path": str(path),
         "bytes": downloaded.bytes,
@@ -524,7 +524,22 @@ def _with_extension(name: str, content_type: str | None) -> str:
     return f"{name}{extension}" if extension else name
 
 
-def _keep_download(ctx: ToolContext, downloaded) -> tuple[Path, str | None, str]:
+def _file_name(raw: Any) -> str | None:
+    """A plain file name kept to what the artifact store accepts, or None."""
+    import re
+    import unicodedata
+
+    if not isinstance(raw, str):
+        return None
+    name = raw.replace("\\", "/").rsplit("/", 1)[-1].strip()
+    name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
+    name = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-.")
+    return name[:120] or None
+
+
+def _keep_download(
+    ctx: ToolContext, downloaded, wanted: Any = None
+) -> tuple[Path, str | None, str]:
     """Move the download into this conversation's files, named with its type.
 
     Downloads landed loose in the shared artifacts folder, without an
@@ -532,7 +547,9 @@ def _keep_download(ctx: ToolContext, downloaded) -> tuple[Path, str | None, str]
     with the shell to show them (V2-3). Without a store (tests, the CLI's bare
     tools) the file stays where it was downloaded, with its extension.
     """
-    name = _with_extension(downloaded.path.name, downloaded.content_type)
+    # The name asked for, else the server's, else the address's last part.
+    given = _file_name(wanted) or _file_name(getattr(downloaded, "filename", ""))
+    name = _with_extension(given or downloaded.path.name, downloaded.content_type)
     store = getattr(ctx, "artifact_store", None)
     session_id = getattr(ctx, "session_id", "") or ""
     if store is None or not session_id.strip():
@@ -758,11 +775,20 @@ def web_tools() -> list[ToolDefinition]:
             name="web.download",
             description=(
                 "Download a URL into the session artifact directory, streamed to disk "
-                "(up to 1 GiB); returns the path, size and SHA-256."
+                "(up to 1 GiB); returns the path, size and SHA-256. Give it a name "
+                "(e.g. pico.png) when the address is a token; otherwise the server's "
+                "file name, or the address's, is kept."
             ),
             input_schema={
                 "type": "object",
-                "properties": {"url": {"type": "string"}},
+                "properties": {
+                    "url": {"type": "string"},
+                    "name": {
+                        "type": "string",
+                        "maxLength": 120,
+                        "description": "The saved file's name (its type's extension is added).",
+                    },
+                },
                 "required": ["url"],
                 "additionalProperties": False,
             },
