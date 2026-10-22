@@ -516,7 +516,7 @@ def test_an_agent_creates_its_rules_as_its_permissions_allow(server) -> None:
     agent = _ok(
         _call(server, "agency.agent.create", {"agent": {"name": "Emails", "connectors": ["gmail"]}})
     )["agent"]
-    [tool] = schedule_tools(ScheduleToolHost(service=services.schedules, agent_id=agent["id"]))
+    tool = schedule_tools(ScheduleToolHost(service=services.schedules, agent_id=agent["id"]))[0]
     ctx = SimpleNamespace(session_id=agent["session_id"], origin_kind="user")
     result = tool.handler(_rule(), ctx)
     # The owner asked the agent (owner, 2026-10-21): with its permissions it
@@ -525,7 +525,7 @@ def test_an_agent_creates_its_rules_as_its_permissions_allow(server) -> None:
     [rule] = services.schedules.list()
     assert rule["agent_id"] == agent["id"] and rule["kind"] == "tool"
     # Outside an agent's conversation, a connector call without the model is refused.
-    [plain] = schedule_tools(ScheduleToolHost(service=services.schedules))
+    plain = schedule_tools(ScheduleToolHost(service=services.schedules))[0]
     refused = plain.handler(_rule(), SimpleNamespace(session_id="s", origin_kind="user"))
     assert refused.ok is False
 

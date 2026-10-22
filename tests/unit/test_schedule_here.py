@@ -115,7 +115,7 @@ def test_a_relative_schedule_is_stored_as_the_local_time_it_means(services) -> N
 
 def test_the_tool_runs_here_and_answers_the_local_time(services) -> None:
     session_id = _chat(services)
-    [tool] = schedule_tools(ScheduleToolHost(service=services.schedules))
+    tool = schedule_tools(ScheduleToolHost(service=services.schedules))[0]
     owner = SimpleNamespace(session_id=session_id, origin_kind="user")
     result = tool.handler(
         _task(schedule={"kind": "once", "after": {"minutes": 30}}, in_this_conversation=True),
@@ -510,3 +510,68 @@ def test_after_never_lands_before_the_time_in_a_repeated_hour(monkeypatch) -> No
 
 def test_the_capability_is_announced() -> None:
     assert CAPABILITIES["schedule_target_v1"] is True
+
+
+# -- changing and stopping what was scheduled (owner, 22-oct) ---------------------------
+
+
+def _tools(services, **host):
+    return {
+        tool.name: tool
+        for tool in schedule_tools(ScheduleToolHost(service=services.schedules, **host))
+    }
+
+
+def test_the_same_name_here_changes_the_task_instead_of_doubling_it(services) -> None:
+    """«Cámbialo a cada minuto» left the 30-second radar running next to the new one."""
+    session_id = _chat(services)
+    tools = _tools(services)
+    owner = SimpleNamespace(session_id=session_id, origin_kind="user")
+    radar = _task(name="radar-oro", schedule={"kind": "interval", "seconds": 30})
+    assert tools["schedule.propose"].handler({**radar, "in_this_conversation": True}, owner).ok
+    again = {**radar, "schedule": {"kind": "interval", "minutes": 1}, "in_this_conversation": True}
+    result = tools["schedule.propose"].handler(again, owner)
+    assert result.ok and result.data["status"] == "updated"
+    [task] = services.schedules.list()
+    assert task["schedule"] == {"kind": "interval", "minutes": 1}
+
+
+def test_a_model_lists_changes_and_cancels_only_its_own_tasks(services) -> None:
+    session_id = _chat(services)
+    owner = SimpleNamespace(session_id=session_id, origin_kind="user")
+    mine = services.schedules.create(_task(name="Precio"))
+    theirs = services.schedules.create(_task(name="Ajeno"))
+    # An Agency agent's rule (its card is not needed for whose it is).
+    services.ctx.schedule_repo.save(
+        theirs["id"], {**services.schedules.get(theirs["id"]), "agent_id": "agent_x"}
+    )
+    seen: list[tuple[str, str]] = []
+    services.schedules.on_changed = lambda task_id, change: seen.append((task_id, change))
+    tools = _tools(services)
+    listed = tools["schedule.list"].handler({}, owner)
+    assert [item["name"] for item in listed.data["tasks"]] == ["Precio"]
+    changed = tools["schedule.update"].handler(
+        {"task": "precio", "schedule": {"kind": "interval", "minutes": 5}, "enabled": False}, owner
+    )
+    assert changed.ok and changed.data["enabled"] is False
+    assert services.schedules.get(mine["id"])["schedule"] == {"kind": "interval", "minutes": 5}
+    assert not tools["schedule.cancel"].handler({"task": theirs["id"]}, owner).ok
+    assert tools["schedule.cancel"].handler({"task": "Precio"}, owner).ok
+    assert [task["id"] for task in services.schedules.list()] == [theirs["id"]]
+    assert seen == [(mine["id"], "updated"), (mine["id"], "deleted")]
+    # An agent reaches only its own rules.
+    agent_tools = _tools(services, agent_id="agent_x")
+    assert [t["name"] for t in agent_tools["schedule.list"].handler({}, owner).data["tasks"]] == [
+        "Ajeno"
+    ]
+
+
+def test_a_task_the_owner_stopped_is_not_switched_back_on_by_a_model(services) -> None:
+    task = services.schedules.create(_task(name="Precio"))
+    services.schedules.update(task["id"], {"enabled": False})
+    services.ctx.schedule_repo.save(
+        task["id"], {**services.schedules.get(task["id"]), "paused_by": "stop_all"}
+    )
+    owner = SimpleNamespace(session_id="ses_x", origin_kind="user")
+    result = _tools(services)["schedule.update"].handler({"task": "Precio", "enabled": True}, owner)
+    assert not result.ok and "owner" in result.error.message

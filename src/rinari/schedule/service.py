@@ -212,6 +212,9 @@ class ScheduleService:
         # Set by the Engine server: a validated proposal becomes the
         # `schedule.proposed` event the desktop shows as a card.
         self.on_proposed: Callable[[dict[str, Any]], None] | None = None
+        # Set by the Engine server: a task a model changed or removed with its
+        # tools (`schedule.changed`, so the desktop's lists follow).
+        self.on_changed: Callable[[str, str], None] | None = None
         # Rinari Agency: checks where an agent's rule delivers (`deliver_to`)
         # and returns it with ids; raises ValueError with a safe message.
         self.check_delivery: Callable[[str, Any], dict[str, Any]] | None = None

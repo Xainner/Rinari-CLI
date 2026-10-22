@@ -332,7 +332,7 @@ def test_the_owner_asking_creates_the_task_without_grants(services) -> None:
 
     announced: list[dict] = []
     services.schedules.on_proposed = announced.append
-    [tool] = schedule_tools(ScheduleToolHost(service=services.schedules, project_id=None))
+    tool = schedule_tools(ScheduleToolHost(service=services.schedules, project_id=None))[0]
     owner = SimpleNamespace(session_id="ses_1", origin_kind="user")
     result = tool.handler(
         {**_task(), "grants": [{"capability": "shell.exec"}], "in_this_project": True}, owner
@@ -357,7 +357,7 @@ def test_a_request_from_another_pane_goes_by_permissions(services) -> None:
 
     from rinari.schedule.tools import ScheduleToolHost, schedule_tools
 
-    [tool] = schedule_tools(ScheduleToolHost(service=services.schedules, project_id=None))
+    tool = schedule_tools(ScheduleToolHost(service=services.schedules, project_id=None))[0]
     result = tool.handler(_task(), SimpleNamespace(session_id="ses_2", origin_kind="peer"))
     assert result.ok is True and result.data["status"] == "created"
     assert len(services.schedules.list()) == 1
@@ -369,7 +369,7 @@ def test_a_scheduled_run_does_not_schedule_more(services) -> None:
 
     from rinari.schedule.tools import ScheduleToolHost, schedule_tools
 
-    [tool] = schedule_tools(ScheduleToolHost(service=services.schedules, project_id=None))
+    tool = schedule_tools(ScheduleToolHost(service=services.schedules, project_id=None))[0]
     result = tool.handler(_task(), SimpleNamespace(session_id="ses_2", origin_kind="schedule"))
     assert result.ok is False and "scheduled run" in result.error.message
     assert services.schedules.list() == []
