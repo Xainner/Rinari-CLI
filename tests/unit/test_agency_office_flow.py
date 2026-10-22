@@ -283,3 +283,18 @@ def test_teammates_learn_where_a_presented_file_and_each_folder_are(server, turn
     members = _tools(server, _post(team, image))["team.members"].handler({}, None)
     folders = {m["name"]: m["folder"] for m in members.data["members"]}
     assert folders["Writer"] == server._services.sessions.show(pw).current_cwd
+
+
+def test_an_errand_names_the_teammates_and_their_jobs_to_pass_their_part(server, turns) -> None:
+    """The MetaTrader chief did a whole errand alone, noting the research was missing,
+    with a researcher in the team: its prompt said only «do it» (21-oct)."""
+    operator = _agent(server, "Operator", role="Operar MetaTrader")
+    researcher = _agent(server, "Investigador", role="Buscar noticias del oro")
+    team = _team(server, "Mesa", [operator, researcher], chief_agent_id=operator["id"])
+    errand = {"title": "Operar si es viable", "to_agent_id": operator["id"]}
+    _ok(_call(server, "agency.errand.create", {"team_id": team["id"], "errand": errand}))
+    prompt = turns[-1]["message"]
+    assert turns[-1]["session_id"] == _post(team, operator)
+    assert "- Investigador: Buscar noticias del oro" in prompt
+    assert "- Operator" not in prompt
+    assert "office.wait" in prompt

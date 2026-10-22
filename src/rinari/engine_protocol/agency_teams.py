@@ -365,6 +365,23 @@ class AgencyTeams:
                 names.append(agent["name"])
         return names
 
+    def _mates_block(self, team_id: str, me: str) -> str:
+        """Who else is in the team and what each one's job is, for an errand's prompt.
+
+        An errand said only «do it»: a chief with a researcher in the team did the
+        whole errand alone and noted the research was missing (21-oct).
+        """
+        lines = []
+        for post in self._repo.posts(team_id):
+            agent = self._services.ctx.agency_repo.get(post["agent_id"])
+            if agent is None or agent["id"] == me or agent.get("archived_at") is not None:
+                continue
+            job = one_line(agent.get("role") or "", 200)
+            lines.append(f"- {agent['name']}" + (f": {job}" if job else ""))
+        if not lines:
+            return ""
+        return "Your teammates (exact names) and their jobs:\n" + "\n".join(lines) + "\n"
+
     def _names(self, team_id: str) -> dict[str, str]:
         names: dict[str, str] = {}
         for post in self._repo.posts(team_id):
@@ -1713,9 +1730,11 @@ class AgencyTeams:
             f"{from_agent}Title: {one_line(errand['title'], 300)}\n{body}"
             f"It is done when:\n{checks or '- (no checklist)'}{returned}\n\n"
             f"{self._office_block(lines)}"
-            "Do it and end with a summary of what you deliver. If part of it needs a "
-            "teammate to do something first, call office.wait with their name and end your "
-            "turn: the errand stays yours and you are woken with what they post."
+            f"{self._mates_block(team['id'], post['agent_id'])}"
+            "Do your part. A part that is a teammate's job goes to them: ask them in the "
+            "office (office.say with @ and their exact name) or leave them an errand, then "
+            "call office.wait with their name and end your turn; the errand stays yours and "
+            "you are woken with what they post. End with a summary of what you deliver."
         )
         now = self._clock.now()
         self._repo.save_errand(
