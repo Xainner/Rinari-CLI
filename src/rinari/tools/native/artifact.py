@@ -32,16 +32,16 @@ FOREIGN_ARTIFACT = (
 )
 
 
-def foreign_artifact(ctx, session_id: str) -> bool:
-    """Whether an artifact:// names a session Rinari does not have (a connector's URI)."""
+def foreign_artifact(ctx, uri: str) -> bool:
+    """Whether an artifact:// is not in Rinari's store at all (a connector's URI)."""
     store = getattr(ctx, "artifact_store", None)
-    sessions = getattr(getattr(store, "_ctx", None), "session_repo", None)
-    if sessions is None:
+    if store is None:
         return False
     try:
-        return sessions.get(session_id) is None
+        store.meta(uri)
     except Exception:
-        return False
+        return True
+    return False
 
 
 def _error(code: ToolErrorCode, message: str) -> ToolResult:
@@ -60,7 +60,7 @@ def _path_for(uri: object, ctx: ToolContext) -> tuple[Path | None, ToolResult | 
     session_id, namespace, name = parts
     shared = getattr(ctx, "shared_artifact_sessions", ()) or ()
     if session_id != ctx.session_id and session_id not in shared:
-        if foreign_artifact(ctx, session_id):
+        if foreign_artifact(ctx, uri):
             return None, _error(ToolErrorCode.NOT_FOUND, FOREIGN_ARTIFACT)
         return None, _error(
             ToolErrorCode.PERMISSION_DENIED,

@@ -79,7 +79,7 @@ def _artifact_path(ctx: ToolContext, uri: str) -> tuple[Path | None, ToolResult 
     if session != owner and session != ctx.session_id:
         from rinari.tools.native.artifact import FOREIGN_ARTIFACT, foreign_artifact
 
-        if foreign_artifact(ctx, session):
+        if foreign_artifact(ctx, uri):
             return None, _fail(ToolErrorCode.NOT_FOUND, FOREIGN_ARTIFACT)
     if session != owner or not (target == base or base in target.parents):
         return None, _fail(

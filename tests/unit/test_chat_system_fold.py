@@ -133,3 +133,40 @@ def test_limits_context_and_overload_are_never_retried_folded(status, error) -> 
     with pytest.raises(ProviderModelError):
         adapter.invoke(_request(), None, ENDPOINT)
     assert len(sent) == 1
+
+
+def test_a_tool_step_without_reasoning_still_carries_the_field() -> None:
+    """DeepSeek's thinking mode: a tool step that returned no reasoning, sent back
+    without `reasoning_content`, made the next request fail with a 400."""
+
+    def step(reasoning):
+        message = {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "t", "arguments": "{}"}}
+            ],
+        }
+        if reasoning is not None:
+            message["reasoning_content"] = reasoning
+        return ChatMessage(
+            role="assistant", content="", continuation={"protocol": "chat", "message": message}
+        )
+
+    request = ModelRequest(
+        model="m",
+        messages=(
+            ChatMessage.user("hola"),
+            step("pienso"),
+            ChatMessage.tool_result("c1", "t", "ok"),
+            step(None),
+        ),
+    )
+    items = OpenAICompatibleAdapter()._payload(request, stream=True)["messages"]
+    assistants = [m for m in items if m["role"] == "assistant"]
+    assert assistants[0]["reasoning_content"] == "pienso"
+    assert assistants[1]["reasoning_content"] == ""
+    # A conversation that never carried it is left alone.
+    plain = ModelRequest(model="m", messages=(ChatMessage.user("hola"), step(None)))
+    items = OpenAICompatibleAdapter()._payload(plain, stream=True)["messages"]
+    assert "reasoning_content" not in items[-1]

@@ -59,7 +59,7 @@ def image_read(arguments, ctx):
             if session_id != ctx.session_id:
                 from rinari.tools.native.artifact import FOREIGN_ARTIFACT, foreign_artifact
 
-                if foreign_artifact(ctx, session_id):
+                if foreign_artifact(ctx, source):
                     return _fail(ToolErrorCode.NOT_FOUND, FOREIGN_ARTIFACT)
                 return _fail(
                     ToolErrorCode.PERMISSION_DENIED,
@@ -156,7 +156,7 @@ def pdf_pages_read(arguments, ctx):
             if session_id != ctx.session_id:
                 from rinari.tools.native.artifact import FOREIGN_ARTIFACT, foreign_artifact
 
-                if foreign_artifact(ctx, session_id):
+                if foreign_artifact(ctx, source):
                     return _fail(ToolErrorCode.NOT_FOUND, FOREIGN_ARTIFACT)
                 return _fail(
                     ToolErrorCode.PERMISSION_DENIED,

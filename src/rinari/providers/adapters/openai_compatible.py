@@ -143,8 +143,10 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         tool_aliases: dict[str, str] | None = None,
         fold_system: bool = False,
     ) -> dict[str, Any]:
-        messages = _joined_user_messages(
-            [_message_to_openai(m, tool_aliases) for m in expand_tool_images(request.messages)]
+        messages = _with_reasoning_slots(
+            _joined_user_messages(
+                [_message_to_openai(m, tool_aliases) for m in expand_tool_images(request.messages)]
+            )
         )
         payload: dict[str, Any] = {
             "model": request.model,
@@ -550,6 +552,25 @@ def _folded_system(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
             rest[index] = {**message, "content": _joined_content(text, message.get("content"))}
             return rest
     return [{"role": "user", "content": text}, *rest]
+
+
+def _with_reasoning_slots(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every tool-calling assistant message carries `reasoning_content` once the
+    conversation does.
+
+    A thinking model can return a tool step with no reasoning at all; sent back
+    without the field, an endpoint that requires its reasoning to be returned
+    (DeepSeek's thinking mode) refused the whole request with a 400 and the turn
+    failed. Only a conversation that already carries the field gets it.
+    """
+    if not any(m.get("role") == "assistant" and "reasoning_content" in m for m in messages):
+        return messages
+    return [
+        {**m, "reasoning_content": ""}
+        if m.get("role") == "assistant" and m.get("tool_calls") and "reasoning_content" not in m
+        else m
+        for m in messages
+    ]
 
 
 def _joined_user_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
