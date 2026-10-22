@@ -499,3 +499,97 @@ def test_changing_the_card_reaches_the_agents_posts(server, turns) -> None:
     record = server._services.sessions.show(pw)
     assert record.permission_profile == "read-only"
     assert server._services.sessions.show(writer["session_id"]).permission_profile == "read-only"
+
+
+def _over_budget(server, monkeypatch, sessions):
+    """Turns of these sessions are refused by a budget, as the Engine refuses them."""
+    from rinari.engine_protocol.errors import AGENT_OVER_BUDGET, EngineProtocolError
+
+    real = server._turns.start_turn
+
+    def start(session_id, message, **kwargs):
+        if session_id in sessions:
+            raise EngineProtocolError(AGENT_OVER_BUDGET, "Image used today's budget.")
+        return real(session_id, message, **kwargs)
+
+    monkeypatch.setattr(server._turns, "start_turn", start)
+
+
+def test_work_held_by_a_budget_is_tried_again_on_its_own(server, turns, monkeypatch) -> None:
+    """A budget left errands blocked until the owner pressed «Reintentar» (22-oct)."""
+    import rinari.engine_protocol.agency_teams as board
+
+    team, _writer, image, _video = _studio(server)
+    pi = _post(team, image)
+    blocked = {pi}
+    _over_budget(server, monkeypatch, blocked)
+    errand = {"title": "La imagen", "to_agent_id": image["id"]}
+    made = _ok(_call(server, "agency.errand.create", {"team_id": team["id"], "errand": errand}))
+    repo = server._services.ctx.team_repo
+    held = repo.errand(made["errand"]["id"])
+    assert held["status"] == "blocked" and "budget" in held["return_reason"]
+    assert held["halted"]["retry"] == "budget"
+    # Still over budget: nothing happens before its time.
+    server._teams.tick()
+    assert repo.errand(held["id"])["status"] == "blocked"
+    # The budget allows it again (a new day): the next try starts it.
+    blocked.clear()
+    monkeypatch.setattr(board, "RETRY_BUDGET_S", 0)
+    saved = repo.errand(held["id"])
+    repo.save_errand(held["id"], {**saved, "halted": {**saved["halted"], "retry_at": 0}})
+    server._teams.tick()
+    assert repo.errand(held["id"])["status"] == "in_progress"
+    assert turns[-1]["session_id"] == pi
+
+
+def test_a_failed_errand_is_tried_once_more_and_then_stays_blocked(server, turns) -> None:
+    team, _writer, image, _video = _studio(server)
+    pi = _post(team, image)
+    errand = {"title": "La imagen", "to_agent_id": image["id"]}
+    made = _ok(_call(server, "agency.errand.create", {"team_id": team["id"], "errand": errand}))
+    repo = server._services.ctx.team_repo
+    errand_id = made["errand"]["id"]
+    _finish(server, pi, name="turn.failed", error={"message": "provider down"})
+    first = repo.errand(errand_id)
+    assert first["status"] == "blocked" and first["halted"]["retry"] == "failure"
+    repo.save_errand(errand_id, {**first, "halted": {**first["halted"], "retry_at": 0}})
+    server._teams.tick()
+    assert repo.errand(errand_id)["status"] == "in_progress"
+    _finish(server, pi, name="turn.failed", error={"message": "provider down"})
+    second = repo.errand(errand_id)
+    assert second["status"] == "blocked" and second["halted"] is None
+
+
+def test_a_mention_held_by_a_budget_waits_in_the_queue_and_is_told_once(
+    server, turns, monkeypatch
+) -> None:
+    team, _writer, image, _video = _studio(server)
+    pi = _post(team, image)
+    _over_budget(server, monkeypatch, {pi})
+    _ok(_call(server, "agency.office.post", {"team_id": team["id"], "text": "@Image la imagen"}))
+    queued = server._teams._mentions.get(pi) or []
+    assert len(queued) == 1 and queued[0]["retry_at"] > 0
+    server._teams.tick()
+    notices = [
+        m
+        for m in _office(server, team)
+        if (m.get("notice") or {}).get("reason") == "could_not_start"
+    ]
+    assert len(notices) == 1
+
+
+def test_a_rule_that_works_for_a_team_counts_against_its_budget(server, turns) -> None:
+    team, writer, *_ = _studio(server)
+    task = server._services.schedules.create(
+        {
+            "name": "Resumen",
+            "kind": "agent",
+            "schedule": {"kind": "daily", "time": "08:00"},
+            "prompt": "Resume",
+            "agent_id": writer["id"],
+            "deliver_to": {"kind": "office", "team": "Estudio"},
+        }
+    )
+    run = server._schedule.run_now(task["id"])["run"]
+    session_id = server._services.ctx.schedule_repo.run(run["id"])["session_id"]
+    assert server._services.sessions.show(session_id).team_id == team["id"]

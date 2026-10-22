@@ -688,6 +688,11 @@ class ScheduleRunner:
         if agent is not None:
             # Rinari Agency: an agent's rule runs as that agent (its card).
             self._services.ctx.agency_repo.set_session_agent(session_id, agent["id"])
+            # Working for a team (it posts in its office or to a teammate), its run
+            # counts against that team's budget too (replan, 22-oct).
+            team_id = (task.get("deliver_to") or {}).get("team_id")
+            if team_id and self._services.ctx.team_repo.get(team_id) is not None:
+                self._services.ctx.team_repo.set_session_team(session_id, team_id)
             if not task.get("permission_profile"):
                 self._services.sessions.set_permission(session_id, agent["permission_profile"])
         # A scheduled run has no mother conversation; its brief is the task (#40).

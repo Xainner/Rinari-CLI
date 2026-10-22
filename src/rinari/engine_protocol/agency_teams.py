@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING, Any
 
 from rinari.agency import AgencyError
 from rinari.agency.teams import OPEN_STATUSES, READY_STATUSES
-from rinari.engine_protocol.errors import INVALID_PARAMS, EngineProtocolError
+from rinari.engine_protocol.errors import AGENT_OVER_BUDGET, INVALID_PARAMS, EngineProtocolError
 from rinari.engine_protocol.messages import event
 from rinari.shared.errors import NotFoundError
 
@@ -79,6 +79,13 @@ PAUSED_BY_TEAM_STOP = "team_stopped"
 PAUSED_BY_TEAM_ARCHIVE = "team_archived"
 _TERMINAL = ("turn.completed", "turn.failed", "turn.cancelled", "turn.stopped")
 _BUSY = "busy"
+#: Why a turn could not start: a daily budget (the agent's, its team's or the Agency's).
+_OVER_BUDGET = "over_budget"
+#: How often work held by a budget is tried again: it starts once the day's spend
+#: allows it (a new day, or a raised budget), with no owner retry (replan, 22-oct).
+RETRY_BUDGET_S = 600
+#: A failed errand is tried once more after this; a second failure blocks it.
+RETRY_FAILURE_S = 300
 #: Why nothing starts on a board the owner stopped («Detener a todos»).
 _HALTED = "stopped_by_owner"
 _OWNER = "the owner"
@@ -231,6 +238,8 @@ class AgencyTeams:
         self._direct: dict[str, list[dict[str, Any]]] = {}
         # session_id -> office.say calls of its running turn.
         self._says: dict[str, int] = {}
+        # session_id -> why its last start was refused by a budget (the owner reads it).
+        self._budget_why: dict[str, str] = {}
         # direct chat session_id -> who its running turn already woke (office.say there).
         self._turn_woken: dict[str, set[str]] = {}
         self._stop = threading.Event()
@@ -1268,6 +1277,30 @@ class AgencyTeams:
                 released = True
         return released
 
+    def _retry_blocked(self, halted: set[str], stopped: set[str]) -> None:
+        """Errands a budget or one failure blocked go back to work when their time comes."""
+        now = self._clock.now()
+        for errand in self._repo.errands(statuses=("blocked",)):
+            hold = errand.get("halted") or {}
+            if hold.get("retry") not in ("budget", "failure") or hold.get("retry_at", 0) > now:
+                continue
+            team = self._repo.get(errand["team_id"])
+            if team is None or self._halts(team, halted, stopped):
+                continue
+            self._repo.save_errand(
+                errand["id"],
+                {
+                    **errand,
+                    "status": "pending",
+                    "session_id": None,
+                    "turn_id": None,
+                    # A failure is retried once; a budget, until it allows the turn.
+                    "halted": {"retried": True} if hold["retry"] == "failure" else None,
+                    "updated_at": now,
+                },
+            )
+            self._changed(team["id"], "errand")
+
     def _persist_queues(self) -> None:
         """Keep the posts' queues in the db, so a restart does not lose them."""
         with self._lock:
@@ -1623,6 +1656,7 @@ class AgencyTeams:
         self._expire_waits()
         halted = self._halted_profiles()
         stopped = self._stopped_teams()
+        self._retry_blocked(halted, stopped)
         self._tick_direct(halted, stopped)
         for team in self._repo.list(None):
             if self._halts(team, halted, stopped):
@@ -1631,9 +1665,14 @@ class AgencyTeams:
                 session_id = post["session_id"]
                 if self._busy(session_id):
                     continue
+                now = self._clock.now()
                 with self._lock:
                     queue = self._mentions.get(session_id) or []
-                    mention = queue.pop(0) if queue else None
+                    ready = next(
+                        (i for i, item in enumerate(queue) if item.get("retry_at", 0) <= now),
+                        None,
+                    )
+                    mention = queue.pop(ready) if ready is not None else None
                 if mention is not None:
                     self._start_mention(team, post, mention)
                     continue
@@ -1733,7 +1772,11 @@ class AgencyTeams:
                 if self._live.get(session_id) is live:
                     self._live.pop(session_id, None)
             logger.info("agency conversation %s could not start: %s", session_id, exc)
-            return str(getattr(exc, "message", None) or exc) or type(exc).__name__
+            why = str(getattr(exc, "message", None) or exc) or type(exc).__name__
+            if getattr(exc, "code", None) == AGENT_OVER_BUDGET:
+                self._budget_why[session_id] = why
+                return _OVER_BUDGET
+            return why
         with self._lock:
             if self._live.get(session_id) is live:
                 self._live[session_id] = {**live, "turn_id": started.get("turn_id")}
@@ -1898,6 +1941,18 @@ class AgencyTeams:
         if why_not == _BUSY:
             with self._lock:
                 self._mentions.setdefault(post["session_id"], []).insert(0, mention)
+        elif why_not == _OVER_BUDGET:
+            if not mention.get("retry_at"):
+                self._stopped(
+                    team,
+                    message["chain_id"],
+                    "could_not_start",
+                    self._budget_why.get(post["session_id"]),
+                )
+            with self._lock:
+                self._mentions.setdefault(post["session_id"], []).insert(
+                    0, {**mention, "retry_at": self._clock.now() + RETRY_BUDGET_S}
+                )
         elif why_not is not None:
             # The mention is not lost silently: the owner is told why.
             self._stopped(team, message["chain_id"], "could_not_start", why_not)
@@ -2022,14 +2077,23 @@ class AgencyTeams:
             self._repo.save_errand(errand["id"], {**errand, "updated_at": self._clock.now()})
             return
         if why is not None:
-            # Over a budget or archived: blocked with why until the owner retries.
+            # Archived or refused: blocked with why until the owner retries. Over a
+            # budget: blocked with why, and tried again on its own (_retry_blocked).
+            budget = why == _OVER_BUDGET
             self._repo.save_errand(
                 errand["id"],
                 {
                     **errand,
                     "status": "blocked",
-                    "return_reason": why[:300],
+                    "return_reason": (
+                        self._budget_why.get(post["session_id"]) or why if budget else why
+                    )[:300],
                     "session_id": None,
+                    "halted": (
+                        {"retry": "budget", "retry_at": self._clock.now() + RETRY_BUDGET_S}
+                        if budget
+                        else errand.get("halted")
+                    ),
                     "updated_at": self._clock.now(),
                 },
             )
@@ -2151,11 +2215,13 @@ class AgencyTeams:
             return  # cancelled, or already blocked (by the owner's stop, for one)
         now = self._clock.now()
         if name != "turn.completed":
-            # Failed or stopped: blocked on the board with why, never silently
-            # and never retried on its own.
+            # Failed or stopped: blocked on the board with why, never silently. A turn
+            # that failed (not one the owner stopped) is tried once more on its own.
             error = payload.get("error") or {}
             reason = error.get("message") if isinstance(error, dict) else None
             reason = reason or payload.get("reason")
+            retried = bool((errand.get("halted") or {}).get("retried"))
+            again = name == "turn.failed" and not retried
             self._repo.save_errand(
                 errand["id"],
                 {
@@ -2164,6 +2230,9 @@ class AgencyTeams:
                     "return_reason": (reason or name)[:300],
                     "session_id": None,
                     "turn_id": None,
+                    "halted": (
+                        {"retry": "failure", "retry_at": now + RETRY_FAILURE_S} if again else None
+                    ),
                     "updated_at": now,
                 },
             )
