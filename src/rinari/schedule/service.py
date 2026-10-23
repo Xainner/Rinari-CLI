@@ -413,6 +413,7 @@ class ScheduleService:
         task_id = self._ids.new("sch")
         task.update(created_at=now, updated_at=now)
         task["next_run_at"] = self._first_run(task, now)
+        self._refuse_past(task)
         return self.view(self._repo.save(task_id, task))
 
     def update(self, task_id: str, patch: dict[str, Any]) -> dict[str, Any]:
@@ -426,6 +427,8 @@ class ScheduleService:
         # A new schedule, or switching a task back on, counts from now: runs
         # missed while it was off are not caught up.
         task["next_run_at"] = self._first_run(task, now) if rescheduled else current["next_run_at"]
+        if rescheduled:
+            self._refuse_past(task)
         if "enabled" not in patch and not task["enabled"]:
             # Still off, and not by the owner's hand now: who paused it stays known
             # («Detener a todos» switches back on only what it switched off).
@@ -442,6 +445,21 @@ class ScheduleService:
         if grant not in grants:
             grants.append(grant)
         return self.update(task_id, {"grants": grants})
+
+    @staticmethod
+    def _refuse_past(task: dict[str, Any]) -> None:
+        """A one-time task at a time that already passed would never run and stay on:
+        an agent did that to «stop» its rules (22-oct). Stopping is cancelling."""
+        if (
+            task.get("enabled")
+            and task["schedule"].get("kind") == "once"
+            and not task.get("next_run_at")
+        ):
+            raise ScheduledTaskError(
+                "That time already passed, so it would never run. To stop a task, cancel it "
+                "(schedule.cancel) or switch it off; to run it once, give a time ahead or "
+                "'after'."
+            )
 
     def _first_run(self, task: dict[str, Any], now: float) -> float | None:
         return next_run(self._schedule(task), now)

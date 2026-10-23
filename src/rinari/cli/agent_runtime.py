@@ -482,16 +482,19 @@ def _agency_place(services: ServiceContainer, record: SessionRecord, agent: dict
     # of its own (22-oct): what repeats is a routine, named here.
     lines.append(
         "What must happen on its own every so often (every N seconds, minutes or hours) is "
-        "a routine: team.routine.create (yours; the chief sets a teammate's too), and "
-        "team.routines lists them. A run never overlaps the previous one; between runs, end "
-        "your turn instead of waiting. Work in steps that hand on to each other is a flow: "
-        "flow.list shows them and flow.start runs one."
+        "a routine: team.routine.create (yours; the chief sets a teammate's too), "
+        "team.routines lists them and you stop yours with schedule.cancel. A run never "
+        "overlaps the previous one; between runs, end your turn instead of waiting. Work in "
+        "steps that hand on to each other is a flow: flow.list shows them and flow.start "
+        "runs one."
     )
     # A quieter office (replan, phase 4): the owner reads one voice.
     lines.append(
         "In the office, only the chief answers the owner, unless the owner names you. "
         "Never post a message with nothing in it (a «received», «on it», «ok»): post when "
-        "you have a result, a question or something blocking you."
+        "you have a result, a question or something blocking you. When the owner asks "
+        "several of you the same thing, do your own part and say once that it is done; "
+        "do not ask teammates to do or confirm what the owner already asked each of them."
     )
     manual = (team.get("manual") or "").strip()
     if manual:
@@ -1680,6 +1683,7 @@ def _build_tools(
                         service=getattr(services, "schedules", None),
                         project_id=record.project_id,
                         agent_id=getattr(record, "agent_id", None),
+                        team_rules=lambda session_id: _chief_team_rules(services, session_id),
                     )
                 )
             )
@@ -2285,6 +2289,23 @@ def _owner_steer_as_source(
             "text": item.display_content or saved[0].content or "",
         },
     )
+
+
+def _chief_team_rules(services: ServiceContainer, session_id: str) -> set[str]:
+    """The rules that work for the team whose chief's post this conversation is.
+
+    MetaTeam (22-oct): an agent stuck on a long turn could not stop its routines and
+    nobody else could; the chief manages the team's routines too.
+    """
+    repo = getattr(services.ctx, "team_repo", None)
+    board = getattr(getattr(services, "teams", None), "board", None)
+    if repo is None or board is None:
+        return set()
+    post = repo.post_for_session(session_id)
+    team = repo.get(post["team_id"]) if post else None
+    if team is None or team.get("chief_agent_id") != post["agent_id"]:
+        return set()
+    return {task["id"] for task in board._team_rules(team["id"])}
 
 
 def _without_pre_persisted_owner_message(

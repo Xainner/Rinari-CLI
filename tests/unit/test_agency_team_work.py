@@ -298,3 +298,45 @@ def test_an_archived_agent_is_no_longer_a_teammate_to_ask(server, turns) -> None
     assert not [
         m for m in _office(server, team) if (m.get("notice") or {}).get("kind") == "stopped"
     ]
+
+
+def test_the_team_routines_say_how_to_stop_one(server) -> None:
+    team, _writer, image, _video = _studio(server)
+    listed = _tools(server, _post(team, image))["team.routines"].handler({}, None)
+    assert "schedule.cancel" in listed.data["note"]
+    place = _place(server, team, image)
+    assert "schedule.cancel" in place and "do not ask teammates" in place
+
+
+def test_the_chief_stops_a_teammates_routine_and_no_one_else_can(server) -> None:
+    """MetaTeam (22-oct): told to delete their scheduled tasks, an agent stuck on a long
+    turn could not stop its routines and nobody else could."""
+    from types import SimpleNamespace
+
+    from rinari.cli.agent_runtime import _chief_team_rules
+    from rinari.schedule.tools import ScheduleToolHost, schedule_tools
+
+    team, writer, _image, video = _studio(server)
+    services = server._services
+    params = {"team_id": team["id"], "agent_id": "Image", "schedule": EVERY_MINUTE}
+    _ok(_call(server, "agency.routine.create", {**params, "name": "Velas", "prompt": "Mira"}))
+
+    def tools(agent):
+        host = ScheduleToolHost(
+            service=services.schedules,
+            agent_id=agent["id"],
+            team_rules=lambda session_id: _chief_team_rules(services, session_id),
+        )
+        ctx = SimpleNamespace(session_id=_post(team, agent), origin_kind="user")
+        return {tool.name: tool for tool in schedule_tools(host)}, ctx
+
+    video_tools, video_ctx = tools(video)
+    assert not video_tools["schedule.cancel"].handler({"task": "Velas"}, video_ctx).ok
+    chief_tools, chief_ctx = tools(writer)
+    listed = chief_tools["schedule.list"].handler({}, chief_ctx).data["tasks"]
+    assert [(item["name"], item.get("mine")) for item in listed] == [("Velas", False)]
+    assert chief_tools["schedule.cancel"].handler({"task": "Velas"}, chief_ctx).ok
+    assert _ok(_call(server, "agency.routine.list", {"team_id": team["id"]}))["routines"] == []
+    # Outside its post (its own chat), the chief reaches only its own.
+    direct = SimpleNamespace(session_id=writer["session_id"], origin_kind="user")
+    assert chief_tools["schedule.list"].handler({}, direct).data["tasks"] == []

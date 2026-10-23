@@ -8,6 +8,7 @@ schedules work on its own, and never grants itself permissions for later.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -21,6 +22,9 @@ class ScheduleToolHost:
     #: Rinari Agency: the agent whose conversation this is. Its proposals are
     #: its permanent rules, and a rule is always confirmed by the owner.
     agent_id: str | None = None
+    #: Rinari Agency: the ids of the rules that work for the team whose chief's post
+    #: this conversation is (empty anywhere else). The chief manages them too.
+    team_rules: Callable[[str], set[str]] | None = None
 
 
 def schedule_tools(host: ScheduleToolHost):
@@ -41,11 +45,18 @@ def schedule_tools(host: ScheduleToolHost):
     def fail(code, message: str):
         return ToolResult(ok=False, error=ToolErrorInfo(code, message), origin="schedule")
 
-    def find(ref: Any) -> tuple[dict[str, Any] | None, str | None]:
-        """One of mine by id, or by its exact name (any case)."""
+    def reach(ctx) -> Callable[[dict[str, Any]], bool]:
+        """Mine, and, in a team chief's post, every routine that works for the team."""
+        session_id = getattr(ctx, "session_id", "") or ""
+        team = host.team_rules(session_id) if host.team_rules and session_id else set()
+        return lambda task: mine(task) or task["id"] in team
+
+    def find(ref: Any, ctx=None) -> tuple[dict[str, Any] | None, str | None]:
+        """One I can manage, by id or by its exact name (any case)."""
         if not isinstance(ref, str) or not ref.strip():
             return None, "task must be a task's id or name (see schedule.list)"
-        tasks = [task for task in host.service.list() if mine(task)]
+        managed = reach(ctx)
+        tasks = [task for task in host.service.list() if managed(task)]
         for task in tasks:
             if task["id"] == ref:
                 return task, None
@@ -72,19 +83,21 @@ def schedule_tools(host: ScheduleToolHost):
             "here": task.get("target") == "this_conversation",
             "notify": task.get("notify") or "all",
             "prompt": (task.get("prompt") or "")[:300],
+            **({"mine": False} if host.agent_id and task.get("agent_id") != host.agent_id else {}),
         }
 
     def list_mine(arguments, ctx):
         if host.service is None:
             return fail(ToolErrorCode.DEPENDENCY_ERROR, "scheduling is not available")
-        tasks = [view(task) for task in host.service.list() if mine(task)]
+        managed = reach(ctx)
+        tasks = [view(task) for task in host.service.list() if managed(task)]
         return ToolResult(ok=True, data={"tasks": tasks}, origin="schedule")
 
     def update(arguments, ctx):
         if host.service is None:
             return fail(ToolErrorCode.DEPENDENCY_ERROR, "scheduling is not available")
         args = dict(arguments or {})
-        task, problem = find(args.pop("task", None))
+        task, problem = find(args.pop("task", None), ctx)
         if task is None:
             return fail(ToolErrorCode.NOT_FOUND, problem or "not found")
         patch = {key: args[key] for key in ("name", "schedule", "prompt", "notify") if key in args}
@@ -113,7 +126,7 @@ def schedule_tools(host: ScheduleToolHost):
     def cancel(arguments, ctx):
         if host.service is None:
             return fail(ToolErrorCode.DEPENDENCY_ERROR, "scheduling is not available")
-        task, problem = find((arguments or {}).get("task"))
+        task, problem = find((arguments or {}).get("task"), ctx)
         if task is None:
             return fail(ToolErrorCode.NOT_FOUND, problem or "not found")
         host.service.delete(task["id"])
@@ -310,8 +323,9 @@ def schedule_tools(host: ScheduleToolHost):
         ToolDefinition(
             name="schedule.list",
             description=(
-                "What you scheduled (your rules, as an Agency agent): each task's id, name, "
-                "when it runs, whether it is on and its next run in local time."
+                "What you scheduled (your rules, as an Agency agent; a team's chief also sees "
+                "every routine that works for its team, marked mine: false): each task's id, "
+                "name, when it runs, whether it is on and its next run in local time."
             ),
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
             capabilities=("state.read",),
@@ -349,7 +363,8 @@ def schedule_tools(host: ScheduleToolHost):
         ToolDefinition(
             name="schedule.cancel",
             description=(
-                "Remove one of your scheduled tasks (task: its id or name): it never runs again."
+                "Remove one of your scheduled tasks (task: its id or name): it never runs again. "
+                "A team's chief can also remove a teammate's routine of that team."
             ),
             input_schema={
                 "type": "object",

@@ -617,3 +617,19 @@ def test_a_new_task_says_what_already_runs_in_its_conversation(services) -> None
     # One in a fresh session repeats nothing here.
     apart = propose(_task(name="Resumen"), owner)
     assert "already_here" not in apart.data
+
+
+def test_a_one_time_task_at_a_past_time_is_refused_and_points_to_cancel(services) -> None:
+    """MetaTeam (22-oct): an agent «stopped» its rules by moving them to a time already
+    past; they never ran again but stayed on."""
+    task = services.schedules.create(_task(name="Riesgo 60s"))
+    with pytest.raises(ScheduledTaskError, match=r"schedule.cancel"):
+        services.schedules.update(
+            task["id"], {"schedule": {"kind": "once", "at": "2020-01-01T08:00"}}
+        )
+    with pytest.raises(ScheduledTaskError):
+        services.schedules.create(
+            _task(name="Tarde", schedule={"kind": "once", "at": "2020-01-01T08:00"})
+        )
+    # Switched off, a past time is no harm: nothing would run anyway.
+    assert services.schedules.get(task["id"])["schedule"] == {"kind": "interval", "minutes": 30}

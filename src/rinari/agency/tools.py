@@ -403,7 +403,17 @@ def team_tools(host: TeamToolHost):
             }
             for item in board.work.routines(team["id"])
         ]
-        return _ok({"team": team["name"], "routines": items})
+        return _ok(
+            {
+                "team": team["name"],
+                "routines": items,
+                # MetaTeam (22-oct): nobody knew how to stop one, and one agent moved its
+                # rules to a time already past instead.
+                "note": "To stop or change one, the agent it belongs to, or the team's "
+                "chief, cancels it (schedule.cancel) or changes it (schedule.update); the "
+                "owner can also do it from the team's panel.",
+            }
+        )
 
     def routine_create(arguments, ctx):
         found = context()
