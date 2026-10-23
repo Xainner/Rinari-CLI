@@ -220,6 +220,7 @@ def schedule_tools(host: ScheduleToolHost):
                         "Scheduled. It has no permissions granted in advance: a run asks "
                         "for what it needs. The owner can undo it from the notice."
                     ),
+                    **_already_here(host.service, proposed["task"]),
                 }
                 if proposed["created"]
                 else {
@@ -363,6 +364,25 @@ def schedule_tools(host: ScheduleToolHost):
             handler=cancel,
         ),
     ]
+
+
+def _already_here(service: Any, task: dict[str, Any]) -> dict[str, Any]:
+    """What else the same owner already runs in this conversation, so a new task that
+    does the same job replaces the old one instead of running beside it (22-oct)."""
+    others = service.siblings(task) if hasattr(service, "siblings") else []
+    if not others:
+        return {}
+    return {
+        "already_here": [
+            {"id": other["id"], "name": other["name"], "when": other.get("description")}
+            for other in others
+        ],
+        "already_here_note": (
+            "These already run in this conversation. If the new task does the same job "
+            "as one of them, cancel the old one (schedule.cancel) or change it "
+            "(schedule.update) instead of keeping both: each run costs a full turn."
+        ),
+    }
 
 
 def _local(epoch: float | None) -> str | None:

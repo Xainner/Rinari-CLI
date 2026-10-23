@@ -436,6 +436,8 @@ def team_tools(host: TeamToolHost):
             )
         except (AgencyError, ScheduleError, ScheduledTaskError) as exc:
             return _fail(ToolErrorCode.INVALID_ARGUMENT, str(exc))
+        from rinari.schedule.tools import _already_here
+
         return _ok(
             {
                 "routine": task["name"],
@@ -443,6 +445,7 @@ def team_tools(host: TeamToolHost):
                 "next_run_at": task.get("next_run_at"),
                 "note": "Active. It runs in that agent's post, with its history; the owner "
                 "sees it in the team's panel.",
+                **_already_here(host.services.schedules, task),
             }
         )
 

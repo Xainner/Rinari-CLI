@@ -601,3 +601,19 @@ def test_the_conversation_knows_it_can_schedule_without_loading_the_tool(service
     assert tools["schedule.propose"].always_loaded is False
     facts = agent_runtime._runtime_facts(services, services.sessions.show(_chat(services)))
     assert "schedule.propose" in facts["scheduling"]
+
+
+def test_a_new_task_says_what_already_runs_in_its_conversation(services) -> None:
+    """22-oct: a team's agents ran «Mercado análisis 30s» and «Mercado XAUUSDm 30s» side
+    by side; nothing told the second one the first existed."""
+    session_id = _chat(services)
+    owner = SimpleNamespace(session_id=session_id, origin_kind="user")
+    propose = _tools(services)["schedule.propose"].handler
+    first = propose({**_task(name="Mercado análisis 30s"), "in_this_conversation": True}, owner)
+    assert first.ok and "already_here" not in first.data
+    second = propose({**_task(name="Mercado XAUUSDm 30s"), "in_this_conversation": True}, owner)
+    assert [item["name"] for item in second.data["already_here"]] == ["Mercado análisis 30s"]
+    assert "schedule.cancel" in second.data["already_here_note"]
+    # One in a fresh session repeats nothing here.
+    apart = propose(_task(name="Resumen"), owner)
+    assert "already_here" not in apart.data

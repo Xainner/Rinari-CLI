@@ -376,6 +376,20 @@ class ScheduleService:
 
     # -- tasks -------------------------------------------------------------
 
+    def siblings(self, task: dict[str, Any]) -> list[dict[str, Any]]:
+        """The other enabled tasks of the same owner (agent or not) that run in the same
+        conversation: what a new one may repeat. Empty for one in a fresh session."""
+        if task.get("target") != "this_conversation" or not task.get("session_id"):
+            return []
+        return [
+            self.view(other)
+            for other in self._repo.list()
+            if other["id"] != task["id"]
+            and other.get("enabled")
+            and other.get("session_id") == task["session_id"]
+            and other.get("agent_id") == task.get("agent_id")
+        ]
+
     def view(self, task: dict[str, Any]) -> dict[str, Any]:
         schedule = parse_schedule(task["schedule"])
         return {
