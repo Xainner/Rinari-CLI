@@ -394,6 +394,11 @@ class DesktopWorkspace:
                 # changeset only exists once the turn ends, so «View file» on a
                 # file outside the workspace failed while the turn was going.
                 changed = self._live_change(record.id, path)
+            if changed is None and (turn_found or changeset is not None):
+                # …and one it handed to the owner with file.present, which read
+                # it under the session's permissions: a song a shell command
+                # downloaded to Downloads showed its card but would not play.
+                changed = self._presented(record.id, path)
             if changed is None:
                 message = (
                     "Unknown turn provenance."
@@ -483,6 +488,15 @@ class DesktopWorkspace:
                 if isinstance(absolute, str) and _same_path(Path(absolute), path):
                     latest = row
         return self._external_change({"files": [latest]}, path) if latest else None
+
+    def _presented(self, session_id: str, path: Path) -> dict[str, Any] | None:
+        """The file, if this session presented it to the owner (file.present)."""
+        for row in self.services.ctx.event_repo.list(session_id, types=["file.presented"]):
+            for item in row.payload.get("items") or []:
+                presented = item.get("path") if isinstance(item, dict) else None
+                if isinstance(presented, str) and _same_path(Path(presented), path):
+                    return {"after_hash": None, "sensitive": is_sensitive_file(path)}
+        return None
 
     def _live_change(self, session_id: str, path: Path) -> dict[str, Any] | None:
         """What a running turn of this session has done to ``path`` so far."""

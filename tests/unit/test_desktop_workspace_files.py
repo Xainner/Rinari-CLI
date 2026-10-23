@@ -708,6 +708,55 @@ def test_a_file_the_running_turn_wrote_opens_before_the_turn_ends(desktop_runtim
         server._turns._turns.pop("turn_live", None)
 
 
+def test_a_file_the_session_presented_opens_outside_the_workspace(desktop_runtime) -> None:
+    # A shell command downloaded a song to Downloads and the agent presented
+    # it: the card showed, but playing it said it was outside the workspace.
+    from rinari.storage.records import SessionEventRecord
+
+    services, server, primary, other, _workspace, tmp_path = desktop_runtime
+    song = tmp_path / "Downloads" / "song.txt"
+    beside = tmp_path / "Downloads" / "other.txt"
+    song.parent.mkdir()
+    song.write_text("la la", encoding="utf-8")
+    beside.write_text("private", encoding="utf-8")
+    for seq, (kind, payload) in enumerate(
+        [
+            ("turn.started", {"turn_id": "turn_song"}),
+            (
+                "file.presented",
+                {"turn_id": "turn_song", "items": [{"path": str(song), "kind": "text"}]},
+            ),
+        ],
+        start=1,
+    ):
+        services.ctx.event_repo.insert(
+            SessionEventRecord(
+                id=f"evt_song_{seq}",
+                session_id=primary.id,
+                seq=seq,
+                type=kind,
+                payload=payload,
+                created_at="2026-01-01T00:00:00Z",
+                turn_id="turn_song",
+            )
+        )
+    for turn in ("turn_song", None):
+        params = {"session_id": primary.id, "path": str(song)}
+        if turn:
+            params["turn_id"] = turn
+        result = _request(server, "workspace.file.read", params)
+        assert result["ok"] is True, result
+        assert result["result"]["content"] == "la la"
+
+    # Only what was presented, and only for the session that presented it.
+    denied = _request(
+        server, "workspace.file.read", {"session_id": primary.id, "path": str(beside)}
+    )
+    assert denied["error"]["code"] == "PERMISSION_DENIED"
+    foreign = _request(server, "workspace.file.read", {"session_id": other.id, "path": str(song)})
+    assert foreign["error"]["code"] == "PERMISSION_DENIED"
+
+
 def test_resolve_reports_large_media_without_reading_it(desktop_runtime) -> None:
     """Large media resolve to path, size and kind; `read` still refuses them."""
     _services, server, primary, _other, workspace, _tmp = desktop_runtime
