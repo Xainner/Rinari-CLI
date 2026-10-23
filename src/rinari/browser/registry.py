@@ -54,7 +54,16 @@ class BrowserRegistry:
         with self._lock:
             existing = self._contexts.get(session_id)
             if existing is not None:
-                if not existing["manager"].is_disposed:
+                manager = existing["manager"]
+                if manager.is_disposed and self.native_available():
+                    # Closed by browser.close: the same manager gets a new
+                    # context, so a turn that kept it does not stay on the
+                    # closed one while the owner's panel opens another.
+                    self._bridge.forget(existing["context_id"])
+                    backend, existing["context_id"] = self._new_backend(session_id)
+                    manager.adopt(backend)
+                    return manager
+                if not manager.is_disposed:
                     # Se devuelve aunque el host se haya ido. Un contexto que
                     # empezó nativo sigue siéndolo hasta que se cierre: si se
                     # sustituyera por el backend externo, la sesión abriría
@@ -71,50 +80,67 @@ class BrowserRegistry:
             if not self.native_available():
                 return None
 
-            # El id lo acuña el componente confiable y se mapea a objetos
-            # internos; nunca viaja un identificador elegido fuera (§5.3). Una
-            # reapertura acuña uno nuevo: el contexto anterior queda cerrado y
-            # su backend rechaza lo que llegue tarde a su nombre.
-            context_id = secrets.token_hex(16)
-            backend = HostBackend(self._bridge, session_id=session_id, context_id=context_id)
-            # La transición se confirma en un worker, así que su resultado
-            # llega por evento. Main monta o retira la barrera **aquí**, que es
-            # el orden del §7: «solo después main habilita input manual».
-            backend.on_control_change(
-                lambda state, sid=session_id, cid=context_id: self._bridge.publish(
-                    "browser.control.changed",
-                    {
-                        "session_id": sid,
-                        "context_id": cid,
-                        "control": backend.control,
-                        "control_state": state,
-                        "control_revision": backend.control_revision,
-                    },
-                )
-            )
-            # El agente espera a que el dueño suelte el navegador (#46): la
-            # interfaz lo enseña con el mismo evento del control.
-            backend.on_waiting_change(
-                lambda waiting, sid=session_id, cid=context_id: self._bridge.publish(
-                    "browser.control.changed",
-                    {
-                        "session_id": sid,
-                        "context_id": cid,
-                        "control": backend.control,
-                        "control_state": backend.status().get("control_state"),
-                        "control_revision": backend.control_revision,
-                        "agent_waiting": waiting,
-                    },
-                )
-            )
-            self._bridge.on_owner_activity(context_id, backend.note_owner_activity)
+            backend, context_id = self._new_backend(session_id)
             manager = BrowserManager(
                 session_id=session_id,
                 home_root=self._home_root,
                 backend=backend,
+                reopen=lambda owner, sid=session_id: self._reopen(sid, owner),
             )
             self._contexts[session_id] = {"manager": manager, "context_id": context_id}
             return manager
+
+    def _reopen(self, session_id: str, manager: Any) -> Any | None:
+        """A new context for a manager whose own was closed, if it is still the session's."""
+        with self._lock:
+            entry = self._contexts.get(session_id)
+            if entry is None or entry["manager"] is not manager or not self.native_available():
+                return None
+            old = entry["context_id"]
+            backend, entry["context_id"] = self._new_backend(session_id)
+        self._bridge.forget(old)
+        return backend
+
+    def _new_backend(self, session_id: str) -> tuple[HostBackend, str]:
+        """A desktop context for the session, wired to the control events."""
+        # El id lo acuña el componente confiable y se mapea a objetos
+        # internos; nunca viaja un identificador elegido fuera (§5.3). Una
+        # reapertura acuña uno nuevo: el contexto anterior queda cerrado y
+        # su backend rechaza lo que llegue tarde a su nombre.
+        context_id = secrets.token_hex(16)
+        backend = HostBackend(self._bridge, session_id=session_id, context_id=context_id)
+        # La transición se confirma en un worker, así que su resultado
+        # llega por evento. Main monta o retira la barrera **aquí**, que es
+        # el orden del §7: «solo después main habilita input manual».
+        backend.on_control_change(
+            lambda state, sid=session_id, cid=context_id: self._bridge.publish(
+                "browser.control.changed",
+                {
+                    "session_id": sid,
+                    "context_id": cid,
+                    "control": backend.control,
+                    "control_state": state,
+                    "control_revision": backend.control_revision,
+                },
+            )
+        )
+        # El agente espera a que el dueño suelte el navegador (#46): la
+        # interfaz lo enseña con el mismo evento del control.
+        backend.on_waiting_change(
+            lambda waiting, sid=session_id, cid=context_id: self._bridge.publish(
+                "browser.control.changed",
+                {
+                    "session_id": sid,
+                    "context_id": cid,
+                    "control": backend.control,
+                    "control_state": backend.status().get("control_state"),
+                    "control_revision": backend.control_revision,
+                    "agent_waiting": waiting,
+                },
+            )
+        )
+        self._bridge.on_owner_activity(context_id, backend.note_owner_activity)
+        return backend, context_id
 
     def set_control(
         self,

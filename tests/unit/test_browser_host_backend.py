@@ -1069,3 +1069,64 @@ def test_el_ancho_de_pagina_viaja_al_host_y_queda_en_el_estado() -> None:
     assert host.status()["viewport_width"] == 1280
     host.set_viewport(None)
     assert host.status()["viewport_width"] is None
+
+
+class _RegistryBridge(FakeBridge):
+    """What the registry asks of the bridge besides requests."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.forgotten: list[str] = []
+
+    def publish(self, *_a, **_k) -> None:
+        pass
+
+    def on_owner_activity(self, *_a, **_k) -> None:
+        pass
+
+    def forget(self, context_id: str) -> None:
+        self.forgotten.append(context_id)
+
+    def observed(self, _context_id: str) -> dict:
+        return {}
+
+
+def test_un_contexto_que_el_agente_cerro_se_reabre_al_volver_a_usarlo() -> None:
+    # SOIN, 23-oct: tras browser.close la sesión se quedaba con el contexto
+    # cerrado; hasta browser.launch decía que el host no estaba, mientras el
+    # panel del dueño abría otro y le funcionaba.
+    from rinari.browser.registry import BrowserRegistry
+
+    bridge = _RegistryBridge()
+    registry = BrowserRegistry(bridge, Path("."))  # type: ignore[arg-type]
+    manager = registry.acquire("s1")
+    first = registry.describe("s1")["context_id"]
+    manager.close()
+    assert manager.is_disposed
+
+    assert manager.launch() == "electron-native"
+    bridge.answer = {"targets": []}
+    assert manager.targets() == []
+    assert not manager.is_disposed
+    second = registry.describe("s1")["context_id"]
+    assert second != first and bridge.forgotten == [first]
+    # The panel and the turn keep the very same manager.
+    assert registry.acquire("s1") is manager
+
+    # Closed by the panel's `prepare` path instead: same manager, new context.
+    manager.close()
+    assert registry.acquire("s1") is manager and not manager.is_disposed
+    assert registry.describe("s1")["context_id"] not in (first, second)
+
+
+def test_una_sesion_cerrada_no_revive_su_navegador() -> None:
+    from rinari.browser.registry import BrowserRegistry
+
+    bridge = _RegistryBridge()
+    registry = BrowserRegistry(bridge, Path("."))  # type: ignore[arg-type]
+    manager = registry.acquire("s1")
+    registry.release("s1")
+    with pytest.raises(BrowserError) as raised:
+        manager.launch()
+    assert raised.value.code == "BROWSER_DISCONNECTED"
+    assert manager.is_disposed

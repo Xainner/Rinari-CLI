@@ -172,6 +172,7 @@ class BrowserManager:
         headless: bool = True,
         timeout_s: float = 15.0,
         backend: Any | None = None,
+        reopen: Callable[[BrowserManager], Any] | None = None,
     ) -> None:
         # Backend inyectado (documento 03 §4.1): cuando lo hay, las operaciones
         # page-level no se ejecutan sobre una CdpSession propia sino donde diga
@@ -179,6 +180,9 @@ class BrowserManager:
         # límites, los errores públicos y la interfaz que usan tools y policy
         # no cambian, que es justo lo que pide el documento.
         self._backend = backend
+        #: A new desktop context for this session when its own was closed
+        #: (the registry gives it; `None` outside the desktop).
+        self._reopen = reopen
         self.session_id = session_id
         self._home_root = Path(home_root)
         self._endpoint_cfg = endpoint
@@ -251,6 +255,7 @@ class BrowserManager:
         the owner's personal one) keeps the signed-in session for next time.
         Closing that window brings the session back to the desktop browser.
         """
+        self._revive()
         self._settle_external()
         if self._native_backend is None:
             self._native_backend = self._backend
@@ -282,6 +287,25 @@ class BrowserManager:
             self._native_backend = None
         self._external_profile = None
         self._headless = True
+
+    def adopt(self, backend: Any) -> None:
+        """Work on a new desktop context from now on (the old one was closed)."""
+        self._disconnect()
+        self._backend = backend
+
+    def _revive(self) -> None:
+        """A desktop context closed by browser.close opens again on next use.
+
+        Closing it was for good, and the session keeps this same manager: every
+        later operation, browser.launch included, said the desktop host was not
+        available while the owner went on using the browser panel (SOIN, 23-oct).
+        """
+        backend = self._backend
+        if backend is None or not getattr(backend, "closed", False) or self._reopen is None:
+            return
+        fresh = self._reopen(self)
+        if fresh is not None:
+            self.adopt(fresh)
 
     def _settle_external(self) -> None:
         """The owner closed the external window: the desktop browser is back."""
@@ -389,6 +413,7 @@ class BrowserManager:
         return self._endpoint or target
 
     def launch(self, command: str | None = None, port: int | None = None) -> str:
+        self._revive()
         self._settle_external()
         if self._backend is not None:
             # El contexto nativo ya existe o no existe; no hay proceso que
@@ -597,6 +622,7 @@ class BrowserManager:
         Con el backend externo no hay arbitraje que sostener —no hay usuario
         compartiendo esa página—, así que no hace nada.
         """
+        self._revive()
         backend = self._backend
         scope = getattr(backend, "mutation_scope", None) if backend is not None else None
         if scope is None:
@@ -648,6 +674,7 @@ class BrowserManager:
         return session, self._attached[target_id]
 
     def targets(self) -> list[dict[str, Any]]:
+        self._revive()
         self._settle_external()
         if self._backend is not None:
             return list(self._backend.targets())
@@ -666,6 +693,7 @@ class BrowserManager:
         return out
 
     def new_page(self, url: str = "about:blank") -> dict[str, Any]:
+        self._revive()
         self._settle_external()
         if self._backend is not None:
             return dict(self._backend.new_page(url))
@@ -683,6 +711,7 @@ class BrowserManager:
         """Fija el ancho de la página (plan 0.4.0 #44b); `None` vuelve a
         ajustarla al panel. Para probar un diseño en varios anchos."""
         with self._mutation("browser.viewport", cancelled):
+            self._revive()
             self._settle_external()
             if self._backend is not None:
                 result = self._backend.set_viewport(width, cancelled=cancelled)
@@ -724,6 +753,7 @@ class BrowserManager:
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         self._raise_if_cancelled(cancelled)
+        self._revive()
         self._settle_external()
         if self._backend is not None:
             return self._backend.send(
