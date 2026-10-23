@@ -145,7 +145,11 @@ def register_media(dispatcher, services):
         record = services.artifacts.meta(uri)
         # `previews`: las capturas que el render documental hizo de un archivo
         # de la sesión; son derivados, como `derived`.
-        if record.namespace not in {"media", "derived", "previews"}:
+        # Any image the session keeps has a thumbnail: one an agent downloaded
+        # and presented (`downloads`) showed «Only attachment artifacts can be
+        # previewed» instead of its card (23-oct). Other files keep the rule.
+        is_image = record.content_type in {"image/png", "image/jpeg", "image/webp"}
+        if record.namespace not in {"media", "derived", "previews"} and not is_image:
             raise EngineProtocolError(INVALID_PARAMS, "Only attachment artifacts can be previewed")
         max_bytes = params.get("max_bytes") or 512 * 1024
         if type(max_bytes) is not int or max_bytes < 1:

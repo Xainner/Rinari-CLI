@@ -595,6 +595,32 @@ def test_runtime_preparation_timeout_becomes_terminal_failure(
     assert events[-1]["payload"]["error"]["code"] == "TURN_PREPARATION_TIMEOUT"
 
 
+def test_an_image_the_agent_downloaded_has_a_thumbnail(server, tmp_path) -> None:
+    # 23-oct: an image downloaded with http and presented showed «Only
+    # attachment artifacts can be previewed» instead of its card.
+    import io
+
+    from PIL import Image
+
+    session_id = _create_chat(server, tmp_path, tag="download-preview")
+    buffer = io.BytesIO()
+    Image.new("RGB", (900, 600), "red").save(buffer, format="PNG")
+    store = server._services.artifacts
+    image = store.create(
+        session_id, "downloads", "picture.png", buffer.getvalue(), content_type="image/png"
+    )
+    preview = server.handle_line(
+        _req("download-preview", "attachment.preview", {"uri": image.uri()})
+    )
+    assert preview["ok"], preview
+    assert preview["result"]["width"] == 512
+
+    # A file that is not an image still needs to be an attachment.
+    text = store.create(session_id, "runtime", "out.json", b"{}")
+    refused = server.handle_line(_req("runtime-preview", "attachment.preview", {"uri": text.uri()}))
+    assert refused["error"]["code"] == "INVALID_PARAMS"
+
+
 def test_a_preparation_that_keeps_moving_is_not_cut(server, tmp_path, monkeypatch) -> None:
     # SOIN, 23-oct: on a slow machine every stage took a few seconds and their
     # sum passed the limit; only a stage that does not move is stalled.
