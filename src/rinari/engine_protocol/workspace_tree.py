@@ -57,6 +57,10 @@ def _git(root: Path, *args: str, stdin: bytes | None = None) -> bytes | None:
 
 
 def _git_root(root: Path) -> Path | None:
+    # A folder outside any repository needs no git at all: starting a process
+    # per listing is what a Files tree on a plain folder paid for nothing.
+    if not any((folder / ".git").exists() for folder in (root, *root.parents)):
+        return None
     out = _git(root, "rev-parse", "--show-toplevel")
     if not out:
         return None

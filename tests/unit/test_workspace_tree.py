@@ -67,3 +67,20 @@ def test_it_never_leaves_the_root(server, tmp_path):
     assert listed["result"]["git"] is False
     outside = _list(server, session_id, "..", tag="o")
     assert not outside["ok"] and "outside" in outside["error"]["message"]
+
+
+def test_a_plain_folder_lists_without_starting_git(server, tmp_path, monkeypatch):
+    # A folder outside any repository paid a git process on every listing.
+    from rinari.engine_protocol import workspace_tree
+
+    plain = tmp_path / "plain"
+    (plain / "comics").mkdir(parents=True)
+    (plain / "notes.txt").write_text("x", encoding="utf-8")
+    session_id = _session(server, plain)
+    monkeypatch.setattr(
+        workspace_tree, "_git", lambda *a, **k: (_ for _ in ()).throw(AssertionError("git ran"))
+    )
+    reply = _list(server, session_id, tag="plain")
+    assert reply["ok"], reply
+    assert [entry["name"] for entry in reply["result"]["entries"]] == ["comics", "notes.txt"]
+    assert reply["result"]["git"] is False
