@@ -1529,11 +1529,19 @@ class TurnManager:
         with self._lock:
             self._preparation_threads.add(thread)
         thread.start()
+        # The limit is for a stage that does not move, not for the whole
+        # preparation: on a slow machine each stage took a few seconds and their
+        # sum passed the limit while every one of them was progressing (SOIN,
+        # 23-oct).
         deadline = time.monotonic() + PREPARATION_TIMEOUT_S
+        watched = turn.preparation_stage
         while True:
             if turn.cancel_requested.is_set():
                 abandoned.set()
                 raise CancelledError("Turn cancelled during runtime preparation")
+            if turn.preparation_stage != watched:
+                watched = turn.preparation_stage
+                deadline = time.monotonic() + PREPARATION_TIMEOUT_S
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 abandoned.set()

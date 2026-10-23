@@ -595,6 +595,35 @@ def test_runtime_preparation_timeout_becomes_terminal_failure(
     assert events[-1]["payload"]["error"]["code"] == "TURN_PREPARATION_TIMEOUT"
 
 
+def test_a_preparation_that_keeps_moving_is_not_cut(server, tmp_path, monkeypatch) -> None:
+    # SOIN, 23-oct: on a slow machine every stage took a few seconds and their
+    # sum passed the limit; only a stage that does not move is stalled.
+    session_id = _create_chat(server, tmp_path, tag="prep-moving")
+    real_build = turns_module.build_agent_session
+
+    def slow_stages(*args, **kwargs):
+        sink = kwargs.get("activity_sink")
+        for stage in ("runtime", "model", "agents", "tools", "context"):
+            sink("turn.preparing", {"stage": stage})
+            time.sleep(0.12)
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(turns_module, "build_agent_session", slow_stages)
+    monkeypatch.setattr(turns_module, "PREPARATION_TIMEOUT_S", 0.3)
+    started = server.handle_line(
+        _req("prep-moving-t", "session.turn.start", {"session_id": session_id, "message": "hi"})
+    )
+    assert started is not None and started["ok"] is True
+    events = _collect_until(server, session_id)
+    # The test model is unreachable: what matters is that the turn got past
+    # its preparation, not how the call ended.
+    failed = [e for e in events if e["event"] == "turn.failed"]
+    assert all(e["payload"]["error"]["code"] != "TURN_PREPARATION_TIMEOUT" for e in failed), failed
+    assert any(
+        e["event"] == "turn.preparing" and e["payload"].get("stage") == "context" for e in events
+    )
+
+
 def test_cancel_interrupts_runtime_preparation(server, tmp_path, monkeypatch) -> None:
     session_id = _create_chat(server, tmp_path, tag="prep-cancel")
     entered = threading.Event()
