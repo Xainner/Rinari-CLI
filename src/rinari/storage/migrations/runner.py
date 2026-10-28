@@ -16,6 +16,7 @@ twice.
 
 from __future__ import annotations
 
+import calendar
 import logging
 import re
 import shutil
@@ -40,6 +41,13 @@ SUPERSEDED: dict[str, str] = {
 }
 _DEFAULT_DIR = Path(__file__).parent
 _log = logging.getLogger(__name__)
+_BACKUP_PREFIX = "antes-de-migrar-"
+_STAMP = "%Y%m%d-%H%M%S"
+#: A migration cut before it ends (the desktop gave up waiting and restarted
+#: the Engine) leaves the database as it was, so the next start reuses that
+#: copy instead of making another: a slow migration once left 30 full copies
+#: in half an hour (27-oct).
+REUSE_BACKUP_WITHIN_S = 24 * 3600.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,11 +168,21 @@ class MigrationRunner:
         return applied_now
 
     def _backup(self, current: int, target: int) -> Path:
-        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime(self._clock.now()))
         assert self._backup_root is not None
-        folder = self._backup_root / f"antes-de-migrar-{current:04d}-a-{target:04d}-{stamp}"
+        now = self._clock.now()
+        name = f"{_BACKUP_PREFIX}{current:04d}-a-{target:04d}-"
+        recent = self._recent_backup(name, now)
+        if recent is not None:
+            _log.warning(
+                "Reusing the backup made before migrating %s -> %s: %s", current, target, recent
+            )
+            return recent
+        folder = self._backup_root / f"{name}{time.strftime(_STAMP, time.gmtime(now))}"
         folder.mkdir(parents=True, exist_ok=True)
-        copy = sqlite3.connect(folder / "state.db")
+        # The copy only takes its final name once whole: a start cut mid-copy
+        # must not leave a backup the next start would reuse.
+        partial = folder / "state.db.partial"
+        copy = sqlite3.connect(partial)
         try:
             self._db.connection.backup(copy)
         finally:
@@ -174,10 +192,28 @@ class MigrationRunner:
                 shutil.copytree(extra, folder / extra.name, dirs_exist_ok=True)
             elif extra.is_file():
                 shutil.copy2(extra, folder / extra.name)
+        partial.replace(folder / "state.db")
         _log.warning(
             "State database backed up before migrating %s -> %s: %s", current, target, folder
         )
         return folder
+
+    def _recent_backup(self, name: str, now: float) -> Path | None:
+        """A whole copy of this same migration made a short while ago, if any."""
+        assert self._backup_root is not None
+        if not self._backup_root.is_dir():
+            return None
+        newest: tuple[float, Path] | None = None
+        for folder in self._backup_root.glob(f"{name}*"):
+            try:
+                made = calendar.timegm(time.strptime(folder.name[len(name) :], _STAMP))
+            except ValueError:
+                continue
+            if not (folder / "state.db").is_file() or not 0 <= now - made <= REUSE_BACKUP_WITHIN_S:
+                continue
+            if newest is None or made > newest[0]:
+                newest = (made, folder)
+        return newest[1] if newest else None
 
     def verify(self) -> None:
         """Raise if the database is missing tables expected by the latest migration."""

@@ -7,7 +7,7 @@ from rinari.shared.clock import FakeClock
 from rinari.shared.errors import ConfigurationError
 from rinari.storage.db import Database
 from rinari.storage.migrations import MigrationRunner
-from rinari.storage.migrations.runner import SUPERSEDED
+from rinari.storage.migrations.runner import REUSE_BACKUP_WITHIN_S, SUPERSEDED
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BUNDLED_0001 = REPO_ROOT / "src/rinari/storage/migrations/0001_initial.sql"
@@ -534,6 +534,82 @@ def test_new_migrations_on_an_existing_home_back_it_up_first(db, tmp_path):
     again = MigrationRunner(db, FakeClock(), directory=custom, backup_root=backups)
     assert again.migrate() == []
     assert again.last_backup is None
+
+
+def test_a_migration_cut_short_reuses_its_backup_on_the_next_start(db, tmp_path):
+    """27-oct: the desktop restarted an Engine stuck migrating every 45 s and
+    each start copied the whole database again (30 copies in half an hour)."""
+    custom = tmp_path / "migrations"
+    custom.mkdir()
+    (custom / "0001_initial.sql").write_text(
+        BUNDLED_0001.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    MigrationRunner(db, FakeClock(), directory=custom).migrate()
+    # A migration that never finishes: here it fails, the database stays at 0001.
+    (custom / "0002_slow.sql").write_text("SELECT * FROM no_such_table", encoding="utf-8")
+    backups = tmp_path / "backups"
+    clock = FakeClock()
+
+    first = MigrationRunner(db, clock, directory=custom, backup_root=backups)
+    with pytest.raises(sqlite3.OperationalError):
+        first.migrate()
+    clock.advance(45)
+    second = MigrationRunner(db, clock, directory=custom, backup_root=backups)
+    with pytest.raises(sqlite3.OperationalError):
+        second.migrate()
+    assert second.last_backup == first.last_backup
+    assert len(list(backups.iterdir())) == 1
+
+    # A copy cut halfway (no state.db yet) is never the one reused.
+    clock.advance(60)
+    cut = backups / "antes-de-migrar-0001-a-0002-20991231-235959"
+    cut.mkdir()
+    (cut / "state.db.partial").write_bytes(b"")
+    third = MigrationRunner(db, clock, directory=custom, backup_root=backups)
+    with pytest.raises(sqlite3.OperationalError):
+        third.migrate()
+    assert third.last_backup == first.last_backup
+
+    # A day later the database may have changed: a fresh copy.
+    clock.advance(REUSE_BACKUP_WITHIN_S)
+    later = MigrationRunner(db, clock, directory=custom, backup_root=backups)
+    with pytest.raises(sqlite3.OperationalError):
+        later.migrate()
+    assert later.last_backup not in (None, first.last_backup)
+    assert (later.last_backup / "state.db").is_file()
+    assert not (later.last_backup / "state.db.partial").exists()
+
+
+def test_0057_stays_linear_on_a_turn_with_many_chunks(db, tmp_path):
+    """27-oct: matching each chunk against every event of its turn took minutes
+    on a turn with tens of thousands of chunks."""
+    import json as _json
+    import time
+
+    custom = _previous_home_migrations(tmp_path, 56)
+    MigrationRunner(db, FakeClock(), directory=custom).migrate()
+    db.execute(
+        "INSERT INTO sessions (id, kind, created_cwd, current_cwd, provider_id, model_id, "
+        "state, created_at, updated_at, last_active_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("ses_d", "CHAT", "/w", "/w", "prov", "mdl", "active", "t0", "t0", "t0"),
+    )
+    rows = []
+    for call in range(40):
+        for _ in range(500):
+            rows.append(("tool.output.delta", _json.dumps({"tool_call_id": f"c{call}"})))
+        rows.append(("tool.completed", _json.dumps({"tool_call_id": f"c{call}"})))
+    with db.transaction():
+        db.connection.executemany(
+            "INSERT INTO session_events (id, session_id, seq, type, payload_json, "
+            "created_at, turn_id) VALUES (?, 'ses_d', ?, ?, ?, 'x', 'turn-1')",
+            [(f"e{seq}", seq, kind, payload) for seq, (kind, payload) in enumerate(rows, 1)],
+        )
+    started = time.perf_counter()
+    MigrationRunner(db, FakeClock()).migrate()
+    # The old query took ~20 s on this turn; the linear one well under a second.
+    assert time.perf_counter() - started < 2.0
+    left = db.query_one("SELECT COUNT(*) AS n FROM session_events")
+    assert left is not None and left["n"] == 40
 
 
 def test_lineage_is_filled_for_forks_notes_and_scheduled_runs(db, tmp_path):
