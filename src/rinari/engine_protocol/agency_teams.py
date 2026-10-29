@@ -980,11 +980,14 @@ class AgencyTeams:
         mentions: list[str] | None = None,
         report: dict[str, Any] | None = None,
         author_kind: str | None = None,
+        answer: bool = True,
     ) -> dict[str, Any]:
         """A message in the office; its @mentions wake those agents, within the caps.
 
         `system`: the Engine's own notice (an errand left, a wait, a stopped
         chain). It wakes nobody and never counts as a teammate's answer.
+        `answer=False`: the author says what it is about to do; a teammate
+        waiting for it keeps waiting.
         `woken`: who the author's turn already woke (its live work keeps it
         otherwise). `mentions`: who the message is for, when the Engine knows it
         better than the text (a delivery is for whoever asked, whatever names
@@ -1028,7 +1031,9 @@ class AgencyTeams:
         else:
             taken: set[str] = set()
             released = (
-                self._release(team, message, taken) if author_agent_id and not system else False
+                self._release(team, message, taken)
+                if author_agent_id and not system and answer
+                else False
             )
             outcome = dict.fromkeys(taken, _WOKEN)
             rest = [agent_id for agent_id in mentions if agent_id not in taken]
@@ -1947,6 +1952,7 @@ class AgencyTeams:
                 "chain_id": message["chain_id"],
                 "hop": message["hop"],
                 "message_at": message["created_at"],
+                "from_owner": message.get("author_kind") == "owner",
             },
         )
         if why_not == _HALTED:
@@ -2120,6 +2126,9 @@ class AgencyTeams:
         if name == "file.presented" and session_id:
             self._presented(session_id, payload)
             return
+        if name == "model.content.completed" and session_id:
+            self._announce(session_id, payload)
+            return
         if name not in _TERMINAL or not session_id:
             return
         with self._lock:
@@ -2143,6 +2152,8 @@ class AgencyTeams:
                 # It already spoke in the office this turn (office.say): its final
                 # answer would repeat it, so it stays in its post (audit 21-oct).
                 pass
+            elif text and text == live.get("announced"):
+                pass  # its first words were its answer, already in the office
             elif text:
                 self.post_message(
                     team,
@@ -2163,6 +2174,47 @@ class AgencyTeams:
                 self._repo.drop_wait(session_id)
             self._finish_errand(team, live, name, text, payload, external)
         threading.Thread(target=self.tick, name="agency-board-next", daemon=True).start()
+
+    def _announce(self, session_id: str, payload: dict[str, Any]) -> None:
+        """The chief's first words on what the owner asked go to the office at once.
+
+        The office only saw the end: the chief said in its post what it would do
+        and handed the work on with office.say, and that plan never reached the
+        office (owner, 28-oct). It wakes nobody and releases no wait.
+        """
+        content = payload.get("content")
+        text = content.strip() if isinstance(content, str) else ""
+        if not text:
+            return
+        with self._lock:
+            live = self._live.get(session_id)
+            if (
+                live is None
+                or live["kind"] != "mention"
+                or not live.get("from_owner")
+                or "announced" in live
+            ):
+                return
+            team_id, agent_id = live["team_id"], live["agent_id"]
+        team = self._repo.get(team_id)
+        if team is None or team.get("chief_agent_id") != agent_id:
+            return
+        with self._lock:
+            live = self._live.get(session_id)
+            if live is None or "announced" in live:
+                return
+            live["announced"] = text
+            live = dict(live)
+        self.post_message(
+            team,
+            text[:MAX_OFFICE_TEXT],
+            author_agent_id=live["agent_id"],
+            chain_id=live["chain_id"],
+            hop=live["hop"] + 1,
+            wake=False,
+            answer=False,
+            external=self._turns.last_turn_external(session_id),
+        )
 
     def _presented(self, session_id: str, payload: dict[str, Any]) -> None:
         """What a post shows the owner with file.present is seen in the office too."""

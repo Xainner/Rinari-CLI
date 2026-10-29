@@ -809,6 +809,75 @@ def test_an_agent_waits_for_a_teammate_and_is_woken_with_what_it_posts(server, t
     ]
 
 
+def _said(server, session_id, content):
+    server._teams._observe(
+        {
+            "event": "model.content.completed",
+            "payload": {"session_id": session_id, "content": content},
+        }
+    )
+
+
+def test_the_chiefs_first_words_on_what_the_owner_asked_reach_the_office(server, turns) -> None:
+    """28-oct: the chief said in its post what it would do and handed the work on
+    with office.say; the office only saw the handoff and, much later, the end."""
+    writer, director = _agent(server, "Writer"), _agent(server, "Director")
+    team = _team(server, "Canciones", [writer, director])
+    assert team["chief_agent_id"] == writer["id"]
+    post = _post(team, writer)
+    _ok(_call(server, "agency.office.post", {"team_id": team["id"], "text": "@Writer una más"}))
+    assert len(turns) == 1
+    _said(server, post, "Entendido: subo la apuesta y se la mando a @Director.")
+    office = _ok(_call(server, "agency.office.list", {"team_id": team["id"]}))["messages"]
+    assert office[-1]["text"] == "Entendido: subo la apuesta y se la mando a @Director."
+    assert office[-1]["agent_id"] == writer["id"] and office[-1]["hop"] == 1
+    # Saying what it will do wakes nobody: the handoff is its office.say.
+    assert len(turns) == 1
+    _tools(server, post)["office.say"].handler({"text": "@Director la canción 10"}, None)
+    assert turns[-1]["session_id"] == _post(team, director)
+    # Only its first words: what it says next stays in its post.
+    _said(server, post, "Un momento, corrijo la letra.")
+    _tools(server, post)["office.wait"].handler({"for": "Director"}, None)
+    _finish(server, post, "Listo: la 10 ya está con Director.")
+    texts = [
+        m["text"]
+        for m in _ok(_call(server, "agency.office.list", {"team_id": team["id"]}))["messages"]
+    ]
+    assert texts.count("Entendido: subo la apuesta y se la mando a @Director.") == 1
+    assert "Un momento, corrijo la letra." not in texts
+    # A teammate's first words stay in its post.
+    _said(server, _post(team, director), "Genero la canción.")
+    assert "Genero la canción." not in [
+        m["text"]
+        for m in _ok(_call(server, "agency.office.list", {"team_id": team["id"]}))["messages"]
+    ]
+
+
+def test_the_chiefs_first_words_neither_repeat_its_answer_nor_release_a_wait(server, turns) -> None:
+    writer, editor = _agent(server, "Writer"), _agent(server, "Editor")
+    team = _team(server, "Canal", [writer, editor])
+    text = "@Writer propón una idea y, cuando la tengas, @Editor la revisa"
+    _ok(_call(server, "agency.office.post", {"team_id": team["id"], "text": text}))
+    _tools(server, _post(team, editor))["office.wait"].handler({"for": "Writer"}, None)
+    _finish(server, _post(team, editor), "Espero a Writer.")
+    _said(server, _post(team, writer), "Voy a pensar una idea.")
+    # Editor keeps waiting: saying what it will do is not Writer's answer.
+    assert len(turns) == 2
+    _finish(server, _post(team, writer), "Un gato astronauta.")
+    assert turns[-1]["session_id"] == _post(team, editor)
+    office = _ok(_call(server, "agency.office.list", {"team_id": team["id"]}))["messages"]
+    assert [m["text"] for m in office if m["agent_id"] == writer["id"]] == [
+        "Voy a pensar una idea.",
+        "Un gato astronauta.",
+    ]
+    # An answer in one go is posted once.
+    _ok(_call(server, "agency.office.post", {"team_id": team["id"], "text": "@Writer otra"}))
+    _said(server, _post(team, writer), "Un perro pirata.")
+    _finish(server, _post(team, writer), "Un perro pirata.")
+    office = _ok(_call(server, "agency.office.list", {"team_id": team["id"]}))["messages"]
+    assert [m["text"] for m in office].count("Un perro pirata.") == 1
+
+
 def test_waiting_is_for_a_mention_or_an_errand_and_for_someone_else(server, turns) -> None:
     writer, editor = _agent(server, "Writer"), _agent(server, "Editor")
     team = _team(server, "Canal", [writer, editor])
