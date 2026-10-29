@@ -89,6 +89,34 @@ def _file_kind(path: Path, head: bytes) -> tuple[str, str]:
     return "text", guessed or "text/plain"
 
 
+def _presented_original(record: Any) -> Path | None:
+    """The file a presented artifact was copied from, while it still holds the same bytes.
+
+    What a post presents reaches its team's office as a copy (its URI); opening
+    or showing it from there should land on the file the agent made, as it does
+    in the post (owner, 28-oct), not on a temporary copy.
+    """
+    provenance = getattr(record, "provenance", "") or ""
+    if not provenance.startswith("file.present:"):
+        return None
+    path = Path(provenance.removeprefix("file.present:"))
+    try:
+        if (
+            not path.is_absolute()
+            or path.is_symlink()
+            or not path.is_file()
+            or path.stat().st_size != record.byte_count
+        ):
+            return None
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return path if digest.hexdigest() == record.sha256 else None
+
+
 def _same_path(left: Path, right: Path) -> bool:
     """Compare stored provenance with the currently resolved target.
 
@@ -439,6 +467,16 @@ class DesktopWorkspace:
             raise EngineProtocolError("NOT_FOUND", "Unknown artifact.") from exc
         if owner != session_id:
             raise EngineProtocolError("PERMISSION_DENIED", "The artifact is from another session.")
+        original = _presented_original(record)
+        if original is not None:
+            return ResolvedFile(
+                path=original,
+                observed_path=original,
+                workspace=original.parent,
+                provenance="artifact",
+                after_hash=record.sha256,
+                sensitive=is_sensitive_file(original),
+            )
         source = self.services.artifacts._storage_path(record.storage_path)
         if not source.is_file():
             raise EngineProtocolError("NOT_FOUND", "File no longer exists.")

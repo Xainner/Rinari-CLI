@@ -834,3 +834,31 @@ def test_artifacts_open_as_a_copy_and_only_from_their_session(desktop_runtime) -
     with pytest.raises(EngineProtocolError) as err:
         server._desktop.resolve_file({"session_id": other.id, "path": uri})
     assert err.value.code == "PERMISSION_DENIED"
+
+
+def test_a_presented_copy_opens_and_shows_its_original_while_unchanged(desktop_runtime) -> None:
+    # What a post presents reaches the office as a copy: «Abrir en el
+    # explorador» there should land on the file the agent made (28-oct).
+    from rinari.artifacts.transfer import import_file
+
+    services, server, primary, _other, _workspace, tmp_path = desktop_runtime
+    song = tmp_path / "Canciones" / "10.mp3"
+    song.parent.mkdir()
+    song.write_bytes(b"ID3 whistle")
+    record = import_file(services.artifacts, primary.id, song, provenance=f"file.present:{song}")
+    params = {"session_id": primary.id, "path": record.uri()}
+    resolved = _request(server, "workspace.file.resolve", params)
+    assert resolved["ok"] is True, resolved
+    assert Path(resolved["result"]["path"]) == song
+
+    # Once the file changes, the copy is what opens: never other bytes.
+    song.write_bytes(b"ID3 another take")
+    resolved = _request(server, "workspace.file.resolve", params)
+    assert resolved["ok"] is True, resolved
+    assert Path(resolved["result"]["path"]) != song
+    assert Path(resolved["result"]["path"]).read_bytes() == b"ID3 whistle"
+
+    # An artifact that was not presented from a file keeps opening as a copy.
+    plain = import_file(services.artifacts, primary.id, tmp_path / "Canciones" / "10.mp3")
+    resolved = _request(server, "workspace.file.resolve", {**params, "path": plain.uri()})
+    assert Path(resolved["result"]["path"]) != song
