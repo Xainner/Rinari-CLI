@@ -123,18 +123,27 @@ class RepositorySummary:
 #: Recent summaries by root. The summary goes into the system prompt: computed
 #: again on every turn, a time-limited sample could differ and change the
 #: prompt, losing the provider's cache, and a large folder paid the walk each turn.
-_RECENT: dict[str, tuple[float, RepositorySummary]] = {}
+#: A change to the root folder itself (a new module, a new manifest) drops it.
+_RECENT: dict[str, tuple[float, int, RepositorySummary]] = {}
 RECENT_TTL_S = 600.0
+
+
+def _root_stamp(root: Path) -> int:
+    try:
+        return root.stat().st_mtime_ns
+    except OSError:
+        return -1
 
 
 def analyze_repository(root: str | Path) -> RepositorySummary:
     key = str(Path(root).expanduser().resolve())
     now = time.monotonic()
+    stamp = _root_stamp(Path(key))
     recent = _RECENT.get(key)
-    if recent is not None and now - recent[0] < RECENT_TTL_S:
-        return recent[1]
+    if recent is not None and now - recent[0] < RECENT_TTL_S and recent[1] == stamp:
+        return recent[2]
     summary = _analyze(Path(key))
-    _RECENT[key] = (now, summary)
+    _RECENT[key] = (now, stamp, summary)
     return summary
 
 

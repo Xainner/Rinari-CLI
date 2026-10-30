@@ -137,3 +137,15 @@ def test_the_summary_is_reused_between_turns(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(state, "RECENT_TTL_S", 0.0)
     monkeypatch.setattr(state, "_walk", lambda _root: iter(()))
     assert state.analyze_repository(tmp_path) is not first
+
+
+def test_a_new_entry_at_the_root_refreshes_the_summary(tmp_path) -> None:
+    # A new module between turns reaches the next turn, not ten minutes later.
+    from rinari.repo import state
+
+    (tmp_path / "a.py").write_text("", encoding="utf-8")
+    first = state.analyze_repository(tmp_path)
+    (tmp_path / "web").mkdir()
+    (tmp_path / "web" / "m.ts").write_text("", encoding="utf-8")
+    again = state.analyze_repository(tmp_path)
+    assert again is not first and "typescript" in again.languages
