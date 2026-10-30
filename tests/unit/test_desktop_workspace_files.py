@@ -862,3 +862,43 @@ def test_a_presented_copy_opens_and_shows_its_original_while_unchanged(desktop_r
     plain = import_file(services.artifacts, primary.id, tmp_path / "Canciones" / "10.mp3")
     resolved = _request(server, "workspace.file.resolve", {**params, "path": plain.uri()})
     assert Path(resolved["result"]["path"]) != song
+
+
+def test_a_workspace_folder_resolves_to_be_shown_but_never_read(desktop_runtime) -> None:
+    # The tree offered «Abrir en el Explorador» on folders and it answered that
+    # the file no longer existed (28-oct).
+    _services, server, primary, _other, workspace, tmp_path = desktop_runtime
+    (workspace / "mv").mkdir()
+    resolved = _request(server, "workspace.file.resolve", {"session_id": primary.id, "path": "mv"})
+    assert resolved["ok"] is True, resolved
+    assert resolved["result"]["kind"] == "folder"
+    assert Path(resolved["result"]["path"]) == (workspace / "mv").resolve()
+    # Reading it is still for files only.
+    read = _request(server, "workspace.file.read", {"session_id": primary.id, "path": "mv"})
+    assert read["ok"] is False
+    # A folder outside the workspace stays out.
+    (tmp_path / "fuera").mkdir()
+    outside = _request(
+        server,
+        "workspace.file.resolve",
+        {"session_id": primary.id, "path": str(tmp_path / "fuera")},
+    )
+    assert outside["ok"] is False
+
+
+def test_artifact_resolve_gives_a_presented_copys_original(desktop_runtime) -> None:
+    # The app reveals and opens an artifact:// through artifact.resolve: the
+    # office's copy of a presented song showed the artifact store (28-oct).
+    from rinari.artifacts.transfer import import_file
+
+    services, server, primary, _other, _workspace, tmp_path = desktop_runtime
+    song = tmp_path / "Canciones" / "11.mp3"
+    song.parent.mkdir()
+    song.write_bytes(b"ID3 diva")
+    record = import_file(services.artifacts, primary.id, song, provenance=f"file.present:{song}")
+    resolved = _request(server, "artifact.resolve", {"uri": record.uri()})
+    assert resolved["ok"] is True, resolved
+    assert Path(resolved["result"]["path"]) == song
+    song.write_bytes(b"ID3 changed")
+    resolved = _request(server, "artifact.resolve", {"uri": record.uri()})
+    assert Path(resolved["result"]["path"]) != song

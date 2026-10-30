@@ -3968,7 +3968,7 @@ class EngineServer:
         ranges, so an audio or video artifact plays at any size. `kind` comes
         from the first bytes, like `workspace.file.resolve`.
         """
-        from rinari.engine_protocol.desktop import _file_kind
+        from rinari.engine_protocol.desktop import _file_kind, _presented_original
 
         params = params or {}
         uri = params.get("uri", "")
@@ -3978,7 +3978,11 @@ class EngineServer:
             record = self._services.artifacts.meta(uri)
         except NotFoundError as exc:
             raise NotFoundError(f"Artifact not found: {uri}") from exc
-        path = self._services.artifacts._storage_path(record.storage_path)
+        # A presented file's copy (what a team's office shows) opens and is shown
+        # in its folder as the original while it holds the same bytes (28-oct).
+        path = _presented_original(record) or self._services.artifacts._storage_path(
+            record.storage_path
+        )
         try:
             size = path.stat().st_size
             with path.open("rb") as stream:

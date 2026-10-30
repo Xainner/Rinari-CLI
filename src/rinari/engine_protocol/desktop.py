@@ -354,7 +354,7 @@ class DesktopWorkspace:
         )
         return {"session": session_to_dict(result)}
 
-    def resolve_file(self, params) -> ResolvedFile:
+    def resolve_file(self, params, *, folders: bool = False) -> ResolvedFile:
         session_id = params.get("session_id")
         if not isinstance(session_id, str) or not session_id:
             raise EngineProtocolError(INVALID_PARAMS, "session_id is required.")
@@ -444,6 +444,8 @@ class DesktopWorkspace:
                 sensitive=bool(changed.get("sensitive")),
             )
 
+        if folders and resolved.provenance == "workspace" and path.is_dir():
+            return resolved
         if not path.is_file():
             raise EngineProtocolError("NOT_FOUND", "File no longer exists.")
         return resolved
@@ -561,7 +563,21 @@ class DesktopWorkspace:
         with the system app from the approved path, at any size. `kind` comes
         from the file's first bytes when they identify a format.
         """
-        resolved = self.resolve_file(params)
+        # A folder of the workspace too, to show it in the file manager: the
+        # tree offered «Abrir en el Explorador» on folders and it said the file
+        # no longer existed (28-oct). Reading and watching stay for files.
+        resolved = self.resolve_file(params, folders=True)
+        if resolved.path.is_dir():
+            return {
+                "path": str(resolved.path),
+                "name": resolved.path.name,
+                "size": 0,
+                "kind": "folder",
+                "mime": None,
+                "provenance": resolved.provenance,
+                "sensitive": False,
+                "preview_limit": PREVIEW_LIMIT,
+            }
         try:
             size = resolved.path.stat().st_size
             with resolved.path.open("rb") as stream:
