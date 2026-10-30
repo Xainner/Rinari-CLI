@@ -292,9 +292,9 @@ class JobWatchService:
         )
         origin = {
             "kind": "automation",
-            "source": "job_watch",
-            "label": (watch.note or f"{watch.server}/{watch.tool}")[:200],
-            "outcome": watch.outcome,
+            # job_done, job_timeout or job_failed: the desktop says which.
+            "source": f"job_{watch.outcome or 'done'}",
+            "source_label": (watch.note or f"{watch.server}/{watch.tool}")[:200],
             "external_content": True,
             "external_source": f"connector {watch.server}",
         }

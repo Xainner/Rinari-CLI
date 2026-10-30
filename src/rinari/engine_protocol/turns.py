@@ -432,12 +432,7 @@ class TurnManager:
         self.wake(
             session_id,
             message,
-            {
-                "kind": "automation",
-                "source": "process_exit",
-                "label": names[:200],
-                "exit_code": codes[0] if len(codes) == 1 else None,
-            },
+            {"kind": "automation", "source": "process_exit", "source_label": names[:200]},
             message,
         )
 

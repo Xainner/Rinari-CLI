@@ -69,8 +69,7 @@ def test_a_process_that_ends_after_its_turn_wakes_the_conversation(
     assert turn["origin"] == {
         "kind": "automation",
         "source": "process_exit",
-        "label": "render",
-        "exit_code": 0,
+        "source_label": "render",
     }
     assert turn["memory_origin"] == "automation"
     # Nothing waiting: nothing starts.
@@ -83,7 +82,7 @@ def test_wakes_are_capped_per_hour_and_a_busy_conversation_is_left_for_later(
     monkeypatch,
 ) -> None:
     started = _record_starts(server, monkeypatch)
-    origin = {"kind": "automation", "source": "job_watch"}
+    origin = {"kind": "automation", "source": "job_done"}
     results = [server._turns.wake("ses_c", "m", origin, "m") for _ in range(MAX_WAKES_PER_HOUR + 1)]
     assert results[:MAX_WAKES_PER_HOUR] == ["started"] * MAX_WAKES_PER_HOUR
     assert results[-1] == "refused" and len(started) == MAX_WAKES_PER_HOUR
@@ -170,7 +169,7 @@ def test_a_watched_job_wakes_its_conversation_with_the_last_answer() -> None:
     (session_id, message, origin, _display) = woken[0]
     assert session_id == "ses_j" and '"completed"' in message
     assert "Send the song to the owner" in message
-    assert origin["source"] == "job_watch" and origin["outcome"] == "done"
+    assert origin["source"] == "job_done" and origin["source_label"].startswith("Send the song")
     assert origin["external_content"] is True
     assert service.list("ses_j") == [] and watch["watch_id"] == live.id
 
@@ -207,5 +206,5 @@ def test_a_job_watch_waits_for_a_busy_turn_and_gives_up_after_errors() -> None:
     for _ in range(5):
         service.tick(watch)
         clock.now += 30
-    assert woken and woken[0][2]["outcome"] == "failed"
+    assert woken and woken[0][2]["source"] == "job_failed"
     assert "RuntimeError: down" in woken[0][1]
