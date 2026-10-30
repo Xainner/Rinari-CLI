@@ -216,10 +216,11 @@ def test_create_validates(server) -> None:
         )["code"]
         == "INVALID_USAGE"
     )
+    # Text may be empty (#87); a name may not.
     assert (
         _err(
             server.handle_line(
-                _req("s13", "soul.create", {"id": "empty", "name": "x", "identity": "  "})
+                _req("s13", "soul.create", {"id": "empty", "name": "  ", "identity": "y"})
             )
         )["code"]
         == "INVALID_USAGE"
@@ -254,3 +255,55 @@ def test_active_resolution_order(services, tmp_path) -> None:
     asset = load_active_soul(home)
     assert asset.text == "Alt soul text."
     assert (home / "soul.md").read_text(encoding="utf-8") == "Legacy soul text."
+
+
+def test_a_soul_travels_as_its_toml_and_md(server, tmp_path):
+    """Plan 0.4.0 #87: export to a folder, import it back as a new soul."""
+    _ok(
+        server.handle_line(
+            _req(
+                "c",
+                "soul.create",
+                {
+                    "id": "seria",
+                    "name": "Seria",
+                    "identity": "# Seria\n\nHabla poco.",
+                    "description": "Sobria",
+                },
+            )
+        )
+    )
+    out = tmp_path / "out"
+    out.mkdir()
+    first = _ok(server.handle_line(_req("e1", "soul.export", {"id": "seria", "folder": str(out)})))
+    second = _ok(server.handle_line(_req("e2", "soul.export", {"id": "seria", "folder": str(out)})))
+    assert first["path"].endswith("seria") and second["path"].endswith("seria-2")
+    assert (out / "seria" / "identity.md").read_text(encoding="utf-8") == "# Seria\n\nHabla poco."
+
+    # Its folder, or its two files: never over the existing one.
+    by_folder = _ok(server.handle_line(_req("i1", "soul.import", {"paths": [first["path"]]})))
+    assert by_folder["soul"]["id"] == "seria-2" and by_folder["soul"]["name"] == "Seria"
+    assert by_folder["soul"]["identity"] == "# Seria\n\nHabla poco."
+    pair = [str(out / "seria" / "soul.toml"), str(out / "seria" / "identity.md")]
+    by_files = _ok(server.handle_line(_req("i2", "soul.import", {"paths": pair})))
+    assert by_files["soul"]["id"] == "seria-3" and by_files["soul"]["source"] == "custom"
+
+    # A bare .toml finds its identity.md next to it; without one, no text.
+    lone = tmp_path / "lone"
+    lone.mkdir()
+    (lone / "mia.toml").write_text('name = "Mía"\nversion = "2"\n', encoding="utf-8")
+    alone = _ok(server.handle_line(_req("i3", "soul.import", {"paths": [str(lone / "mia.toml")]})))
+    assert (alone["soul"]["id"], alone["soul"]["identity"]) == ("mia", "")
+    bad = _err(server.handle_line(_req("i4", "soul.import", {"paths": [str(lone)]})))
+    assert bad["code"] in ("INVALID_USAGE", "INVALID_PARAMS", "INVALID_ARGUMENT")
+
+
+def test_a_soul_without_text_is_allowed_and_speaks_with_the_level(server):
+    created = _ok(
+        server.handle_line(
+            _req("c", "soul.create", {"id": "vacia", "name": "Vacía", "identity": ""})
+        )
+    )
+    assert created["soul"]["identity"] == ""
+    listed = _ok(server.handle_line(_req("l", "soul.list", {})))["souls"]
+    assert "vacia" in {soul["id"] for soul in listed}

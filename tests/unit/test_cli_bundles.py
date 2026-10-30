@@ -47,7 +47,9 @@ def test_create_activate_and_list(env):
     assert listed["active_id"] == "default"
     assert [p["id"] for p in listed["profiles"]] == ["default"]
 
-    created = _data("bundles", "create", "trabajo", "--name", "Trabajo", "--agent", "explore=f1")
+    created = _data(
+        "bundles", "create", "--id", "trabajo", "--name", "Trabajo", "--agent", "explore=f1"
+    )
     assert created["profile"]["agents"] == {"explore": {"model": "f1"}}
     assert created["activated"] is False
 
@@ -64,15 +66,22 @@ def test_create_activate_and_list(env):
 
 
 def test_create_rejects_unknown_agent_or_model(env):
-    assert _call("bundles", "create", "x", "--name", "X", "--agent", "nope=f1").exit_code != 0
-    assert _call("bundles", "create", "x", "--name", "X", "--agent", "explore=ghost").exit_code != 0
-    assert _call("bundles", "create", "x", "--name", "X", "--agent", "explore").exit_code != 0
+    assert (
+        _call("bundles", "create", "--id", "x", "--name", "X", "--agent", "nope=f1").exit_code != 0
+    )
+    assert (
+        _call("bundles", "create", "--id", "x", "--name", "X", "--agent", "explore=ghost").exit_code
+        != 0
+    )
+    assert (
+        _call("bundles", "create", "--id", "x", "--name", "X", "--agent", "explore").exit_code != 0
+    )
     assert [p["id"] for p in _data("bundles", "list")["profiles"]] == ["default"]
 
 
 def test_move_project_and_sessions(env):
     _tmp, work = env
-    _data("bundles", "create", "casa", "--name", "Casa")
+    _data("bundles", "create", "--id", "casa", "--name", "Casa")
     project = _data("project", "add", str(work))
     in_project = _data("session", "new")
     assert in_project["project_id"] == project["id"]

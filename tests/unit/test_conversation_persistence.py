@@ -96,7 +96,9 @@ def test_history_restored_across_invocations(env, monkeypatch) -> None:
     result_a = run_turn(session_a, "hello")
     assert result_a.kind == "answer"
 
-    stored = s.ctx.message_repo.list(record.id)
+    # The turn state is kept as a harness note (F42); the owner's turn is
+    # the rest, in order.
+    stored = [r for r in s.ctx.message_repo.list(record.id) if not _state(r)]
     assert [r.role for r in stored] == ["user", "assistant"]
 
     # New invocation (new process equivalent): history must come back.
@@ -105,7 +107,7 @@ def test_history_restored_across_invocations(env, monkeypatch) -> None:
     session_b = build_agent_session(
         s, s.ctx.session_repo.get(record.id), interactive=False, user_home=user_home
     )
-    history = session_b.context.history
+    history = [m for m in session_b.context.history if not _state(m)]
     assert [m.role for m in history] == ["user", "assistant"]
     assert history[0].content == "hello"
     assert history[1].content == "hi there"
@@ -116,13 +118,18 @@ def test_history_restored_across_invocations(env, monkeypatch) -> None:
     contents = [m.content for m in last if m.content]
     assert "hello" in contents and "hi there" in contents and "again" in contents
 
-    # Now 4 messages persisted in order.
-    assert [r.role for r in s.ctx.message_repo.list(record.id)] == [
+    # Now 4 messages persisted in order, besides the state note.
+    assert [r.role for r in s.ctx.message_repo.list(record.id) if not _state(r)] == [
         "user",
         "assistant",
         "user",
         "assistant",
     ]
+
+
+def _state(message) -> bool:
+    """A harness note the conversation keeps: its turn state or its local time."""
+    return (message.origin or {}).get("source") in ("turn-state", "clock")
 
 
 def test_cancelled_turn_persists_partial_history(env, monkeypatch) -> None:
@@ -144,5 +151,27 @@ def test_cancelled_turn_persists_partial_history(env, monkeypatch) -> None:
     session.token.cancel()
     result = run_turn(session, "interrupted prompt")
     assert result.kind == "cancelled"
-    assert [r.role for r in s.ctx.message_repo.list(record.id)] == ["user"]
+    assert [r.role for r in s.ctx.message_repo.list(record.id) if not _state(r)] == ["user"]
     assert s.ctx.session_repo.get(record.id).state == "interrupted"
+
+
+def test_the_title_request_carries_the_session_id(env, monkeypatch) -> None:
+    # Plan 0.4.0 #48: OpenCode Go refuses a request without x-opencode-session,
+    # which comes from ModelRequest.session_id; the title call had none.
+    tmp_path, user_home, s = env
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    record = s.sessions.start(cwd, forced_chat=True).session
+    fake = FakeModel(
+        scripted=[
+            ModelResponse(content="Diseño del juego", stop_reason=StopReason.END_TURN),
+            ModelResponse(content="Va.", stop_reason=StopReason.END_TURN),
+        ]
+    )
+    fake.model_id = "fake-model-1"  # the title call names the conversation's model
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda services, rec: fake)
+    session = build_agent_session(s, record, interactive=False, user_home=user_home)
+    run_turn(session, "Diseñemos un juego de naves espaciales")
+    assert fake.requests, "no model call was made"
+    assert all(request.session_id == record.id for request in fake.requests)
+    assert s.sessions.show(record.id).title == "Diseño del juego"

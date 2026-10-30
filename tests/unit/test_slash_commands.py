@@ -160,9 +160,10 @@ def test_usage_after_turn(env, monkeypatch) -> None:
         console = Console(record=True, no_color=True, width=100)
         slash.handle(session, console, "/usage")
         text = console.export_text()
-        assert "120" in text
-        assert "30" in text
-        assert "model calls" in text
+        # The same report as the desktop's (#78).
+        assert "Usage report · session" in text
+        assert "Session:" in text and "1 calls · 120 input · 30 output" in text
+        assert "Plan limits:" in text and "Tools: 0" in text
     finally:
         session.end()
 

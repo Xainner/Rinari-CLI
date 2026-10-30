@@ -45,6 +45,10 @@ class ApprovalRequest:
     # `exact`: grants bind to this target (never widened to the capability)
     # and a capability-wide grant cannot cover this request.
     binding_mode: str = "capability"
+    # «Siempre» that saves a setting instead of a project grant: Allow for
+    # one MCP tool, kept with its server (connectors plan, C5). Works in a
+    # loose chat too, since the setting belongs to the server.
+    on_always: Callable[[], None] | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,9 +127,19 @@ class ApprovalEngine:
         # exact-bound request (peer messaging) is honored only for the choices
         # it offered: hiding a button in a client is not a security boundary.
         wide_ok = request.binding_mode != "exact"
-        if answer in ("p", "project", "always-project") and (
-            "allow_project" in request.choices
-            or (wide_ok and request.reusable and self._project_store is None)
+        if (
+            answer in ("p", "project", "always-project")
+            and request.on_always is not None
+            and "allow_project" in request.choices
+        ):
+            return self._record(self._save_setting(request))
+        if (
+            answer in ("p", "project", "always-project")
+            and _has_project(request)
+            and (
+                "allow_project" in request.choices
+                or (wide_ok and request.reusable and self._project_store is None)
+            )
         ):
             return self._record(
                 self._issue(request, GrantScope.PROJECT, reason="approved for project")
@@ -140,9 +154,31 @@ class ApprovalEngine:
         self._record(outcome)
         return outcome
 
+    @staticmethod
+    def _save_setting(request: ApprovalRequest) -> ApprovalOutcome:
+        """The setting is the lasting answer: nothing goes to the grant stores."""
+        grant = ApprovalGrant(
+            capability=request.capability,
+            scope=GrantScope.ONCE,
+            target=request.target,
+            session_id=request.session_id,
+            project_id=request.project_id,
+            rule_id=request.rule_id,
+        )
+        try:
+            request.on_always()
+        except Exception as exc:  # the call still runs: the owner said yes
+            return ApprovalOutcome(
+                granted=True,
+                grant=grant,
+                reason=f"approved once; saving the setting failed ({type(exc).__name__})",
+            )
+        return ApprovalOutcome(granted=True, grant=grant, reason="approved always (tool setting)")
+
     def _find_grant(self, request: ApprovalRequest) -> ApprovalGrant | None:
-        project_grants = list(self._project_grants)
-        if self._project_store is not None and request.project_id:
+        # Old «always in chats» grants no longer apply (#56).
+        project_grants = list(self._project_grants) if _has_project(request) else []
+        if self._project_store is not None and _has_project(request):
             project_grants.extend(self._project_store.grants_for(request.project_id))
         for store, scope_filter in (
             (self._store.values() if self._store else [], GrantScope.PERSISTENT),
@@ -225,6 +261,11 @@ class ApprovalEngine:
             *self._project_grants,
             *(self._store.values() if self._store else []),
         ]
+
+
+def _has_project(request: ApprovalRequest) -> bool:
+    """A loose chat (key "chats") has no project to keep an «always» grant in."""
+    return bool(request.project_id) and request.project_id != "chats"
 
 
 def _inside(child: str, parent: str) -> bool:

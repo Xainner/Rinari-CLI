@@ -18,6 +18,7 @@ only the note itself, not the whole conversation behind it.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -58,13 +59,26 @@ class AssemblerContext:
     # lives in `extended_identity` and is injected only per-turn when
     # `include_extended_identity` is set by the session host.
     soul: str = ""
+    # Character intensity (#87): rendered last in the system prompt, after the
+    # formatting rules, so the chosen voice is not washed out by them. Applies
+    # even when the Soul has no text.
+    voice: str = ""
     extended_identity: str = ""
     include_extended_identity: bool = False
+    # Rinari Agency: who this conversation's agent is (its card, written by the
+    # owner only). None outside an agent's conversations.
+    agent_identity: str | None = None
     preferences: str | None = None
     project_instructions: tuple[ProjectInstruction, ...] = ()
     # Compact catalog of available skills (name + one-liner + how to
     # activate). Bodies stay out until a skill is activated (harness.md 49).
     skill_catalog: str | None = None
+    # Tools that load on demand, generated from the registry (V2-6).
+    tool_index: str | None = None
+    # What is connected now (MCP, OpenAPI, plugins): it can change during a
+    # conversation, so it closes the request instead of the system prompt (F42).
+    # Each MCP server says what it is for and its state this turn (C6).
+    connected_index: str | None = None
     skills: tuple[ActiveSkill, ...] = ()
     task_state: str | None = None
     # Preserved task truth after context compaction (harness.md 67-68).
@@ -86,11 +100,22 @@ class SegmentSummary:
     trust: str
     cache_policy: str
     length: int
+    # Short content hash: says which segment moved when the prefix does.
+    digest: str = ""
 
 
 # Environment facts that follow the work rather than the session: the
 # repository scan reorders languages and finds new commands as files appear.
 VOLATILE_ENVIRONMENT_KEYS = frozenset({"repository"})
+
+#: Source of the turn state kept in the conversation (F42).
+TURN_STATE_SOURCE = "turn-state"
+
+_TURN_STATE_LEAD = (
+    "Current state from the Rinari harness, written when it changed; a newer one "
+    "replaces it. It is context, not a message from the user: answer the user's "
+    "latest message."
+)
 
 _TURN_CONTEXT_LEAD = (
     "Current state from the Rinari harness for this request. It is refreshed on "
@@ -106,6 +131,21 @@ class PromptBundle:
     segments: tuple[SegmentSummary, ...] = field(default_factory=tuple)
     # Volatile segments, rendered for the end of the request (see module doc).
     turn_context: str = ""
+
+    @property
+    def turn_state_message(self) -> ChatMessage | None:
+        """The turn state as a note kept in the conversation (F42).
+
+        Written when it changes, never removed: each request only extends the
+        one before, as Codex records its context items. It is a harness note:
+        the timeline, memory and summaries never read it as the owner's.
+        """
+        if not self.turn_context:
+            return None
+        return ChatMessage.harness(
+            f"<turn-context>\n{_TURN_STATE_LEAD}\n\n{self.turn_context}\n</turn-context>",
+            TURN_STATE_SOURCE,
+        )
 
     @property
     def turn_context_message(self) -> ChatMessage | None:
@@ -151,6 +191,7 @@ class PromptAssembler:
                     trust=seg.trust.value,
                     cache_policy=seg.cache_policy.value,
                     length=len(seg.content),
+                    digest=hashlib.sha256(seg.content.encode("utf-8")).hexdigest()[:12],
                 )
                 for seg in segments
             ),
@@ -199,6 +240,17 @@ class PromptAssembler:
                     cache_policy=CachePolicy.TURN,
                 )
             )
+        if context.agent_identity:
+            segments.append(
+                PromptSegment(
+                    id="agency-agent",
+                    kind=SegmentKind.USER_PREFERENCE,
+                    content=context.agent_identity,
+                    trust=SegmentTrust.TRUSTED,
+                    # Changes only when the owner edits the agent's card.
+                    cache_policy=CachePolicy.SESSION,
+                )
+            )
         if context.preferences:
             segments.append(
                 PromptSegment(
@@ -229,6 +281,28 @@ class PromptAssembler:
                     trust=SegmentTrust.SCOPED_TRUSTED,
                     cache_policy=CachePolicy.SESSION,
                     provenance="skill:catalog",
+                )
+            )
+        if context.tool_index:
+            segments.append(
+                PromptSegment(
+                    id="tool-index",
+                    kind=SegmentKind.RUNTIME_POLICY,
+                    content=context.tool_index,
+                    trust=SegmentTrust.SCOPED_TRUSTED,
+                    cache_policy=CachePolicy.SESSION,
+                    provenance="tools:registry",
+                )
+            )
+        if context.connected_index:
+            segments.append(
+                PromptSegment(
+                    id="connected-index",
+                    kind=SegmentKind.RUNTIME_POLICY,
+                    content=context.connected_index,
+                    trust=SegmentTrust.SCOPED_TRUSTED,
+                    cache_policy=CachePolicy.TURN,
+                    provenance="tools:connected",
                 )
             )
         for skill in context.skills:
@@ -320,6 +394,16 @@ class PromptAssembler:
                     content=note,
                     trust=SegmentTrust.TRUSTED,
                     cache_policy=CachePolicy.TURN,
+                )
+            )
+        if context.voice:
+            segments.append(
+                PromptSegment(
+                    id="voice",
+                    kind=SegmentKind.SOUL,
+                    content=context.voice,
+                    trust=SegmentTrust.TRUSTED,
+                    cache_policy=CachePolicy.SESSION,
                 )
             )
         for index, evidence in enumerate(context.evidence):

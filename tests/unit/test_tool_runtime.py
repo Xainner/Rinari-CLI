@@ -218,16 +218,19 @@ def test_reading_outside_the_project_needs_no_approval(project) -> None:
     assert "outside" in str(result.data)
 
 
-def test_system_secrets_still_ask(project) -> None:
+def test_system_secrets_ask_in_project_mode(project) -> None:
     tmp_path, root, _ = project
     key = tmp_path / ".ssh" / "id_ed25519"
     key.parent.mkdir()
     key.write_text("synthetic", encoding="utf-8")
-    ctx = _free_reads(_ctx(tmp_path, root, profile="full-access"))
+    ctx = _free_reads(_ctx(tmp_path, root))
     denied, _ = _runtime(ctx, tmp_path, answer="n")
     assert not denied.execute("fs.read", {"path": str(key)}, ctx).ok
     approved, _ = _runtime(ctx, tmp_path, answer="y")
     assert approved.execute("fs.read", {"path": str(key)}, ctx).ok
+    full = _free_reads(_ctx(tmp_path, root, profile="full-access"))
+    silent, _ = _runtime(full, tmp_path, answer="n")
+    assert silent.execute("fs.read", {"path": str(key)}, full).ok
 
 
 def test_approved_external_directory_can_be_listed(project) -> None:
@@ -330,15 +333,16 @@ def test_redaction_and_events(project) -> None:
     assert completed["turn_index"] == 2
     assert completed["tool_seq"] == 3
 
-    spilled = runtime.execute("fs.read", {"path": "big.py"}, ctx)
-    assert spilled.ok is True
-    assert spilled.data["delivery_partial"] is True
-    assert spilled.data["result_ref"].startswith("artifact://s1/runtime/")
-    assert spilled.data["recovery"]["tool"] == "artifact.read"
-    assert len(spilled.to_model_text().encode("utf-8")) < 64 * 1024
-    spill_files = list((tmp_path / "artifacts" / "s1" / "runtime").glob("*.txt"))
-    assert len(spill_files) == 1
-    assert spill_files[0].stat().st_size > 64 * 1024
+    # Plan 0.4.0 #76: a file too large to read whole comes back as its first
+    # page with where to continue, and no copy of it is saved.
+    paged = runtime.execute("fs.read", {"path": "big.py"}, ctx)
+    assert paged.ok is True
+    assert "delivery_partial" not in paged.data
+    assert paged.data["text"] and "data" * 100 in paged.data["text"]
+    assert paged.data["total_lines"] == 1 and paged.data["truncated"] is True
+    assert "(line cut)" in paged.data["text"]
+    assert len(paged.to_model_text().encode("utf-8")) < 64 * 1024
+    assert not list((tmp_path / "artifacts" / "s1" / "runtime").glob("*"))
 
 
 def test_cancelled_before_execution(project) -> None:
@@ -537,11 +541,9 @@ def test_git_tools_in_repo(project) -> None:
     ctx = _ctx(tmp_path, root)
     runtime, _ = _runtime(ctx, tmp_path)
     status = runtime.execute("git.status", {}, ctx)
-    # not a git repo -> NOT_FOUND (structured, not a crash)
-    if status.ok is False:
-        assert status.error.code is ToolErrorCode.NOT_FOUND
-    else:
-        assert status.data["branch"]
+    # Not a git repo: an answer, not a failure (plan 0.4.0 v2, V2-14).
+    assert status.ok, status.error
+    assert status.data.get("is_repo") is False or status.data["branch"]
 
     init_cmd = "git init -q && git config user.email a@b.c && git config user.name t"
     init = runtime.execute("shell.exec", {"command": init_cmd}, ctx)

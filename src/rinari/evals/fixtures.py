@@ -172,15 +172,10 @@ class EvalFixture:
         return self.services.ctx.event_repo.list(self.record.id)
 
     def tools(self) -> list[dict]:
-        from rinari.runtime.agent import EVENT_TOOL_COMPLETED
+        from rinari.runtime import tool_events
 
-        # Runtime terminal events are correlated by tool_call_id. Successful
-        # calls are ToolCompleted; failures are ToolFailed.
-        return [
-            e.payload
-            for e in self.events()
-            if e.type in (EVENT_TOOL_COMPLETED, "ToolFailed") and "tool_call_id" in e.payload
-        ]
+        # One end per call, old names or new (#91): `tool` (and `name`), `ok`.
+        return [{**end, "name": end["tool"]} for end in tool_events.ends(self.events())]
 
     @property
     def changed_files(self) -> list[str]:

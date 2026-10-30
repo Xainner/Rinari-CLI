@@ -61,7 +61,13 @@ def register_media(dispatcher, services):
         from rinari.runtime.vision import visual_status
 
         decision = visual_status(caller)
-        vision = caller.capabilities().vision
+        from rinari.application.vision import model_vision
+        from rinari.application.vision import settings as vision_settings
+
+        # The owner's declaration, then the endpoint, then what Rinari learned (#14).
+        vision, vision_source = model_vision(
+            vision_settings(services), record.model_id, caller.capabilities().vision
+        )
         destination = (
             caller.destination() if decision.available and hasattr(caller, "destination") else None
         )
@@ -78,6 +84,7 @@ def register_media(dispatcher, services):
             else None,
             "destination_provider": destination.provider.alias if destination else None,
             "route": decision.route,
+            "vision_source": vision_source,
         }
 
     def receive(params):
@@ -138,7 +145,11 @@ def register_media(dispatcher, services):
         record = services.artifacts.meta(uri)
         # `previews`: las capturas que el render documental hizo de un archivo
         # de la sesión; son derivados, como `derived`.
-        if record.namespace not in {"media", "derived", "previews"}:
+        # Any image the session keeps has a thumbnail: one an agent downloaded
+        # and presented (`downloads`) showed «Only attachment artifacts can be
+        # previewed» instead of its card (23-oct). Other files keep the rule.
+        is_image = record.content_type in {"image/png", "image/jpeg", "image/webp"}
+        if record.namespace not in {"media", "derived", "previews"} and not is_image:
             raise EngineProtocolError(INVALID_PARAMS, "Only attachment artifacts can be previewed")
         max_bytes = params.get("max_bytes") or 512 * 1024
         if type(max_bytes) is not int or max_bytes < 1:
@@ -237,6 +248,21 @@ def register_media(dispatcher, services):
             raise EngineProtocolError(INVALID_PARAMS, str(exc)) from exc
 
     dispatcher.register("vision.settings.get", lambda params: settings(services))
+
+    def reset_vision(params):
+        from rinari.application.vision import reset_model_vision
+
+        model_id = params.get("model_id")
+        if not isinstance(model_id, str) or not model_id:
+            raise EngineProtocolError(
+                INVALID_PARAMS, "Param 'model_id' must be a non-empty string."
+            )
+        try:
+            return reset_model_vision(services, services.models.resolve(model_id).id)
+        except ValueError as exc:
+            raise EngineProtocolError(INVALID_PARAMS, str(exc)) from exc
+
+    dispatcher.register("vision.model.reset", reset_vision)
     from rinari.context.settings import load as context_settings
     from rinari.context.settings import save as save_context_settings
 
@@ -339,7 +365,8 @@ def register_media(dispatcher, services):
         if params.get("refresh") is True:
             windows.forget(services.ctx)
         rows = []
-        for model in services.models.list():
+        # A turned-off provider is not asked for its windows (#97).
+        for model in services.models.list(include_disabled=False):
             try:
                 rows.append(model_status(model))
             except Exception as exc:
@@ -350,6 +377,30 @@ def register_media(dispatcher, services):
     dispatcher.register("context.status", context_status)
     dispatcher.register("context.models", context_models)
     dispatcher.register("vision.settings.set", save_vision)
+
+    # Ajustes → Visión e imágenes → Creación de imágenes (plan 0.4.0 #28).
+    from rinari.images.service import ImageService
+
+    images = ImageService(services)
+
+    def images_set(params):
+        try:
+            return images.configure(params or {})
+        except ValueError as exc:
+            raise EngineProtocolError(INVALID_PARAMS, str(exc)) from exc
+
+    def images_test(params):
+        connector_id = (params or {}).get("connector_id")
+        if not isinstance(connector_id, str) or not connector_id:
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'connector_id' must be a string.")
+        try:
+            return images.test(connector_id)
+        except ValueError as exc:
+            raise EngineProtocolError(INVALID_PARAMS, str(exc)) from exc
+
+    dispatcher.register("images.settings.get", lambda params: images.settings())
+    dispatcher.register("images.settings.set", images_set)
+    dispatcher.register("images.connector.test", images_test)
     dispatcher.register("session.image_support", support)
     dispatcher.register("artifact.receive_image", receive)
     dispatcher.register("artifact.delete_media", delete)

@@ -12,8 +12,31 @@ from rinari.storage.db import Database
 
 # environment/workflow hold learned facts (memory.propose): hosts, ports and
 # paths of this machine, and how a project is started, built or tested.
-USER_KINDS = ("preference", "rule", "fact", "environment", "workflow")
-PROJECT_KINDS = ("fact", "rule", "convention", "environment", "workflow")
+USER_KINDS = (
+    "preference",
+    "rule",
+    "fact",
+    "environment",
+    "workflow",
+    # #75: people and characters, links/guides/references, and decisions taken.
+    "person",
+    "resource",
+    "decision",
+)
+PROJECT_KINDS = (
+    "fact",
+    "rule",
+    "convention",
+    "environment",
+    "workflow",
+    "person",
+    "resource",
+    "decision",
+)
+#: Where a personal memory applies (#75). Project memory has its own table.
+# agent: Rinari Agency, an agent's own memory (place_ref is the agent id).
+# team: Rinari Agency A2, a team's memory (place_ref is the team id).
+USER_PLACES = ("general", "profile", "chat", "agent", "team")
 
 
 class MemoryRepository:
@@ -27,8 +50,9 @@ class MemoryRepository:
             """
             INSERT INTO user_memory (
                 id, kind, topic, text, provenance, confidence,
-                superseded_by, created_at, updated_at, revision
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                superseded_by, created_at, updated_at, revision, place, place_ref,
+                source_session_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 row["id"],
@@ -41,8 +65,43 @@ class MemoryRepository:
                 row["created_at"],
                 row["updated_at"],
                 row.get("revision", 1),
+                row.get("place") or "general",
+                row.get("place_ref"),
+                row.get("source_session_id"),
             ),
         )
+
+    def mark_used(self, memory_ids: list[str], used_at: str) -> None:
+        """These records just went into a prompt (#75: «sin usar hace tiempo»)."""
+        ids = sorted({str(item) for item in memory_ids if item})
+        if not ids:
+            return
+        marks = ", ".join("?" for _ in ids)
+        for table in ("user_memory", "project_memory"):
+            self._db.execute(
+                f"UPDATE {table} SET last_used_at = ? WHERE id IN ({marks})", (used_at, *ids)
+            )
+
+    def user_set_place(
+        self, memory_id: str, place: str, place_ref: str | None, updated_at: str
+    ) -> None:
+        self._db.execute(
+            "UPDATE user_memory SET place = ?, place_ref = ?, updated_at = ?, "
+            "revision = revision + 1 WHERE id = ? AND superseded_by IS NULL",
+            (place, place_ref, updated_at, memory_id),
+        )
+
+    def user_delete_place(self, place: str, place_ref: str) -> int:
+        """Every record of one place (a chat's memory goes with the chat, #75)."""
+        rows = self._db.query(
+            "SELECT id FROM user_memory WHERE place = ? AND place_ref = ?", (place, place_ref)
+        )
+        for row in rows:
+            self._db.execute("DELETE FROM memory_sources WHERE memory_id = ?", (row["id"],))
+        cursor = self._db.execute(
+            "DELETE FROM user_memory WHERE place = ? AND place_ref = ?", (place, place_ref)
+        )
+        return int(getattr(cursor, "rowcount", 0) or 0)
 
     def user_get(self, memory_id: str) -> dict | None:
         row = self._db.query_one(
@@ -274,8 +333,8 @@ class MemoryRepository:
             INSERT OR IGNORE INTO memory_candidates
               (id, session_id, message_id, topic, text, kind, confidence,
                classification, reason, status, memory_id, created_at, resolved_at,
-               scope, project_root)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               scope, project_root, place, place_ref)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 row["id"],
@@ -293,7 +352,24 @@ class MemoryRepository:
                 row.get("resolved_at"),
                 row.get("scope", "user"),
                 row.get("project_root"),
+                row.get("place"),
+                row.get("place_ref"),
             ),
+        )
+
+    def candidate_set_place(
+        self,
+        candidate_id: str,
+        scope: str,
+        project_root: str | None,
+        place: str | None,
+        place_ref: str | None,
+    ) -> None:
+        """The owner chose another place on the card before approving (#75)."""
+        self._db.execute(
+            "UPDATE memory_candidates SET scope = ?, project_root = ?, place = ?, place_ref = ? "
+            "WHERE id = ? AND status = 'pending'",
+            (scope, project_root, place, place_ref, candidate_id),
         )
 
     def candidate_resolve(
@@ -341,8 +417,8 @@ class MemoryRepository:
             """
             INSERT INTO project_memory (
                 id, project_root, kind, topic, text, provenance, confidence,
-                superseded_by, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                superseded_by, created_at, updated_at, source_session_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 row["id"],
@@ -355,6 +431,7 @@ class MemoryRepository:
                 row.get("superseded_by"),
                 row["created_at"],
                 row["updated_at"],
+                row.get("source_session_id"),
             ),
         )
 

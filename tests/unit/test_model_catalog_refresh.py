@@ -52,7 +52,9 @@ def test_refreshing_brings_a_model_the_bundled_snapshot_lacks(cache_dir):
     assert summary["models"] == 1
     entry = metadata.catalog()["models"]["opencode-go"]["space-bunny-free"]
     assert entry["limit"]["context"] == 1048576
-    assert "cost" not in entry  # only the fields Rinari uses are kept
+    # Only the fields Rinari uses are kept: the price says whether it is free (#13).
+    assert entry["cost"] == {"input": 0}
+    assert "name" not in entry
     assert (cache_dir / "model_metadata.json").is_file()
 
 
@@ -74,3 +76,13 @@ def test_a_failed_download_keeps_the_catalog_in_use(cache_dir):
         metadata.refresh_public_catalog(lambda url, **kwargs: _Response({"other": {}}))
     assert metadata.catalog() is before
     assert not (cache_dir / "model_metadata.json").exists()
+
+
+def test_free_models_are_marked_from_their_price_or_opencodes_ids() -> None:
+    # Plan 0.4.0 #13: «OpenCode Go (gratis)» in the picker.
+    assert metadata.pricing("opencode-go", "x", {"cost": {"input": 0, "output": 0}}) == "free"
+    assert metadata.pricing("openai", "gpt", {"cost": {"input": 1.25, "output": 10}}) == "paid"
+    assert metadata.pricing("opencode-go", "step-6-free", {}) == "free"
+    assert metadata.pricing("opencode-zen", "big-pickle", {}) == "free"
+    assert metadata.pricing("openrouter", "something-free", {}) is None
+    assert metadata.pricing("openai", "gpt", {}) is None

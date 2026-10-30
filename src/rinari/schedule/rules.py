@@ -5,8 +5,15 @@ on this machine, so its clock and daylight-saving rules are the right ones):
 
     {"kind": "once", "at": "2026-09-25T09:00"}
     {"kind": "interval", "minutes": 30}
+    {"kind": "interval", "seconds": 30}
     {"kind": "daily", "time": "08:30"}
     {"kind": "weekly", "days": [0, 2, 4], "time": "08:30"}   # 0 = Monday
+    {"kind": "cron", "expr": "*/15 9-18 * * 1-5"}            # minute hour day month weekday
+
+A one-time schedule may also be asked for from now, `{"kind": "once",
+"after": {"minutes": 30}}` (`hours` and `days` too): `resolve_after` turns it
+into the `at` it means when the task is created, so a model does not need to
+know the time and what is stored is always `at`.
 
 Times are epoch seconds everywhere else; only these rules know about local
 dates. Pure functions: the scheduler passes its clock in.
@@ -14,19 +21,30 @@ dates. Pure functions: the scheduler passes its clock in.
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-MIN_INTERVAL_MINUTES = 5
-MAX_INTERVAL_MINUTES = 7 * 24 * 60
+#: How often the scheduler looks for what is due. It is the only floor of an
+#: interval: a shorter one could not be kept. There is no other minimum (the
+#: owner, 22-oct): how often an agent works is governed by budgets, and a run
+#: never overlaps the previous one of its task (it is skipped).
+SCHEDULER_TICK_S = 5
+MIN_INTERVAL_SECONDS = SCHEDULER_TICK_S
+MAX_INTERVAL_SECONDS = 7 * 24 * 3600
 # A run that was due while the app was closed still runs when it comes back,
 # but not a stale one: after this it is recorded as skipped.
 CATCH_UP_WINDOW_S = 12 * 3600
 
 _TIME = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
-KINDS = ("once", "interval", "daily", "weekly")
+KINDS = ("once", "interval", "daily", "weekly", "cron")
+#: Units of a relative one-time schedule, in seconds.
+AFTER_UNITS = {"minutes": 60, "hours": 3600, "days": 86400}
+MAX_AFTER_S = 366 * 86400
+# How far ahead a cron expression is searched for its next match.
+_CRON_HORIZON_DAYS = 366 * 4
 
 
 class ScheduleError(ValueError):
@@ -37,21 +55,58 @@ class ScheduleError(ValueError):
 class Schedule:
     kind: str
     at: datetime | None = None  # once: naive local datetime
-    minutes: int = 0  # interval
+    seconds: int = 0  # interval
     hour: int = 0
     minute: int = 0
     days: tuple[int, ...] = ()  # weekly, 0 = Monday
+    expr: str = ""  # cron: the five fields, as written (plan 0.4.0 #50)
 
     def to_dict(self) -> dict[str, Any]:
         if self.kind == "once":
             assert self.at is not None
             return {"kind": "once", "at": self.at.strftime("%Y-%m-%dT%H:%M")}
         if self.kind == "interval":
-            return {"kind": "interval", "minutes": self.minutes}
+            # Whole minutes keep the form every client already reads.
+            if self.seconds % 60 == 0:
+                return {"kind": "interval", "minutes": self.seconds // 60}
+            return {"kind": "interval", "seconds": self.seconds}
+        if self.kind == "cron":
+            return {"kind": "cron", "expr": self.expr}
         time = f"{self.hour:02d}:{self.minute:02d}"
         if self.kind == "daily":
             return {"kind": "daily", "time": time}
         return {"kind": "weekly", "days": list(self.days), "time": time}
+
+
+def resolve_after(raw: Any, now: float) -> Any:
+    """`{kind: once, after: {...}}` as the local `at` it means from `now`.
+
+    Rounded up to the minute, so it never runs before the time asked for.
+    Anything else is returned as it came: `parse_schedule` judges it.
+    """
+    if not isinstance(raw, dict) or raw.get("kind") != "once" or "after" not in raw:
+        return raw
+    if raw.get("at") is not None:
+        raise ScheduleError("A one-time schedule takes 'at' or 'after', not both.")
+    after = raw["after"]
+    if not isinstance(after, dict) or not after or set(after) - set(AFTER_UNITS):
+        raise ScheduleError("'after' is an object of minutes, hours and days.")
+    seconds = 0
+    for unit, value in after.items():
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ScheduleError(f"'after.{unit}' must be a whole number.")
+        seconds += value * AFTER_UNITS[unit]
+    if not 60 <= seconds <= MAX_AFTER_S:
+        raise ScheduleError("'after' must be between 1 minute and 366 days.")
+    due = math.ceil((now + seconds) / 60) * 60
+    local = datetime.fromtimestamp(due).replace(fold=0)
+    # `at` is a local time without an offset: in an hour the clock repeats it
+    # means the first one, which can be before `due`. The next minute that is
+    # not before it (at most an hour later) keeps «never earlier».
+    while local.timestamp() < due:
+        local += timedelta(minutes=1)
+    at = local.strftime("%Y-%m-%dT%H:%M")
+    return {key: value for key, value in raw.items() if key != "after"} | {"at": at}
 
 
 def parse_schedule(raw: Any) -> Schedule:
@@ -60,6 +115,10 @@ def parse_schedule(raw: Any) -> Schedule:
     kind = raw.get("kind")
     if kind not in KINDS:
         raise ScheduleError(f"Schedule kind must be one of {', '.join(KINDS)}.")
+    if kind == "cron":
+        expr = " ".join(str(raw.get("expr") or "").split())
+        _cron_fields(expr)
+        return Schedule("cron", expr=expr)
     if kind == "once":
         at = raw.get("at")
         if not isinstance(at, str):
@@ -72,16 +131,19 @@ def parse_schedule(raw: Any) -> Schedule:
             raise ScheduleError("'at' is local time: leave the timezone out.")
         return Schedule("once", at=moment.replace(second=0, microsecond=0))
     if kind == "interval":
-        minutes = raw.get("minutes")
-        if (
-            not isinstance(minutes, int)
-            or isinstance(minutes, bool)
-            or not MIN_INTERVAL_MINUTES <= minutes <= MAX_INTERVAL_MINUTES
-        ):
+        given = [unit for unit in ("minutes", "seconds") if raw.get(unit) is not None]
+        if len(given) != 1:
+            raise ScheduleError("An interval takes 'minutes' or 'seconds'.")
+        value = raw[given[0]]
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ScheduleError(f"'{given[0]}' must be a whole number.")
+        seconds = value * 60 if given[0] == "minutes" else value
+        if not MIN_INTERVAL_SECONDS <= seconds <= MAX_INTERVAL_SECONDS:
             raise ScheduleError(
-                f"The interval must be {MIN_INTERVAL_MINUTES}..{MAX_INTERVAL_MINUTES} minutes."
+                f"The interval must be {MIN_INTERVAL_SECONDS} seconds to "
+                f"{MAX_INTERVAL_SECONDS // 86400} days."
             )
-        return Schedule("interval", minutes=minutes)
+        return Schedule("interval", seconds=seconds)
     time = raw.get("time")
     match = _TIME.match(time) if isinstance(time, str) else None
     if match is None:
@@ -118,7 +180,9 @@ def next_run(schedule: Schedule, after: float) -> float | None:
         due = _epoch(schedule.at)
         return due if due > after else None
     if schedule.kind == "interval":
-        return after + schedule.minutes * 60
+        return after + schedule.seconds
+    if schedule.kind == "cron":
+        return _cron_next(schedule.expr, after)
     base = _local(after)
     for offset in range(0, 8):
         day = (base + timedelta(days=offset)).replace(
@@ -138,9 +202,88 @@ def describe(schedule: Schedule) -> str:
         assert schedule.at is not None
         return f"once at {schedule.at.strftime('%Y-%m-%d %H:%M')}"
     if schedule.kind == "interval":
-        return f"every {schedule.minutes} min"
+        if schedule.seconds % 60:
+            return f"every {schedule.seconds} s"
+        return f"every {schedule.seconds // 60} min"
+    if schedule.kind == "cron":
+        return f"cron {schedule.expr}"
     time = f"{schedule.hour:02d}:{schedule.minute:02d}"
     if schedule.kind == "daily":
         return f"daily at {time}"
     names = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
     return f"{', '.join(names[day] for day in schedule.days)} at {time}"
+
+
+# -- cron (plan 0.4.0 #50) -----------------------------------------------------------
+
+_CRON_RANGES = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))
+_CRON_NAMES = ("minute", "hour", "day of month", "month", "day of week")
+
+
+def _cron_field(text: str, low: int, high: int, name: str) -> frozenset[int]:
+    values: set[int] = set()
+    for part in text.split(","):
+        step = 1
+        if "/" in part:
+            part, raw_step = part.split("/", 1)
+            if not raw_step.isdigit() or int(raw_step) < 1:
+                raise ScheduleError(f"Invalid step in the {name} field of the cron expression.")
+            step = int(raw_step)
+        if part == "*":
+            start, end = low, high
+        elif "-" in part:
+            first, last = part.split("-", 1)
+            if not (first.isdigit() and last.isdigit()):
+                raise ScheduleError(f"Invalid range in the {name} field of the cron expression.")
+            start, end = int(first), int(last)
+        elif part.isdigit():
+            start = end = int(part)
+            if "/" in text and step > 1:
+                end = high
+        else:
+            raise ScheduleError(f"Invalid {name} field in the cron expression: {part!r}.")
+        if not (low <= start <= high and low <= end <= high and start <= end):
+            raise ScheduleError(f"The {name} field must be within {low}-{high}.")
+        values.update(range(start, end + 1, step))
+    return frozenset(values)
+
+
+def _cron_fields(expr: str) -> tuple[frozenset[int], ...]:
+    parts = expr.split()
+    if len(parts) != 5:
+        raise ScheduleError(
+            "A cron expression has five fields: minute hour day month weekday "
+            "(for example */15 9-18 * * 1-5)."
+        )
+    fields = tuple(
+        _cron_field(part, low, high, name)
+        for part, (low, high), name in zip(parts, _CRON_RANGES, _CRON_NAMES, strict=True)
+    )
+    # 7 is Sunday too.
+    weekdays = frozenset(0 if day == 7 else day for day in fields[4])
+    return (*fields[:4], weekdays)
+
+
+def _cron_next(expr: str, after: float) -> float | None:
+    minutes, hours, days, months, weekdays = _cron_fields(expr)
+    restricted_day = expr.split()[2] != "*"
+    restricted_weekday = expr.split()[4] != "*"
+    start = _local(after).replace(second=0, microsecond=0) + timedelta(minutes=1)
+    day = start.replace(hour=0, minute=0)
+    for _ in range(_CRON_HORIZON_DAYS):
+        if day.month in months:
+            in_month = day.day in days
+            in_week = (day.weekday() + 1) % 7 in weekdays
+            # Classic cron: with both restricted, either one matches.
+            if restricted_day and restricted_weekday:
+                matches = in_month or in_week
+            else:
+                matches = in_month and in_week
+            if matches:
+                for hour in sorted(hours):
+                    for minute in sorted(minutes):
+                        moment = day.replace(hour=hour, minute=minute)
+                        if moment >= start:
+                            return _epoch(moment)
+        day = day + timedelta(days=1)
+    return None

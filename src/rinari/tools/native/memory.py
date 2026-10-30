@@ -36,7 +36,9 @@ logger = logging.getLogger(__name__)
 
 _USER_KINDS = ["preference", "rule", "fact", "environment", "workflow"]
 _PROJECT_KINDS = ["fact", "rule", "convention", "environment", "workflow"]
-_SCOPES = ["user", "project", "pattern"]
+_SCOPES = ["user", "profile", "project", "chat", "pattern"]
+#: Personal places (#75): user = general, everywhere.
+_PERSONAL = {"user": "general", "profile": "profile", "chat": "chat"}
 _RECALL_SCOPES = ["user", "project", "pattern", "episodic"]
 
 
@@ -128,19 +130,21 @@ def _emit(ctx: ToolContext, event_name: str, payload: dict) -> None:
 
 
 def emit_candidate_created(ctx: ToolContext, candidate: dict) -> None:
-    _emit(
-        ctx,
-        "memory.candidate.created",
-        {
-            "candidate_id": candidate["id"],
-            "topic": candidate["topic"],
-            "text": candidate["text"],
-            "kind": candidate["kind"],
-            "scope": candidate.get("scope") or "user",
-            "reason": candidate.get("reason") or "",
-            "sensitive": bool(candidate.get("sensitive")),
-        },
-    )
+    payload = {
+        "candidate_id": candidate["id"],
+        "topic": candidate["topic"],
+        "text": candidate["text"],
+        "kind": candidate["kind"],
+        "scope": candidate.get("scope") or "user",
+        "reason": candidate.get("reason") or "",
+        "sensitive": bool(candidate.get("sensitive")),
+    }
+    # Where the model chose to keep it (#75); the card lets the owner change it.
+    if candidate.get("place") and candidate.get("place") != "general":
+        payload["place"] = candidate["place"]
+    if candidate.get("project_root"):
+        payload["project_root"] = candidate["project_root"]
+    _emit(ctx, "memory.candidate.created", payload)
 
 
 def emit_remembered(ctx: ToolContext, record: dict | None) -> None:
@@ -155,12 +159,22 @@ def emit_remembered(ctx: ToolContext, record: dict | None) -> None:
             "text": record["text"],
             "kind": record["kind"],
             "scope": record.get("scope") or "user",
+            # Where it went (#75): the notice says it and offers «Mover».
+            "place": record.get("place")
+            or ("project" if record.get("scope") == "project" else "general"),
+            "place_ref": record.get("place_ref") or record.get("project_root"),
         },
     )
 
 
 def _remember_for_owner(
-    service, input: dict, ctx: ToolContext, topic: str, text: str
+    service,
+    input: dict,
+    ctx: ToolContext,
+    topic: str,
+    text: str,
+    place: str = "general",
+    place_ref: str | None = None,
 ) -> ToolResult:
     """Personal memory, written by the model in the owner's turn.
 
@@ -174,8 +188,10 @@ def _remember_for_owner(
     if source is None:
         return _fail(
             ToolErrorCode.PERMISSION_DENIED,
-            "personal memory can only be written during a turn the owner started "
-            "(not from a subagent, a scheduled run or another session). Do not retry.",
+            "personal memory is written only in a turn the owner started or wrote "
+            "into, never on its own from a subagent, a scheduled run or another "
+            "session. Propose it with memory.propose instead (the owner approves it); "
+            "do not retry memory.remember.",
         )
     kind = input.get("kind", "fact")
     if kind not in _USER_KINDS:
@@ -199,6 +215,8 @@ def _remember_for_owner(
             topic=topic,
             kind=kind,
             confidence=float(confidence),
+            place=place,
+            place_ref=place_ref,
         )
     except Exception as exc:
         message = getattr(exc, "message", str(exc))
@@ -231,13 +249,22 @@ def memory_remember(input: dict, ctx: ToolContext) -> ToolResult:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "text is required")
     if len(text.strip()) > 4096:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "text exceeds 4096 characters")
-    if scope == "user" and not service.extraction_allowed(ctx.session_id):
+    if scope in _PERSONAL and not service.extraction_allowed(ctx.session_id):
         return _fail(
             ToolErrorCode.PERMISSION_DENIED,
             "memory is excluded for this conversation; the owner must re-enable it. Do not retry.",
         )
-    if scope == "user":
-        return _remember_for_owner(service, input, ctx, topic.strip(), text.strip())
+    if scope in _PERSONAL:
+        place, place_ref = service.place_for(_PERSONAL[scope], ctx.session_id)
+        return _remember_for_owner(
+            service,
+            input,
+            ctx,
+            topic.strip(),
+            text.strip(),
+            place,
+            place_ref,
+        )
     provenance = input.get("provenance")
     if provenance is not None and not isinstance(provenance, str):
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "provenance must be a string")
@@ -277,6 +304,7 @@ def memory_remember(input: dict, ctx: ToolContext) -> ToolResult:
                 topic=topic,
                 provenance=provenance or "agent",
                 confidence=float(confidence),
+                origin_session_id=ctx.session_id,
             )
         elif scope == "project":
             result = service.remember_project(
@@ -286,6 +314,7 @@ def memory_remember(input: dict, ctx: ToolContext) -> ToolResult:
                 topic=topic,
                 provenance=provenance or "agent",
                 confidence=float(confidence),
+                origin_session_id=ctx.session_id,
             )
         else:
             p_scope = input.get("pattern_scope", "global")
@@ -347,8 +376,11 @@ def memory_propose(input: dict, ctx: ToolContext) -> ToolResult:
             ToolErrorCode.INVALID_ARGUMENT, f"kind must be one of: {', '.join(LEARNED_KINDS)}"
         )
     scope = input.get("scope", "user")
-    if scope not in ("user", "project"):
-        return _fail(ToolErrorCode.INVALID_ARGUMENT, "scope must be user or project")
+    if scope not in ("user", "profile", "project", "chat"):
+        return _fail(ToolErrorCode.INVALID_ARGUMENT, "scope must be user, profile, project or chat")
+    place, place_ref = service.place_for(_PERSONAL.get(scope, "general"), ctx.session_id)
+    if scope in ("profile", "chat"):
+        scope = "user"
     if not service.session_exists(ctx.session_id):
         # A subagent runs under a child id with no conversation behind it.
         return _fail(
@@ -388,6 +420,8 @@ def memory_propose(input: dict, ctx: ToolContext) -> ToolResult:
             project_root=str(root) if root is not None else None,
             trusted=trusted,
             untrusted_reason=untrusted_reason,
+            place=place,
+            place_ref=place_ref,
         )
     except Exception as exc:
         message = getattr(exc, "message", str(exc))
@@ -435,7 +469,9 @@ def memory_recall(input: dict, ctx: ToolContext) -> ToolResult:
         notes = ("this session has no project: searched user memory instead of project memory",)
     try:
         if scope == "user":
-            rows = service.search_user(query, kind=kind, limit=limit)
+            # Only what this conversation may see (an agent never reads
+            # another agent's or team's memory).
+            rows = service.search_user(query, kind=kind, limit=limit, session_id=ctx.session_id)
         elif scope == "project":
             root = _project_root(ctx)
             rows = service.search_project(str(root), query, kind=kind, limit=limit)
@@ -493,6 +529,8 @@ def memory_update(input: dict, ctx: ToolContext) -> ToolResult:
     provenance, err = _optional_str(input, "provenance", max_len=256)
     if err is not None:
         return err
+    if scope == "user" and not service.may_change_user(memory_id, ctx.session_id):
+        return _fail(ToolErrorCode.NOT_FOUND, f"no memory {memory_id} in this conversation")
     try:
         if scope == "user":
             row = service.update_user(
@@ -549,6 +587,8 @@ def memory_forget(input: dict, ctx: ToolContext) -> ToolResult:
             ToolErrorCode.INVALID_ARGUMENT,
             "expected_revision is required for user memory deletion",
         )
+    if scope == "user" and not service.may_change_user(memory_id, ctx.session_id):
+        return _fail(ToolErrorCode.NOT_FOUND, f"no memory {memory_id} in this conversation")
     try:
         if scope == "user":
             forgotten = service.forget_user(memory_id, expected_revision=expected_revision)
@@ -593,6 +633,14 @@ def memory_episodic(input: dict, ctx: ToolContext) -> ToolResult:
     return _ok(record)
 
 
+#: Where to keep it (#75): the model chooses, the owner can change it on the card.
+_SCOPE_GUIDE = (
+    "Where it applies: user = about the owner, everywhere (preferences, who they are); "
+    "profile = only for the active Rinari profile's role; project = this project; "
+    "chat = only this conversation (details of this one piece of work)."
+)
+
+
 def memory_tools() -> list[ToolDefinition]:
     return [
         ToolDefinition(
@@ -609,12 +657,14 @@ def memory_tools() -> list[ToolDefinition]:
                 "scope=pattern: a reusable procedure. "
                 "A re-statement with the same kind+topic refreshes the record; "
                 "a conflicting statement supersedes the old one. Secrets are rejected. "
-                "A refusal that says 'Do not retry' will fail again: tell the owner."
+                "A refusal that says 'Do not retry' will fail again: tell the owner. "
+                "What is about yourself (the app, the Engine, the CLI) is written in "
+                "first person ('my built-in browser'), never as a third party."
             ),
             input_schema={
                 "type": "object",
                 "properties": {
-                    "scope": {"type": "string", "enum": _SCOPES},
+                    "scope": {"type": "string", "enum": _SCOPES, "description": _SCOPE_GUIDE},
                     "kind": {
                         "type": "string",
                         "enum": list(dict.fromkeys([*_USER_KINDS, *_PROJECT_KINDS])),
@@ -642,10 +692,12 @@ def memory_tools() -> list[ToolDefinition]:
                 "repeat it: environment/infrastructure (hosts, ports, paths, which machine "
                 "runs what), how a project is started, built or tested, a command that works "
                 "on this machine, or an owner preference you inferred. One short fact per "
-                "call, in your own words. Not for one-off details of this task, guesses, or "
+                "call, in your own words. Not for one-off details of this task, conventions "
+                "that only come from the current request's instructions, guesses, or "
                 "secrets (name where a secret lives, never its value). Depending on the "
                 "owner's setting it is saved at once or proposed for approval; the result "
-                "says which. scope=project only in a session with a project."
+                "says which. scope=project only in a session with a project. About "
+                "yourself, first person: 'my environment (Windows)'."
             ),
             input_schema={
                 "type": "object",
@@ -657,7 +709,12 @@ def memory_tools() -> list[ToolDefinition]:
                         "description": "short label, e.g. 'saturno ssh' or 'dev server'",
                     },
                     "kind": {"type": "string", "enum": list(LEARNED_KINDS), "default": "fact"},
-                    "scope": {"type": "string", "enum": ["user", "project"], "default": "user"},
+                    "scope": {
+                        "type": "string",
+                        "enum": ["user", "profile", "project", "chat"],
+                        "default": "user",
+                        "description": _SCOPE_GUIDE,
+                    },
                 },
                 "required": ["text", "topic"],
             },
@@ -699,6 +756,7 @@ def memory_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="memory.update",
+            always_loaded=False,
             description=(
                 "Update an existing user or project memory record by id (text, "
                 "topic, confidence, provenance). Use after a stored fact turns "
@@ -735,6 +793,7 @@ def memory_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="memory.forget",
+            always_loaded=False,
             description=(
                 "Delete one user, project, or pattern memory record by id. Use when "
                 "the user asks you to forget something or a stored record is wrong."

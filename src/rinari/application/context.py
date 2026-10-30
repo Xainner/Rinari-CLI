@@ -18,6 +18,7 @@ from rinari.shared.paths import HomeLayout, ensure_layout, resolve_home
 from rinari.storage.db import Database
 from rinari.storage.migrations import MigrationRunner
 from rinari.storage.repositories import (
+    AgencyRepository,
     ApiSpecRepository,
     CheckpointRepository,
     ConfigValueRepository,
@@ -37,6 +38,7 @@ from rinari.storage.repositories import (
     SessionRepository,
     SkillRecordRepository,
     TaskRepository,
+    TeamRepository,
     TrustEntryRepository,
     TurnChangeRepository,
     ValidationRecordRepository,
@@ -75,6 +77,8 @@ class AppContext:
     hook_repo: HookRepository = None
     skill_repo: SkillRecordRepository = None
     schedule_repo: ScheduleRepository = None
+    agency_repo: AgencyRepository = None
+    team_repo: TeamRepository = None
 
     def close(self) -> None:
         self.db.close()
@@ -90,7 +94,12 @@ def build_app_context(
     root = resolve_home(home)
     layout = ensure_layout(root)
     db = Database(layout.state_db)
-    MigrationRunner(db, clock).migrate()
+    MigrationRunner(
+        db,
+        clock,
+        backup_root=layout.root / "backups",
+        backup_extra=(layout.root / "policies",),
+    ).migrate()
 
     user_data: dict | None = None
     if config_path is not None:
@@ -130,6 +139,8 @@ def build_app_context(
         hook_repo=HookRepository(db),
         skill_repo=SkillRecordRepository(db),
         schedule_repo=ScheduleRepository(db),
+        agency_repo=AgencyRepository(db),
+        team_repo=TeamRepository(db),
     )
 
 

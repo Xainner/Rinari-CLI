@@ -47,6 +47,27 @@ secciones de «TODO.md», a `roadmap-v1.md`.
 - Cada migración corre en una transacción, conserva las referencias de
   proveedores, modelos y sesiones, y nunca copia secretos en claro.
 
+## Herramientas
+
+- **Núcleo pequeño, lo demás bajo demanda** ([`docs/tools.md`](docs/tools.md)
+  §63). Cada petición al modelo lleva solo el núcleo (`always_loaded=True`);
+  el resto lo encuentra con `capability.search` o lo activa por nombre. Cada
+  herramienta del núcleo se paga en tokens en cada llamada y empeora la
+  elección y la caché.
+- **El núcleo no crece por un caso.** Una herramienta entra al núcleo solo
+  por decisión del dueño. La prueba
+  `test_the_always_loaded_core_does_not_grow_by_itself`
+  (`tests/unit/test_tool_contract.py`) fija la lista: cambiarla es cambiar
+  esta regla.
+- **Si un modelo no sabe que algo existe, se le dice en una línea**, no se le
+  carga el esquema: un hecho de la conversación (`_runtime_facts`), la
+  sección de su equipo o una skill. Ejemplo: `schedule.propose` sigue bajo
+  demanda y los hechos de cada conversación dicen que se programa con ella
+  (22-oct).
+- Una herramienta nueva declara su contrato de salida en
+  `src/rinari/tools/output_contracts.py` (el empaquetado de la Nightly lo
+  exige) y suma su nombre a las cuentas del catálogo en las pruebas.
+
 ## Nada específico del dueño
 
 Las mejoras son generales. Nada en el código, las pruebas, los prompts ni los

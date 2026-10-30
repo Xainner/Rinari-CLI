@@ -10,7 +10,9 @@ what changed — it never invents policy or touches credentials.
 from __future__ import annotations
 
 import re
+import secrets
 import tomllib
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -26,6 +28,15 @@ MAX_DESCRIPTION_CHARS = 500
 #: (its file is written then) but never removed.
 DEFAULT_PROFILE_ID = "default"
 DEFAULT_PROFILE_NAME = "Default"
+#: A new profile speaks with Rinari's soul unless the owner picks another (#86).
+DEFAULT_SOUL_ID = "rinari-default"
+
+
+def slug_for(name: str) -> str:
+    """An id from a name: ascii, lowercase, dashes; empty when nothing usable."""
+    ascii_name = unicodedata.normalize("NFKD", name or "").encode("ascii", "ignore").decode()
+    slug = re.sub(r"[^a-z0-9]+", "-", ascii_name.lower()).strip("-")[:48].strip("-")
+    return slug if PROFILE_ID_RE.match(slug or "") else ""
 
 
 @dataclass(slots=True)
@@ -34,6 +45,8 @@ class ProfileBundle:
     name: str
     description: str = ""
     soul_id: str | None = None
+    # Kept only to read old files: the mode is no longer part of a profile
+    # (the owner, 2026-10-15). Never written again.
     mode: str | None = None
     agents: dict[str, dict[str, Any]] = field(default_factory=dict)
 
@@ -47,7 +60,6 @@ class ProfileBundle:
             "name": self.name,
             "description": self.description,
             "soul_id": self.soul_id,
-            "mode": self.mode,
             "agents": {k: dict(v) for k, v in self.agents.items()},
             "builtin": self.builtin,
         }
@@ -110,8 +122,6 @@ class ProfileBundleStore:
             bundle.description = str(changes["description"]).strip()
         if "soul_id" in changes:
             bundle.soul_id = str(changes["soul_id"]) if changes["soul_id"] else None
-        if "mode" in changes:
-            bundle.mode = str(changes["mode"]).strip().lower() if changes["mode"] else None
         if "agents" in changes and changes["agents"] is not None:
             if not isinstance(changes["agents"], dict):
                 raise InvalidUsageError("Profile agents must be an object.")
@@ -122,9 +132,18 @@ class ProfileBundleStore:
         self._write(bundle)
         return bundle
 
+    def new_id(self, name: str) -> str:
+        """The id for a new profile (#86): from its name, unique, never asked."""
+        base = slug_for(name) or f"perfil-{secrets.token_hex(3)}"
+        candidate, suffix = base, 2
+        while candidate == DEFAULT_PROFILE_ID or self._path(candidate).exists():
+            candidate = f"{base[:60]}-{suffix}"
+            suffix += 1
+        return candidate
+
     def create(
         self,
-        bundle_id: str,
+        bundle_id: str | None,
         *,
         name: str,
         description: str = "",
@@ -132,6 +151,12 @@ class ProfileBundleStore:
         mode: str | None = None,
         agents: dict[str, dict[str, Any]] | None = None,
     ) -> ProfileBundle:
+        """A new profile. Without an id one is made from the name; the soul is
+        Rinari's unless another is chosen. `mode` is accepted and ignored."""
+        if not bundle_id:
+            if not (name or "").strip():
+                raise InvalidUsageError("Profile name must be 1..80 chars.")
+            bundle_id = self.new_id(name)
         _validate_bundle(bundle_id, name, description)
         if self._path(bundle_id).exists():
             raise ConflictError(f"Profile already exists: {bundle_id}.")
@@ -139,8 +164,7 @@ class ProfileBundleStore:
             id=bundle_id,
             name=name.strip(),
             description=(description or "").strip(),
-            soul_id=soul_id or None,
-            mode=(mode or "").strip().lower() or None,
+            soul_id=soul_id or DEFAULT_SOUL_ID,
             agents={k: dict(v) for k, v in (agents or {}).items()},
         )
         self._write(bundle)
@@ -162,7 +186,7 @@ class ProfileBundleStore:
         description = str(raw.get("description") or "")
         _validate_bundle(bundle_id, name, description)
         soul_id = raw.get("soul_id")
-        mode = raw.get("mode")
+        # An old file's `mode` loads without error and is ignored (#86).
         agents = raw.get("agents") or {}
         if not isinstance(agents, dict):
             raise InvalidUsageError(f"Invalid agents map: {path.name}.")
@@ -171,7 +195,6 @@ class ProfileBundleStore:
             name=name.strip(),
             description=description.strip(),
             soul_id=str(soul_id) if soul_id else None,
-            mode=str(mode).strip().lower() if mode else None,
             agents={str(k): dict(v) for k, v in agents.items() if isinstance(v, dict)},
         )
 
@@ -184,8 +207,6 @@ class ProfileBundleStore:
         }
         if bundle.soul_id:
             payload["soul_id"] = bundle.soul_id
-        if bundle.mode:
-            payload["mode"] = bundle.mode
         if bundle.agents:
             payload["agents"] = bundle.agents
         self._path(bundle.id).write_text(tomli_w.dumps(payload), encoding="utf-8")

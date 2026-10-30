@@ -23,6 +23,7 @@ from rinari.tools.definition import (
     RISK_MEDIUM,
     SIDE_EFFECT_LOCAL_REVERSIBLE,
     SIDE_EFFECT_NONE,
+    ArtifactRef,
     ClassifiedAction,
     ToolContext,
     ToolDefinition,
@@ -35,7 +36,9 @@ from rinari.web.client import (
     SEARCH_MAX_RESULTS_DEFAULT,
     SEARCH_MAX_RESULTS_LIMIT,
     WebRequestError,
+    download_to,
     fetch,
+    looks_binary,
     search,
 )
 from rinari.web.html import parse_page
@@ -129,7 +132,35 @@ def source_snapshot(ctx, identifier):
 
 def _is_text(fetched) -> bool:
     ctype = (fetched.content_type or "").lower()
-    return not ctype or "text" in ctype or "json" in ctype or "xml" in ctype
+    claims_text = not ctype or "text" in ctype or "json" in ctype or "xml" in ctype
+    return claims_text and not looks_binary(fetched.body)
+
+
+def _binary_failure(fetched) -> ToolResult:
+    """The page is not readable text: a clear error instead of garbage."""
+    ctype = fetched.content_type or "unknown"
+    return ToolResult(
+        ok=False,
+        error=ToolErrorInfo(
+            code=ToolErrorCode.CONTENT_BINARY,
+            message=(
+                f"{fetched.final_url} returned binary content (content-type: {ctype}), "
+                "not text. Use web.download to save it as a file."
+            ),
+            details={
+                "content_type": ctype,
+                "bytes": len(fetched.body),
+                "url": fetched.final_url,
+            },
+        ),
+    )
+
+
+def _page_text(fetched) -> tuple[str | None, ToolResult | None]:
+    """(decoded text, None) for a readable page; (None, failure) for binary."""
+    if not _is_text(fetched):
+        return None, _binary_failure(fetched)
+    return fetched.body.decode("utf-8", errors="replace"), None
 
 
 def _fetch_guarded(
@@ -181,6 +212,10 @@ def web_search(input: dict, ctx: ToolContext) -> ToolResult:
         queries = input["queries"]
         if not isinstance(queries, list) or not 1 <= len(queries) <= 4:
             return _fail(ToolErrorCode.INVALID_ARGUMENT, "queries must contain 1 to 4 strings")
+        # Models often send both; the lone query joins the list when it fits.
+        extra = input.get("query")
+        if isinstance(extra, str) and extra.strip() and extra not in queries and len(queries) < 4:
+            queries = [extra, *queries]
         rows = []
         for query in queries:
             if ctx.cancellation:
@@ -229,6 +264,11 @@ def web_fetch(input: dict, ctx: ToolContext) -> ToolResult:
     if error is not None:
         return error
     data: dict = {"truncated": fetched.truncated}
+    ctype = (fetched.content_type or "").lower()
+    if (not ctype or "text" in ctype or "json" in ctype or "xml" in ctype) and looks_binary(
+        fetched.body
+    ):
+        return _binary_failure(fetched)
     if _is_text(fetched):
         text = fetched.body.decode("utf-8", errors="replace")
         page = parse_page(text, fetched.final_url) if "<html" in text[:4096].lower() else None
@@ -262,12 +302,10 @@ def web_open(input: dict, ctx: ToolContext) -> ToolResult:
     )
     if error is not None:
         return error
-    if not _is_text(fetched):
-        return _fail(
-            ToolErrorCode.INVALID_ARGUMENT,
-            f"URL did not return text content (content-type: {fetched.content_type or 'unknown'})",
-        )
-    page = parse_page(fetched.body.decode("utf-8", errors="replace"), fetched.final_url)
+    text, failure = _page_text(fetched)
+    if failure is not None:
+        return failure
+    page = parse_page(text, fetched.final_url)
     return _ok(
         {
             "url": fetched.final_url,
@@ -292,7 +330,10 @@ def web_links(input: dict, ctx: ToolContext) -> ToolResult:
     )
     if error is not None:
         return error
-    page = parse_page(fetched.body.decode("utf-8", errors="replace"), fetched.final_url)
+    text, failure = _page_text(fetched)
+    if failure is not None:
+        return failure
+    page = parse_page(text, fetched.final_url)
     links = page.links[:MAX_LINKS_RESULT]
     return _ok({"url": fetched.final_url, "links": links, "total": len(page.links)})
 
@@ -312,7 +353,10 @@ def web_find(input: dict, ctx: ToolContext) -> ToolResult:
     )
     if error is not None:
         return error
-    text = parse_page(fetched.body.decode("utf-8", errors="replace"), fetched.final_url).text()
+    raw, failure = _page_text(fetched)
+    if failure is not None:
+        return failure
+    text = parse_page(raw, fetched.final_url).text()
     lines = text.splitlines()
     needle = pattern.lower()
     hits = []
@@ -343,7 +387,10 @@ def web_extract_text(input: dict, ctx: ToolContext) -> ToolResult:
     )
     if error is not None:
         return error
-    text = parse_page(fetched.body.decode("utf-8", errors="replace"), fetched.final_url).text()
+    raw, failure = _page_text(fetched)
+    if failure is not None:
+        return failure
+    text = parse_page(raw, fetched.final_url).text()
     return _ok(
         {
             "url": fetched.final_url,
@@ -363,7 +410,10 @@ def web_extract_markdown(input: dict, ctx: ToolContext) -> ToolResult:
     )
     if error is not None:
         return error
-    page = parse_page(fetched.body.decode("utf-8", errors="replace"), fetched.final_url)
+    text, failure = _page_text(fetched)
+    if failure is not None:
+        return failure
+    page = parse_page(text, fetched.final_url)
     markdown = page.markdown()
     return _ok(
         {
@@ -384,7 +434,10 @@ def web_extract_metadata(input: dict, ctx: ToolContext) -> ToolResult:
     )
     if error is not None:
         return error
-    page = parse_page(fetched.body.decode("utf-8", errors="replace"), fetched.final_url)
+    text, failure = _page_text(fetched)
+    if failure is not None:
+        return failure
+    page = parse_page(text, fetched.final_url)
     return _ok(
         {
             "url": fetched.final_url,
@@ -404,29 +457,124 @@ def web_download(input: dict, ctx: ToolContext) -> ToolResult:
     url = _validate_url(input.get("url"))
     if url is None:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "url must be an http(s) URL")
-    fetched, error = _fetch_guarded(ctx, url, timeout_s=60.0, refresh=True)
-    if error is not None:
-        return error
-    artifact_root = Path(ctx.artifact_root)
-    artifact_root.mkdir(parents=True, exist_ok=True)
-    name = _safe_name(url, f"download-{fetched.sha256[:8]}")
-    target = artifact_root / name
+    denied = _guard(ctx, url)
+    if denied is not None:
+        return denied
+    if ctx.cancellation:
+        ctx.cancellation.throw_if_cancelled()
     try:
-        target.write_bytes(fetched.body)
+        downloaded = download_to(
+            url,
+            Path(ctx.artifact_root),
+            lambda final_url, sha256: _safe_name(final_url, f"download-{sha256[:8]}"),
+            client_factory=_client_factory(ctx),
+            timeout_s=60.0,
+            is_cancelled=(lambda: ctx.cancellation.cancelled) if ctx.cancellation else None,
+        )
+    except WebRequestError as exc:
+        return _fail(ToolErrorCode(exc.code), exc.message, retryable=exc.retryable)
     except OSError as exc:
         return _fail(
             ToolErrorCode.PERMISSION_DENIED, f"Download write failed: {exc.__class__.__name__}"
         )
-    return _ok(
-        {
-            "path": str(target),
-            "bytes": len(fetched.body),
-            "sha256": fetched.sha256,
-            "content_type": fetched.content_type,
-            "truncated": fetched.truncated,
-            "provenance": _provenance(fetched, ctx),
-        }
+    # A redirect may have left the allowed network: the file stays only if
+    # its final address passes the guard too.
+    denied = _guard(ctx, downloaded.final_url)
+    if denied is not None:
+        downloaded.path.unlink(missing_ok=True)
+        return denied
+    path, uri, name = _keep_download(ctx, downloaded, input.get("name"))
+    data = {
+        "path": str(path),
+        "bytes": downloaded.bytes,
+        "sha256": downloaded.sha256,
+        "content_type": downloaded.content_type,
+        "truncated": False,
+        "provenance": {
+            "url": downloaded.url,
+            "final_url": downloaded.final_url,
+            "status": downloaded.status,
+            "content_type": downloaded.content_type,
+            "bytes": downloaded.bytes,
+            "sha256": downloaded.sha256,
+            "fetched_at": now_iso(ctx.clock),
+        },
+    }
+    if uri is None:
+        return _ok(data)
+    # A file of this conversation: file.present shows it with its card and
+    # artifact.export copies it into the project (plan 0.4.0 v2, V2-3).
+    data["uri"] = uri
+    kind = "image" if (downloaded.content_type or "").startswith("image/") else "file"
+    return ToolResult(ok=True, data=data, artifacts=(ArtifactRef(uri, name, kind),))
+
+
+def _with_extension(name: str, content_type: str | None) -> str:
+    """`rvl_dl_F0ync…` served as image/png becomes `rvl_dl_F0ync….png`."""
+    import mimetypes
+
+    if Path(name).suffix or not content_type:
+        return name
+    mime = content_type.split(";", 1)[0].strip().lower()
+    if mime in ("", "application/octet-stream"):
+        return name
+    extension = {"image/jpeg": ".jpg", "text/plain": ".txt"}.get(mime) or (
+        mimetypes.guess_extension(mime) or ""
     )
+    return f"{name}{extension}" if extension else name
+
+
+def _file_name(raw: Any) -> str | None:
+    """A plain file name kept to what the artifact store accepts, or None."""
+    import re
+    import unicodedata
+
+    if not isinstance(raw, str):
+        return None
+    name = raw.replace("\\", "/").rsplit("/", 1)[-1].strip()
+    name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
+    name = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-.")
+    return name[:120] or None
+
+
+def _keep_download(
+    ctx: ToolContext, downloaded, wanted: Any = None
+) -> tuple[Path, str | None, str]:
+    """Move the download into this conversation's files, named with its type.
+
+    Downloads landed loose in the shared artifacts folder, without an
+    extension and without an artifact:// address, so the model copied them
+    with the shell to show them (V2-3). Without a store (tests, the CLI's bare
+    tools) the file stays where it was downloaded, with its extension.
+    """
+    # The name asked for, else the server's, else the address's last part.
+    given = _file_name(wanted) or _file_name(getattr(downloaded, "filename", ""))
+    name = _with_extension(given or downloaded.path.name, downloaded.content_type)
+    store = getattr(ctx, "artifact_store", None)
+    session_id = getattr(ctx, "session_id", "") or ""
+    if store is None or not session_id.strip():
+        if name != downloaded.path.name:
+            target = downloaded.path.with_name(name)
+            if not target.exists():
+                downloaded.path.replace(target)
+                return target, None, name
+        return downloaded.path, None, downloaded.path.name
+    if store._storage_path(f"{session_id.strip()}/downloads/{name}").exists():
+        stem, suffix = Path(name).stem, Path(name).suffix
+        name = f"{stem}-{downloaded.sha256[:8]}{suffix}"
+    try:
+        record = store.create_from_file(
+            session_id,
+            "downloads",
+            name,
+            downloaded.path,
+            content_type=(downloaded.content_type or "application/octet-stream").split(";")[0],
+            summary=f"Downloaded from {downloaded.final_url}"[:200],
+            provenance=f"web.download:{downloaded.final_url}"[:500],
+        )
+    except Exception:
+        return downloaded.path, None, downloaded.path.name
+    return store._storage_path(record.storage_path), record.uri(), name
 
 
 # -- provenance: web.cite / web.sources ------------------------------------------------------
@@ -518,7 +666,10 @@ def web_tools() -> list[ToolDefinition]:
     return [
         ToolDefinition(
             name="web.search",
-            description="Search the web (keyless DuckDuckGo HTML endpoint).",
+            description=(
+                "Search the web (keyless DuckDuckGo HTML endpoint). "
+                "Pass query for one search or queries for up to 4."
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -531,7 +682,7 @@ def web_tools() -> list[ToolDefinition]:
                     },
                     "max_results": {"type": "integer", "minimum": 1, "maximum": 50},
                 },
-                "oneOf": [{"required": ["query"]}, {"required": ["queries"]}],
+                "anyOf": [{"required": ["query"]}, {"required": ["queries"]}],
             },
             risk=RISK_LOW,
             side_effects=SIDE_EFFECT_NONE,
@@ -559,6 +710,7 @@ def web_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="web.links",
+            always_loaded=False,
             description="List the (deduplicated, absolute) links of a page.",
             input_schema=url_schema,
             risk=RISK_LOW,
@@ -568,6 +720,7 @@ def web_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="web.find",
+            always_loaded=False,
             description="Case-insensitive literal search within a page's extracted text.",
             input_schema={
                 "type": "object",
@@ -590,6 +743,7 @@ def web_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="web.extract_text",
+            always_loaded=False,
             description="Extract plain text from a page (bounded).",
             input_schema=url_schema,
             risk=RISK_LOW,
@@ -599,6 +753,7 @@ def web_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="web.extract_markdown",
+            always_loaded=False,
             description="Extract lightweight markdown from a page (bounded).",
             input_schema=url_schema,
             risk=RISK_LOW,
@@ -608,6 +763,7 @@ def web_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="web.extract_metadata",
+            always_loaded=False,
             description="Extract title, description and meta tags from a page.",
             input_schema=url_schema,
             risk=RISK_LOW,
@@ -617,21 +773,35 @@ def web_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="web.download",
-            description="Download a URL into the session artifact directory (bounded 2 MiB).",
+            description=(
+                "Download a URL into the session artifact directory, streamed to disk "
+                "(up to 1 GiB); returns the path, size and SHA-256. Give it a name "
+                "(e.g. pico.png) when the address is a token; otherwise the server's "
+                "file name, or the address's, is kept."
+            ),
             input_schema={
                 "type": "object",
-                "properties": {"url": {"type": "string"}},
+                "properties": {
+                    "url": {"type": "string"},
+                    "name": {
+                        "type": "string",
+                        "maxLength": 120,
+                        "description": "The saved file's name (its type's extension is added).",
+                    },
+                },
                 "required": ["url"],
                 "additionalProperties": False,
             },
             risk=RISK_MEDIUM,
             side_effects=SIDE_EFFECT_LOCAL_REVERSIBLE,
-            timeout_ms=90_000,
+            # Large files take minutes; the read timeout still ends a stalled one.
+            timeout_ms=30 * 60_000,
             handler=web_download,
             **common,
         ),
         ToolDefinition(
             name="web.cite",
+            always_loaded=False,
             description="Build a citation/evidence record for a URL (hash, timestamp, title).",
             input_schema=url_schema,
             risk=RISK_LOW,
@@ -641,6 +811,7 @@ def web_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="web.sources",
+            always_loaded=False,
             description="Build citation records for up to 10 URLs; per-URL failures included.",
             input_schema={
                 "type": "object",

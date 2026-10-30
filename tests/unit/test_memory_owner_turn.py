@@ -62,7 +62,9 @@ def test_without_an_owner_turn_the_refusal_says_not_to_retry(app_ctx, tmp_path) 
     assert not result.ok
     # Not APPROVAL_REQUIRED: there is nothing pending the owner could accept.
     assert result.error.code is ToolErrorCode.PERMISSION_DENIED
-    assert "Do not retry" in result.error.message
+    assert "do not retry memory.remember" in result.error.message
+    # The way that works without the owner: a proposal they approve (22-oct).
+    assert "memory.propose" in result.error.message
     assert memory.list_user() == []
 
 

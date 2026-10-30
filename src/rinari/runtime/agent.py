@@ -21,6 +21,7 @@ from __future__ import annotations
 import contextlib
 import json
 import queue
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -40,7 +41,7 @@ from rinari.runtime.budget import TOOL_CALLS as TOOL_CALLS_DIM
 from rinari.runtime.budget import BudgetMeter, EmergencyCircuitBreaker
 from rinari.runtime.cancellation import CancellationToken
 from rinari.runtime.governor import RECOVERY_PROMPTS, GovernorAction, TurnGovernor
-from rinari.runtime.loopdetection import LoopDetector
+from rinari.runtime.loopdetection import LoopDetector, outcome_digest
 from rinari.shared.errors import CancelledError
 from rinari.tools.definition import ToolContext, ToolErrorCode, ToolErrorInfo, ToolResult
 from rinari.tools.runtime import ToolRuntime
@@ -72,6 +73,16 @@ EVENT_TOOL_COMPLETED = "ToolCompleted"
 EVENT_TURN_COMPLETED = "AgentTurnCompleted"
 EVENT_LOOP_DETECTED = "LoopDetected"
 EVENT_OPENING_REQUESTED = "OpeningRequested"
+EVENT_EMPTY_RESPONSE = "EmptyResponse"
+# Sent once when a final response arrives with no text and no tool calls
+# (plan 0.4.0 #66a): common with quantized or long-reasoning models, which
+# end the turn mid-work after only reasoning.
+_EMPTY_REMINDER = (
+    "Runtime: your last response was empty (no text and no tool calls), so the user saw "
+    "nothing. Continue the work you were doing, or tell the user, in their language, "
+    "where it stands and what is left."
+)
+EMPTY_RESPONSE_STOP = "empty_response"
 # Sent when a task's first response calls tools without a word to the user.
 _OPENING_REMINDER = (
     "Runtime: your last response called tools without telling the user what you are "
@@ -168,13 +179,207 @@ class AgentContext:
     # Live checklist that fell behind the work (rinari.checklist.reminder):
     # called after each tool round with the tools it ran.
     checklist_reminder: Callable[[list[str]], str | None] | None = None
+    # Once per turn, before the final answer: a note when the live checklist
+    # still has open steps (rinari.checklist.reminder.before_final).
+    checklist_final_check: Callable[[], str | None] | None = None
     # Messages the owner sent while this turn runs (steering). Each call
     # hands over what arrived since the last one; the loop puts them in the
     # history after the current step and the model reads them next.
     collect_steering: Callable[[], list[ChatMessage]] | None = None
+    # «Enviar ahora» (#31): set to end the answer being written; the next
+    # step reads the owner's message. Cleared once honoured.
+    step_interrupt: threading.Event | None = None
     # Reads whose full text this conversation already holds (tools.read_cache);
     # created on first use and cleared when compaction rewrites the history.
     read_cache: Any = None
+    # Where the settled part of the request ends (context.settle, F45); kept
+    # between calls so the prefix only moves when context pressure asks.
+    settle_state: Any = None
+    # Runtime notes that follow the owner's message once (the tools a turn
+    # needs from outside the fixed list, F42); consumed by the next turn.
+    turn_notes: tuple[ChatMessage, ...] = ()
+    # What the conversation keeps between turns (context.session_state):
+    # the settled boundary and the last request's prefix hashes.
+    session_state: Any = None
+    # Hashes of the last request's system prompt and tools (F42 guard).
+    prefix_hashes: dict | None = None
+    # Digest of each system segment of the last built request.
+    prompt_segments: dict | None = None
+    # The index of what is connected, read again for each request: an MCP
+    # server that connects mid-turn shows in the turn note (C2).
+    connected_index: Callable[[], str | None] | None = None
+
+
+def _prefix_hashes(request: ModelRequest) -> dict[str, str]:
+    import hashlib
+
+    def digest(text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+    system = "\n".join(m.content or "" for m in request.messages if m.role == "system")
+    tools = json.dumps(
+        [[t.name, t.description, t.parameters] for t in request.tools],
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+    return {"system": digest(system), "tools": digest(tools)}
+
+
+def _turn_state_in_history() -> bool:
+    """The turn state lives in the conversation (F42); RINARI_TURN_STATE=trailing
+    brings back the old note sent last and dropped, for one version, as a way
+    back."""
+    import os
+
+    return os.environ.get("RINARI_TURN_STATE") != "trailing"
+
+
+def _last_turn_state(history) -> str | None:
+    from rinari.prompts.assembler import TURN_STATE_SOURCE
+
+    for message in reversed(history):
+        if (message.origin or {}).get("source") == TURN_STATE_SOURCE:
+            return message.content
+    return None
+
+
+def _message_digests(request: ModelRequest) -> list[str]:
+    """One short hash per conversation message, the volatile turn note left out.
+
+    Covers what a provider replays: role, text, tool calls and the provider's
+    own continuation (reasoning, signatures), so a message sent differently
+    from one request to the next shows up even when its text is the same.
+    """
+    import hashlib
+
+    digests = []
+    for message in request.messages:
+        if message.role == "system" or message.is_turn_context:
+            continue
+        raw = json.dumps(
+            [
+                message.role,
+                message.content,
+                [[tc.id, tc.name, tc.arguments] for tc in message.tool_calls],
+                message.tool_call_id,
+                message.name,
+                message.continuation,
+            ],
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        digests.append(hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12])
+    return digests
+
+
+def _first_divergence(before: list[str], after: list[str]) -> int | None:
+    """Index of the first earlier message the new request no longer repeats."""
+    for index, digest in enumerate(before):
+        if index >= len(after) or after[index] != digest:
+            return index
+    return None
+
+
+def _watch_prefix(ctx: AgentContext, request: ModelRequest) -> dict[str, Any]:
+    """Hash the part of the request providers cache; warn when it moves (F42).
+
+    Every request of a conversation should start with the same system prompt
+    and tools. A change is logged with what changed: expected (info) when the
+    tool list was decided again for another model or a compaction, a warning
+    otherwise, since it means the rest of the conversation is read again.
+    """
+    import logging
+
+    exposure = getattr(ctx.tool_ctx, "exposure", None)
+    key = getattr(exposure, "key", None)
+    current = {
+        **_prefix_hashes(request),
+        "key": key,
+        "segments": ctx.prompt_segments or {},
+        "messages": _message_digests(request),
+    }
+    previous = ctx.prefix_hashes
+    if previous is None and ctx.session_state is not None:
+        previous = ctx.session_state.get("prefix")
+    if isinstance(previous, dict) and previous != current:
+        # The conversation itself: the next request repeats every earlier
+        # message as it was sent, or the cache stops at the first that moved.
+        diverged = _first_divergence(list(previous.get("messages") or ()), current["messages"])
+        if diverged is not None and previous.get("key") == key:
+            roles = [
+                m.role for m in request.messages if m.role != "system" and not m.is_turn_context
+            ]
+            logging.getLogger("rinari.cache").warning(
+                "Conversation resent differently in session %s from message %d (%s)",
+                ctx.session_id,
+                diverged,
+                roles[diverged] if diverged < len(roles) else "gone",
+            )
+        changed = [part for part in ("system", "tools") if previous.get(part) != current[part]]
+        if changed:
+            expected = previous.get("key") != key
+            before = previous.get("segments") or {}
+            after = current["segments"]
+            moved = sorted(
+                seg for seg in set(before) | set(after) if before.get(seg) != after.get(seg)
+            )
+            logging.getLogger("rinari.cache").log(
+                logging.INFO if expected else logging.WARNING,
+                "Cached prefix changed in session %s: %s%s%s",
+                ctx.session_id,
+                " and ".join(changed),
+                f" (segments: {', '.join(moved)})" if "system" in changed and moved else "",
+                " (new model or compaction)" if expected else "",
+            )
+    if previous != current:
+        ctx.prefix_hashes = current
+        if ctx.session_state is not None:
+            ctx.session_state.put("prefix", current)
+    return {"system": current["system"], "tools": current["tools"]}
+
+
+def _unwrap_door(tool_calls, registry):
+    """(real calls, errors by call id, ids that came through the door)."""
+    from rinari.tools.door import unwrap
+
+    calls: list[ToolCall] = []
+    errors: dict[str, ToolResult] = {}
+    via_door: set[str] = set()
+    for call in tool_calls:
+        real, error = unwrap(call, registry)
+        if real is not call:
+            via_door.add(call.id)
+        if error is not None:
+            errors[call.id] = error
+        calls.append(real)
+    return tuple(calls), errors, via_door
+
+
+def _with_schema(result: ToolResult, tool) -> ToolResult:
+    """An argument error through the door shows the tool's schema and call."""
+    if (
+        result.ok
+        or tool is None
+        or result.error is None
+        or result.error.code is not ToolErrorCode.INVALID_ARGUMENT
+    ):
+        return result
+    from rinari.tools.door import how_to_call
+
+    def add(item: ToolResult) -> ToolResult:
+        details = item.error.details if isinstance(item.error.details, dict) else {}
+        error = replace(
+            item.error, retryable=True, details={**details, "how_to_call": how_to_call(tool)}
+        )
+        return replace(item, error=error)
+
+    full = result.full_observation
+    # The round projection re-derives the observation from this copy.
+    if full is not None and full.error is not None:
+        full = add(full)
+    return replace(add(result), full_observation=full)
 
 
 class AgentLoop:
@@ -230,6 +435,13 @@ class AgentLoop:
     ) -> TurnResult:
         cancel = cancel if cancel is not None else CancellationToken()
         self._tools.registry.context = ctx.tool_ctx
+        # Each turn starts with the conversation's own model (plan 0.4.0 #80).
+        restore = getattr(self._provider, "restore_primary", None)
+        if callable(restore) and getattr(self._provider, "on_fallback", False):
+            restore()
+            primary = getattr(self._provider, "primary_model_id", None)
+            if primary:
+                ctx.model_ref = primary
         loop = loop if loop is not None else LoopDetector()
         governor = governor if governor is not None else TurnGovernor()
         started_payload: dict = {"preview": user_message[:200]}
@@ -259,6 +471,8 @@ class AgentLoop:
                 origin=origin,
             )
         )
+        notes, ctx.turn_notes = ctx.turn_notes, ()
+        ctx.history.extend(notes)
         # Hierarchical ledger (P0.10): the turn's meter becomes the parent
         # budget visible to agent.spawn, so subagent cost aggregates here.
         if (
@@ -278,6 +492,11 @@ class AgentLoop:
         opened = False
         opening_asked = False
         language_asked = False
+        empty_retried = False
+        checklist_checked = False
+        # The answer given before the checklist note; it stands if the model
+        # then only updates the list.
+        answered: str | None = None
         circuit_breaker = EmergencyCircuitBreaker(budget) if budget is not None else None
 
         # A present meter is authoritative for model-call iterations; the
@@ -347,12 +566,17 @@ class AgentLoop:
             exposure_metrics = getattr(ctx.tool_ctx, "exposure", None)
             if exposure_metrics is not None:
                 before_model_payload["exposure"] = exposure_metrics.metrics(self._tools.registry)
+            before_model_payload["prefix"] = _watch_prefix(ctx, request)
             self._emit_hook("BeforeModel", before_model_payload)
             model_call_id = f"model_{model_index + 1}"
             model_started = time.monotonic()
             self._emit_activity(
                 "model.started",
                 {"model_call_id": model_call_id, "model": ctx.model_ref},
+            )
+            request = replace(
+                request,
+                tool_input_observer=ToolInputProgress(self._emit_activity, model_call_id),
             )
 
             accepted_output = False
@@ -362,13 +586,31 @@ class AgentLoop:
                 nonlocal accepted_output
                 accepted_output = False
 
-            def call_model(current: ModelRequest, call_id: str = model_call_id) -> Any:
-                return self._call_with_retries(
-                    ctx, current, visible_delta, cancel, call_id, budget, restart_output
-                )
+            written: list[str] = []
 
-            def visible_delta(text: str, call_id: str = model_call_id) -> None:
+            def call_model(
+                current: ModelRequest, call_id: str = model_call_id, written: list = written
+            ) -> Any:
+                try:
+                    return self._call_with_retries(
+                        ctx, current, visible_delta, cancel, call_id, budget, restart_output
+                    )
+                except StepInterrupted:
+                    # What was written stays as a partial answer; the owner's
+                    # message waits in the steering queue, so the loop goes on.
+                    if ctx.step_interrupt is not None:
+                        ctx.step_interrupt.clear()
+                    from rinari.models.types import ModelResponse
+
+                    return ModelResponse(content="".join(written), stop_reason=StopReason.END_TURN)
+
+            def visible_delta(
+                text: str, call_id: str = model_call_id, written: list = written
+            ) -> None:
                 nonlocal accepted_output
+                if ctx.step_interrupt is not None and ctx.step_interrupt.is_set():
+                    raise StepInterrupted()
+                written.append(text)
                 accepted_output = accepted_output or bool(text)
                 if on_delta is not None:
                     on_delta(text)
@@ -377,6 +619,10 @@ class AgentLoop:
                     {"model_call_id": call_id, "delta": text},
                 )
 
+            # «Enviar ahora» asked before this call is already in the request
+            # (the steering was taken above): only a later one cuts this step.
+            if ctx.step_interrupt is not None:
+                ctx.step_interrupt.clear()
             try:
                 try:
                     response = call_model(request)
@@ -492,6 +738,10 @@ class AgentLoop:
                 if type(ctx.context_usage["actual"]) is int
                 else None
             )
+            # The door (F42): a `tool.call` becomes the real call here, so
+            # policy, approvals, the timeline and the logs see the real tool.
+            # The history keeps what the model wrote.
+            calls, door_errors, via_door = _unwrap_door(response.tool_calls, self._tools.registry)
             self._emit(
                 ctx.session_id,
                 EVENT_MODEL_INVOKED,
@@ -501,14 +751,14 @@ class AgentLoop:
                     **({"context_anchor": anchor} if anchor else {}),
                     "provider_id": (response.provider_state or {}).get("provider_id"),
                     "stop_reason": response.stop_reason.value,
-                    "tool_calls": [{"id": tc.id, "name": tc.name} for tc in response.tool_calls],
+                    "tool_calls": [{"id": tc.id, "name": tc.name} for tc in calls],
                     "usage": _usage_dict(response.usage),
                     # Etapa C: execution plan groups (serial baseline; the
                     # plan is traced so a concurrent executor can adopt it).
                     "execution_plan": schedule(
-                        [tc.name for tc in response.tool_calls],
+                        [tc.name for tc in calls],
                         self._tools.registry,
-                        [tc.arguments for tc in response.tool_calls],
+                        [tc.arguments for tc in calls],
                     ),
                 },
             )
@@ -534,7 +784,73 @@ class AgentLoop:
                 ctx.history.append(ChatMessage.harness(_OPENING_REMINDER, "opening"))
                 continue
 
+            if (
+                not response.has_tool_calls
+                and answered is not None
+                and not (response.content or "").strip()
+            ):
+                # The checklist note was answered with the update alone.
+                response = replace(response, content=answered)
+                answered = None
+                kind = "truncated" if response.stop_reason is StopReason.MAX_TOKENS else "answer"
+                self._emit_hook("BeforeFinal", {"kind": kind, "preview": response.content[:200]})
+                self._emit(
+                    ctx.session_id,
+                    EVENT_TURN_COMPLETED,
+                    _turn_completed_payload(
+                        kind,
+                        tool_calls_executed,
+                        budget,
+                        turn_index,
+                        requested=tool_calls_requested,
+                        rejected=tool_calls_rejected,
+                    ),
+                )
+                return TurnResult(
+                    kind=kind,
+                    content=response.content or "",
+                    tool_calls=tool_calls_executed,
+                    usage=total_usage,
+                    budget=budget.snapshot() if budget is not None else None,
+                    governor=governor.snapshot(),
+                )
+
             if not response.has_tool_calls:
+                empty = (
+                    not (response.content or "").strip()
+                    and response.stop_reason is not StopReason.MAX_TOKENS
+                    and not subagent_results
+                    and not steered
+                )
+                if empty:
+                    self._emit(
+                        ctx.session_id,
+                        EVENT_EMPTY_RESPONSE,
+                        {"model_call_id": model_call_id, "retried": empty_retried},
+                    )
+                    if not empty_retried:
+                        # Nothing is kept from the empty answer: the model
+                        # gets the note and one more call.
+                        empty_retried = True
+                        ctx.history.append(ChatMessage.harness(_EMPTY_REMINDER, "empty"))
+                        continue
+                    if self._switch_to_fallback(ctx, "empty_response", "two empty answers"):
+                        empty_retried = False
+                        ctx.history.append(ChatMessage.harness(_EMPTY_REMINDER, "empty"))
+                        continue
+                    return self._stop(
+                        ctx.session_id,
+                        EMPTY_RESPONSE_STOP,
+                        "The model ended its turn without a reply, twice in a row.",
+                        tool_calls_executed,
+                        total_usage,
+                        budget,
+                        turn_index,
+                        requested=tool_calls_requested,
+                        rejected=tool_calls_rejected,
+                        governor=governor,
+                        stop_detail={"empty": True},
+                    )
                 ctx.history.append(
                     ChatMessage.assistant(
                         response.content or "", continuation=response.continuation
@@ -558,6 +874,19 @@ class AgentLoop:
                     language_asked = True
                     ctx.history.append(ChatMessage.harness(_LANGUAGE_REMINDER, "language"))
                     continue
+                if (
+                    not checklist_checked
+                    and ctx.checklist_final_check is not None
+                    and response.stop_reason is not StopReason.MAX_TOKENS
+                ):
+                    checklist_checked = True
+                    note = None
+                    with contextlib.suppress(Exception):
+                        note = ctx.checklist_final_check()
+                    if note:
+                        answered = response.content or ""
+                        ctx.history.append(ChatMessage.harness(note, "checklist-final"))
+                        continue
                 kind = "truncated" if response.stop_reason is StopReason.MAX_TOKENS else "answer"
                 self._emit_hook(
                     "BeforeFinal", {"kind": kind, "preview": (response.content or "")[:200]}
@@ -592,21 +921,36 @@ class AgentLoop:
             looping_detected = False
             loop.begin_response()
             round_tool_seq = tool_seq
+            wire_names = {tc.id: tc.name for tc in response.tool_calls}
+
+            def wire_name(call, wire_names=wire_names):
+                return wire_names.get(call.id, call.name)
 
             def prepare_call(
-                call, model_call_id=model_call_id, round_tool_seq=round_tool_seq, response=response
+                call,
+                model_call_id=model_call_id,
+                round_tool_seq=round_tool_seq,
+                response=response,
+                door_errors=door_errors,
+                via_door=via_door,
             ):
                 nonlocal tool_calls_requested, tool_calls_executed, tool_calls_rejected
                 cancel.throw_if_cancelled()
-                self._emit_activity(
-                    "tool.requested",
-                    {
-                        "tool_call_id": call.id,
-                        "tool": call.name,
-                        "arguments": call.arguments,
-                        "model_call_id": model_call_id,
-                    },
-                )
+                requested_payload: dict = {
+                    "tool_call_id": call.id,
+                    "tool": call.name,
+                    "arguments": call.arguments,
+                    "model_call_id": model_call_id,
+                }
+                if not self._tools.legacy_events:
+                    # The only stored record of the call (#91): the display
+                    # copy of `arguments` is cut, these stay whole (redacted).
+                    requested_payload["full_arguments"] = self._tools.redact_arguments(
+                        call.arguments
+                    )
+                    if turn_index is not None:
+                        requested_payload["turn_index"] = turn_index
+                self._emit_activity("tool.requested", requested_payload)
                 tool_calls_requested += 1
                 network = self._call_is_network(call.name, call.arguments)
                 if budget is not None:
@@ -618,7 +962,20 @@ class AgentLoop:
                 else:
                     allowed = tool_calls_executed < self._max_tool_calls
                 executed = False
-                if call.arguments_invalid:
+                if call.id in door_errors:
+                    # Unknown name or arguments that are not a JSON object:
+                    # never run, never charged; the error shows how to fix it.
+                    result = door_errors[call.id]
+                    self._emit_hook(
+                        "ToolError",
+                        {
+                            "tool": call.name,
+                            "tool_call_id": call.id,
+                            "code": result.error.code.value,
+                            "message": result.error.message,
+                        },
+                    )
+                elif call.arguments_invalid:
                     # Malformed wire arguments are never executed and never
                     # charged: the model gets a retryable observation instead.
                     result = ToolResult(
@@ -698,14 +1055,27 @@ class AgentLoop:
                         if is_parallelizable(self._tools.registry.get(call.name), call.arguments)
                         else None
                     )
-                    return executed, lambda: self._tools.execute(
-                        call.name,
-                        call.arguments,
-                        call_context,
-                        tool_call_id=call.id,
+
+                    def run(
+                        call=call,
+                        call_context=call_context,
                         trace=trace,
                         prepared=prepared,
-                    )
+                        via_door=via_door,
+                    ):
+                        result = self._tools.execute(
+                            call.name,
+                            call.arguments,
+                            call_context,
+                            tool_call_id=call.id,
+                            trace=trace,
+                            prepared=prepared,
+                        )
+                        if call.id in via_door:
+                            result = _with_schema(result, self._tools.registry.get(call.name))
+                        return result
+
+                    return executed, run
                 return executed, result
 
             def complete_call(call, result, model_call_id=model_call_id):
@@ -776,7 +1146,7 @@ class AgentLoop:
             round_nudges = []
             try:
                 for call, executed, result, group_end in execute_round(
-                    response.tool_calls,
+                    calls,
                     self._tools.registry,
                     prepare_call,
                     cancellation=cancel,
@@ -828,8 +1198,14 @@ class AgentLoop:
                         }
                         if turn_index is not None:
                             tool_completed_payload["turn_index"] = turn_index
-                        self._emit(ctx.session_id, EVENT_TOOL_COMPLETED, tool_completed_payload)
-                    loop.record_tool(call.name, call.arguments)
+                        if self._tools.legacy_events:
+                            self._emit(ctx.session_id, EVENT_TOOL_COMPLETED, tool_completed_payload)
+                    loop.record_tool(
+                        call.name,
+                        call.arguments,
+                        outcome_digest(result.data if result.ok else result.error.message),
+                        applied=result.ok,
+                    )
                     if result.error is not None:
                         loop.record_error(call.name, result.error.code.value, result.error.message)
                     signal = loop.check() if group_end else None
@@ -879,7 +1255,9 @@ class AgentLoop:
                         ctx.history.append(
                             replace(
                                 ChatMessage.tool_result(
-                                    call.id, call.name, result.to_model_text(call.name)
+                                    call.id,
+                                    wire_name(call),
+                                    result.to_model_text(call.name),
                                 ),
                                 images=result.images if result.ok else (),
                             )
@@ -889,7 +1267,7 @@ class AgentLoop:
                     ctx.history.append(
                         replace(
                             ChatMessage.tool_result(
-                                call.id, call.name, result.to_model_text(call.name)
+                                call.id, wire_name(call), result.to_model_text(call.name)
                             ),
                             images=result.images if result.ok else (),
                         )
@@ -985,7 +1363,14 @@ class AgentLoop:
 
     def _take_steering(self, ctx: AgentContext) -> None:
         if ctx.collect_steering is not None:
-            self._append_steering(ctx, ctx.collect_steering())
+            messages = ctx.collect_steering()
+            if messages:
+                # Read: the waits of the next steps no longer end for these.
+                turn_state = getattr(getattr(ctx, "tool_ctx", None), "turn_state", None)
+                wrote = getattr(turn_state, "owner_wrote", None)
+                if wrote is not None:
+                    wrote.clear()
+            self._append_steering(ctx, messages)
 
     def _append_steering(self, ctx: AgentContext, messages: list[ChatMessage]) -> None:
         for message in messages:
@@ -995,6 +1380,19 @@ class AgentLoop:
                 {
                     "steer_id": (message.origin or {}).get("steer_id"),
                     "content": message.display_content or message.content,
+                    **(
+                        {"source": (message.origin or {}).get("source")}
+                        if (message.origin or {}).get("source")
+                        else {}
+                    ),
+                    # A child's report read mid-turn: which children, and what each said (#100).
+                    **{
+                        key: (message.origin or {})[key]
+                        for key in ("children", "reports")
+                        if (message.origin or {}).get(key)
+                    },
+                    # «Enviar ahora» (#31): the bubble says it cut the step.
+                    **({"interrupted": True} if (message.origin or {}).get("interrupt") else {}),
                 },
             )
 
@@ -1004,29 +1402,62 @@ class AgentLoop:
             history=tuple(ctx.history),
             compact_state=ctx.compact_state_text,
         )
+        if ctx.connected_index is not None:
+            context = replace(context, connected_index=ctx.connected_index())
         bundle = self._assembler.build(context)
+        # Which system segments this request carries, for the prefix guard.
+        ctx.prompt_segments = {
+            seg.id: seg.digest for seg in bundle.segments if seg.cache_policy != "turn"
+        }
         messages: list[ChatMessage] = []
         if bundle.system_prompt:
             messages.append(ChatMessage.system(bundle.system_prompt))
-        from rinari.context.settle import settle_old_observations
+        from rinari.context.settle import SettleState, plan_boundary, settle_old_observations
 
-        messages.extend(settle_old_observations(ctx.history))
+        if ctx.settle_state is None:
+            saved = ctx.session_state.get("settle") if ctx.session_state is not None else None
+            ctx.settle_state = SettleState.from_json(saved)
+        settled_before = ctx.settle_state.to_json()
+        window = getattr(self._provider.capabilities(), "max_context_tokens", None)
+        boundary = plan_boundary(
+            ctx.history,
+            ctx.settle_state,
+            window_tokens=window,
+            fixed_tokens=estimate_tokens(system_prompt=bundle.system_prompt or ""),
+        )
+        messages.extend(settle_old_observations(ctx.history, boundary=boundary))
+        if ctx.session_state is not None and ctx.settle_state.to_json() != settled_before:
+            ctx.session_state.put("settle", ctx.settle_state.to_json())
         # Volatile state closes the request instead of opening it: the system
         # prompt and the history stay a byte-identical prefix between calls
-        # and turns, which is what provider prompt caches reuse. The note is
-        # rebuilt per request and never enters ctx.history.
-        note = bundle.turn_context_message
-        if note is not None:
-            messages.append(note)
-        exposure = getattr(ctx.tool_ctx, "exposure", None)
-        if wire_tools is not None:
-            pass
-        elif exposure is not None:
-            # Dynamic exposure (Etapa B): core + activated + recent, pruned
-            # once per model request so turn-scoped activations decay.
-            exposure.prune()
-            wire_tools = exposure.for_model(self._tools.registry)
+        # and turns, which is what provider prompt caches reuse.
+        if _turn_state_in_history():
+            # F42 (phase 2b, measured on five models): the state enters the
+            # conversation when it changes and stays there, as Codex records
+            # its context, so every request only extends the one before. A
+            # note sent last and dropped by the next request cut the cache at
+            # the first assistant turn on luna and on a local model with
+            # recurrent layers, which cannot trim the end of its cache.
+            kept = bundle.turn_state_message
+            if kept is not None and kept.content != _last_turn_state(ctx.history):
+                ctx.history.append(kept)
+                messages.append(kept)
         else:
+            note = bundle.turn_context_message
+            if note is not None:
+                messages.append(note)
+        exposure = getattr(ctx.tool_ctx, "exposure", None)
+        if exposure is not None:
+            # The conversation's fixed list (F42): the same in every request
+            # until another model or a compaction, where the cache is lost
+            # anyway and the list is decided again, in that same request.
+            from rinari.tools.exposure import list_key
+
+            moved = exposure.follow(list_key(ctx.model_ref, ctx.compact_revision))
+            if wire_tools is None or moved:
+                exposure.prune()
+                wire_tools = exposure.for_model(self._tools.registry)
+        elif wire_tools is None:
             wire_tools = self._tools.registry.for_model()
         # A provider that announces no tool support gets none. Sending them
         # anyway means either a hard failure or, worse, a transport that drops
@@ -1098,12 +1529,37 @@ class AgentLoop:
         on_delta: DeltaFn | None,
         cancellation: CancellationToken,
     ) -> Any:
-        from rinari.models.visual_context import last_owner_message, select_visual_context
+        from rinari.models.visual_context import select_visual_context
+
+        # The call gets its own token, cancelled with the turn or when «Enviar
+        # ahora» cuts the step (P7): the provider stops streaming instead of
+        # writing on into a step that was left behind.
+        call_token = CancellationToken()
+        unlink = cancellation.on_cancel(call_token.cancel)
+        request = replace(select_visual_context(request), cancellation=call_token)
+        try:
+            return self._invoke_call(ctx, request, on_delta, cancellation, call_token)
+        finally:
+            unlink()
+
+    def _invoke_call(
+        self,
+        ctx: AgentContext,
+        request: ModelRequest,
+        on_delta: DeltaFn | None,
+        cancellation: CancellationToken,
+        call_token: CancellationToken,
+    ) -> Any:
+        from rinari.models.visual_context import last_owner_message
         from rinari.runtime.vision import visual_status
 
-        request = replace(select_visual_context(request), cancellation=cancellation)
         last_user = last_owner_message(request.messages)
-        if any(message.images for message in request.messages[last_user:]):
+        # The owner's images and those a tool read to look at them need a way
+        # to be seen; a capture or a created image goes back with a note when
+        # the model cannot see it, and the turn goes on (#11, #28).
+        from rinari.runtime.vision import needs_sight
+
+        if any(message.images and needs_sight(message) for message in request.messages[last_user:]):
             decision = visual_status(self._provider)
             if not decision.available:
                 from rinari.shared.errors import InvalidUsageError
@@ -1151,6 +1607,14 @@ class AgentLoop:
             except CancelledError as exc:
                 exc.details = {"partial_text": "".join(partial_text)}
                 raise
+            # «Enviar ahora» (P7): the step ends here whatever the model is
+            # doing (text, reasoning, the arguments of a tool call). Only text
+            # deltas used to notice it, so a model writing a 61 KB tool call
+            # kept the owner waiting for 22 minutes.
+            interrupt = getattr(ctx, "step_interrupt", None)
+            if interrupt is not None and interrupt.is_set():
+                call_token.cancel()
+                raise StepInterrupted()
             try:
                 ok, value = completed.get(timeout=0.05)
             except queue.Empty:
@@ -1182,12 +1646,28 @@ class AgentLoop:
             try:
                 return self._invoke(ctx, request, self._guarded_delta(ctx, visible_delta), cancel)
             except Exception as exc:
+                fallback_reason = _fallback_reason(exc)
+                if fallback_reason == "QUOTA_EXHAUSTED" and self._switch_to_fallback(
+                    ctx, fallback_reason, str(exc), model_call_id
+                ):
+                    # Out of quota: no point waiting, the fallback goes now (#80).
+                    retries = 0
+                    restart_output()
+                    request = replace(request, model=ctx.model_ref)
+                    continue
                 reason = _transient_failure(exc)
                 if reason is not None and not _streams(self._provider) and _router_retried(exc):
                     # A non-streaming call was already retried by the router.
                     reason = None
                 delays = MODEL_RETRY_DELAYS_S[:1] if reason == "TIMEOUT" else MODEL_RETRY_DELAYS_S
                 if reason is None or retries >= len(delays) or not _reserve_retry(budget):
+                    if fallback_reason is not None and self._switch_to_fallback(
+                        ctx, fallback_reason, str(exc), model_call_id
+                    ):
+                        retries = 0
+                        restart_output()
+                        request = replace(request, model=ctx.model_ref)
+                        continue
                     raise
                 retry_after = getattr(exc, "retry_after", None)
                 delay = (
@@ -1209,6 +1689,30 @@ class AgentLoop:
                     },
                 )
                 _cancellable_wait(delay, cancel)
+
+    def _switch_to_fallback(
+        self, ctx: AgentContext, reason: str, message: str, model_call_id: str | None = None
+    ) -> bool:
+        """Go on with the fallback model for the rest of this turn (plan 0.4.0 #80)."""
+        use = getattr(self._provider, "use_fallback", None)
+        if not callable(use):
+            return False
+        previous = ctx.model_ref
+        caller = use()
+        if caller is None:
+            return False
+        ctx.model_ref = getattr(caller, "model_id", None) or ctx.model_ref
+        payload = {
+            "from_model": previous,
+            "to_model": ctx.model_ref,
+            "reason": reason,
+            "message": message[:300],
+        }
+        if model_call_id:
+            payload["model_call_id"] = model_call_id
+        self._emit_activity("model.fallback", payload)
+        self._emit(ctx.session_id, "ModelFallback", payload)
+        return True
 
     def _guarded_delta(self, ctx: AgentContext, on_delta: DeltaFn | None) -> DeltaFn | None:
         """Abort a live stream promptly on cancel (Â§8/Etapa D).
@@ -1277,7 +1781,7 @@ class AgentLoop:
             budget=budget.snapshot() if budget is not None else None,
             governor=governor.snapshot() if governor is not None else None,
             stop_reason=("emergency_limit" if kind == "budget" else kind),
-            recoverable=kind in ("budget", "loop", "stagnation"),
+            recoverable=kind in ("budget", "loop", "stagnation", EMPTY_RESPONSE_STOP),
             stop_detail=stop_detail,
         )
 
@@ -1300,6 +1804,45 @@ class AgentLoop:
             return
         with contextlib.suppress(Exception):
             self._activity_sink(event, payload)
+
+
+class ToolInputProgress:
+    """`model.tool_input`: what a model is writing into a tool call, while it
+    writes it (F26). DeepSeek spent 5 min 13 s generating whole files inside
+    fs.write arguments with no sign of life. Throttled to one event a second,
+    and only past a size where the wait is noticeable."""
+
+    MIN_CHARS = 2000
+    EVERY_S = 1.0
+    _PATH = re.compile(r'"(?:path|file|filename|target)"\s*:\s*"((?:[^"\\]|\\.){1,240})"')
+
+    def __init__(self, emit, model_call_id: str) -> None:
+        self._emit = emit
+        self._call = model_call_id
+        self._lock = threading.Lock()
+        self._chars: dict[str, int] = {}
+        self._head: dict[str, str] = {}
+        self._last = 0.0
+
+    def __call__(self, name: str | None, piece: str | None) -> None:
+        if not piece:
+            return
+        tool = name or "tool"
+        with self._lock:
+            self._chars[tool] = self._chars.get(tool, 0) + len(piece)
+            head = self._head.get(tool, "")
+            if len(head) < 600:
+                self._head[tool] = head + piece[: 600 - len(head)]
+            chars = self._chars[tool]
+            now = time.monotonic()
+            if chars < self.MIN_CHARS or now - self._last < self.EVERY_S:
+                return
+            self._last = now
+            match = self._PATH.search(self._head[tool])
+        payload = {"model_call_id": self._call, "tool": tool, "chars": chars}
+        if match:
+            payload["path"] = match.group(1).replace("\\\\", "\\")
+        self._emit("model.tool_input", payload)
 
 
 def _invalid_arguments_message(call: ToolCall) -> str:
@@ -1402,9 +1945,10 @@ def _tool_activity_presentation(tool: str, arguments: dict, result: ToolResult) 
         exit_code = data.get("exit_code")
         if not isinstance(exit_code, int):
             exit_code = presentation.get("exit_code")
-        if isinstance(exit_code, int) and exit_code != 0:
+        expected = data.get("as_expected") or data.get("stop_requested")
+        if isinstance(exit_code, int) and exit_code != 0 and not expected:
             presentation["status"] = "failed"
-        elif result.ok and exit_code == 0:
+        elif result.ok and (exit_code == 0 or expected):
             presentation["status"] = "success"
     else:
         presentation["data"] = data
@@ -1510,6 +2054,28 @@ def _transient_failure(exc: BaseException) -> str | None:
     return None
 
 
+def _fallback_reason(exc: BaseException) -> str | None:
+    """A technical failure the fallback model may cover; never a content refusal."""
+    from rinari.providers.errors import ProviderError, ProviderErrorCode
+    from rinari.shared.errors import NetworkError
+
+    if isinstance(exc, ProviderError):
+        covered = (
+            ProviderErrorCode.SERVER_ERROR,
+            ProviderErrorCode.TIMEOUT,
+            ProviderErrorCode.STREAM_INTERRUPTED,
+            ProviderErrorCode.RATE_LIMIT,
+            ProviderErrorCode.QUOTA_EXHAUSTED,
+            ProviderErrorCode.MODEL_UNAVAILABLE,
+            ProviderErrorCode.MODEL_NOT_FOUND,
+            ProviderErrorCode.AUTH,
+        )
+        return str(exc.error_code) if exc.error_code in covered else None
+    if isinstance(exc, NetworkError):
+        return "NETWORK"
+    return None
+
+
 def _streams(provider: Any) -> bool:
     try:
         return bool(getattr(provider.capabilities(), "streaming", False))
@@ -1531,6 +2097,10 @@ def _reserve_retry(budget: BudgetMeter | None) -> bool:
     except ValueError:
         return False
     return True
+
+
+class StepInterrupted(Exception):
+    """The owner sent a message «now» (#31): end this answer, keep the turn."""
 
 
 def _cancellable_wait(seconds: float, cancel: CancellationToken) -> None:
@@ -1585,6 +2155,7 @@ def _merge_usage(prev: Usage | None, new: Usage | None) -> Usage | None:
         output_tokens=_sum(prev.output_tokens, new.output_tokens),
         cached_input_tokens=_sum(prev.cached_input_tokens, new.cached_input_tokens),
         reasoning_tokens=_sum(prev.reasoning_tokens, new.reasoning_tokens),
+        cache_write_tokens=_sum(prev.cache_write_tokens, new.cache_write_tokens),
     )
 
 
@@ -1597,6 +2168,7 @@ def _usage_dict(usage: Usage | None) -> dict | None:
         "total_tokens": usage.total_tokens,
         "cached_input_tokens": usage.cached_input_tokens,
         "reasoning_tokens": usage.reasoning_tokens,
+        "cache_write_tokens": usage.cache_write_tokens,
         "source": usage.source,
     }
 

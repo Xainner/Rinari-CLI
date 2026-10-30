@@ -595,6 +595,61 @@ def test_runtime_preparation_timeout_becomes_terminal_failure(
     assert events[-1]["payload"]["error"]["code"] == "TURN_PREPARATION_TIMEOUT"
 
 
+def test_an_image_the_agent_downloaded_has_a_thumbnail(server, tmp_path) -> None:
+    # 23-oct: an image downloaded with http and presented showed «Only
+    # attachment artifacts can be previewed» instead of its card.
+    import io
+
+    from PIL import Image
+
+    session_id = _create_chat(server, tmp_path, tag="download-preview")
+    buffer = io.BytesIO()
+    Image.new("RGB", (900, 600), "red").save(buffer, format="PNG")
+    store = server._services.artifacts
+    image = store.create(
+        session_id, "downloads", "picture.png", buffer.getvalue(), content_type="image/png"
+    )
+    preview = server.handle_line(
+        _req("download-preview", "attachment.preview", {"uri": image.uri()})
+    )
+    assert preview["ok"], preview
+    assert preview["result"]["width"] == 512
+
+    # A file that is not an image still needs to be an attachment.
+    text = store.create(session_id, "runtime", "out.json", b"{}")
+    refused = server.handle_line(_req("runtime-preview", "attachment.preview", {"uri": text.uri()}))
+    assert refused["error"]["code"] == "INVALID_PARAMS"
+
+
+def test_a_preparation_that_keeps_moving_is_not_cut(server, tmp_path, monkeypatch) -> None:
+    # SOIN, 23-oct: on a slow machine every stage took a few seconds and their
+    # sum passed the limit; only a stage that does not move is stalled.
+    session_id = _create_chat(server, tmp_path, tag="prep-moving")
+    real_build = turns_module.build_agent_session
+
+    def slow_stages(*args, **kwargs):
+        sink = kwargs.get("activity_sink")
+        for stage in ("runtime", "model", "agents", "tools", "context"):
+            sink("turn.preparing", {"stage": stage})
+            time.sleep(0.12)
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(turns_module, "build_agent_session", slow_stages)
+    monkeypatch.setattr(turns_module, "PREPARATION_TIMEOUT_S", 0.3)
+    started = server.handle_line(
+        _req("prep-moving-t", "session.turn.start", {"session_id": session_id, "message": "hi"})
+    )
+    assert started is not None and started["ok"] is True
+    events = _collect_until(server, session_id)
+    # The test model is unreachable: what matters is that the turn got past
+    # its preparation, not how the call ended.
+    failed = [e for e in events if e["event"] == "turn.failed"]
+    assert all(e["payload"]["error"]["code"] != "TURN_PREPARATION_TIMEOUT" for e in failed), failed
+    assert any(
+        e["event"] == "turn.preparing" and e["payload"].get("stage") == "context" for e in events
+    )
+
+
 def test_cancel_interrupts_runtime_preparation(server, tmp_path, monkeypatch) -> None:
     session_id = _create_chat(server, tmp_path, tag="prep-cancel")
     entered = threading.Event()
@@ -855,8 +910,12 @@ def test_stdio_flushes_async_events(server, tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         agent_runtime, "_caller_for", lambda services, rec: FakeModel(scripted=[_answer()])
     )
-    stdin = io.StringIO(
-        _req("e1", "session.turn.start", {"session_id": session_id, "message": "hi"}) + "\n"
+    # The client stays connected until the turn is over: closing stdin means
+    # it left, and that cancels the turn (see the test below).
+    finished = threading.Event()
+    stdin = _HeldStdin(
+        _req("e1", "session.turn.start", {"session_id": session_id, "message": "hi"}) + "\n",
+        finished,
     )
     stdout, stderr = io.StringIO(), io.StringIO()
 
@@ -865,9 +924,10 @@ def test_stdio_flushes_async_events(server, tmp_path, monkeypatch) -> None:
         while time.time() < deadline:
             for evt in server.drain_events():
                 stdout.write(json.dumps(evt) + "\n")
-            if not server.has_active_turns() and server.turns.drain_events() == []:
+            if '"turn.completed"' in stdout.getvalue() and not server.has_active_turns():
                 break
             time.sleep(0.02)
+        finished.set()
 
     code_holder: dict = {}
 
@@ -887,6 +947,63 @@ def test_stdio_flushes_async_events(server, tmp_path, monkeypatch) -> None:
     assert "turn.completed" in by_event
     assert "e1" in by_event
     assert stderr.getvalue() == ""
+
+
+class _HeldStdin:
+    """Stdin of a client that sends `lines` and closes only once `until` is set."""
+
+    def __init__(self, lines: str, until: threading.Event) -> None:
+        self._lines = lines.splitlines(keepends=True)
+        self._until = until
+
+    def __iter__(self):
+        yield from self._lines
+        self._until.wait(30)
+
+
+def test_stdin_closing_mid_turn_cancels_it_and_frees_the_engine(
+    server, tmp_path, monkeypatch
+) -> None:
+    """The desktop quitting mid-turn: the Engine must leave within seconds.
+
+    It used to wait up to 60 s for the turn, so a dev Engine under `uv run`
+    kept the home lock after the app closed and the next start failed.
+    """
+    import io
+
+    session_id = _create_chat(server, tmp_path, tag="eof")
+    gate, abort = threading.Event(), threading.Event()
+    fake = FakeBlockingModel(scripted=[_answer()], gate=gate, abort=abort)
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda services, rec: fake)
+    leave = threading.Event()
+    stdin = _HeldStdin(
+        _req("s1", "session.turn.start", {"session_id": session_id, "message": "slow"}) + "\n",
+        leave,
+    )
+    stdout, stderr = io.StringIO(), io.StringIO()
+    code_holder: dict = {}
+
+    def _run() -> None:
+        code_holder["code"] = run_stdio(server, stdin=stdin, stdout=stdout, stderr=stderr)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    deadline = time.time() + 10
+    while not fake.requests and time.time() < deadline:
+        time.sleep(0.02)
+    assert fake.requests, "the turn never reached the model"
+
+    left_at = time.monotonic()
+    leave.set()
+    thread.join(timeout=10)
+    abort.set()
+
+    assert not thread.is_alive()
+    assert code_holder.get("code") == 0
+    assert time.monotonic() - left_at < 3
+    assert not server.has_active_turns()
+    events = [json.loads(line).get("event") for line in stdout.getvalue().splitlines()]
+    assert "turn.cancelled" in events
 
 
 def test_durable_operation_replay_and_restart(server, services, tmp_path, monkeypatch):
@@ -1082,7 +1199,8 @@ def test_owner_memory_tool_receives_persisted_source_before_loop(
     records = services.memory.list_user()
     assert [row["text"] for row in records] == ["Prefiero usar español"]
     messages = services.ctx.message_repo.list(session_id)
-    assert [row.role for row in messages].count("user") == 1
+    owner = [row for row in messages if (row.origin or {}).get("kind") != "harness"]
+    assert [row.role for row in owner].count("user") == 1
 
 
 def test_owner_turn_keeps_a_memory_in_the_models_own_words(server, services, tmp_path, monkeypatch):
@@ -1183,7 +1301,11 @@ def test_cancelled_owner_turn_clears_source_and_does_not_duplicate_user(services
         )
         assert result.kind == "cancelled"
         assert session.context.tool_ctx.memory_source is None
-        users = [row for row in services.ctx.message_repo.list(record.id) if row.role == "user"]
+        users = [
+            row
+            for row in services.ctx.message_repo.list(record.id)
+            if row.role == "user" and (row.origin or {}).get("kind") != "harness"
+        ]
         assert len(users) == 1
     finally:
         session.end()
@@ -1648,7 +1770,12 @@ def test_steering_is_read_after_the_current_tool_round(
     assert [e["payload"]["content"] for e in applied] == ["solo los .py, por favor"]
     assert applied[0]["payload"]["steer_id"] == steered["result"]["steer_id"]
     history = server.handle_line(_req("steer-h", "session.history", {"ref": sid}))["result"]
-    users = [m for m in history["messages"] if m["role"] == "user"]
+    users = [
+        m
+        for m in history["messages"]
+        if m["role"] == "user"
+        and (m.get("origin") or {}).get("source") not in ("turn-state", "clock")
+    ]
     assert [m["content"] for m in users] == ["revisa", "solo los .py, por favor"]
     assert users[1]["origin"]["steer_id"] == steered["result"]["steer_id"]
     # A reload finds it where it was read.
@@ -1929,5 +2056,243 @@ def test_command_secret_runs_for_real_but_is_hidden_from_storage_ui_and_later_tu
 
 
 def _conversation(messages):
-    """The request without its per-call context note (it now always names the language)."""
-    return [m for m in messages if not m.is_turn_context]
+    """The request without the harness's state notes: the per-call one of old,
+    the one the conversation keeps since F42 (they always name the language)
+    and the turn's local time."""
+    return [
+        m
+        for m in messages
+        if not m.is_turn_context and (m.origin or {}).get("source") not in ("turn-state", "clock")
+    ]
+
+
+# -- «Enviar ahora» (plan 0.4.0 #31) ---------------------------------------------------
+
+
+class _SlowWriter(FakeModel):
+    """Writes slowly until interrupted; the next call answers the owner."""
+
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(streaming=True, tool_calls=True, structured_output=True)
+
+    def invoke_stream(self, request, on_delta):
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            for _ in range(400):
+                on_delta("palabra ")
+                time.sleep(0.02)
+            return ModelResponse(content="nunca debía terminar", stop_reason=StopReason.END_TURN)
+        return ModelResponse(content="De acuerdo, cambio de plan.", stop_reason=StopReason.END_TURN)
+
+
+def test_send_now_cuts_the_answer_being_written_and_the_turn_reads_it(
+    server, tmp_path, monkeypatch
+) -> None:
+    session_id = _create_chat(server, tmp_path, tag="now")
+    model = _SlowWriter(scripted=[])
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda services, rec: model)
+    assert server.handle_line(
+        _req("n1", "session.turn.start", {"session_id": session_id, "message": "escribe largo"})
+    )["ok"]
+    deadline = time.time() + 10
+    while not model.requests and time.time() < deadline:
+        time.sleep(0.02)
+    time.sleep(0.3)
+    sent = server.handle_line(
+        _req(
+            "n2", "session.turn.steer_now", {"session_id": session_id, "message": "para, otra cosa"}
+        )
+    )
+    assert sent["ok"], sent
+    assert sent["result"]["delivery"] == "steer"
+    assert "answer" in sent["result"]["interrupted"]
+    events = _collect_until(server, session_id)
+    assert events[-1]["event"] == "turn.completed"
+    applied = [e for e in events if e["event"] == "steer.applied"]
+    # The bubble says the message cut the step.
+    assert applied and applied[0]["payload"].get("interrupted") is True
+    assert len(model.requests) == 2
+    second = "\n".join(str(m.content) for m in model.requests[1].messages)
+    assert "interrupted your current step" in second and "para, otra cosa" in second
+    # What was written before the interruption stays as a partial answer.
+    assert any(
+        m.role == "assistant" and "palabra" in str(m.content) for m in model.requests[1].messages
+    )
+
+
+def test_send_now_with_no_turn_is_an_ordinary_next_message(server, tmp_path, monkeypatch) -> None:
+    session_id = _create_chat(server, tmp_path, tag="idle")
+    model = FakeModel(scripted=[_answer()])
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda services, rec: model)
+    sent = server.handle_line(
+        _req("q1", "session.turn.steer_now", {"session_id": session_id, "message": "hola"})
+    )
+    assert sent["ok"] and sent["result"]["delivery"] == "queued"
+    _collect_until(server, session_id)
+
+
+def test_send_now_moves_a_foreground_command_to_the_background(
+    server, tmp_path, monkeypatch
+) -> None:
+    import sys
+
+    from rinari.models.types import ToolCall
+
+    script = tmp_path / "install.py"
+    script.write_text("import time\nprint('instalando', flush=True)\ntime.sleep(60)\n")
+    session_id = _create_chat(server, tmp_path, tag="cmd")
+    run = ModelResponse(
+        content="Instalo.",
+        tool_calls=(
+            ToolCall("call_install", "shell.exec", {"command": f'"{sys.executable}" "{script}"'}),
+        ),
+        stop_reason=StopReason.TOOL_CALLS,
+    )
+    model = FakeModel(scripted=[run, _answer()])
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda services, rec: model)
+    server.handle_line(
+        _req("c1", "session.turn.start", {"session_id": session_id, "message": "instala"})
+    )
+    from rinari.tools.native.shell import running_foreground
+
+    deadline = time.time() + 15
+    while "call_install" not in running_foreground(session_id) and time.time() < deadline:
+        # The owner may need to approve the command first.
+        for evt in server.drain_events():
+            if evt.get("event") == "approval.requested":
+                server.handle_line(
+                    _req(
+                        "a1",
+                        "approval.resolve",
+                        {"approval_id": evt["payload"]["approval_id"], "decision": "allow_once"},
+                    )
+                )
+        time.sleep(0.05)
+    assert "call_install" in running_foreground(session_id)
+    sent = server.handle_line(
+        _req("c2", "session.turn.steer_now", {"session_id": session_id, "message": "sigue luego"})
+    )
+    assert "command:call_install" in sent["result"]["interrupted"]
+    _collect_until(server, session_id)
+    registry = server.turns._desktop_processes[session_id]
+    try:
+        running = [h for h in registry.list() if h.exit_code is None]
+        assert len(running) == 1 and "instalando" in running[0].stdout.text()
+    finally:
+        registry.stop_all(include_persistent=True)
+
+
+@pytest.mark.background_title
+def test_a_slow_title_does_not_hold_the_first_turn(server, services, tmp_path, monkeypatch):
+    """«Preparando el turno…» lasted 9.6 s: 8.9 s were the title call, asked
+    before the turn's first model call (plan 0.4.0 v2, V2-4)."""
+    import threading
+
+    title_started = threading.Event()
+    release_title = threading.Event()
+    order: list[str] = []
+
+    class Model(FakeModel):
+        def invoke(self, request):
+            first = request.messages[0].content or ""
+            if "conversation title" in first:
+                order.append("title-start")
+                title_started.set()
+                release_title.wait(10)
+                order.append("title-end")
+                return ModelResponse(content="Naves espaciales", stop_reason=StopReason.END_TURN)
+            order.append("turn")
+            return _answer()
+
+    model = Model(scripted=[])
+    model.model_id = "fake-model-1"  # the title call names the conversation's model
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda services, rec: model)
+    session_id = _create_chat(server, tmp_path, tag="slow-title")
+    server.handle_line(
+        _req(
+            "st", "session.turn.start", {"session_id": session_id, "message": "Diseñemos un juego"}
+        )
+    )
+    seen = _collect_until(server, session_id)
+    assert seen and seen[-1]["event"] == "turn.completed"
+    assert title_started.wait(5)
+    assert "turn" in order and "title-end" not in order  # the turn finished first
+    release_title.set()
+    deadline = time.time() + 10
+    while time.time() < deadline and services.sessions.show(session_id).title != "Naves espaciales":
+        time.sleep(0.05)
+    assert services.sessions.show(session_id).title == "Naves espaciales"
+
+
+def _remember_after_steer(server, services, tmp_path, monkeypatch, steer: str | None):
+    """A scheduled run in its conversation tries to keep a rule in personal memory."""
+    from rinari.models.types import ToolCall
+
+    sid = _create_chat(server, tmp_path, "steer-memory")
+    services.sessions.set_permission(sid, "full-access")
+    gate = threading.Event()
+    fake = GatedModel(
+        [
+            ModelResponse(
+                content="Reviso",
+                tool_calls=(ToolCall("look", "fs.list", {"path": str(tmp_path)}),),
+            ),
+            ModelResponse(
+                content="Lo guardo",
+                tool_calls=(
+                    ToolCall(
+                        "keep",
+                        "memory.remember",
+                        {"scope": "user", "topic": "cierres", "text": "Cerrar en el mismo paso"},
+                    ),
+                ),
+            ),
+            _answer(),
+        ],
+        gate,
+    )
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda *args: fake)
+    server._turns.start_turn(
+        sid,
+        "Revisa la posición",
+        memory_origin="automation",
+        origin={"kind": "schedule", "task_id": "sch_x", "run_id": "run_x"},
+    )
+    assert fake.entered.wait(10)
+    if steer is not None:
+        assert _steer(server, sid, steer)["result"]["delivery"] == "steer"
+    gate.set()
+    events = _collect_until(server, sid)
+    kept = next(
+        e
+        for e in events
+        if e["event"] in ("tool.completed", "tool.failed")
+        and e["payload"].get("tool") == "memory.remember"
+    )
+    return sid, kept
+
+
+def test_the_owner_writing_into_a_scheduled_run_can_be_kept_in_memory(
+    server, services, tmp_path, monkeypatch
+) -> None:
+    """22-oct: the owner wrote «la cerré yo, duraste demasiado» into a scheduled run and
+    personal memory refused the lesson as an unattended run's."""
+    sid, kept = _remember_after_steer(
+        server, services, tmp_path, monkeypatch, "La cerré yo, duraste demasiado"
+    )
+    assert kept["event"] == "tool.completed", kept
+    [record] = services.memory.list_user()
+    sources = services.ctx.memory_repo.sources_for_memory(record["id"])
+    steer = next(
+        row for row in services.ctx.message_repo.list(sid) if (row.origin or {}).get("steer_id")
+    )
+    assert [source["message_id"] for source in sources] == [steer.id]
+
+
+def test_a_scheduled_run_alone_still_cannot_write_personal_memory(
+    server, services, tmp_path, monkeypatch
+) -> None:
+    _sid, kept = _remember_after_steer(server, services, tmp_path, monkeypatch, None)
+    assert kept["event"] == "tool.failed"
+    assert "memory.propose" in kept["payload"]["error"]["message"]
+    assert services.memory.list_user() == []

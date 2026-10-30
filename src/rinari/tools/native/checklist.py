@@ -26,7 +26,9 @@ DESCRIPTION = (
     "Live list of your steps for multi-step work (3+ steps, several files, or a task "
     "list from the user); never for simple questions or chats. Send the whole list "
     "each call, one item in_progress at a time, completed only when really done, "
-    "blocked with blocked_reason. Keep it true when the plan changes; [] clears it."
+    "blocked with blocked_reason. Keep it true when the plan changes; [] clears it. "
+    "Close it (last items completed) before your final summary, never after it: the "
+    "summary is your last message of the turn."
 )
 
 INPUT_SCHEMA: dict[str, Any] = {

@@ -41,7 +41,9 @@ PUBLIC_PRODUCTS = {
     "minimax-coding": "minimax-coding-plan",
     "github-copilot": "github-copilot",
 }
-PUBLIC_FIELDS = ("limit", "modalities", "tool_call", "reasoning", "provider", "interleaved")
+PUBLIC_FIELDS = ("limit", "modalities", "tool_call", "reasoning", "provider", "interleaved", "cost")
+# OpenCode's free models when the catalog has no price for them (plan 0.4.0 #13).
+_OPENCODE_FREE_IDS = frozenset({"big-pickle"})
 _CACHE_NAME = "model_metadata.json"
 _cache_dir: Path | None = None
 
@@ -82,14 +84,52 @@ def public_snapshot(upstream: dict, *, now: datetime | None = None) -> dict:
     for product, key in PUBLIC_PRODUCTS.items():
         entries = (upstream.get(key) or {}).get("models") or {}
         models[product] = {
-            name: {field: value[field] for field in PUBLIC_FIELDS if field in value}
-            for name, value in entries.items()
-            if isinstance(value, dict)
+            name: _public_entry(value) for name, value in entries.items() if isinstance(value, dict)
         }
     if not any(models.values()):
         raise ValueError("the public catalog had none of the known providers")
     stamp = (now or datetime.now(UTC)).isoformat()
     return {"source": PUBLIC_CATALOG_URL, "updated_at": stamp, "models": models}
+
+
+def _public_entry(value: dict) -> dict:
+    entry = {field: value[field] for field in PUBLIC_FIELDS if field in value}
+    cost = entry.get("cost")
+    if isinstance(cost, dict):
+        # USD per million tokens: whether a model is free, and the usage
+        # report's cost when the model has no price of its own (#78).
+        entry["cost"] = {
+            key: cost[key]
+            for key in ("input", "output", "cache_read", "cache_write")
+            if isinstance(cost.get(key), (int, float)) and not isinstance(cost.get(key), bool)
+        }
+    elif "cost" in entry:
+        del entry["cost"]
+    return entry
+
+
+def pricing(product: str | None, model_id: str, entry: dict) -> str | None:
+    """ "free" when the catalog says input and output cost nothing, "paid" when
+    it gives a price, None when it does not say. OpenCode's `-free` ids and
+    `big-pickle` are free even without a price."""
+    cost = entry.get("cost")
+    if isinstance(cost, dict) and cost:
+        return "free" if all(cost.get(key, 0) == 0 for key in ("input", "output")) else "paid"
+    if product in ("opencode-go", "opencode-zen") and (
+        model_id.endswith("-free") or model_id in _OPENCODE_FREE_IDS
+    ):
+        return "free"
+    return None
+
+
+def catalog_prices(provider, model_id: str) -> dict[str, float] | None:
+    """The public catalog's prices of a model (USD per million tokens), with
+    `input` and `output` at least; None when it gives none (#78)."""
+    entry = catalog()["models"].get(product_for(provider), {}).get(model_id, {})
+    cost = entry.get("cost")
+    if not isinstance(cost, dict) or "input" not in cost or "output" not in cost:
+        return None
+    return {key: float(value) for key, value in cost.items()}
 
 
 def refresh_public_catalog(get) -> dict:
@@ -162,6 +202,9 @@ def model_metadata(provider, model_id):
             tool_calls=entry.get("tool_call"),
             advertised_reasoning=entry.get("reasoning"),
         )
+    price = pricing(product, model_id, entry)
+    if price is not None:
+        metadata["pricing"] = price
     transport = "chat"
     if product in ("opencode-go", "opencode-zen"):
         npm = entry.get("provider", {}).get("npm")
@@ -180,8 +223,9 @@ def model_metadata(provider, model_id):
             transport = "anthropic"
         elif npm == "@ai-sdk/openai" or model_id in OPENCODE_RESPONSES_MODELS:
             transport = "responses"
-        elif npm == "@ai-sdk/google":
-            transport = "unsupported-google-native"
+        elif npm == "@ai-sdk/google" or model_id.startswith("gemini-"):
+            # Gemini's own protocol (plan 0.4.0 #94).
+            transport = "google"
     if (
         provider.type == "anthropic"
         or (provider.settings or {}).get("protocol") == "anthropic-compatible"
@@ -247,7 +291,13 @@ def model_metadata(provider, model_id):
     elif product not in ("custom", "chatgpt", "github-copilot") and transport == "chat":
         # Advertising thought generation is not evidence of the OpenAI effort dialect.
         metadata.update(reasoning_effort=False, reasoning_levels=[])
-    metadata["route_supported"] = transport in ("chat", "responses", "anthropic", "claude-cli")
+    metadata["route_supported"] = transport in (
+        "chat",
+        "responses",
+        "anthropic",
+        "claude-cli",
+        "google",
+    )
     return metadata
 
 

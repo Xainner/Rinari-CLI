@@ -24,15 +24,15 @@ def test_config_path_pointing_at_user_config(isolated_home):
 def test_config_get_default_value(isolated_home):
     from rinari.cli.main import app
 
-    result = runner.invoke(app, ["config", "get", "agent.max_turns"])
+    result = runner.invoke(app, ["config", "get", "agents.max_total"])
     assert result.exit_code == 0
-    assert result.output.strip() == "200"
+    assert result.output.strip() == "12"
 
 
 def test_config_get_unknown_key_exits_invalid_usage(isolated_home):
     from rinari.cli.main import app
 
-    result = runner.invoke(app, ["config", "get", "agent.nope"])
+    result = runner.invoke(app, ["config", "get", "agents.nope"])
     assert result.exit_code == 2
     assert "Unknown config key" in result.output
 
@@ -40,25 +40,25 @@ def test_config_get_unknown_key_exits_invalid_usage(isolated_home):
 def test_config_set_roundtrips_through_user_file(isolated_home):
     from rinari.cli.main import app
 
-    result = runner.invoke(app, ["config", "set", "agent.max_turns", "250"])
+    result = runner.invoke(app, ["config", "set", "agents.max_total", "20"])
     assert result.exit_code == 0, result.output
 
     config_file = isolated_home / "config.toml"
     assert config_file.is_file()
     raw = config_file.read_text(encoding="utf-8")
-    assert "max_turns = 250" in raw
+    assert "max_total = 20" in raw
 
     # The key must not drag unrelated defaults into the user file.
-    assert "max_tool_calls" not in raw
+    assert "max_depth" not in raw
 
-    check = runner.invoke(app, ["config", "get", "agent.max_turns"])
-    assert check.output.strip() == "250"
+    check = runner.invoke(app, ["config", "get", "agents.max_total"])
+    assert check.output.strip() == "20"
 
 
 def test_config_set_validates_before_persisting(isolated_home):
     from rinari.cli.main import app
 
-    result = runner.invoke(app, ["config", "set", "agent.max_turns", "999999"])
+    result = runner.invoke(app, ["config", "set", "agents.max_total", "999999"])
     assert result.exit_code == 3
     assert not (isolated_home / "config.toml").exists()
 
@@ -68,19 +68,17 @@ def test_config_set_bad_type_is_invalid_usage(isolated_home):
 
     result = runner.invoke(app, ["config", "set", "agents.enabled", "maybe"])
     assert result.exit_code == 3  # declared-type validation failure = configuration error
-    result2 = runner.invoke(app, ["config", "set", "agent.max_turns", "abc"])
+    result2 = runner.invoke(app, ["config", "set", "agents.max_total", "abc"])
     assert result2.exit_code == 3
 
 
-def test_config_set_list_value(isolated_home):
+def test_config_set_refuses_a_retired_setting(isolated_home):
     from rinari.cli.main import app
 
-    result = runner.invoke(
-        app, ["config", "set", "workspace.project_root_markers", ".git,Cargo.toml"]
-    )
-    assert result.exit_code == 0, result.output
-    check = runner.invoke(app, ["config", "get", "workspace.project_root_markers"])
-    assert check.output.strip() == '[".git", "Cargo.toml"]'
+    result = runner.invoke(app, ["config", "set", "agent.max_turns", "5"])
+    assert result.exit_code == 2  # unknown key: invalid usage
+    assert "Unknown config key" in result.output
+    assert not (isolated_home / "config.toml").exists()
 
 
 def test_config_unset_removes_override(isolated_home):
@@ -107,7 +105,7 @@ def test_config_validate_ok_and_failing(isolated_home):
     assert ok.exit_code == 0
     assert "Config OK" in ok.output
 
-    (isolated_home / "config.toml").write_text("[agent]\nmax_turns = -1\n", encoding="utf-8")
+    (isolated_home / "config.toml").write_text("[agents]\nmax_total = -1\n", encoding="utf-8")
     bad = runner.invoke(app, ["config", "validate"])
     assert bad.exit_code == 3
 
@@ -117,17 +115,17 @@ def test_config_list_shows_all_keys(isolated_home):
 
     result = runner.invoke(app, ["config", "list"])
     assert result.exit_code == 0
-    assert "agent.max_turns = 200" in result.output
-    assert "telemetry.redact_secrets = True" in result.output
+    assert "agents.max_total = 12" in result.output
+    assert "runtime.emergency.max_model_calls = 500" in result.output
 
 
 def test_explicit_config_flag_replaces_user_file(isolated_home, tmp_path):
     from rinari.cli.main import app
 
     explicit = tmp_path / "explicit.toml"
-    explicit.write_text("[agent]\nmax_turns = 44\n", encoding="utf-8")
+    explicit.write_text("[agents]\nmax_total = 44\n", encoding="utf-8")
 
-    result = runner.invoke(app, ["--config", str(explicit), "config", "get", "agent.max_turns"])
+    result = runner.invoke(app, ["--config", str(explicit), "config", "get", "agents.max_total"])
     assert result.exit_code == 0
     assert result.output.strip() == "44"
 

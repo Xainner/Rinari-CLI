@@ -14,6 +14,7 @@ allows it, and any future chaining must keep the local replay fallback.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 from collections.abc import Callable
@@ -182,7 +183,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
             **self.request_headers(secret, request),
             **session_affinity_headers(url, request.session_id),
         }
-        acc = _ResponsesStreamAccumulator()
+        acc = _ResponsesStreamAccumulator(request.tool_input_observer)
         stream_stats: dict[str, Any] = {}
         done_seen = False
         headers_received = False
@@ -527,7 +528,9 @@ class _ResponsesStreamAccumulator:
     for a terminal event that carries none.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, tool_input_observer: Callable | None = None) -> None:
+        self._tool_input = tool_input_observer
+        self._tool_names: dict[str, str] = {}
         self._text_parts: list[str] = []
         self._completed: dict[str, Any] | None = None
         self._items: dict[int, dict[str, Any]] = {}
@@ -568,6 +571,16 @@ class _ResponsesStreamAccumulator:
             if isinstance(delta, str) and delta:
                 self._text_parts.append(delta)
                 on_delta(delta)
+        elif event_type == "response.output_item.added" and self._tool_input is not None:
+            item = event.get("item")
+            if isinstance(item, dict) and item.get("type") == "function_call":
+                self._tool_names[str(item.get("id"))] = str(item.get("name") or "")
+        elif event_type == "response.function_call_arguments.delta" and self._tool_input:
+            # How much of a tool call is written so far (F26, plan 0.4.0 v2).
+            with contextlib.suppress(Exception):
+                self._tool_input(
+                    self._tool_names.get(str(event.get("item_id"))), event.get("delta")
+                )
         elif event_type == "response.output_item.done":
             item = event.get("item")
             if isinstance(item, dict):

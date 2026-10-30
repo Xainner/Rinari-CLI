@@ -96,8 +96,12 @@ def test_canonical_reference_soul_is_4(services) -> None:
 def test_intensity_levels_are_visibly_different() -> None:
     blocks = {level: intensity_instructions(level) for level in INTENSITIES}
     assert len(set(blocks.values())) == 3
-    assert "no emoji or kaomoji" in blocks["minimal"]
-    assert "every conversational reply" in blocks["full"]
+    assert "no emoji" in blocks["minimal"]
+    assert "opens AND closes" in blocks["full"]
+    # Concrete examples to imitate, and never kaomoji at any level (#87).
+    assert all(
+        "Sounds like:" in block and "Never use kaomoji" in block for block in blocks.values()
+    )
     # Unknown values fall back to the default rather than failing a turn.
     assert intensity_instructions("loud") == blocks["balanced"]
 
@@ -106,15 +110,21 @@ def test_intensity_reaches_the_main_prompt(services, server, tmp_path) -> None:
     session_id = _session(server, tmp_path)
     record = services.sessions.show(session_id)
     default_context = build_assembler_context(services, record)
-    assert "Character intensity: Balanced" in default_context.soul
+    # The level has its own segment, last in the system prompt (#87).
+    assert "Character intensity: Balanced" in default_context.voice
     assert default_context.soul.startswith("You are Rinari,")
+    assert "Character intensity" not in default_context.soul
     SoulStore(services.ctx.home).set_character_intensity("full")
-    full = build_assembler_context(services, record).soul
+    full = build_assembler_context(services, record).voice
     assert "Character intensity: Full Character" in full
     SoulStore(services.ctx.home).set_character_intensity("minimal")
-    minimal = build_assembler_context(services, record).soul
+    minimal = build_assembler_context(services, record).voice
     assert "Character intensity: Minimal" in minimal
     assert minimal != full
+    from rinari.prompts.assembler import PromptAssembler
+
+    system = PromptAssembler().build(build_assembler_context(services, record)).system_prompt
+    assert system.rstrip().endswith("Never use kaomoji.")
 
 
 def test_intensity_applies_to_custom_souls_too(services, server, tmp_path) -> None:
@@ -123,9 +133,9 @@ def test_intensity_applies_to_custom_souls_too(services, server, tmp_path) -> No
     store.activate("mine")
     store.set_character_intensity("minimal")
     session_id = _session(server, tmp_path)
-    soul = build_assembler_context(services, services.sessions.show(session_id)).soul
-    assert soul.startswith("You are Mine, a custom persona.")
-    assert "Character intensity: Minimal" in soul
+    context = build_assembler_context(services, services.sessions.show(session_id))
+    assert context.soul.startswith("You are Mine, a custom persona.")
+    assert "Character intensity: Minimal" in context.voice
 
 
 def test_settings_protocol(server) -> None:

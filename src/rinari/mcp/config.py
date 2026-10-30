@@ -7,7 +7,7 @@ URL in `url` and everything else in `config_json`:
 {
   "argv": ["npx", "-y", "server"],          stdio: exact command (args keep spaces)
   "env": {"API_KEY": "<ref>"},              stdio: environment for the process
-  "auth": {"kind": "bearer", "token_ref": "<ref>"},   http: none | bearer | headers
+  "auth": {"kind": "bearer", "token_ref": "<ref>"},   http: none | bearer | headers | oauth
   "headers": {"X-Team": {"value": "core"},  http: plain header
               "X-Api-Key": {"ref": "<ref>"}},           secret header
   "timeout_s": 30
@@ -24,6 +24,18 @@ environment variables: a `keyring://` or `file://` reference from outside is
 rejected so a server can never be pointed at another stored secret (a
 provider's API key, for instance).
 
+A URL whose query carries a secret (`?api_key=…`, `?token=…`; plan de
+conectores C4, imported configurations) is kept whole in the CredentialStore
+(`url_ref`, slot `url`); the row's `url` column and the views keep it with
+those values replaced by `***`.
+
+OAuth (`"kind": "oauth"`, plan de conectores C1) keeps only the client side
+of the configuration in the row: an optional `client_id` (public), the
+`client_secret_ref` of the owner's own client, the `scopes` to ask for, a
+fixed `redirect_port`, a `client_metadata_url` (CIMD) and extra
+`authorize_params`. The tokens never touch the row: `mcp/oauth.py` keeps them
+in the CredentialStore under `mcp/<server id>/oauth`.
+
 Legacy rows (`{"env": {...}}` + space-joined `command`) keep working.
 """
 
@@ -37,7 +49,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 TRANSPORT_STDIO = "stdio"
 TRANSPORT_HTTP = "http"
@@ -46,7 +58,8 @@ TRANSPORTS = (TRANSPORT_STDIO, TRANSPORT_HTTP)
 AUTH_NONE = "none"
 AUTH_BEARER = "bearer"
 AUTH_HEADERS = "headers"
-AUTH_KINDS = (AUTH_NONE, AUTH_BEARER, AUTH_HEADERS)
+AUTH_OAUTH = "oauth"
+AUTH_KINDS = (AUTH_NONE, AUTH_BEARER, AUTH_HEADERS, AUTH_OAUTH)
 
 ENV_SCHEME = "env://"
 #: Prefixes of the secret references this module owns (and may delete).
@@ -75,6 +88,29 @@ _RESERVED_HEADERS = frozenset(
 )
 #: Header names treated as secret unless the client says otherwise.
 _SENSITIVE_HEADER_RE = re.compile(r"(auth|token|key|secret|password|cookie|session)", re.I)
+#: Query parameters whose value is a secret (an API key in the URL).
+_SENSITIVE_QUERY_RE = re.compile(
+    r"(auth|token|key|secret|password|passwd|pwd|credential|session|signature|sig)", re.I
+)
+REDACTED = "***"
+#: Authorization-request parameters Rinari sets itself (PKCE, state, resource…).
+RESERVED_AUTHORIZE_PARAMS = frozenset(
+    {
+        "response_type",
+        "client_id",
+        "redirect_uri",
+        "state",
+        "code_challenge",
+        "code_challenge_method",
+        "resource",
+        "scope",
+    }
+)
+# RFC 6749 scope-token: printable ASCII without space, '"' or '\'.
+_SCOPE_RE = re.compile(r"^[\x21\x23-\x5B\x5D-\x7E]{1,256}$")
+_PARAM_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
+MIN_REDIRECT_PORT = 1024
+MAX_REDIRECT_PORT = 65535
 
 
 class McpConfigError(ValueError):
@@ -100,6 +136,18 @@ class HeaderSlot:
 
 
 @dataclass(slots=True)
+class OAuthConfig:
+    """The client side of an OAuth server (no token: those live in the store)."""
+
+    client_id: str | None = None
+    client_secret: SecretSlot | None = None
+    scopes: list[str] = field(default_factory=list)
+    redirect_port: int | None = None
+    client_metadata_url: str | None = None
+    authorize_params: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class ServerDraft:
     transport: str = TRANSPORT_STDIO
     argv: list[str] = field(default_factory=list)
@@ -109,6 +157,9 @@ class ServerDraft:
     auth_token: SecretSlot | None = None
     headers: dict[str, HeaderSlot] = field(default_factory=dict)
     timeout_s: float | None = None
+    oauth: OAuthConfig | None = None
+    #: The whole URL when its query carries a secret; `url` is then redacted.
+    url_secret: SecretSlot | None = None
 
     def copy(self) -> ServerDraft:
         return copy.deepcopy(self)
@@ -132,6 +183,9 @@ def draft_from_row(row: Mapping[str, Any]) -> ServerDraft:
     if not (isinstance(argv, list) and all(isinstance(a, str) for a in argv)):
         argv = [p for p in str(row.get("command") or "").split() if p]
     draft = ServerDraft(transport=transport, argv=list(argv), url=str(row.get("url") or ""))
+    url_ref = config.get("url_ref")
+    if isinstance(url_ref, str) and url_ref:
+        draft.url_secret = SecretSlot(ref=url_ref)
     env = config.get("env")
     if isinstance(env, dict):
         for key, ref in env.items():
@@ -145,6 +199,8 @@ def draft_from_row(row: Mapping[str, Any]) -> ServerDraft:
         token_ref = auth.get("token_ref")
         if isinstance(token_ref, str) and token_ref:
             draft.auth_token = SecretSlot(ref=token_ref)
+        if draft.auth_kind == AUTH_OAUTH:
+            draft.oauth = _oauth_from_stored(auth)
     headers = config.get("headers")
     if isinstance(headers, dict):
         for name, spec in headers.items():
@@ -160,15 +216,41 @@ def draft_from_row(row: Mapping[str, Any]) -> ServerDraft:
     return draft
 
 
+def _oauth_from_stored(auth: Mapping[str, Any]) -> OAuthConfig:
+    oauth = OAuthConfig()
+    if isinstance(auth.get("client_id"), str) and auth["client_id"]:
+        oauth.client_id = auth["client_id"]
+    if isinstance(auth.get("client_secret_ref"), str) and auth["client_secret_ref"]:
+        oauth.client_secret = SecretSlot(ref=auth["client_secret_ref"])
+    scopes = auth.get("scopes")
+    if isinstance(scopes, list):
+        oauth.scopes = [s for s in scopes if isinstance(s, str) and s]
+    port = auth.get("redirect_port")
+    if isinstance(port, int) and not isinstance(port, bool):
+        oauth.redirect_port = port
+    if isinstance(auth.get("client_metadata_url"), str) and auth["client_metadata_url"]:
+        oauth.client_metadata_url = auth["client_metadata_url"]
+    params = auth.get("authorize_params")
+    if isinstance(params, dict):
+        oauth.authorize_params = {
+            k: v for k, v in params.items() if isinstance(k, str) and isinstance(v, str)
+        }
+    return oauth
+
+
 def config_refs(config: Mapping[str, Any]) -> set[str]:
     """Every secret reference a stored config points at."""
     refs: set[str] = set()
+    if isinstance(config.get("url_ref"), str):
+        refs.add(config["url_ref"])
     env = config.get("env")
     if isinstance(env, dict):
         refs.update(v for v in env.values() if isinstance(v, str))
     auth = config.get("auth")
     if isinstance(auth, dict) and isinstance(auth.get("token_ref"), str):
         refs.add(auth["token_ref"])
+    if isinstance(auth, dict) and isinstance(auth.get("client_secret_ref"), str):
+        refs.add(auth["client_secret_ref"])
     headers = config.get("headers")
     if isinstance(headers, dict):
         for spec in headers.values():
@@ -240,6 +322,22 @@ def validate_url(url: Any) -> str:
     return url
 
 
+def redact_url(url: str) -> str:
+    """`url` with the values of secret-looking query parameters replaced."""
+    parts = urlsplit(url)
+    if not parts.query:
+        return url
+    pairs = parse_qsl(parts.query, keep_blank_values=True)
+    if not any(_SENSITIVE_QUERY_RE.search(name) and value for name, value in pairs):
+        return url
+    redacted = [
+        (name, REDACTED if value and _SENSITIVE_QUERY_RE.search(name) else value)
+        for name, value in pairs
+    ]
+    query = urlencode(redacted, safe="*")
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
+
+
 def is_local_host(url: str) -> bool:
     host = (urlsplit(url).hostname or "").lower()
     if host in ("localhost",) or host.endswith(".localhost"):
@@ -248,6 +346,84 @@ def is_local_host(url: str) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+def validate_client_metadata_url(url: Any) -> str:
+    """A client ID metadata document URL: https with a path (or a loopback host)."""
+    if not isinstance(url, str) or not url.strip():
+        raise McpConfigError("auth.client_metadata_url must be an https URL")
+    url = url.strip()
+    try:
+        parts = urlsplit(url)
+    except ValueError as exc:
+        raise McpConfigError("auth.client_metadata_url is not a valid URL") from exc
+    secure = parts.scheme == "https" or (parts.scheme == "http" and is_local_host(url))
+    if not secure or not parts.hostname or parts.path in ("", "/"):
+        raise McpConfigError("auth.client_metadata_url must be an https URL with a path")
+    if parts.username or parts.password or parts.fragment or len(url) > 2048:
+        raise McpConfigError("auth.client_metadata_url must not carry credentials or a fragment")
+    return url
+
+
+def _single_line(value: Any, what: str, limit: int = 512) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > limit
+        or any(c in value for c in "\r\n\0")
+    ):
+        raise McpConfigError(f"{what} must be a non-empty single-line string")
+    return value
+
+
+def _apply_oauth(current: OAuthConfig | None, auth: Mapping[str, Any]) -> OAuthConfig:
+    """Merge an `auth` block of kind oauth over the stored one (null clears a key)."""
+    oauth = copy.deepcopy(current) if current is not None else OAuthConfig()
+    if "client_id" in auth:
+        value = auth["client_id"]
+        oauth.client_id = None if value is None else _single_line(value, "auth.client_id")
+    if "client_secret" in auth:
+        oauth.client_secret = parse_secret_input(auth["client_secret"], "auth.client_secret")
+    if "scopes" in auth:
+        scopes = auth["scopes"]
+        if scopes is None:
+            scopes = []
+        elif isinstance(scopes, str):
+            scopes = scopes.split()
+        if not isinstance(scopes, list) or not all(
+            isinstance(s, str) and _SCOPE_RE.match(s) for s in scopes
+        ):
+            raise McpConfigError("auth.scopes must be a list of OAuth scope names")
+        oauth.scopes = list(dict.fromkeys(scopes))
+    if "redirect_port" in auth:
+        port = auth["redirect_port"]
+        if port is not None and (
+            isinstance(port, bool)
+            or not isinstance(port, int)
+            or not MIN_REDIRECT_PORT <= port <= MAX_REDIRECT_PORT
+        ):
+            raise McpConfigError(
+                f"auth.redirect_port must be between {MIN_REDIRECT_PORT} and {MAX_REDIRECT_PORT}"
+            )
+        oauth.redirect_port = port
+    if "client_metadata_url" in auth:
+        value = auth["client_metadata_url"]
+        oauth.client_metadata_url = None if value is None else validate_client_metadata_url(value)
+    if "authorize_params" in auth:
+        params = auth["authorize_params"]
+        if params is None:
+            params = {}
+        if not isinstance(params, dict):
+            raise McpConfigError("auth.authorize_params must be an object of strings")
+        cleaned: dict[str, str] = {}
+        for key, value in params.items():
+            if not isinstance(key, str) or not _PARAM_NAME_RE.match(key):
+                raise McpConfigError("auth.authorize_params names must be simple words")
+            if key in RESERVED_AUTHORIZE_PARAMS:
+                raise McpConfigError(f"auth.authorize_params cannot set {key!r}")
+            cleaned[key] = _single_line(value, f"auth.authorize_params.{key}")
+        oauth.authorize_params = cleaned
+    return oauth
 
 
 def _header_name(name: Any) -> str:
@@ -291,6 +467,7 @@ def apply_patch(draft: ServerDraft, params: Mapping[str, Any]) -> ServerDraft:
             draft.argv, draft.env = [], {}
         else:
             draft.url, draft.auth_kind, draft.auth_token, draft.headers = "", AUTH_NONE, None, {}
+            draft.oauth, draft.url_secret = None, None
         draft.transport = transport
     if "command" in params and params["command"] is not None:
         command = params["command"]
@@ -298,7 +475,15 @@ def apply_patch(draft: ServerDraft, params: Mapping[str, Any]) -> ServerDraft:
             raise McpConfigError("Param 'command' must be a string array")
         draft.argv = [c for c in command if c != ""]
     if "url" in params:
-        draft.url = validate_url(params["url"]) if params["url"] is not None else ""
+        if params["url"] is None:
+            draft.url, draft.url_secret = "", None
+        else:
+            url = validate_url(params["url"])
+            # The redacted URL sent back by an edit form keeps the stored one.
+            if not (draft.url_secret is not None and url == draft.url):
+                display = redact_url(url)
+                draft.url_secret = SecretSlot(literal=url) if display != url else None
+                draft.url = display
     if "timeout_s" in params:
         timeout = params["timeout_s"]
         if timeout is None:
@@ -342,8 +527,12 @@ def apply_patch(draft: ServerDraft, params: Mapping[str, Any]) -> ServerDraft:
     if "auth" in params and params["auth"] is not None:
         auth = params["auth"]
         if not isinstance(auth, dict) or auth.get("kind") not in AUTH_KINDS:
-            raise McpConfigError("Param 'auth.kind' must be none, bearer or headers")
+            raise McpConfigError("Param 'auth.kind' must be none, bearer, headers or oauth")
         kind = auth["kind"]
+        if kind == AUTH_OAUTH:
+            draft.oauth = _apply_oauth(draft.oauth if draft.auth_kind == AUTH_OAUTH else None, auth)
+        else:
+            draft.oauth = None
         if kind == AUTH_BEARER:
             if "token" in auth:
                 token = parse_secret_input(auth["token"], "auth.token")
@@ -411,6 +600,15 @@ def validate_draft(draft: ServerDraft) -> None:
             raise McpConfigError("bearer auth needs a token (value or env://NAME)")
         if draft.auth_kind == AUTH_BEARER and _find_header(draft.headers, "Authorization"):
             raise McpConfigError("bearer auth and an Authorization header cannot be combined")
+        if draft.auth_kind == AUTH_OAUTH:
+            if _find_header(draft.headers, "Authorization"):
+                raise McpConfigError("oauth and an Authorization header cannot be combined")
+            if urlsplit(draft.url).scheme != "https" and not is_local_host(draft.url):
+                # The access token travels with every request (OAuth 2.1, MCP).
+                raise McpConfigError("oauth needs an https:// URL (http only on this computer)")
+            oauth = draft.oauth or OAuthConfig()
+            if oauth.client_secret is not None and not oauth.client_id:
+                raise McpConfigError("auth.client_secret needs auth.client_id")
 
 
 def slot_key(server_id: str, slot: str) -> str:
@@ -433,9 +631,25 @@ def config_from_draft(draft: ServerDraft) -> dict[str, Any]:
         if draft.env:
             config["env"] = {k: ref(v) for k, v in sorted(draft.env.items())}
     else:
+        if draft.url_secret is not None:
+            config["url_ref"] = ref(draft.url_secret)
         auth: dict[str, Any] = {"kind": draft.auth_kind}
         if draft.auth_kind == AUTH_BEARER and draft.auth_token is not None:
             auth["token_ref"] = ref(draft.auth_token)
+        if draft.auth_kind == AUTH_OAUTH and draft.oauth is not None:
+            oauth = draft.oauth
+            if oauth.client_id:
+                auth["client_id"] = oauth.client_id
+            if oauth.client_secret is not None:
+                auth["client_secret_ref"] = ref(oauth.client_secret)
+            if oauth.scopes:
+                auth["scopes"] = list(oauth.scopes)
+            if oauth.redirect_port is not None:
+                auth["redirect_port"] = oauth.redirect_port
+            if oauth.client_metadata_url:
+                auth["client_metadata_url"] = oauth.client_metadata_url
+            if oauth.authorize_params:
+                auth["authorize_params"] = dict(sorted(oauth.authorize_params.items()))
         config["auth"] = auth
         if draft.headers:
             headers: dict[str, Any] = {}
@@ -482,8 +696,22 @@ def draft_view(draft: ServerDraft, env: Mapping[str, str] | None = None) -> dict
         "env": [],
         "warnings": warnings,
     }
+    if draft.url_secret is not None:
+        view["url_secret"] = _secret_view(draft.url_secret, env)
     if draft.auth_kind == AUTH_BEARER:
         view["auth"]["token"] = _secret_view(draft.auth_token, env)
+    if draft.auth_kind == AUTH_OAUTH:
+        oauth = draft.oauth or OAuthConfig()
+        view["auth"].update(
+            {
+                "client_id": oauth.client_id,
+                "client_secret": _secret_view(oauth.client_secret, env),
+                "scopes": list(oauth.scopes),
+                "redirect_port": oauth.redirect_port,
+                "client_metadata_url": oauth.client_metadata_url,
+                "authorize_params": dict(sorted(oauth.authorize_params.items())),
+            }
+        )
     for name, header in sorted(draft.headers.items(), key=lambda kv: kv[0].lower()):
         if header.secret is not None:
             view["headers"].append(
@@ -503,12 +731,14 @@ __all__ = [
     "AUTH_HEADERS",
     "AUTH_KINDS",
     "AUTH_NONE",
+    "AUTH_OAUTH",
     "DEFAULT_TIMEOUT_S",
     "TRANSPORTS",
     "TRANSPORT_HTTP",
     "TRANSPORT_STDIO",
     "HeaderSlot",
     "McpConfigError",
+    "OAuthConfig",
     "SecretSlot",
     "ServerDraft",
     "apply_patch",
@@ -519,8 +749,10 @@ __all__ = [
     "is_local_host",
     "is_owned_ref",
     "parse_secret_input",
+    "redact_url",
     "slot_key",
     "stored_config",
+    "validate_client_metadata_url",
     "validate_draft",
     "validate_url",
 ]

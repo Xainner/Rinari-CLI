@@ -10,6 +10,7 @@ enough for model-supplied arguments.
 from __future__ import annotations
 
 import difflib
+import json
 import math
 import re
 from typing import Any
@@ -50,6 +51,20 @@ def _project(schema: Any, *, root: bool = False) -> Any:
     if not isinstance(schema, dict):
         return schema
     wire = dict(schema)
+    # Limits some backends drop or models skip (F20, F39): said in words too,
+    # for any tool (plan 0.4.0 v2, V2-14).
+    said = []
+    if isinstance(wire.get("maxLength"), int):
+        said.append(f"At most {wire['maxLength']} characters.")
+    enum = wire.get("enum")
+    if isinstance(enum, list) and 1 < len(enum) <= 12 and all(isinstance(v, str) for v in enum):
+        said.append("One of: " + ", ".join(enum) + ".")
+    if said:
+        existing = wire.get("description")
+        text = existing.strip() if isinstance(existing, str) else ""
+        missing = [s for s in said if s not in text]
+        if missing:
+            wire["description"] = " ".join([text, *missing]).strip()
     if isinstance(wire.get("properties"), dict):
         wire["properties"] = {key: _project(sub) for key, sub in wire["properties"].items()}
     if isinstance(wire.get("items"), dict):
@@ -82,6 +97,139 @@ def _required_alternatives(clauses: list[Any]) -> list[str] | None:
             return None
         alternatives.append(" + ".join(required))
     return alternatives
+
+
+_TYPE_EXAMPLES = {
+    "array": '["a", "b"]',
+    "object": '{"key": "value"}',
+    "boolean": "true",
+    "integer": "3",
+    "number": "1.5",
+}
+
+
+def coerce_types(schema: Any, value: Any, path: str = "$") -> tuple[Any, list[str]]:
+    """Values a model sent as text that have exactly one typed meaning.
+
+    Quantized and smaller models often send `"[\"a\"]"` for a list, `"True"`
+    for a boolean or `"3"` for a number. Each one cost a round trip. Only a
+    string whose declared type is a single non-string type is touched, and
+    only when it parses to exactly that type; anything else is left for
+    validation to reject. Returns the value and one note per conversion.
+    """
+    notes: list[str] = []
+    if not isinstance(schema, dict):
+        return value, notes
+    expected = schema.get("type")
+    if isinstance(value, str) and isinstance(expected, str) and expected != "string":
+        converted = _parse_as(expected, value)
+        if converted is not _NO_VALUE:
+            notes.append(f"used {path[2:] or 'value'} as {expected} (received it as text)")
+            value = converted
+    if isinstance(value, dict) and isinstance(schema.get("properties"), dict):
+        rewritten = dict(value)
+        for key, sub in schema["properties"].items():
+            if key in rewritten:
+                rewritten[key], inner = coerce_types(sub, rewritten[key], f"{path}.{key}")
+                notes.extend(inner)
+        value = rewritten
+    if isinstance(value, list) and isinstance(schema.get("items"), dict):
+        items = []
+        for index, item in enumerate(value):
+            item, inner = coerce_types(schema["items"], item, f"{path}[{index}]")
+            items.append(item)
+            notes.extend(inner)
+        value = items
+    return value, notes
+
+
+_NO_VALUE = object()
+
+
+def _empty(value: Any) -> bool:
+    return value is None or value == "" or value == [] or value == {}
+
+
+def drop_empty_optionals(schema: Any, value: Any) -> tuple[Any, list[str]]:
+    """Optional text arguments a model sent empty count as absent.
+
+    Strict structured outputs (OpenAI's among them) make a model send every
+    declared key, so optional ones arrive as `""`. Read
+    as values they changed the call: `expected_hash: ""` turned a new file
+    into a conflict, and `path: ""` beside `files` made fs.patch see two
+    forms at once (plan 0.4.0 v2, V2-8). Driven by the schema, for any tool:
+    a key required at the top level is never touched; a key required only by
+    one `oneOf`/`anyOf` alternative is dropped when it is empty and another
+    alternative is fully given with real values.
+    """
+    if not isinstance(schema, dict) or not isinstance(value, dict):
+        return value, []
+    required = set(schema.get("required") or ())
+    branches = [
+        set(clause.get("required") or ())
+        for key in ("oneOf", "anyOf")
+        for clause in schema.get(key) or ()
+        if isinstance(clause, dict)
+    ]
+    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    satisfied = [b for b in branches if b and all(not _empty(value.get(k, None)) for k in b)]
+    in_branch = set().union(*branches) if branches else set()
+    keep = set().union(*satisfied) if satisfied else set()
+    result, dropped = dict(value), []
+    for key, item in value.items():
+        # Only empty text: a `null` in a typed field stays invalid (the
+        # contract of test_builtin_tool_validation), and `[]`/`{}` are values.
+        if key in required or item != "":
+            continue
+        if key in in_branch and (not satisfied or key in keep):
+            continue  # its own alternative may need it ("" can be a real new_string)
+        del result[key]
+        dropped.append(key)
+    notes = [f"ignored empty optional {', '.join(sorted(dropped))}"] if dropped else []
+    # The same inside objects and lists of objects (files[].expected_hash).
+    for key, item in list(result.items()):
+        sub = properties.get(key)
+        if not isinstance(sub, dict):
+            continue
+        if isinstance(item, dict):
+            result[key], inner = drop_empty_optionals(sub, item)
+            notes.extend(f"{key}: {note}" for note in inner)
+        elif isinstance(item, list) and isinstance(sub.get("items"), dict):
+            rows = []
+            for index, row in enumerate(item):
+                row, inner = drop_empty_optionals(sub["items"], row)
+                rows.append(row)
+                notes.extend(f"{key}[{index}]: {note}" for note in inner)
+            result[key] = rows
+    if not notes:
+        return value, []
+    return result, notes
+
+
+def _parse_as(expected: str, text: str) -> Any:
+    stripped = text.strip()
+    if expected == "boolean":
+        lowered = stripped.lower()
+        return {"true": True, "false": False}.get(lowered, _NO_VALUE)
+    if expected in ("integer", "number"):
+        try:
+            number = json.loads(stripped)
+        except ValueError:
+            return _NO_VALUE
+        if isinstance(number, bool) or not isinstance(number, (int, float)):
+            return _NO_VALUE
+        if expected == "integer" and isinstance(number, float):
+            return int(number) if number.is_integer() else _NO_VALUE
+        return number
+    if expected in ("array", "object"):
+        if not stripped.startswith("[" if expected == "array" else "{"):
+            return _NO_VALUE
+        try:
+            parsed = json.loads(stripped)
+        except ValueError:
+            return _NO_VALUE
+        return parsed if _matches_type(expected, parsed) else _NO_VALUE
+    return _NO_VALUE
 
 
 def validate_against(schema: dict[str, Any], value: Any) -> list[str]:
@@ -118,7 +266,9 @@ def _validate(schema: dict[str, Any], value: Any, path: str, errors: list[str]) 
 
     expected_type = schema.get("type")
     if expected_type is not None and not _matches_type(expected_type, value):
-        errors.append(f"{path}: expected type {expected_type}, got {type_name(value)}")
+        example = _TYPE_EXAMPLES.get(expected_type) if isinstance(expected_type, str) else None
+        hint = f" (send a JSON {expected_type}, e.g. {example})" if example else ""
+        errors.append(f"{path}: expected type {expected_type}, got {type_name(value)}{hint}")
         return
 
     if isinstance(value, dict):

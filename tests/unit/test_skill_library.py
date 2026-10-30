@@ -188,7 +188,11 @@ def test_install_from_github_subfolder_and_ambiguous_repo(services) -> None:
     installed = services.skills.install("https://github.com/acme/skills/tree/main/skills/pdf-tools")
     assert installed.name == "pdf-tools" and installed.format == "standard"
     assert (services.skills.user_skills_dir() / "pdf-tools" / "scripts" / "extract.py").is_file()
-    assert seen == ["https://codeload.github.com/acme/skills/zip/main"]
+    # The tree API comes first (plan 0.4.0 #53); without it, the archive.
+    assert seen == [
+        "https://api.github.com/repos/acme/skills/git/trees/main?recursive=1",
+        "https://codeload.github.com/acme/skills/zip/main",
+    ]
     record = services.ctx.skill_repo.get("pdf-tools")
     assert record["source_kind"] == "github" and record["origin"] == "installed"
 
@@ -454,3 +458,34 @@ def test_section_headings_tolerate_spanish_levels_and_punctuation(tmp_path) -> N
     assert manifest.procedure.startswith("1. Compilar")
     assert manifest.verification == "- curl /health"
     assert not [i for i in validate_skill(manifest, set()) if i["code"] == "MISSING_PROCEDURE"]
+
+
+def test_an_activated_skill_lives_in_the_conversation_not_the_system_prompt(services) -> None:
+    # F43: activating a skill rewrote the system prompt ([active] in the
+    # catalog, the body in a segment) and broke the cached prefix mid-way.
+    import json
+
+    from rinari.models.types import ChatMessage
+
+    user = services.skills.user_skills_dir()
+    user.mkdir(parents=True, exist_ok=True)
+    _skill(user, "local-notes", RINARI_SKILL)
+    idle = SimpleNamespace(active_skills=None)
+    pinned = SimpleNamespace(active_skills=(("local-notes", "1.0.0"),))
+
+    before_active, before_catalog = _skill_prompt_parts(services, None, idle)
+    pinned_active, pinned_catalog = _skill_prompt_parts(services, None, pinned)
+    assert pinned_catalog == before_catalog and "[active]" not in pinned_catalog
+    # Pinned outside the conversation (the app, the CLI): it goes in the prompt.
+    assert [skill.name for skill in pinned_active] == ["local-notes"]
+
+    result = ChatMessage.tool_result(
+        "c1",
+        "skills.activate",
+        json.dumps({"ok": True, "data": {"name": "local-notes", "procedure": "Keep notes."}}),
+    )
+    delivered_active, delivered_catalog = _skill_prompt_parts(
+        services, None, pinned, history=[result]
+    )
+    assert delivered_active == before_active == ()
+    assert delivered_catalog == before_catalog

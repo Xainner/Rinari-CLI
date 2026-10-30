@@ -8,6 +8,7 @@ roundtrips, provider/model reads. Envelope contract is unchanged.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import secrets
 import threading
@@ -15,6 +16,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from rinari.application.project_service import default_permission
 from rinari.application.provider_service import AddProviderInput
 from rinari.application.services import ServiceContainer
 from rinari.application.session_service import (
@@ -35,7 +37,7 @@ from rinari.engine_protocol.errors import (
     EngineProtocolError,
 )
 from rinari.engine_protocol.flow import collect_flow
-from rinari.engine_protocol.frames import newest_within
+from rinari.engine_protocol.frames import PAGE_BUDGET_BYTES, newest_within
 from rinari.engine_protocol.messages import event, hello
 from rinari.engine_protocol.observability import (
     clamp_read_bytes,
@@ -127,6 +129,9 @@ def _prepare_turn_attachments(
     try:
         prepared = prepare_attachments(services.artifacts, session_id, attachments)
     except (OSError, ValueError, RuntimeError) as exc:
+        # In engine.log too (plan 0.4.0 #57): the reason with the file's real
+        # name, never its content.
+        logger.warning("attachment rejected: %s (%d attached)", exc, len(attachments))
         raise EngineProtocolError(INVALID_PARAMS, str(exc)) from exc
     image_refs = [reference for item in prepared for reference in item.images]
     if image_refs:
@@ -144,6 +149,118 @@ def _prepare_turn_attachments(
                 details={"visual_route": decision.route, "retryable": False},
             )
     return attachment_prompt(prepared), image_refs, [item.reference() for item in prepared]
+
+
+#: Files in a folder that declare commands to run (plan 0.4.0 #60). Rinari runs
+#: the hooks once the folder is trusted; the MCP files are other tools' (Rinari
+#: keeps its project servers in its own database), but a folder that brings
+#: them, like one cloned from the internet, deserves a look before trusting.
+_HOOK_FILES = (".rinari/hooks.json",)
+_MCP_FILES = (".mcp.json", ".rinari/mcp.json", ".vscode/mcp.json", ".cursor/mcp.json")
+
+
+def _runs_commands(root: Path) -> dict[str, bool]:
+    def present(names: tuple[str, ...]) -> bool:
+        return any((root / name).is_file() for name in names)
+
+    return {"has_hooks": present(_HOOK_FILES), "has_mcp": present(_MCP_FILES)}
+
+
+#: How much of a command's output a timeline page carries per stream (#91);
+#: the rest is one click away (`session.tool.output`, «Ver completo»).
+TIMELINE_STREAM_CHARS = 1_000
+#: What a page of persisted turns weighs at most, besides its newest turn.
+TIMELINE_PAGE_BYTES = 500_000
+#: Each long text inside a call's arguments, as the page shows them: the
+#: path or the command stay whole, a file's content is cut.
+TIMELINE_ARGUMENT_CHARS = 300
+
+
+def _shorten(value: Any, limit: int, depth: int = 0) -> tuple[Any, bool]:
+    """`value` with every string longer than `limit` cut; and whether any was."""
+    if isinstance(value, str):
+        return (value[:limit] + "…", True) if len(value) > limit else (value, False)
+    if depth > 6:
+        return value, False
+    if isinstance(value, dict):
+        cut = False
+        result = {}
+        for key, item in value.items():
+            result[key], was = _shorten(item, limit, depth + 1)
+            cut = cut or was
+        return result, cut
+    if isinstance(value, list):
+        pairs = [_shorten(item, limit, depth + 1) for item in value]
+        return [item for item, _ in pairs], any(was for _, was in pairs)
+    return value, False
+
+
+def _shorten_arguments(text: Any) -> Any:
+    """The display copy of a call's arguments (a JSON string) with long texts cut."""
+    if not isinstance(text, str) or len(text) <= TIMELINE_ARGUMENT_CHARS:
+        return text
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return text[: TIMELINE_ARGUMENT_CHARS * 2] + "…"
+    shortened, _ = _shorten(parsed, TIMELINE_ARGUMENT_CHARS)
+    return json.dumps(shortened, ensure_ascii=False)
+
+
+def _lighten_for_timeline(payload: dict[str, Any]) -> None:
+    """What the desktop never reads from a stored turn stays out of the page.
+
+    `observation` is the text the model saw (the bulk of the database); the
+    desktop shows `result` and `presentation`. Command output and long tool
+    data are capped and the cut is flagged (`page_truncated`, not the tool's
+    own `truncated`), so the view offers them whole through
+    `session.tool.output`. What is said elsewhere in the page (ids, the
+    arguments of a call, a subagent's objective) is said once.
+    """
+    payload.pop("observation", None)
+    # The whole arguments are the record's (#91); the page shows `arguments`.
+    payload.pop("full_arguments", None)
+    # Said once per turn, not per item: the turn carries its ids, and nothing
+    # reads the folder of each event nor the id of the model's result.
+    for key in ("session_id", "turn_id", "workspace_root", "result_id"):
+        payload.pop(key, None)
+    event = payload.get("event")
+    if event == "agent.activity":
+        # A subagent's objective is in its `agent.started`; its events are its work.
+        payload.pop("objective", None)
+        event = payload.get("child_event")
+    if event in ("tool.started", "tool.completed", "tool.failed", "tool.cancelled"):
+        # The arguments are said once, in `tool.requested`.
+        payload.pop("arguments", None)
+    elif "arguments" in payload:
+        payload["arguments"] = _shorten_arguments(payload["arguments"])
+    if isinstance(event, str) and event.startswith("governor.") and event != "governor.compact":
+        # The view shows the governor's action and reason, not its counters.
+        payload.pop("governor", None)
+        payload.pop("usage", None)
+    if event == "turn.changes.completed" and isinstance(payload.get("files"), list):
+        # The diff comes whole from `turn.changes.review` when it is opened.
+        payload["files"] = [
+            {key: value for key, value in item.items() if key != "diff"}
+            if isinstance(item, dict)
+            else item
+            for item in payload["files"]
+        ]
+    presentation = payload.get("presentation")
+    if isinstance(presentation, dict):
+        for stream in ("stdout", "stderr"):
+            text = presentation.get(stream)
+            if isinstance(text, str) and len(text) > TIMELINE_STREAM_CHARS:
+                presentation = {
+                    **presentation,
+                    stream: text[:TIMELINE_STREAM_CHARS],
+                    "page_truncated": True,
+                }
+        if "data" in presentation:
+            data, cut = _shorten(presentation["data"], TIMELINE_STREAM_CHARS)
+            if cut:
+                presentation = {**presentation, "data": data, "page_truncated": True}
+        payload["presentation"] = presentation
 
 
 class EngineServer:
@@ -165,6 +282,11 @@ class EngineServer:
         self._dispatcher = EngineDispatcher()
         self._model_jobs: dict[str, dict[str, Any]] = {}
         self._model_jobs_lock = threading.Lock()
+        # GitHub reads in flight for repo.status (#82), by (root, branch).
+        self._repo_refreshing: set[tuple[str, str]] = set()
+        self._repo_lock = threading.Lock()
+        # session.summary.changed, coalesced per session (#82).
+        self._summary_pending: set[str] = set()
         # Broker del browser nativo (documento 03 §5). El bridge existe siempre;
         # lo que decide si hay browser nativo es que un host se registre. Un
         # Engine sin host de escritorio no cambia de comportamiento.
@@ -187,6 +309,7 @@ class EngineServer:
         self._dispatcher.register("browser.context.get", self._browser_context_get)
         self._dispatcher.register("browser.control.set", self._browser_control_set)
         self._dispatcher.register("browser.context.prepare", self._browser_context_prepare)
+        self._dispatcher.register("browser.external.open", self._browser_external_open)
         self._dispatcher.register("target.list", self._target_list)
         self._dispatcher.register("target.add", self._target_add)
         self._dispatcher.register("session.list", self._session_list)
@@ -205,8 +328,73 @@ class EngineServer:
         from rinari.engine_protocol.schedule import ScheduleRunner
 
         self._schedule = ScheduleRunner(self)
+        # A watched connector job wakes its conversation when it is done (Ideas-2).
+        if self._services.job_watches is not None:
+            self._services.job_watches.wake = self._turns.wake
+        from rinari.engine_protocol.agency import AgencyMethods
+
+        self._agency = AgencyMethods(self)
+        self._dispatcher.register("agency.agent.list", self._agency.list)
+        self._dispatcher.register("agency.agent.get", self._agency.get)
+        self._dispatcher.register("agency.agent.create", self._agency.create)
+        self._dispatcher.register("agency.agent.update", self._agency.update)
+        self._dispatcher.register("agency.agent.archive", self._agency.archive)
+        self._dispatcher.register("agency.agent.unarchive", self._agency.unarchive)
+        self._dispatcher.register("agency.agent.delete", self._agency.delete)
+        self._dispatcher.register("agency.templates.list", self._agency.templates_list)
+        self._dispatcher.register("agency.team.from_template", self._agency.team_from_template)
+        self._dispatcher.register("agency.status", self._agency.status)
+        self._dispatcher.register("agency.agent.draft", self._agency.draft)
+        self._dispatcher.register("agency.stop_all", self._agency.stop_all)
+        self._dispatcher.register("agency.agent.memory.list", self._agency.memory_list)
+        self._dispatcher.register("agency.agent.memory.add", self._agency.memory_add)
+        self._dispatcher.register("agency.team.memory.list", self._agency.team_memory_list)
+        self._dispatcher.register("agency.team.memory.add", self._agency.team_memory_add)
+        from rinari.engine_protocol.agency_teams import AgencyTeams
+
+        self._teams = AgencyTeams(self)
+        self._services.teams.board = self._teams
+        self._dispatcher.register("agency.team.list", self._teams.list)
+        self._dispatcher.register("agency.team.get", self._teams.get)
+        self._dispatcher.register("agency.team.create", self._teams.create)
+        self._dispatcher.register("agency.team.update", self._teams.update)
+        self._dispatcher.register("agency.team.archive", self._teams.archive)
+        self._dispatcher.register("agency.team.unarchive", self._teams.unarchive)
+        self._dispatcher.register("agency.team.delete", self._teams.delete)
+        self._dispatcher.register("agency.team.stop", self._teams.stop_team)
+        self._dispatcher.register("agency.team.resume", self._teams.resume_team)
+        self._dispatcher.register("agency.team.join", self._teams.join)
+        self._dispatcher.register("agency.team.leave", self._teams.leave)
+        self._dispatcher.register("agency.office.list", self._teams.office_list)
+        self._dispatcher.register("agency.office.post", self._teams.office_post)
+        self._dispatcher.register("agency.errand.create", self._teams.errand_create)
+        self._dispatcher.register("agency.errand.list", self._teams.errand_list)
+        self._dispatcher.register("agency.errand.review", self._teams.errand_review)
+        self._dispatcher.register("agency.errand.cancel", self._teams.errand_cancel)
+        self._dispatcher.register("agency.errand.retry", self._teams.errand_retry)
+        self._dispatcher.register("agency.team.template", self._teams.template)
+        self._dispatcher.register("agency.team.duplicate", self._teams.duplicate)
+        self._dispatcher.register("agency.team.overview", self._teams.work.overview)
+        self._dispatcher.register("agency.routine.list", self._teams.work.routines_list)
+        self._dispatcher.register("agency.routine.create", self._teams.work.routine_create)
+        self._dispatcher.register("agency.flow.list", self._teams.work.flow_list)
+        self._dispatcher.register("agency.flow.save", self._teams.work.flow_save)
+        self._dispatcher.register("agency.flow.delete", self._teams.work.flow_delete)
+        self._dispatcher.register("agency.flow.start", self._teams.work.flow_start)
+        self._dispatcher.register("agency.flow.run.cancel", self._teams.work.flow_run_cancel)
+        self._dispatcher.register("agency.resume", self._teams.resume_params)
+        self._dispatcher.register("agency.chain.dismiss", self._teams.dismiss_stopped)
+        self._dispatcher.register("agency.settings.get", self._agency.settings_get)
+        self._dispatcher.register("agency.settings.set", self._agency.settings_set)
+        from rinari.engine_protocol.resume import ResumeRunner
+
+        self._resume = ResumeRunner(self)
+        self._turns.add_observer(self._summary_observe)
         self._services.schedules.on_proposed = lambda payload: self._turns.emit_external(
             event("schedule.proposed", payload)
+        )
+        self._services.schedules.on_changed = lambda task_id, change: self._turns.emit_external(
+            event("schedule.changed", {"task_id": task_id, "change": change})
         )
         # Automatic titles land mid-turn (or on a later turn, when the first
         # attempt failed): clients learn the new title as soon as it is stored.
@@ -221,12 +409,14 @@ class EngineServer:
         self._dispatcher.register("schedule.runs", self._schedule.runs)
         self._dispatcher.register("schedule.run_now", self._schedule.run)
         self._dispatcher.register("schedule.grant", self._schedule.grant)
+        self._dispatcher.register("schedule.rehearse", self._schedule.rehearse)
         self._dispatcher.register("workspace.process.list", self._process_tasks.list)
         self._dispatcher.register("workspace.process.read", self._process_tasks.read)
         self._dispatcher.register("workspace.process.stop", self._process_tasks.stop)
         self._dispatcher.register("workspace.preview.start", self._previews.start)
         self._dispatcher.register("workspace.preview.status", self._previews.status)
         self._dispatcher.register("workspace.preview.stop", self._previews.stop)
+        self._dispatcher.register("workspace.preview.list", self._previews.list)
         self._dispatcher.register("session.move", self._desktop.move)
         self._dispatcher.register("workspace.file.read", self._desktop.read)
         self._dispatcher.register("workspace.file.resolve", self._desktop.resolve)
@@ -243,8 +433,14 @@ class EngineServer:
         self._dispatcher.register("session.delete", self._session_delete)
         self._dispatcher.register("session.branch", self._session_branch)
         self._dispatcher.register("session.fork", self._session_branch)
+        self._dispatcher.register("session.children.list", self._session_children_list)
+        self._dispatcher.register("session.child.start", self._session_child_start)
+        self._dispatcher.register("session.child.integrate", self._session_child_integrate)
+        self._dispatcher.register("session.child.discard", self._session_child_discard)
+        self._dispatcher.register("session.children.isolation", self._session_children_isolation)
         self._dispatcher.register("session.history", self._session_history)
         self._dispatcher.register("session.timeline", self._session_timeline)
+        self._dispatcher.register("session.tool.output", self._session_tool_output)
         self._dispatcher.register("session.mode.set", self._session_mode_set)
         self._dispatcher.register("session.model.set", self._session_model_set)
         self._dispatcher.register("session.permission.get", self._session_permission_get)
@@ -253,6 +449,21 @@ class EngineServer:
         self._dispatcher.register("followup.dismiss", self._followup_dismiss)
         self._dispatcher.register("followup.accept", self._followup_accept)
         self._dispatcher.register("session.checklist.clear", self._session_checklist_clear)
+        self._dispatcher.register("session.checklist.complete", self._session_checklist_complete)
+        self._dispatcher.register("session.goal.get", self._session_goal_get)
+        self._dispatcher.register("session.goal.set", self._session_goal_set)
+        self._dispatcher.register("session.goal.pause", self._session_goal_pause)
+        self._dispatcher.register("session.goal.resume", self._session_goal_resume)
+        self._dispatcher.register("session.goal.clear", self._session_goal_clear)
+        self._dispatcher.register("session.goal.budget", self._session_goal_budget)
+        self._dispatcher.register("session.resume.get", self._session_resume_get)
+        self._dispatcher.register("session.resume.arm", self._session_resume_arm)
+        self._dispatcher.register("session.resume.cancel", self._session_resume_cancel)
+        self._dispatcher.register("session.resume.now", self._session_resume_now)
+        self._dispatcher.register("resume.settings.get", self._resume_settings_get)
+        self._dispatcher.register("models.roles.get", self._models_roles_get)
+        self._dispatcher.register("models.roles.set", self._models_roles_set)
+        self._dispatcher.register("resume.settings.set", self._resume_settings_set)
         self._dispatcher.register("session.permission.set", self._session_permission_set)
         self._dispatcher.register("session.turn.start", self._turn_start)
         self._dispatcher.register("command.list", self._command_list)
@@ -261,6 +472,10 @@ class EngineServer:
         self._dispatcher.register("operation.cancel", self._operation_cancel)
         self._dispatcher.register("session.turn.cancel", self._turn_cancel)
         self._dispatcher.register("session.turn.steer", self._turn_steer)
+        self._dispatcher.register("session.turn.steer_now", self._turn_steer_now)
+        self._dispatcher.register("session.turn.steer.update", self._turn_steer_update)
+        self._dispatcher.register("session.turn.steer.cancel", self._turn_steer_cancel)
+        self._dispatcher.register("session.turn.steer.promote", self._turn_steer_promote)
         self._dispatcher.register("turn.changes.get", self._turn_changes_get)
         self._dispatcher.register("turn.changes.review", self._turn_changes_review)
         self._dispatcher.register("turn.changes.undo.preview", self._turn_changes_undo_preview)
@@ -269,6 +484,15 @@ class EngineServer:
         self._dispatcher.register("channel.resolve", self._turns.channels.resolve)
         self._dispatcher.register("channel.pending", lambda params: self._turns.channels.list())
         self._dispatcher.register("flow.get", self._flow_get)
+        self._dispatcher.register("project.init.start", self._project_init_start)
+        self._dispatcher.register("session.tool.background", self._session_tool_background)
+        self._dispatcher.register("process.orphans.list", self._process_orphans_list)
+        self._dispatcher.register("process.orphan.stop", self._process_orphan_stop)
+        self._dispatcher.register("process.persistent.list", self._process_persistent_list)
+        self._dispatcher.register("process.persistent.stop", self._process_persistent_stop)
+        self._dispatcher.register(
+            "project.instructions.resolve", self._project_instructions_resolve
+        )
         self._dispatcher.register("task.tree", self._task_tree)
         self._dispatcher.register("task.get", self._task_get)
         self._dispatcher.register("verification.latest", self._verification_latest)
@@ -287,6 +511,9 @@ class EngineServer:
         self._dispatcher.register("project.delete", self._project_delete)
         self._dispatcher.register("project.open", self._project_open)
         self._dispatcher.register("project.status", self._project_status)
+        self._dispatcher.register("repo.status", self._repo_status)
+        self._dispatcher.register("session.summary", self._session_summary)
+        self._dispatcher.register("repo.pr.create", self._repo_pr_create)
         self._dispatcher.register("project.intelligence", self._project_intelligence)
         self._dispatcher.register("project.trust", self._project_trust)
         self._dispatcher.register("pty.start", self._pty_start)
@@ -309,11 +536,19 @@ class EngineServer:
         self._dispatcher.register("soul.update", self._soul_update)
         self._dispatcher.register("soul.remove", self._soul_remove)
         self._dispatcher.register("soul.activate", self._soul_activate)
+        self._dispatcher.register("soul.export", self._soul_export)
+        self._dispatcher.register("soul.import", self._soul_import)
         self._dispatcher.register("soul.get_effective", self._soul_get_effective)
         self._dispatcher.register("soul.settings.get", self._soul_settings_get)
         self._dispatcher.register("soul.settings.set", self._soul_settings_set)
         self._dispatcher.register("session.soul.set", self._session_soul_set)
         self._dispatcher.register("session.soul.clear", self._session_soul_clear)
+        # MCP connections (connectors plan, C2): the Engine connects servers in
+        # the background; each change of state reaches the clients as an event.
+        self._services.mcp.on_status = lambda payload: self._turns.emit_external(
+            event("mcp.status.changed", payload)
+        )
+        self._dispatcher.register("mcp.reconnect", self._mcp_reconnect)
         self._dispatcher.register("mcp.list", self._mcp_list)
         self._dispatcher.register("mcp.get", self._mcp_get)
         self._dispatcher.register("mcp.create", self._mcp_create)
@@ -331,6 +566,23 @@ class EngineServer:
         from rinari.engine_protocol.speech import SpeechMethods
 
         SpeechMethods(self._services, self._turns.emit_external).register(self._dispatcher)
+        from rinari.engine_protocol.mcp_auth import McpAuthMethods
+
+        self._mcp_auth = McpAuthMethods(self._services, self._turns.emit_external)
+        self._mcp_auth.register(self._dispatcher)
+        # Permissions per connector and per tool (connectors plan, C5).
+        from rinari.engine_protocol.mcp_tools import McpToolMethods
+
+        McpToolMethods(self._services).register(self._dispatcher)
+
+        # Connector catalog and imports (connectors plan, C4): mcp.catalog.*,
+        # mcp.import.* and mcp.project_offers.*.
+        from rinari.engine_protocol.mcp_connectors import McpConnectorMethods
+
+        user_home = self._user_home
+        McpConnectorMethods(
+            self._services, home=(lambda: user_home) if user_home is not None else None
+        ).register(self._dispatcher)
         from rinari.engine_protocol.skills import SkillMethods
 
         self._skills = SkillMethods(
@@ -364,6 +616,18 @@ class EngineServer:
         from rinari.engine_protocol.media import register_media
 
         self._attachment_jobs = register_media(self._dispatcher, self._services)
+        from rinari.engine_protocol.advanced import register_advanced
+
+        register_advanced(self._dispatcher, self._services)
+        from rinari.engine_protocol.usage_report import register_usage_report
+
+        register_usage_report(self._dispatcher, self._services)
+        from rinari.engine_protocol.review_export import register_review_export
+
+        register_review_export(self._dispatcher, self._services)
+        from rinari.engine_protocol.workspace_tree import register_workspace_tree
+
+        register_workspace_tree(self._dispatcher, self._services)
         self._dispatcher.register("artifact.list", self._artifact_list)
         self._dispatcher.register("artifact.read", self._artifact_read)
         self._dispatcher.register("artifact.export", self._artifact_export)
@@ -385,6 +649,9 @@ class EngineServer:
         self._dispatcher.register("memory.forget", self._memory_forget)
         self._dispatcher.register("memory.candidates.list", self._memory_candidates_list)
         self._dispatcher.register("memory.candidate.resolve", self._memory_candidate_resolve)
+        self._dispatcher.register("memory.move", self._memory_move)
+        self._dispatcher.register("memory.about.get", self._memory_about_get)
+        self._dispatcher.register("memory.about.set", self._memory_about_set)
         self._dispatcher.register("memory.settings.get", self._memory_settings_get)
         self._dispatcher.register("memory.settings.set", self._memory_settings_set)
         self._dispatcher.register("memory.export", self._memory_export)
@@ -399,12 +666,6 @@ class EngineServer:
         self._dispatcher.register("session.queue.list", self._queue_list)
         self._dispatcher.register("session.queue.clear", self._queue_clear)
         self._dispatcher.register("session.queue.resume", self._queue_resume)
-        self._dispatcher.register("session.peer_group.set", self._peer_group_set)
-        self._dispatcher.register("session.peer_group.get", self._peer_group_get)
-        self._dispatcher.register("session.peer_group.revoke", self._peer_group_revoke)
-        self._dispatcher.register("session.peer_message.list", self._peer_message_list)
-        self._dispatcher.register("session.peer_message.cancel", self._peer_message_cancel)
-        self._dispatcher.register("session.peer_message.forward", self._peer_message_forward)
         self._dispatcher.register("profile_bundle.list", self._bundle_list)
         self._dispatcher.register("profile_bundle.get", self._bundle_get)
         self._dispatcher.register("profile_bundle.create", self._bundle_create)
@@ -430,6 +691,20 @@ class EngineServer:
         self._dispatcher.register("provider.runtime.probe", self._provider_runtime_probe)
         self._dispatcher.register("provider.settings.get", self._provider_settings_get)
         self._dispatcher.register("provider.settings.set", self._provider_settings_set)
+        # Network (plan 0.4.0 #96, «Red»): proxy, certificates, «Probar conexión».
+        from rinari.engine_protocol import network as network_methods
+
+        self._dispatcher.register(
+            "network.settings.get",
+            lambda params: network_methods.settings_get(self._services, params),
+        )
+        self._dispatcher.register(
+            "network.settings.set",
+            lambda params: network_methods.settings_set(self._services, params),
+        )
+        self._dispatcher.register(
+            "network.test", lambda params: network_methods.run_test(self._services, params)
+        )
         self._dispatcher.register("provider.create", self._provider_create)
         self._dispatcher.register("provider.get", self._provider_get)
         self._dispatcher.register("provider.update", self._provider_update)
@@ -446,6 +721,8 @@ class EngineServer:
         self._dispatcher.register("model.discover", self._model_discover)
         self._dispatcher.register("model.discovery.start", self._model_discovery_start)
         self._dispatcher.register("model.refresh", self._model_refresh)
+        self._dispatcher.register("model.hidden.list", self._model_hidden_list)
+        self._dispatcher.register("model.unhide", self._model_unhide)
         self._dispatcher.register("model.test", self._model_test)
         self._dispatcher.register("runtime.snapshot.get", self._snapshot_get)
 
@@ -474,9 +751,19 @@ class EngineServer:
     def start_background(self) -> None:
         """Background work of a serving Engine (not of one built for a test)."""
         self._schedule.start()
+        self._teams.start()
+        self._resume.start()
+        # Connect the MCP servers now, in parallel; no turn waits for them (C2).
+        self._services.mcp.start_background()
 
     def close(self) -> None:
+        if hasattr(self, "_mcp_auth"):
+            self._mcp_auth.close()
         self._schedule.close()
+        self._resume.close()
+        if self._services.job_watches is not None:
+            self._services.job_watches.close()
+        self._services.mcp.stop_background()
         if hasattr(self, "_provider_auth_service"):
             self._provider_auth_service.close()
         self._attachment_jobs.close()
@@ -597,6 +884,52 @@ class EngineServer:
         # agente la recupera en su primera acción; un control tomado a mano no.
         return self._browser_registry.set_control(record.id, owner, expected, automatic=automatic)
 
+    def _browser_external_open(self, params: dict[str, Any]) -> dict[str, Any]:
+        """`browser.external.open`: the session goes on in a real Chrome/Edge (#45).
+
+        The owner asks for it from the human-verification card: the page
+        opens in a visible window of the installed Chrome or Edge, with a
+        Rinari profile kept per project (never the owner's own profile or
+        passwords). The owner passes the check there and the agent keeps
+        working in that window. Launching takes seconds, so it runs in a
+        worker and the result arrives as `browser.external.changed`.
+        """
+        record = self._services.sessions.show(self._need_str(params, "session_id"))
+        url = self._need_str(params, "url")
+        if not url.startswith(("https://", "http://")):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'url' must be an http(s) URL.")
+        manager = self._browser_registry.acquire(record.id)
+        if manager is None:
+            raise EngineProtocolError(
+                INVALID_PARAMS, "This session has no browser to move to Chrome or Edge."
+            )
+        key = record.project_id or "chat"
+        profile = self._services.ctx.home / "browser" / "profiles" / "external" / key
+        publish = self._browser_host.publish
+
+        def run() -> None:
+            from rinari.browser.manager import BrowserError
+
+            try:
+                opened = manager.use_external(url, profile)
+            except BrowserError as exc:
+                publish(
+                    "browser.external.changed",
+                    {
+                        "session_id": record.id,
+                        "state": "failed",
+                        "error": {"code": exc.code, "message": exc.message},
+                    },
+                )
+                return
+            publish(
+                "browser.external.changed",
+                {"session_id": record.id, "state": "open", "url": opened.get("url") or url},
+            )
+
+        threading.Thread(target=run, name="browser-external-open", daemon=True).start()
+        return {"session_id": record.id, "state": "opening"}
+
     # -- sessions --------------------------------------------------------
 
     def _session_list(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -612,12 +945,19 @@ class EngineServer:
             raise EngineProtocolError(INVALID_PARAMS, "Param 'project_id' must be a string.")
         if state is not None and (not isinstance(state, str) or not state):
             raise EngineProtocolError(INVALID_PARAMS, "Param 'state' must be a string.")
+        agent_id = params.get("agent_id")
+        if agent_id is not None and (not isinstance(agent_id, str) or not agent_id):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'agent_id' must be a string.")
+        # Rinari Agency: an agent's conversations are not Rinari's. They are
+        # listed only when asked for by agent.
         records = self._services.sessions.list(
             kind=kind,
             project_id=project_id,
             state=state,
             limit=limit,
             rinari_profile_id=self._profile_filter(params),
+            agent_id=agent_id,
+            exclude_agents=agent_id is None,
         )
         if not params.get("include_closed", False) and state is None:
             records = [
@@ -649,7 +989,7 @@ class EngineServer:
         # Una sesión archivada no tiene pestañas abiertas: sus watches seguirían
         # leyendo el disco cada 500 ms hasta apagar el Engine.
         self._desktop.close_session(record.id)
-        self._turns.peers.on_session_gone(record.id)
+        self._turns.grants.forget(record.id)
         return {"session": session_to_dict(result)}
 
     def _session_pin(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -679,7 +1019,7 @@ class EngineServer:
         self._desktop.close_session(record.id)
         self._turns.close_browser(record.id)
         self._turns.close_processes(record.id)
-        self._turns.peers.on_session_gone(record.id)
+        self._turns.grants.forget(record.id)
         return {"session": session_to_dict(result)}
 
     def _session_delete(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -717,7 +1057,7 @@ class EngineServer:
         self._desktop.close_session(record.id)
         self._turns.close_browser(record.id)
         self._turns.close_processes(record.id)
-        self._turns.peers.on_session_gone(record.id)
+        self._turns.grants.forget(record.id)
         if cascade:
             artifacts_removed = self._services.artifacts.gc(session_id=sid)
             artifacts_kept = 0
@@ -809,9 +1149,10 @@ class EngineServer:
         # No mode given: the profile's, else BUILD (a desktop session is
         # born in a real mode).
         mode = params.get("mode")
-        permission_profile = params.get("permission_profile", "workspace")
-        if (mode is not None and not isinstance(mode, str)) or not isinstance(
-            permission_profile, str
+        # No permission_profile: the project's default mode, else Proyecto (P-5).
+        permission_profile = params.get("permission_profile")
+        if (mode is not None and not isinstance(mode, str)) or (
+            permission_profile is not None and not isinstance(permission_profile, str)
         ):
             raise EngineProtocolError(
                 INVALID_PARAMS,
@@ -879,19 +1220,40 @@ class EngineServer:
         limit = params.get("limit", 200)
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 500:
             raise EngineProtocolError(INVALID_PARAMS, "Param 'limit' must be an int in 1..500.")
+        before_seq = params.get("before_seq")
+        if before_seq is not None and (
+            not isinstance(before_seq, int) or isinstance(before_seq, bool) or before_seq < 1
+        ):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'before_seq' must be an int >= 1.")
         record = self._services.sessions.show(ref)
-        stored = self._services.ctx.message_repo.list(record.id)
-        total = len(stored)
-        stored, redacted = self._services.memory.redact_history(stored)
-        window = stored[-limit:] if total > limit else stored
+        repo = self._services.ctx.message_repo
+        # Only the page is read (#70): a long conversation no longer costs its
+        # whole history on every open.
+        total = repo.count(record.id)
+        window = repo.page(record.id, limit, before_seq)
+        # The page may start inside a turn whose user message was forgotten:
+        # that turn's first rows come along so the redaction sees them.
+        lead = []
+        if window and window[0].turn_id and window[0].role != "user":
+            lead = [
+                row
+                for row in repo.list_for_turns(record.id, [window[0].turn_id])
+                if row.seq < window[0].seq
+            ]
+        kept, redacted = self._services.memory.redact_history([*lead, *window])
+        first = window[0].seq if window else None
+        kept = [row for row in kept if first is None or row.seq >= first]
         # A page is bounded by bytes too: a few huge tool outputs must not
         # produce a line the desktop drops, taking the whole connection with it.
-        messages = newest_within([message_to_dict(item) for item in window])
+        messages = newest_within([message_to_dict(item) for item in kept])
+        oldest = messages[0]["seq"] if messages else None
+        has_more = bool(oldest) and repo.page(record.id, 1, oldest) != []
         return {
             "session_id": record.id,
             "messages": messages,
             "total": total,
-            "has_more": total > len(messages),
+            "has_more": has_more,
+            "next_before_seq": oldest if has_more else None,
             "redacted": redacted,
         }
 
@@ -957,6 +1319,7 @@ class EngineServer:
         if scope == "all":
             rows.sort(key=lambda row: str(row.get("updated_at") or ""), reverse=True)
             rows = rows[:limit]
+        rows = self._with_place_labels(rows)
         return {"scope": scope, "records": rows, "count": len(rows)}
 
     def _memory_search(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1233,6 +1596,8 @@ class EngineServer:
             "decision",
             "text",
             "topic",
+            "place",
+            "project_root",
         }:
             raise EngineProtocolError(INVALID_PARAMS, "Candidate id and decision are required.")
         candidate_id = params.get("id")
@@ -1259,9 +1624,17 @@ class EngineServer:
                 TURN_RUNNING,
                 "Finish active turns before resolving a memory candidate.",
             )
+        place = params.get("place")
+        if place is not None and place not in ("general", "profile", "project", "chat"):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'place' is not a memory place.")
         try:
             row = self._services.memory.resolve_candidate(
-                candidate_id, decision, text=text, topic=topic
+                candidate_id,
+                decision,
+                text=text,
+                topic=topic,
+                place=place,
+                project_root=self._opt_str(params, "project_root"),
             )
         except MemoryNotFoundError as exc:
             raise EngineProtocolError("NOT_FOUND", exc.message) from exc
@@ -1278,6 +1651,111 @@ class EngineServer:
                 # The card refetches the list; a lost event is presentation.
                 logger.exception("memory.candidate.resolved event failed")
         return {"candidate": row}
+
+    def _memory_move(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Move a memory to another place (#75): general, a profile, a project or a chat."""
+        from rinari.memory.service import MemoryNotFoundError
+
+        self._memory_reject_unknown(params, {"id", "place", "place_ref", "project_root"})
+        memory_id = self._memory_id(params)
+        place = params.get("place")
+        if place not in ("general", "profile", "project", "chat"):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'place' is not a memory place.")
+        try:
+            record = self._services.memory.move(
+                memory_id,
+                place,
+                place_ref=self._opt_str(params, "place_ref"),
+                project_root=self._opt_str(params, "project_root"),
+            )
+        except MemoryNotFoundError as exc:
+            raise EngineProtocolError("NOT_FOUND", exc.message) from exc
+        except InvalidUsageError as exc:
+            raise EngineProtocolError(INVALID_PARAMS, exc.message) from exc
+        return {"record": self._with_place_labels([record])[0]}
+
+    def _memory_about_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        if params:
+            raise EngineProtocolError(INVALID_PARAMS, "memory.about.get takes no parameters.")
+        return self._services.memory.about_get()
+
+    def _memory_about_set(self, params: dict[str, Any]) -> dict[str, Any]:
+        """«Sobre ti» from the welcome (#71): the owner's own words, no approval."""
+        self._memory_reject_unknown(params, {"name", "uses", "preferences"})
+        uses = params.get("uses", [])
+        if not isinstance(uses, list) or not all(isinstance(item, str) for item in uses):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'uses' must be a list of strings.")
+        try:
+            return self._services.memory.about_set(
+                name=self._opt_str(params, "name"),
+                uses=uses,
+                preferences=self._opt_str(params, "preferences"),
+            )
+        except InvalidUsageError as exc:
+            raise EngineProtocolError(INVALID_PARAMS, exc.message) from exc
+
+    def _with_place_labels(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Each record says where it applies, by name (#75)."""
+        profiles: dict[str, str] = {}
+        try:
+            for profile in self._services.rinari_profiles.summaries():
+                profiles[str(profile.get("id"))] = str(profile.get("name") or profile.get("id"))
+        except Exception:
+            profiles = {}
+        out = []
+        for row in rows:
+            view = dict(row)
+            if view.get("scope") == "project":
+                view["place"] = "project"
+                view["place_ref"] = view.get("project_root")
+                root = str(view.get("project_root") or "")
+                view["place_label"] = root.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] or root
+            else:
+                place = view.get("place") or "general"
+                view["place"] = place
+                ref = view.get("place_ref")
+                if place == "profile":
+                    view["place_label"] = profiles.get(str(ref), str(ref))
+                elif place == "chat":
+                    record = self._services.ctx.session_repo.get(str(ref)) if ref else None
+                    view["place_label"] = (
+                        (getattr(record, "title", None) or str(ref)) if ref else ""
+                    )
+                elif place == "agent":
+                    # Rinari Agency: an agent's own memory, by the agent's name.
+                    agent = self._services.ctx.agency_repo.get(str(ref)) if ref else None
+                    view["place_label"] = agent["name"] if agent else str(ref or "")
+                elif place == "team":
+                    team = self._services.ctx.team_repo.get(str(ref)) if ref else None
+                    view["place_label"] = team["name"] if team else str(ref or "")
+                else:
+                    view["place_label"] = None
+            view["origin"] = self._memory_origin(view)
+            out.append(view)
+        return out
+
+    def _memory_origin(self, view: dict[str, Any]) -> dict[str, Any] | None:
+        """The conversation a memory came from, by name (#75): the one that saved
+        it, else the one its provenance names (facts learned before 0.4.0)."""
+        import re
+
+        session_id = view.get("source_session_id")
+        if not session_id:
+            sources = view.get("sources") or []
+            session_id = next((item.get("session_id") for item in sources if item), None)
+        if not session_id:
+            match = re.search(
+                r"(?:session[:/])(ses_[A-Za-z0-9]+)", str(view.get("provenance") or "")
+            )
+            session_id = match.group(1) if match else None
+        if not session_id:
+            return None
+        record = self._services.ctx.session_repo.get(str(session_id))
+        return {
+            "session_id": str(session_id),
+            "title": getattr(record, "title", None),
+            "exists": record is not None,
+        }
 
     def _memory_ledger_export(self, params: dict[str, Any]) -> dict[str, Any]:
         if params:
@@ -1411,25 +1889,55 @@ class EngineServer:
         record = self._services.sessions.show(ref)
         self._turns.questions.list(record.id)  # Reconcile orphaned waits after restart.
         self._turns.reconcile_orphan_turns(record.id)
-        events = [row for row in self._services.ctx.event_repo.list(record.id) if row.turn_id]
-        messages = self._services.ctx.message_repo.list(record.id)
+        # Only the turns of the page are read (#91): the order comes from one
+        # grouped query, and the events and messages of the rest stay on disk.
+        order_all = self._services.ctx.event_repo.turn_order(record.id)
+        index_of = {turn_id: index for index, turn_id in enumerate(order_all)}
+        candidates = order_all if before is None else order_all[:before]
+        page_ids = candidates[-(limit + 1) :]
+        events = self._services.ctx.event_repo.list_for_turns(record.id, page_ids)
+        messages = self._services.ctx.message_repo.list_for_turns(record.id, page_ids)
+        suppressed = self._services.memory.repo.suppressed_message_ids(record.id)
+        redacted_turns = {row.turn_id for row in messages if row.id in suppressed and row.turn_id}
         messages, _redacted = self._services.memory.redact_history(messages)
-        redacted_turns = {
-            row.turn_id
-            for row in self._services.ctx.message_repo.list(record.id)
-            if row.id in self._services.memory.repo.suppressed_message_ids(record.id)
-            and row.turn_id
+        ended_tools = {
+            str((row.payload or {}).get("tool_call_id"))
+            for row in events
+            if row.type in {"tool.completed", "tool.failed", "tool.cancelled"}
+        }
+        # A subagent's live chunks were for watching it; once it ended, its
+        # completed messages and tools say the same (#91).
+        ended_agents = {
+            str((row.payload or {}).get("agent_id"))
+            for row in events
+            if row.type in {"agent.completed", "agent.failed"}
+            or (
+                row.type == "agent.activity"
+                and (row.payload or {}).get("child_event") in {"agent.completed", "agent.failed"}
+            )
         }
 
         by_turn: dict[str, dict[str, Any]] = {}
         order: list[str] = []
         for row in events:
             turn_id = str(row.turn_id)
+            if (
+                row.type == "tool.output.delta"
+                and str((row.payload or {}).get("tool_call_id")) in ended_tools
+            ):
+                # The ended tool carries its output; the chunks were for the live view.
+                continue
+            if (
+                row.type == "agent.activity"
+                and str((row.payload or {}).get("child_event") or "").endswith(".delta")
+                and str((row.payload or {}).get("agent_id")) in ended_agents
+            ):
+                continue
             if turn_id not in by_turn:
                 by_turn[turn_id] = {
                     "turn_id": turn_id,
                     "session_id": record.id,
-                    "turn_index": len(order),
+                    "turn_index": index_of.get(turn_id, len(order)),
                     "status": "running",
                     "started_at": row.created_at,
                     "completed_at": None,
@@ -1463,6 +1971,7 @@ class EngineServer:
                 continue
             payload["event"] = event_name
             payload["activity_seq"] = row.activity_seq or payload.get("activity_seq")
+            _lighten_for_timeline(payload)
             if turn_id in redacted_turns and event_name == "model.content.completed":
                 payload["content"] = "[contenido omitido por privacidad]"
             turn["items"].append(payload)
@@ -1481,11 +1990,12 @@ class EngineServer:
         for turn in selected:
             if turn["turn_id"] in redacted_turns:
                 turn["final_response"] = "[contenido omitido por privacidad]"
-        if before is not None:
-            selected = [item for item in selected if item["turn_index"] < before]
-        has_more = len(selected) > limit
+        has_more = len(candidates) > limit
         selected = selected[-limit:]
-        bounded = newest_within(selected)
+        # A page of busy turns (30 commands each) weighed megabytes: the last
+        # turn comes whole and older ones join while the page stays light;
+        # «Cargar anteriores» brings the rest (#91).
+        bounded = newest_within(selected, TIMELINE_PAGE_BYTES, first_budget=PAGE_BUDGET_BYTES)
         has_more = has_more or len(bounded) < len(selected)
         selected = bounded
         return {
@@ -1493,6 +2003,29 @@ class EngineServer:
             "turns": selected,
             "has_more": has_more,
             "next_before_turn_index": selected[0]["turn_index"] if has_more and selected else None,
+        }
+
+    def _session_tool_output(self, params: dict[str, Any]) -> dict[str, Any]:
+        """The whole stored output of one command the timeline cut (#91)."""
+        record = self._services.sessions.show(self._need_str(params, "ref"))
+        call = self._need_str(params, "tool_call_id")
+        rows = self._services.ctx.db.query(
+            "SELECT payload_json FROM session_events WHERE session_id = ? "
+            "AND type IN ('tool.completed', 'tool.failed', 'tool.cancelled') "
+            "AND json_extract(payload_json, '$.tool_call_id') = ? ORDER BY seq DESC LIMIT 1",
+            (record.id, call),
+        )
+        if not rows:
+            from rinari.shared.errors import NotFoundError
+
+            raise NotFoundError(f"No stored output for tool call {call}.")
+        presentation = (json.loads(rows[0]["payload_json"]) or {}).get("presentation") or {}
+        whole = presentation if isinstance(presentation, dict) else {}
+        return {
+            "tool_call_id": call,
+            "stdout": whole.get("stdout"),
+            "stderr": whole.get("stderr"),
+            "data": whole.get("data"),
         }
 
     def _session_mode_set(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1577,38 +2110,29 @@ class EngineServer:
                 }
             if suggestion.status != "pending":
                 raise ConflictError(f"This suggestion is {suggestion.status}.")
-            source = self._services.sessions.show(suggestion.session_id)
-            project = self._services.projects.get(source.project_id) if source.project_id else None
-            if project is not None and project.archived:
-                raise ConflictError("Restore the project before starting this task.")
-            cwd = Path(project.canonical_root) if project is not None else Path(source.current_cwd)
-            record = self._services.sessions.new(
-                cwd=cwd,
+            # The card may change how the child opens before starting it.
+            spawn = suggestion.spawn
+            context = self._opt_str(params, "context") or spawn["context"]
+            isolation = self._opt_str(params, "isolation") or spawn["isolation"]
+            # A note opens a child of the conversation that left it
+            # (plan-sesiones-hijas 5.1): same project, its permissions, a report.
+            child = self._turns.children.create(
+                suggestion.session_id,
                 title=suggestion.title,
-                forced_chat=project is None,
-                mode="build",
-                permission_profile=source.permission_profile,
-                rinari_profile_id=None if project is not None else source.rinari_profile_id,
+                prompt=suggestion.prompt,
+                origin="plan_step" if suggestion.kind == "plan_step" else "note",
+                context=context,
+                isolation=isolation,
+                done_when=spawn["done_when"],
+                external_content=bool(suggestion.provenance.get("external_content")),
             )
-            if project is not None and record.kind != "PROJECT":
-                record = self._services.sessions.promote(record.id, cwd)
-            accepted = self._followups().mark_accepted(suggestion.id, record.id)
-        turn = self._turns.start_turn(
-            record.id,
-            suggestion.prompt,
-            display_message=suggestion.prompt,
-            origin={
-                "kind": "user",
-                "source": "followup",
-                "suggestion_id": suggestion.id,
-                "source_session_id": source.id,
-            },
-        )
+            accepted = self._followups().mark_accepted(suggestion.id, child["child_session_id"])
         self._turns.emit_followup_resolution(accepted)
         return {
             "suggestion": accepted.as_dict(),
-            "session": session_to_dict(self._services.sessions.show(record.id)),
-            "turn": {"turn_id": turn.get("turn_id")},
+            "session": session_to_dict(self._services.sessions.show(child["child_session_id"])),
+            "turn": {"turn_id": child.get("turn_id")},
+            "child": child,
             "already_accepted": False,
         }
 
@@ -1628,6 +2152,155 @@ class EngineServer:
         service = getattr(self._services, "checklist", None)
         cleared = service.clear(session_id) if service is not None else None
         return {"checklist": cleared.as_dict() if cleared is not None else None}
+
+    # -- model roles (plan 0.4.0 #80) ---------------------------------------------
+
+    def _models_roles_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        from rinari.models.roles import get_roles
+
+        return {"roles": get_roles(self._services.ctx)}
+
+    def _models_roles_set(self, params: dict[str, Any]) -> dict[str, Any]:
+        """fallback / auxiliary: a model alias or id, null clears; auxiliary_compaction: bool."""
+        from rinari.models.roles import set_roles
+
+        changes: dict[str, Any] = {}
+        for role in ("fallback", "auxiliary"):
+            if role in params:
+                value = params[role]
+                if value is not None and not isinstance(value, str):
+                    raise EngineProtocolError(INVALID_PARAMS, f"Param '{role}' must be a string.")
+                changes[role] = value
+        if "auxiliary_compaction" in params:
+            if not isinstance(params["auxiliary_compaction"], bool):
+                raise EngineProtocolError(
+                    INVALID_PARAMS, "Param 'auxiliary_compaction' must be a boolean."
+                )
+            changes["auxiliary_compaction"] = params["auxiliary_compaction"]
+        roles = set_roles(self._services.ctx, self._services.models, **changes)
+        return {"roles": roles}
+
+    # -- resumes (plan 0.4.0 #24) -------------------------------------------------
+
+    def _resume_view(self, session_id: str) -> dict[str, Any]:
+        resume = self._services.resumes.get(session_id)
+        return {"resume": resume.as_dict() if resume is not None else None}
+
+    def _session_resume_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        session_id = self._services.sessions.show(self._need_str(params, "session_id")).id
+        return self._resume_view(session_id)
+
+    def _session_resume_arm(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Continue by itself when the limit that stopped the last turn resets."""
+        session_id = self._services.sessions.show(self._need_str(params, "session_id")).id
+        resets_at = self._opt_str(params, "resets_at")
+        self._resume.arm(session_id, resets_at=resets_at)
+        return self._resume_view(session_id)
+
+    def _session_resume_cancel(self, params: dict[str, Any]) -> dict[str, Any]:
+        session_id = self._services.sessions.show(self._need_str(params, "session_id")).id
+        self._resume.cancel(session_id)
+        return self._resume_view(session_id)
+
+    def _session_resume_now(self, params: dict[str, Any]) -> dict[str, Any]:
+        session_id = self._services.sessions.show(self._need_str(params, "session_id")).id
+        continued = self._resume.now(session_id)
+        return {**self._resume_view(session_id), "continued": continued}
+
+    def _resume_settings_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        return {"auto_resume_on_limits": self._services.resumes.mode()}
+
+    def _resume_settings_set(self, params: dict[str, Any]) -> dict[str, Any]:
+        mode = self._need_str(params, "auto_resume_on_limits")
+        try:
+            return {"auto_resume_on_limits": self._services.resumes.set_mode(mode)}
+        except ValueError as exc:
+            raise EngineProtocolError(INVALID_PARAMS, str(exc)) from exc
+
+    # -- goals (plan 0.4.0 #23) ---------------------------------------------------
+
+    def _goals(self):
+        service = getattr(self._services, "goals", None)
+        if service is None:
+            raise EngineProtocolError(ENGINE_ERROR, "Goals are not available.")
+        return service
+
+    def _goal_call(self, function, *args):
+        from rinari.goals import GoalError
+
+        try:
+            return function(*args)
+        except GoalError as exc:
+            raise EngineProtocolError(INVALID_PARAMS, str(exc)) from exc
+
+    def _goal_reply(self, session_id: str, goal, turn: dict | None = None) -> dict[str, Any]:
+        self._turns.emit_goal(goal, session_id)
+        reply: dict[str, Any] = {"goal": goal.as_dict() if goal is not None else None}
+        if turn is not None:
+            reply["turn"] = {"turn_id": turn.get("turn_id")}
+        return reply
+
+    def _session_goal_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        session_id = self._services.sessions.show(self._need_str(params, "session_id")).id
+        goal = self._goals().visible(session_id)
+        return {"goal": goal.as_dict() if goal is not None else None}
+
+    def _session_goal_set(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Set (or replace) the goal and start pursuing it when the session is free."""
+        session_id = self._services.sessions.show(self._need_str(params, "session_id")).id
+        objective = self._need_str(params, "objective")
+        budget = params.get("budget")
+        start = params.get("start", True)
+        if not isinstance(start, bool):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'start' must be a boolean.")
+        goal = self._goal_call(self._goals().set, session_id, objective, budget)
+        self._turns.emit_goal(goal, session_id)
+        turn = self._turns.start_goal_turn(session_id) if start else None
+        current = self._goals().get(session_id)
+        return self._goal_reply(session_id, current, turn)
+
+    def _session_goal_pause(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Pause: the turn running now finishes, and no new one starts."""
+        session_id = self._services.sessions.show(self._need_str(params, "session_id")).id
+        goal = self._goal_call(self._goals().pause, session_id, "paused by the owner")
+        return self._goal_reply(session_id, goal)
+
+    def _session_goal_resume(self, params: dict[str, Any]) -> dict[str, Any]:
+        session_id = self._services.sessions.show(self._need_str(params, "session_id")).id
+        start = params.get("start", True)
+        if not isinstance(start, bool):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'start' must be a boolean.")
+        goal = self._goal_call(self._goals().resume, session_id)
+        self._turns.emit_goal(goal, session_id)
+        # start=false: the owner's hint goes first as a normal turn, and the
+        # goal goes on when that turn ends.
+        turn = self._turns.start_goal_turn(session_id) if start else None
+        return self._goal_reply(session_id, self._goals().get(session_id), turn)
+
+    def _session_goal_clear(self, params: dict[str, Any]) -> dict[str, Any]:
+        session_id = self._services.sessions.show(self._need_str(params, "session_id")).id
+        goal = self._goal_call(self._goals().clear, session_id)
+        return self._goal_reply(session_id, goal)
+
+    def _session_goal_budget(self, params: dict[str, Any]) -> dict[str, Any]:
+        """The owner's caps (turns, minutes, tokens); {} removes them."""
+        session_id = self._services.sessions.show(self._need_str(params, "session_id")).id
+        budget = params.get("budget")
+        if not isinstance(budget, dict):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'budget' must be an object.")
+        goal = self._goal_call(self._goals().set_budget, session_id, budget)
+        return self._goal_reply(session_id, goal)
+
+    def _session_checklist_complete(self, params: dict[str, Any]) -> dict[str, Any]:
+        """The owner marks every step of a list left open as done."""
+        session_id = self._services.sessions.show(self._need_str(params, "session_id")).id
+        if self._turns.has_active_turn(session_id):
+            raise EngineProtocolError(
+                TURN_RUNNING, "Rinari is working on this list; mark it when the turn ends."
+            )
+        service = getattr(self._services, "checklist", None)
+        done = service.complete_all(session_id) if service is not None else None
+        return {"checklist": done.as_dict() if done is not None else None}
 
     def _session_model_set(self, params: dict[str, Any]) -> dict[str, Any]:
         ref = self._need_str(params, "ref")
@@ -1670,6 +2343,164 @@ class EngineServer:
         return {"session": view}
 
     # -- flow (project_flow_v1) ----------------------------------------------------
+
+    # -- processes left behind (#90) ---------------------------------------------------
+
+    def _session_tool_background(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Move a foreground shell.exec of this session to the background (#32)."""
+        from rinari.tools.native.shell import request_background
+
+        session_id = self._need_str(params, "session_id")
+        tool_call_id = self._need_str(params, "tool_call_id")
+        moved = request_background(session_id, tool_call_id)
+        if not moved:
+            raise NotFoundError("That command is no longer running in the foreground.")
+        return {"session_id": session_id, "tool_call_id": tool_call_id, "requested": True}
+
+    # -- child sessions (plan-sesiones-hijas 5) ---------------------------------------
+
+    def _session_children_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        session_id = self._need_str(params, "session_id")
+        return {"session_id": session_id, "children": self._turns.children.list(session_id)}
+
+    def _session_child_start(self, params: dict[str, Any]) -> dict[str, Any]:
+        """The owner opens a child by hand (a message's menu, /child): it starts now."""
+        session_id = self._need_str(params, "session_id")
+        prompt = self._need_str(params, "prompt").strip()
+        title = self._opt_str(params, "title") or " ".join(prompt.split())[:80]
+        return self._turns.children.create(
+            session_id,
+            title=title,
+            prompt=prompt,
+            origin="start",
+            context=self._opt_str(params, "context") or "brief",
+            isolation=self._opt_str(params, "isolation") or "auto",
+        )
+
+    def _session_child_integrate(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Merge a child's branch into the project: the owner's button, never a tool."""
+        return self._turns.children.integrate(self._need_str(params, "child_session_id"))
+
+    def _session_child_discard(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._turns.children.discard(self._need_str(params, "child_session_id"))
+
+    def _session_children_isolation(self, params: dict[str, Any]) -> dict[str, Any]:
+        """«Use the same folder in this project» (or back to worktrees) from a child's card."""
+        session_id = self._need_str(params, "session_id")
+        isolation = self._need_str(params, "isolation")
+        record = self._services.sessions.show(session_id)
+        project = self._services.projects.get(record.project_id) if record.project_id else None
+        if project is None:
+            raise NotFoundError("That conversation has no project.")
+        self._turns.children.set_project_isolation(Path(project.canonical_root), isolation)
+        return {"session_id": session_id, "isolation": isolation}
+
+    def _process_orphans_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Processes an earlier Engine started that are still running."""
+        _ = params
+        ledger = self._turns._process_ledger
+        return {"orphans": ledger.orphans() if ledger is not None else []}
+
+    def _process_orphan_stop(self, params: dict[str, Any]) -> dict[str, Any]:
+        ledger = self._turns._process_ledger
+        stopped = ledger is not None and ledger.stop_orphan(self._need_str(params, "id"))
+        return {"stopped": bool(stopped)}
+
+    def _persistent(self) -> list[tuple[str, Any, Any]]:
+        rows = []
+        for session_id, registry in list(self._turns._desktop_processes.items()):
+            for handle in registry.list():
+                if handle.exit_code is None and getattr(handle, "persist", False):
+                    rows.append((session_id, registry, handle))
+        return rows
+
+    def _process_persistent_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Running processes the model asked to keep: the desktop asks before quitting."""
+        _ = params
+        return {
+            "processes": [
+                {
+                    "session_id": session_id,
+                    "handle": handle.id,
+                    "name": handle.name,
+                    "command": handle.command
+                    if isinstance(handle.command, str)
+                    else " ".join(map(str, handle.command)),
+                    "port": handle.port,
+                }
+                for session_id, _registry, handle in self._persistent()
+            ]
+        }
+
+    def _process_persistent_stop(self, params: dict[str, Any]) -> dict[str, Any]:
+        stopped = []
+        for session_id, registry, handle in self._persistent():
+            registry.kill(handle)
+            stopped.append({"session_id": session_id, "handle": handle.id})
+        return {"stopped": stopped}
+
+    def stop_owned_processes(self) -> None:
+        """At exit: stop what the model left running, except what it asked to keep (#90).
+
+        Quick by design: the next Engine waits on the home lock. With Job
+        Objects, Windows ends whatever this misses when the process goes.
+        """
+        for registry in list(self._turns._desktop_processes.values()):
+            with contextlib.suppress(Exception):
+                registry.stop_all(include_persistent=False)
+        with contextlib.suppress(Exception):
+            self._pty.shutdown()
+        with contextlib.suppress(Exception):
+            self._previews.close()
+
+    def _project_init_start(self, params: dict[str, Any]) -> dict[str, Any]:
+        """`/init` (#81): a read-only turn that proposes the project's RINARI.md."""
+        return self._turns.start_init_turn(self._need_str(params, "session_id"))
+
+    def _project_instructions_resolve(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Save (as proposed or edited) or discard a /init proposal (#81).
+
+        Only «Guardar» writes, and only the RINARI.md of the conversation's
+        project, whatever path the proposal event carries.
+        """
+        from rinari.tools.native.instructions import INSTRUCTIONS_FILE, MAX_CONTENT_CHARS
+
+        session_id = self._need_str(params, "session_id")
+        proposal_id = self._need_str(params, "proposal_id")
+        decision = self._need_str(params, "decision")
+        if decision not in {"save", "discard"}:
+            raise EngineProtocolError(
+                INVALID_PARAMS, "Param 'decision' must be 'save' or 'discard'."
+            )
+        proposal = self._turns.instructions_proposal(session_id, proposal_id)
+        if proposal is None:
+            raise NotFoundError(f"No /init proposal {proposal_id} in this conversation.")
+        record = self._services.sessions.show(session_id)
+        root = Path(record.project_root_snapshot) if record.project_root_snapshot else None
+        if root is None or not root.is_dir():
+            raise EngineProtocolError(INVALID_PARAMS, "This conversation has no project folder.")
+        path = root / INSTRUCTIONS_FILE
+        result: dict[str, Any] = {
+            "proposal_id": proposal_id,
+            "status": "discarded",
+            "path": str(path),
+        }
+        if decision == "save":
+            content = params.get("content")
+            if content is None:
+                content = proposal.get("content") or ""
+            if not isinstance(content, str) or not content.strip():
+                raise EngineProtocolError(INVALID_PARAMS, "Param 'content' must be the whole file.")
+            if len(content) > MAX_CONTENT_CHARS:
+                raise EngineProtocolError(
+                    INVALID_PARAMS, f"RINARI.md is read up to {MAX_CONTENT_CHARS} characters."
+                )
+            path.write_text(content.rstrip() + "\n", encoding="utf-8")
+            result.update(
+                status="saved", edited=content.strip() != str(proposal.get("content") or "").strip()
+            )
+        self._turns.emit_instructions_resolution(session_id, proposal.get("turn_id"), result)
+        return result
 
     def _flow_get(self, params: dict[str, Any]) -> dict[str, Any]:
         """Stages of a project or of a lone chat, derived from persisted facts."""
@@ -1854,6 +2685,7 @@ class EngineServer:
             "pinned": project.pinned,
             "archived": project.archived,
             "rinari_profile_id": project.rinari_profile_id,
+            "permission_profile": default_permission(project),
             "created_at": project.created_at,
             "updated_at": project.updated_at,
             "last_opened_at": project.last_opened_at or project.updated_at,
@@ -1918,6 +2750,11 @@ class EngineServer:
         description = params.get("description")
         pinned = params.get("pinned")
         archived = params.get("archived")
+        permission_profile = params.get("permission_profile")
+        if permission_profile is not None and not isinstance(permission_profile, str):
+            raise EngineProtocolError(
+                INVALID_PARAMS, "Param 'permission_profile' must be a string ('' clears it)."
+            )
         if name is not None and not isinstance(name, str):
             raise EngineProtocolError(INVALID_PARAMS, "Param 'name' must be a string.")
         if description is not None and not isinstance(description, str):
@@ -1932,6 +2769,7 @@ class EngineServer:
             description=description,
             pinned=pinned,
             archived=archived,
+            permission_profile=permission_profile,
         )
         return {"project": self._project_view(project)}
 
@@ -2049,6 +2887,152 @@ class EngineServer:
             "session": session_to_dict(record),
             "created": created,
         }
+
+    def _session_summary(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Sources, results, connectors and background work of a conversation
+        (plan 0.4.0 #82): what the «Resumen» panel cannot gather by itself."""
+        from rinari.engine_protocol.summary import build_summary
+
+        return build_summary(self, self._need_str(params, "session_id"))
+
+    def _summary_observe(self, frame: dict[str, Any]) -> None:
+        from rinari.engine_protocol.summary import changed_by
+
+        if frame.get("event") == "session.summary.changed":
+            return
+        reason = changed_by(frame)
+        session_id = (frame.get("payload") or {}).get("session_id")
+        if reason is None or not isinstance(session_id, str) or not session_id:
+            return
+        with self._repo_lock:
+            if session_id in self._summary_pending:
+                return
+            self._summary_pending.add(session_id)
+
+        def announce() -> None:
+            with self._repo_lock:
+                self._summary_pending.discard(session_id)
+            self._turns.emit_external(
+                event("session.summary.changed", {"session_id": session_id, "reason": reason})
+            )
+
+        timer = threading.Timer(1.0, announce)
+        timer.daemon = True
+        timer.start()
+
+    def _repo_cwd(self, params: dict[str, Any]) -> tuple[str, Path | None]:
+        record = self._services.sessions.show(self._need_str(params, "session_id"))
+        folder = record.current_cwd or record.project_root_snapshot
+        return record.id, Path(folder) if folder else None
+
+    def _repo_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        """The conversation's repository for «Resumen» (plan 0.4.0 #82), read-only.
+
+        Git is answered now; the GitHub part (`gh` sign-in, the branch's pull
+        requests and checks) comes from a cache and, when stale or with
+        `refresh`, is read in the background and announced with
+        `repo.status.updated`. `remote_pending` says one is on its way.
+        """
+        from rinari.engine_protocol import repo
+
+        refresh = params.get("refresh", False)
+        if not isinstance(refresh, bool):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'refresh' must be a boolean.")
+        session_id, cwd = self._repo_cwd(params)
+        status = repo.local_status(cwd)
+        key = repo.remote_key(status)
+        cached, fresh = repo.cached_remote(key) if key else (None, True)
+        pending = bool(key) and (refresh or not fresh)
+        if pending:
+            self._repo_refresh(session_id, status, key)
+        return {
+            "session_id": session_id,
+            **status,
+            "gh": (cached or {}).get("gh"),
+            "prs": (cached or {}).get("prs", []),
+            "remote_pending": pending,
+        }
+
+    def _repo_refresh(self, session_id: str, status: dict[str, Any], key: tuple[str, str]) -> None:
+        from rinari.engine_protocol import repo
+
+        with self._repo_lock:
+            if key in self._repo_refreshing:
+                return
+            self._repo_refreshing.add(key)
+
+        def read() -> None:
+            try:
+                info = repo.remote_info(key)
+                self._turns.emit_external(
+                    event(
+                        "repo.status.updated",
+                        {"session_id": session_id, **status, **info, "remote_pending": False},
+                    )
+                )
+            except Exception:
+                logger.exception("repo.status GitHub read failed")
+            finally:
+                with self._repo_lock:
+                    self._repo_refreshing.discard(key)
+
+        threading.Thread(target=read, name="repo-status", daemon=True).start()
+
+    def _repo_pr_create(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Open a pull request for the branch with `gh` (plan 0.4.0 #82).
+
+        The desktop confirms first. Checks that need no network answer now
+        (INVALID_PARAMS-style codes such as NOT_PUSHED); `gh` runs in the
+        background and ends with `repo.pr.created` or `repo.pr.failed`.
+        """
+        from rinari.engine_protocol import repo
+
+        title = self._need_str(params, "title").strip()
+        base = self._need_str(params, "base").strip()
+        body = params.get("body", "")
+        if not isinstance(body, str):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'body' must be a string.")
+        if not title or not base:
+            raise EngineProtocolError(INVALID_PARAMS, "Params 'title' and 'base' are required.")
+        session_id, cwd = self._repo_cwd(params)
+        status = repo.local_status(cwd)
+        try:
+            repo.check_pr(status, base)
+        except repo.RepoError as exc:
+            raise EngineProtocolError(exc.code, exc.message, details=exc.details) from exc
+        job_id = self._services.ctx.ids.new("job")
+
+        def create() -> None:
+            try:
+                created = repo.pr_create(status, title, base, body)
+            except repo.RepoError as exc:
+                payload = {"code": exc.code, "message": exc.message, "details": exc.details}
+                self._turns.emit_external(
+                    event(
+                        "repo.pr.failed",
+                        {"session_id": session_id, "job_id": job_id, "error": payload},
+                    )
+                )
+                return
+            except Exception as exc:  # defensive: the desktop must hear back
+                payload = {"code": "PR_CREATE_FAILED", "message": str(exc)[:500], "details": {}}
+                self._turns.emit_external(
+                    event(
+                        "repo.pr.failed",
+                        {"session_id": session_id, "job_id": job_id, "error": payload},
+                    )
+                )
+                return
+            self._turns.emit_external(
+                event("repo.pr.created", {"session_id": session_id, "job_id": job_id, **created})
+            )
+            key = repo.remote_key(status)
+            if key:
+                repo.forget_remote(key)
+                self._repo_refresh(session_id, status, key)
+
+        threading.Thread(target=create, name="repo-pr-create", daemon=True).start()
+        return {"status": "started", "job_id": job_id, "session_id": session_id}
 
     def _project_status(self, params: dict[str, Any]) -> dict[str, Any]:
         """Git truth plus session binding: the dashboard header source."""
@@ -2499,10 +3483,9 @@ class EngineServer:
             raise EngineProtocolError(INVALID_PARAMS, "Param 'id' must be a non-empty string.")
         if not isinstance(name, str) or not name:
             raise EngineProtocolError(INVALID_PARAMS, "Param 'name' must be a non-empty string.")
-        if not isinstance(identity, str) or not identity:
-            raise EngineProtocolError(
-                INVALID_PARAMS, "Param 'identity' must be a non-empty string."
-            )
+        # Empty text is allowed: the soul speaks only with the level (#87).
+        if not isinstance(identity, str):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'identity' must be a string.")
         description = params.get("description") or ""
         version = params.get("version") or "1.0"
         if not isinstance(description, str) or not isinstance(version, str):
@@ -2512,6 +3495,25 @@ class EngineServer:
         definition = self._soul_store().create(
             soul_id, name=name, identity=identity, description=description, version=version
         )
+        return {"soul": {**self._soul_view(definition), "identity": definition.identity}}
+
+    def _soul_export(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Plan 0.4.0 #87: a soul into a folder the owner picked."""
+        soul_id = self._need_str(params, "id")
+        folder = self._need_str(params, "folder")
+        target = self._soul_store().export(soul_id, Path(folder))
+        return {"path": str(target), "files": ["soul.toml", "identity.md"]}
+
+    def _soul_import(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Plan 0.4.0 #87: a soul from files the owner picked (folder, or .toml + .md)."""
+        paths = params.get("paths")
+        if (
+            not isinstance(paths, list)
+            or not 1 <= len(paths) <= 4
+            or not all(isinstance(path, str) and path for path in paths)
+        ):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'paths' must list 1..4 paths.")
+        definition = self._soul_store().import_files([Path(path) for path in paths])
         return {"soul": {**self._soul_view(definition), "identity": definition.identity}}
 
     def _soul_update(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -2621,6 +3623,24 @@ class EngineServer:
         record = self._services.sessions.clear_soul(ref)
         return {"session": session_to_dict(record), **self._soul_effective(record)}
 
+    # -- MCP connections (connectors plan, C2) ------------------------------------
+
+    def _mcp_reconnect(self, params: dict[str, Any]) -> dict[str, Any]:
+        """«Reconectar»: connect again now, in the background, whatever the wait.
+
+        Returns at once with the server (status `connecting`); the outcome
+        arrives as `mcp.status.changed`.
+        """
+        name = self._mcp_name(params or {})
+        try:
+            self._services.mcp.reconnect(name)
+        except LookupError:
+            raise NotFoundError(f"Unknown MCP server: {name}.") from None
+        row = self._services.mcp.show(name) or self._services.mcp.show(name, "project")
+        if row is None:
+            raise NotFoundError(f"Unknown MCP server: {name}.")
+        return {"server": self._mcp_view(row)}
+
     # -- ecosystem (Phase 9) ----------------------------------------------------
 
     def _mcp_connected(self, name: str) -> bool:
@@ -2671,6 +3691,9 @@ class EngineServer:
         params = params or {}
         name = self._mcp_name(params)
         fields = self._mcp_fields(params)
+        from rinari.engine_protocol.agency import checked_owner
+
+        owner = checked_owner(self._services, params.get("owner"))
         try:
             row = self._services.mcp.add(
                 name,
@@ -2683,9 +3706,12 @@ class EngineServer:
                 auth=fields.get("auth"),
                 headers=fields.get("headers"),
                 timeout_s=fields.get("timeout_s"),
+                # Rinari Agency (C8): the account belongs to that agent only.
+                owner=owner,
             )
         except ValueError as exc:
             raise EngineProtocolError(INVALID_PARAMS, str(exc)) from exc
+            row = self._services.mcp.show(name) or row
         return {"server": self._mcp_view(row, False)}
 
     def _mcp_update(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -2725,7 +3751,45 @@ class EngineServer:
     def _mcp_test(self, params: dict[str, Any]) -> dict[str, Any]:
         name = (params or {}).get("name", "")
         # Connection problems are the diagnosis: reported, never raised.
-        return {"test": self._services.mcp.test(name)}
+        result = self._services.mcp.test(name)
+        row = self._services.mcp.show(name) or self._services.mcp.show(name, "project")
+        if row is not None:
+            from rinari.mcp.config import draft_from_row
+
+            self._mcp_oauth_support(result, draft_from_row(row))
+        return {"test": result}
+
+    def _mcp_oauth_support(self, result: dict[str, Any], draft) -> None:
+        """«Probar» also says whether the server signs in with OAuth (plan C1).
+
+        Some servers answer `initialize` and `tools/list` anonymously and
+        only ask for a token on `tools/call`, so this looks for OAuth metadata
+        even without a 401. Never raises; `oauth` is null when there is none.
+        """
+        from rinari.mcp.config import AUTH_NONE, AUTH_OAUTH, TRANSPORT_HTTP
+
+        if draft.transport != TRANSPORT_HTTP or draft.auth_kind not in (AUTH_NONE, AUTH_OAUTH):
+            return
+        if not result.get("ok") and result.get("hint") not in (
+            "oauth_required",
+            "reauth_required",
+            "check_credentials",
+        ):
+            return
+        from rinari.mcp.oauth import default_http_factory, describe_support
+
+        support = None
+        with (
+            contextlib.suppress(Exception),
+            default_http_factory(self._services.ctx.home)() as http,
+        ):
+            support = describe_support(
+                draft.url,
+                http,
+                oauth=draft.oauth,
+                client_metadata_url=self._mcp_auth.manager.client_metadata_url,
+            )
+        result["oauth"] = support
 
     def _mcp_probe(self, params: dict[str, Any]) -> dict[str, Any]:
         """Test an unsaved configuration (optionally a patch over `name`)."""
@@ -2738,6 +3802,12 @@ class EngineServer:
             raise NotFoundError(f"Unknown MCP server: {name}.") from None
         except ValueError as exc:
             raise EngineProtocolError(INVALID_PARAMS, str(exc)) from exc
+        from rinari.mcp.config import ServerDraft, apply_patch, draft_from_row
+
+        existing = self._services.mcp.show(name) if name is not None else None
+        draft = draft_from_row(existing) if existing is not None else ServerDraft()
+        with contextlib.suppress(ValueError):
+            self._mcp_oauth_support(result, apply_patch(draft, fields))
         return {"test": result}
 
     def _plugin_list(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -2811,6 +3881,8 @@ class EngineServer:
                     "id": row["id"],
                     "scope": scope,
                     "scope_kind": "chats" if scope == "chats" else "project",
+                    # «Always in chats» no longer applies (#56): listed to remove.
+                    "legacy": scope == "chats",
                     "scope_label": "" if scope == "chats" else names.get(scope, Path(scope).name),
                     "capability": row.get("capability"),
                     "rule_id": row.get("rule_id"),
@@ -2901,7 +3973,7 @@ class EngineServer:
         ranges, so an audio or video artifact plays at any size. `kind` comes
         from the first bytes, like `workspace.file.resolve`.
         """
-        from rinari.engine_protocol.desktop import _file_kind
+        from rinari.engine_protocol.desktop import _file_kind, _presented_original
 
         params = params or {}
         uri = params.get("uri", "")
@@ -2911,7 +3983,11 @@ class EngineServer:
             record = self._services.artifacts.meta(uri)
         except NotFoundError as exc:
             raise NotFoundError(f"Artifact not found: {uri}") from exc
-        path = self._services.artifacts._storage_path(record.storage_path)
+        # A presented file's copy (what a team's office shows) opens and is shown
+        # in its folder as the original while it holds the same bytes (28-oct).
+        path = _presented_original(record) or self._services.artifacts._storage_path(
+            record.storage_path
+        )
         try:
             size = path.stat().st_size
             with path.open("rb") as stream:
@@ -3001,26 +4077,6 @@ class EngineServer:
     def _queue_resume(self, params: dict[str, Any]) -> dict[str, Any]:
         return self._turns.queue_resume(params or {})
 
-    # -- peer messaging between sessions (Boards) ------------------------------
-
-    def _peer_group_set(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self._turns.peers.set_group(params or {})
-
-    def _peer_group_get(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self._turns.peers.get_group(params or {})
-
-    def _peer_group_revoke(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self._turns.peers.revoke_group(params or {})
-
-    def _peer_message_list(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self._turns.peers.list_messages(params or {})
-
-    def _peer_message_cancel(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self._turns.peers.cancel_message(params or {})
-
-    def _peer_message_forward(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self._turns.peers.forward(params or {})
-
     # -- profile bundles (Phase 11) -----------------------------------------------
 
     def _bundles(self):  # ProfileBundleStore bound to the engine home.
@@ -3062,7 +4118,7 @@ class EngineServer:
         params = params or {}
         self._check_bundle_agents(params.get("agents"))
         bundle = self._bundles().create(
-            params.get("id", ""),
+            params.get("id") or None,
             name=params.get("name", ""),
             description=params.get("description") or "",
             soul_id=params.get("soul_id"),
@@ -3077,7 +4133,7 @@ class EngineServer:
         bundle_id = self._need_str(params, "id")
         changes = {
             key: params[key]
-            for key in ("name", "description", "soul_id", "mode", "agents")
+            for key in ("name", "description", "soul_id", "agents")
             if key in params
         }
         self._check_bundle_agents(changes.get("agents"))
@@ -3134,9 +4190,11 @@ class EngineServer:
             if check.canonical_path:
                 row["trust_state"] = self._services.trust.status(Path(check.canonical_path)).state
                 row["git_head"] = HEADS.get(check.canonical_path).as_dict()
+                row.update(_runs_commands(Path(check.canonical_path)))
             else:
                 row["trust_state"] = None
                 row["git_head"] = None
+                row.update(has_hooks=False, has_mcp=False)
             report.append(row)
         return report
 
@@ -3302,38 +4360,20 @@ class EngineServer:
         return {"session": session_to_dict(self._services.sessions.show(session_id))}
 
     def _bundle_apply(self, params: dict[str, Any]) -> dict[str, Any]:
-        from rinari.soul.store import SoulStore
+        """«Usar este perfil» (#86): the same as activating it.
 
+        It used to write the profile's models into the global agent
+        configuration and activate its soul globally, although nothing
+        global should change: the models and the soul are read per
+        conversation from its own profile.
+        """
         params = params or {}
-        bundle = self._bundles().get(params.get("id", ""))
-        applied: dict[str, Any] = {"profile_id": bundle.id}
-        if bundle.soul_id:
-            SoulStore(self._services.ctx.home).activate(bundle.soul_id)
-            applied["soul_id"] = bundle.soul_id
-        if bundle.agents:
-            definitions = self._services.agents.list()
-            for agent, assignment in bundle.agents.items():
-                if agent not in definitions:
-                    raise NotFoundError(f"Unknown agent: {agent}.")
-                model = (assignment or {}).get("model")
-                fallback = (assignment or {}).get("fallback")
-                if model:
-                    self._check_agent_model(model)
-                if fallback:
-                    self._check_agent_model(fallback)
-                self._services.agent_configs.set(
-                    agent, model=model or None, fallback=fallback or None
-                )
-            applied["agents"] = sorted(bundle.agents)
-        session_ref = params.get("session_ref")
-        if bundle.mode and session_ref:
-            record = self._services.sessions.set_mode(session_ref, bundle.mode)
-            applied["mode"] = record.mode
-            applied["session_id"] = record.id
-        elif bundle.mode:
-            applied["mode"] = bundle.mode
-            applied["session_id"] = None
-        return {"applied": applied}
+        bundle_id = self._need_str(params, "id")
+        previous, bundle = self._services.rinari_profiles.activate(bundle_id)
+        self._turns.emit_external(
+            event("profile_bundle.activated", {"id": bundle.id, "previous_id": previous})
+        )
+        return {"applied": {"profile_id": bundle.id, "previous_id": previous}}
 
     # -- turns ------------------------------------------------------------
 
@@ -3343,7 +4383,13 @@ class EngineServer:
             raise EngineProtocolError(
                 INVALID_PARAMS, "Param 'session_id' must be a non-empty string."
             )
+        from rinari.engine_protocol import plan_turns
+
+        plan_origin = plan_turns.parse_origin(params.get("origin"))
         message = params.get("message")
+        if plan_origin is not None and (message is None or message == ""):
+            # Implement / adjust a plan (#55): the Engine writes the instruction.
+            message = plan_origin.get("comment") or "plan"
         if not isinstance(message, str) or not message.strip():
             raise EngineProtocolError(INVALID_PARAMS, "Param 'message' must be a non-empty string.")
         reasoning_effort = params.get("reasoning_effort")
@@ -3374,6 +4420,10 @@ class EngineServer:
             )
         except EngineProtocolError:
             raise
+        if plan_origin is not None:
+            return self._plan_turn_start(
+                session_id, plan_origin, reasoning_effort, image_refs, attachment_metadata, params
+            )
         request, command_name = self._expand_command(session_id, params.get("command"), message)
         origin = None
         if command_name:
@@ -3400,16 +4450,72 @@ class EngineServer:
             origin=origin,
         )
 
+    def _plan_turn_start(
+        self,
+        session_id: str,
+        origin: dict[str, Any],
+        reasoning_effort: Any,
+        image_refs: Any,
+        attachment_metadata: Any,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Implement or adjust a finished plan (plan 0.4.0 #55).
+
+        No user bubble: the origin names the plan turn and the chat shows a
+        separator. Implementing runs in BUILD with the plan's steps as the
+        checklist; adjusting runs in PLAN with the owner's comment.
+        """
+        from rinari.application.session_service import SESSION_MODE_BUILD, SESSION_MODE_PLAN
+        from rinari.engine_protocol import plan_turns
+
+        record = self._services.sessions.show(session_id)
+        plan = plan_turns.find_plan(self._services.ctx.db, record.id, origin["plan_turn_id"])
+        implement = origin["source"] == "plan_implement"
+        mode = SESSION_MODE_BUILD if implement else SESSION_MODE_PLAN
+        if record.mode != mode:
+            record = self._services.sessions.set_mode(record.id, mode)
+            self._turns.emit_external(
+                event("session.mode.changed", {"session_id": record.id, "mode": record.mode})
+            )
+        origin = {**origin, "plan_title": plan.title}
+        if implement:
+            steps = plan_turns.plan_steps(plan.content)
+            origin["plan_steps"] = len(steps)
+            message = plan_turns.implement_message(plan)
+            seed = plan_turns.checklist_items(steps) or None
+            display = plan.title
+        else:
+            message = plan_turns.adjust_message(plan, origin["comment"])
+            seed = None
+            display = origin["comment"]
+        return self._turns.start_turn(
+            record.id,
+            message,
+            reasoning_effort,
+            attachments=image_refs,
+            display_message=display,
+            attachment_metadata=attachment_metadata,
+            allow_unconfirmed_vision=params.get("allow_unconfirmed_vision") is True,
+            origin=origin,
+            seed_checklist=seed,
+        )
+
     def _command_list(self, params: dict[str, Any]) -> dict[str, Any]:
         from rinari.commands import command_list
 
         project = None
+        agency = False
         session_id = params.get("session_id")
         if isinstance(session_id, str) and session_id:
             record = self._services.sessions.show(session_id)
             if record.project_root_snapshot:
                 project = Path(record.project_root_snapshot)
-        return {"commands": command_list(self._services.skills, project, client="desktop")}
+            agency = bool(getattr(record, "agent_id", None))
+        commands = command_list(self._services.skills, project, client="desktop")
+        if agency:
+            # Rinari Agency: its conversations are never forked (session.fork refuses).
+            commands = [item for item in commands if item.get("name") != "fork"]
+        return {"commands": commands}
 
     def _expand_command(self, session_id: str, command: Any, typed: str) -> tuple[str, str]:
         """`/review x`, `/test`, `/pdf-tools x`: the Engine turns the command the
@@ -3544,7 +4650,46 @@ class EngineServer:
         message = params.get("message")
         if not isinstance(message, str):
             raise EngineProtocolError(INVALID_PARAMS, "Param 'message' must be a string.")
-        return self._turns.steer(session_id, message)
+        attachments = params.get("attachments") or []
+        if not isinstance(attachments, list):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'attachments' must be a list.")
+        # Files in a message sent during the turn travel with it (#54).
+        context, image_refs, metadata = _prepare_turn_attachments(
+            self._services,
+            session_id,
+            attachments,
+            allow_unconfirmed_vision=params.get("allow_unconfirmed_vision") is True,
+        )
+        return self._turns.steer(
+            session_id,
+            message,
+            attachment_context=context,
+            image_refs=image_refs,
+            attachment_metadata=metadata,
+            now=params.get("_now") is True,
+        )
+
+    def _turn_steer_now(self, params: dict[str, Any]) -> dict[str, Any]:
+        """«Enviar ahora» (#31): the message is read now; only the current step ends."""
+        return self._turn_steer({**params, "_now": True})
+
+    def _turn_steer_update(self, params: dict[str, Any]) -> dict[str, Any]:
+        message = params.get("message")
+        if not isinstance(message, str):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'message' must be a string.")
+        return self._turns.steer_update(
+            self._need_str(params, "session_id"), self._need_str(params, "steer_id"), message
+        )
+
+    def _turn_steer_promote(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._turns.steer_promote(
+            self._need_str(params, "session_id"), self._need_str(params, "steer_id")
+        )
+
+    def _turn_steer_cancel(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._turns.steer_cancel(
+            self._need_str(params, "session_id"), self._need_str(params, "steer_id")
+        )
 
     def _turn_changes_get(self, params: dict[str, Any]) -> dict[str, Any]:
         return self._services.changes.get(self._need_str(params, "turn_id"))
@@ -3842,8 +4987,12 @@ class EngineServer:
         provider = params.get("provider")
         if provider is not None and not isinstance(provider, str):
             raise EngineProtocolError(INVALID_PARAMS, "Param 'provider' must be a string.")
-        items = [self._model_view(model) for model in self._services.models.list(provider)]
-        return {"models": items}
+        include_disabled = params.get("include_disabled", False)
+        if not isinstance(include_disabled, bool):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'include_disabled' must be a boolean.")
+        # A turned-off provider's models leave every picker; Settings asks for them (#97).
+        models = self._services.models.list(provider, include_disabled=include_disabled)
+        return {"models": [self._model_view(model) for model in models]}
 
     def _provider_alias(self, provider_id: str) -> str | None:
         try:
@@ -3958,15 +5107,33 @@ class EngineServer:
         settings = params.get("settings")
         if settings is not None and not isinstance(settings, dict):
             raise EngineProtocolError(INVALID_PARAMS, "Param 'settings' must be an object.")
+        enabled = params.get("enabled")
+        if enabled is not None and not isinstance(enabled, bool):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'enabled' must be a boolean.")
         if not any(
             key in params
-            for key in ("alias", "endpoint", "settings", "account_hint", "secret", "secret_env")
+            for key in (
+                "alias",
+                "endpoint",
+                "settings",
+                "account_hint",
+                "secret",
+                "secret_env",
+                "enabled",
+            )
         ):
             raise EngineProtocolError(
                 INVALID_PARAMS,
                 "Nothing to update: pass alias, endpoint, settings, account_hint, "
-                "secret or secret_env.",
+                "secret, secret_env or enabled.",
             )
+        if enabled is not None and not any(
+            key in params
+            for key in ("alias", "endpoint", "settings", "account_hint", "secret", "secret_env")
+        ):
+            # On/off alone (plan 0.4.0 #97).
+            record = providers.set_enabled(self._need_str(params, "ref"), enabled)
+            return {"provider": self._provider_view(providers.get(record.id))}
         record = providers.apply_update(
             self._need_str(params, "ref"),
             new_alias=self._opt_str(params, "alias"),
@@ -3976,6 +5143,8 @@ class EngineServer:
             secret=secret or None,
             secret_env=secret_env or None,
         )
+        if enabled is not None:
+            record = providers.set_enabled(record.id, enabled)
         return {"provider": self._provider_view(providers.get(record.id))}
 
     def _provider_remove(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -4047,6 +5216,7 @@ class EngineServer:
             capabilities=dict(capabilities) if capabilities is not None else None,
             settings=self._opt_settings(params),
         )
+        self._models_changed("added", model.provider_id)
         return {"model": self._model_view(model)}
 
     def _model_alias(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -4055,13 +5225,33 @@ class EngineServer:
             self._need_str(params, "new_alias"),
             self._opt_str(params, "provider"),
         )
+        self._models_changed("renamed", model.provider_id)
         return {"model": self._model_view(model)}
 
     def _model_remove(self, params: dict[str, Any]) -> dict[str, Any]:
         model = self._services.models.remove(
             self._need_str(params, "ref"), self._opt_str(params, "provider")
         )
+        self._models_changed("hidden", model.provider_id)
         return {"removed": {"id": model.id, "alias": model.alias}}
+
+    def _model_hidden_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        return {"hidden": self._services.models.hidden(self._need_str(params, "provider"))}
+
+    def _model_unhide(self, params: dict[str, Any]) -> dict[str, Any]:
+        model = self._services.models.unhide(
+            self._need_str(params, "provider"), self._need_str(params, "provider_model_id")
+        )
+        self._models_changed("added", model.provider_id)
+        return {"model": self._model_view(model)}
+
+    def _models_changed(self, reason: str, provider_id: str | None = None, **extra: Any) -> None:
+        """Every list of models reloads itself (#93): Settings, the composer, Agents."""
+        payload: dict[str, Any] = {"reason": reason, **extra}
+        if provider_id is not None:
+            payload["provider_id"] = provider_id
+        with contextlib.suppress(Exception):
+            self._turns.emit_external(event("models.changed", payload))
 
     def _model_use(self, params: dict[str, Any]) -> dict[str, Any]:
         resolved = self._services.models.use(
@@ -4075,7 +5265,12 @@ class EngineServer:
 
     def _model_discover(self, params: dict[str, Any]) -> dict[str, Any]:
         found = self._services.models.available(self._opt_str(params, "provider"))
+        # What the provider offers is saved (#93): nothing stays «por guardar».
+        added = self._services.models.save_discovered(found)
+        if added:
+            self._models_changed("added", added=added)
         return {
+            "added": added,
             "providers": {
                 alias: [
                     {
@@ -4086,7 +5281,7 @@ class EngineServer:
                     for model in models
                 ]
                 for alias, models in found.items()
-            }
+            },
         }
 
     def _model_discovery_start(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -4137,6 +5332,7 @@ class EngineServer:
                     "job_id": job_id,
                     "provider": provider,
                     "providers": result["providers"],
+                    "added": result.get("added", {}),
                     "cached": False,
                 }
                 with self._model_jobs_lock:
@@ -4178,6 +5374,11 @@ class EngineServer:
         results = self._services.models.refresh(
             provider, add_new=add_new, public_catalog=provider is None
         )
+        if any(result.added or result.marked_unavailable for result in results.values()):
+            self._models_changed(
+                "refreshed",
+                added={alias: list(r.added) for alias, r in results.items() if r.added},
+            )
         providers: dict[str, Any] = {}
         for alias, result in results.items():
             providers[alias] = {

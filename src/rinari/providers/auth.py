@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 
 import httpx
 
+from rinari.net import client as net_client
 from rinari.providers.catalog import product_for
 from rinari.shared.errors import AuthenticationRequiredError, InvalidUsageError, RinariError
 from rinari.shared.locking import file_lock
@@ -60,7 +61,9 @@ def account_id(token):
 
 
 def request_json(providers, method, url, **kwargs):
-    client = providers._client or httpx.Client(timeout=10, follow_redirects=False)
+    client = providers._client or net_client(
+        providers._ctx.home, timeout=10, follow_redirects=False
+    )
     try:
         response = client.request(
             method,

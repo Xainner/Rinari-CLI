@@ -172,6 +172,7 @@ class BrowserManager:
         headless: bool = True,
         timeout_s: float = 15.0,
         backend: Any | None = None,
+        reopen: Callable[[BrowserManager], Any] | None = None,
     ) -> None:
         # Backend inyectado (documento 03 §4.1): cuando lo hay, las operaciones
         # page-level no se ejecutan sobre una CdpSession propia sino donde diga
@@ -179,6 +180,9 @@ class BrowserManager:
         # límites, los errores públicos y la interfaz que usan tools y policy
         # no cambian, que es justo lo que pide el documento.
         self._backend = backend
+        #: A new desktop context for this session when its own was closed
+        #: (the registry gives it; `None` outside the desktop).
+        self._reopen = reopen
         self.session_id = session_id
         self._home_root = Path(home_root)
         self._endpoint_cfg = endpoint
@@ -203,6 +207,11 @@ class BrowserManager:
         # A desktop turn builds a new runtime. Never share Chromium's singleton
         # profile with a previous runtime (or another engine process).
         self._profile_instance = uuid.uuid4().hex
+        #: A real Chrome/Edge window the owner asked for (plan 0.4.0 #45): the
+        #: desktop backend waits here while the session works over there, and
+        #: comes back when that window is closed.
+        self._native_backend: Any | None = None
+        self._external_profile: Path | None = None
 
     # -- state ----------------------------------------------------------------
 
@@ -227,9 +236,87 @@ class BrowserManager:
 
     @property
     def profile_dir(self) -> Path:
+        if self._external_profile is not None:
+            return self._external_profile
         return self._home_root / "browser" / "profiles" / self.session_id / self._profile_instance
 
+    @property
+    def external(self) -> bool:
+        """The session works in a real Chrome/Edge window (#45)."""
+        self._settle_external()
+        return self._native_backend is not None
+
+    def use_external(self, url: str, profile_dir: Path) -> dict[str, Any]:
+        """Open `url` in a real, visible Chrome/Edge with Rinari's profile (#45).
+
+        For a site that rejects Rinari's own browser with a human
+        verification. The owner passes the check there; the agent keeps
+        working in that same window, and the profile (one per project, never
+        the owner's personal one) keeps the signed-in session for next time.
+        Closing that window brings the session back to the desktop browser.
+        """
+        self._revive()
+        self._settle_external()
+        if self._native_backend is None:
+            self._native_backend = self._backend
+            self._backend = None
+        self._external_profile = Path(profile_dir)
+        self._headless = False
+        try:
+            self.launch()
+            pages = self.targets()
+            if pages:
+                self.navigate(pages[0]["target_id"], url)
+                return {"target_id": pages[0]["target_id"], "url": url}
+            return self.new_page(url)
+        except BrowserError:
+            self._leave_external()
+            raise
+
+    def _leave_external(self) -> None:
+        """Back to the desktop browser; the external window, if any, closes."""
+        if self._session is not None or self._process is not None:
+            with contextlib.suppress(Exception):
+                self._disconnect()
+            if self._process is not None:
+                with contextlib.suppress(Exception):
+                    self._kill_process()
+        self._endpoint = None
+        if self._native_backend is not None:
+            self._backend = self._native_backend
+            self._native_backend = None
+        self._external_profile = None
+        self._headless = True
+
+    def adopt(self, backend: Any) -> None:
+        """Work on a new desktop context from now on (the old one was closed)."""
+        self._disconnect()
+        self._backend = backend
+
+    def _revive(self) -> None:
+        """A desktop context closed by browser.close opens again on next use.
+
+        Closing it was for good, and the session keeps this same manager: every
+        later operation, browser.launch included, said the desktop host was not
+        available while the owner went on using the browser panel (SOIN, 23-oct).
+        """
+        backend = self._backend
+        if backend is None or not getattr(backend, "closed", False) or self._reopen is None:
+            return
+        fresh = self._reopen(self)
+        if fresh is not None:
+            self.adopt(fresh)
+
+    def _settle_external(self) -> None:
+        """The owner closed the external window: the desktop browser is back."""
+        if self._native_backend is None:
+            return
+        session = self._session
+        if session is None or session.closed or session.fatal is not None:
+            self._leave_external()
+
     def status(self) -> dict[str, Any]:
+        self._settle_external()
         if self._backend is not None:
             # El estado del backend nativo no tiene endpoint ni proceso que
             # enseñar, y fingir uno sería mentir sobre lo que hay detrás
@@ -250,6 +337,7 @@ class BrowserManager:
             "endpoint": self._endpoint,
             "managed": self._process is not None,
             "headless": self._headless,
+            "external": self._native_backend is not None,
             "targets": len(self.targets()) if self.connected else 0,
             "diagnostics": self.diagnostics(),
         }
@@ -325,6 +413,8 @@ class BrowserManager:
         return self._endpoint or target
 
     def launch(self, command: str | None = None, port: int | None = None) -> str:
+        self._revive()
+        self._settle_external()
         if self._backend is not None:
             # El contexto nativo ya existe o no existe; no hay proceso que
             # lanzar. La comprobación va **antes** que `self.connected`: con el
@@ -401,6 +491,13 @@ class BrowserManager:
 
     def close(self) -> dict[str, Any]:
         closed: list[str] = []
+        if self._native_backend is not None:
+            # Closing the session also closes the desktop context waiting
+            # behind the external window.
+            self._native_backend.close()
+            self._native_backend = None
+            self._external_profile = None
+            closed.append("host-context")
         if self._backend is not None:
             self._backend.close()
             closed.append("host-context")
@@ -512,7 +609,9 @@ class BrowserManager:
     # -- targets ---------------------------------------------------------------
 
     @contextlib.contextmanager
-    def _mutation(self, operation: str) -> Iterator[None]:
+    def _mutation(
+        self, operation: str, cancelled: Callable[[], bool] | None = None
+    ) -> Iterator[None]:
         """Una mutación semántica es indivisible frente al traspaso (§7).
 
         Un click no es una operación: son unas coordenadas y tres eventos de
@@ -523,12 +622,13 @@ class BrowserManager:
         Con el backend externo no hay arbitraje que sostener —no hay usuario
         compartiendo esa página—, así que no hace nada.
         """
+        self._revive()
         backend = self._backend
         scope = getattr(backend, "mutation_scope", None) if backend is not None else None
         if scope is None:
             yield
             return
-        with scope(operation):
+        with scope(operation, cancelled):
             yield
 
     def _require_session(self) -> CdpSession:
@@ -574,6 +674,8 @@ class BrowserManager:
         return session, self._attached[target_id]
 
     def targets(self) -> list[dict[str, Any]]:
+        self._revive()
+        self._settle_external()
         if self._backend is not None:
             return list(self._backend.targets())
         session = self._require_session()
@@ -591,11 +693,41 @@ class BrowserManager:
         return out
 
     def new_page(self, url: str = "about:blank") -> dict[str, Any]:
+        self._revive()
+        self._settle_external()
         if self._backend is not None:
             return dict(self._backend.new_page(url))
         session = self._require_session()
         result = session.send("Target.createTarget", {"url": url})
         return {"target_id": result["targetId"], "url": url}
+
+    def set_viewport(
+        self,
+        width: int | None,
+        *,
+        target_id: str | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
+        """Fija el ancho de la página (plan 0.4.0 #44b); `None` vuelve a
+        ajustarla al panel. Para probar un diseño en varios anchos."""
+        with self._mutation("browser.viewport", cancelled):
+            self._revive()
+            self._settle_external()
+            if self._backend is not None:
+                result = self._backend.set_viewport(width, cancelled=cancelled)
+                return {"width": width, **{k: v for k, v in result.items() if k != "width"}}
+            if width is None:
+                self.call(
+                    target_id, "Emulation.clearDeviceMetricsOverride", {}, cancelled=cancelled
+                )
+            else:
+                self.call(
+                    target_id,
+                    "Emulation.setDeviceMetricsOverride",
+                    {"width": width, "height": 800, "deviceScaleFactor": 0, "mobile": width < 600},
+                    cancelled=cancelled,
+                )
+            return {"width": width}
 
     def close_page(self, target_id: str) -> dict[str, Any]:
         with self._mutation("browser.tabs_close"):
@@ -621,6 +753,8 @@ class BrowserManager:
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         self._raise_if_cancelled(cancelled)
+        self._revive()
+        self._settle_external()
         if self._backend is not None:
             return self._backend.send(
                 target_id,
@@ -645,7 +779,7 @@ class BrowserManager:
         max_chars: int = 8000,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        with self._mutation("browser.evaluate"):
+        with self._mutation("browser.evaluate", cancelled):
             self._raise_if_cancelled(cancelled)
             # Por `call` para que el backend inyectado también reciba esta ruta:
             # `snapshot`, `click` y `fill` se apoyan en `evaluate`, así que dejarla
@@ -680,7 +814,7 @@ class BrowserManager:
         *,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        with self._mutation("browser.navigate"):
+        with self._mutation("browser.navigate", cancelled):
             self._raise_if_cancelled(cancelled)
             result = self.call(
                 target_id,
@@ -834,7 +968,7 @@ class BrowserManager:
         y: float | None = None,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        with self._mutation("browser.click"):
+        with self._mutation("browser.click", cancelled):
             px, py = self._point(target_id, selector, x, y, cancelled)
             for event in (
                 {"type": "mouseMoved", "x": px, "y": py, "button": "none"},
@@ -852,7 +986,7 @@ class BrowserManager:
         *,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        with self._mutation("browser.fill"):
+        with self._mutation("browser.fill", cancelled):
             self.evaluate(
                 target_id,
                 _JS_FILL % (json.dumps(selector), json.dumps(value), json.dumps(value)),
@@ -869,7 +1003,7 @@ class BrowserManager:
         press_enter: bool = False,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        with self._mutation("browser.type"):
+        with self._mutation("browser.type", cancelled):
             if len(text) > MAX_TYPED_CHARS:
                 raise BrowserError(
                     "INVALID_ARGUMENT", f"text is limited to {MAX_TYPED_CHARS} characters"
@@ -907,7 +1041,7 @@ class BrowserManager:
         *,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        with self._mutation("browser.select"):
+        with self._mutation("browser.select", cancelled):
             out = self.evaluate(
                 target_id,
                 _JS_SELECT % (json.dumps(selector), json.dumps(value)),
@@ -923,7 +1057,7 @@ class BrowserManager:
         *,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        with self._mutation("browser.check"):
+        with self._mutation("browser.check", cancelled):
             out = self.evaluate(
                 target_id,
                 _JS_CHECK % (json.dumps(selector), "true" if checked else "false"),
@@ -941,7 +1075,7 @@ class BrowserManager:
         y: float | None = None,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        with self._mutation("browser.scroll"):
+        with self._mutation("browser.scroll", cancelled):
             if x is None or y is None:
                 out = self.evaluate(target_id, _JS_VIEWPORT, cancelled=cancelled)
                 size = out.get("value") or {}
@@ -977,7 +1111,7 @@ class BrowserManager:
         steps: int = 5,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        with self._mutation("browser.drag"):
+        with self._mutation("browser.drag", cancelled):
             if steps < 1:
                 raise BrowserError("INVALID_ARGUMENT", "steps must be >= 1")
             sx, sy = self._point(target_id, from_selector, from_x, from_y, cancelled)
@@ -1019,7 +1153,7 @@ class BrowserManager:
         provenance: dict[str, Any] | None = None,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        with self._mutation("browser.upload"):
+        with self._mutation("browser.upload", cancelled):
             self._raise_if_cancelled(cancelled)
             resolved = Path(file_path).resolve()
             if self._backend is not None:
@@ -1256,7 +1390,7 @@ class BrowserManager:
         *,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        with self._mutation("browser.set_cookie"):
+        with self._mutation("browser.set_cookie", cancelled):
             self._raise_if_cancelled(cancelled)
             if self._backend is not None:
                 self._backend.set_cookie(target_id, name, value, url, cancelled=cancelled)

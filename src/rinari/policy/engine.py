@@ -5,25 +5,39 @@ It is separated from the sandbox (what can technically execute) and from
 approvals (what requires consent). Locked system rules are applied first
 and can never be relaxed by a profile.
 
-Permissions v3 (2026-09-25). The profiles are cut by what cannot be undone,
-measured on the owner's history (92 prompts in two weeks, 92 approved):
+Permissions v4 (2026-10-12, plan-permisos-v4.md). Three modes:
 
     read-only    reads anything (local and internet) except system secrets;
                  never writes, runs commands or sends data out
-    workspace    free inside the project/chat, on localhost/LAN and reading
-                 the internet; asks once (or always, per project) to act
+    workspace    («Proyecto») free inside the project/chat, on localhost/LAN,
+                 reading the internet and with the owner's registered tools
+                 (MCP servers); asks once (or always, per project) to act
                  outside: writes/commands outside, sending to internet hosts,
-                 external tools (MCP), git push
-    full-access  asks for nothing but the hard list
+                 git push. Force push, deleting outside the project and
+                 system secrets ask every time.
+    full-access  asks for nothing, like Claude Code's or Codex's full access
+                 and Hermes' YOLO.
 
-Always asked, in every profile: force push, deleting outside the project,
-and system secrets (SSH keys, OS/browser credential stores). Hard-list asks
-cannot be granted "always".
+The catastrophic list is refused in every mode, with no way to allow it:
+wiping the system root or a whole disk, formatting, writing straight to a
+physical disk, fork bombs.
 
-Untrusted-content guard: once a turn has read external content (a web page,
-an internet API, an MCP result), the next action that sends data out (POST,
-MCP call, git push, curl with a body, browser upload) asks even in
-full-access. A prompt injection can read; it cannot quietly exfiltrate.
+Untrusted-content guard. In workspace, once a turn has read external content
+(a web page, an internet API, an MCP result), sending data to the internet
+asks for this session at most. In full-access it is the owner's switch «Ask
+before sending data to new destinations» (off by default): on, it asks only
+to send to a destination that is not trusted (registered MCP servers, the
+project's git remote, localhost and the LAN are).
+
+MCP tools (plan de conectores, C5; `policy/mcp_tools.py`). The server's
+annotations count: a declared read is `mcp.read`, `destructiveHint` asks in
+workspace and `openWorldHint` marks a call that sends data out. The owner's
+Allow / Ask / Block per tool (or per server) wins over the mode's rule; Block
+holds in every mode, full access asks for nothing else. Same connector, same
+destination: in workspace, a call that sends out asks after external content
+only when that content came from somewhere else (a page, another connector);
+reading from a connector and calling the same connector again does not.
+
 """
 
 from __future__ import annotations
@@ -33,6 +47,16 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from rinari.policy.mcp_tools import (
+    DECISION_ALLOW,
+    DECISION_ASK,
+    DECISION_DENY,
+    RULE_BLOCKED,
+    RULE_DESTRUCTIVE,
+    RULE_TOOL_ASK,
+    McpToolFacts,
+)
 
 if TYPE_CHECKING:
     from rinari.policy.network import NetworkPolicy
@@ -82,10 +106,6 @@ CAPABILITY_BROWSER_WRITE = "browser.mutate"
 #   mcp.call  any other MCP tool call; external side effects require consent
 CAPABILITY_MCP_READ = "mcp.read"
 CAPABILITY_MCP_WRITE = "mcp.call"
-# Peer messaging (Boards). Sending text to another agent session starts a
-# turn there and may forward data to a different provider: always consent,
-# bound exactly to one destination; PLAN/REVIEW/read-only never send.
-CAPABILITY_SESSION_MESSAGE = "session.message"
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,12 +122,27 @@ class SessionScope:
     # This turn already read external (untrusted) content: sending data out
     # asks even in full-access (module docstring).
     external_content: bool = False
+    # Full access asks before sending to a new destination after external
+    # content (the owner's switch, off by default).
+    ask_new_destinations: bool = False
+    # Where this turn's external content came from (`mcp:<server>` for a
+    # connector, a host or a label otherwise). Empty with external_content
+    # means "unknown": treated as foreign to every connector.
+    external_origins: frozenset[str] = frozenset()
     # Folder a shell-like command runs in when the call names its own `cwd`;
     # None means it runs in the session's cwd.
     command_cwd: Path | None = None
     # A project's other trusted working folders: inside them is inside the
     # project, exactly as the primary root. Untrusted ones are not listed.
     extra_roots: tuple[Path, ...] = ()
+    # Rinari Agency: the Engine's own home (its database, sessions, other
+    # conversations' outputs, credentials...) is off limits to an agent's
+    # conversation in every mode. `engine_home_open` are the folders of it this
+    # conversation may still use (its own workspace and outputs) and
+    # `engine_home_readable` the ones it may only read (installed skills).
+    engine_home: Path | None = None
+    engine_home_open: tuple[Path, ...] = ()
+    engine_home_readable: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,10 +184,57 @@ SENSITIVE_FILE = re.compile(
 
 SYSTEM_RULES: tuple[str, ...] = (
     "$HOME is never an implicit writable project root",
-    "system secrets (SSH/GPG/cloud keys, credential stores) always require approval",
-    "force push and deleting outside the project always require approval",
-    "after reading external content, sending data out requires approval",
+    "the catastrophic list (wiping the system or a disk, formatting, raw disk writes, "
+    "fork bombs) is refused in every mode",
+    "in project mode, system secrets, force push and deleting outside the project ask every time",
+    "in project mode, sending data to the internet after reading external content asks",
 )
+
+# The catastrophic list (plan-permisos-v4): refused in every mode, never asked.
+_ROOT_TARGET = r"""(?:/|/\*|~/?|\$HOME/?|[A-Za-z]:[\\/]?\*?|[A-Za-z]:[\\/]\.?)"""
+CATASTROPHIC: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(
+            r"\brm\s+(?:-[A-Za-z]*\s+)*-[A-Za-z]*[rR][A-Za-z]*\s+(?:-[A-Za-z-]+\s+)*"
+            rf"""["']?{_ROOT_TARGET}["']?(?:\s|$)"""
+        ),
+        "deletes the system root or the home folder",
+    ),
+    (
+        re.compile(
+            r"\b(?:Remove-Item|rm|del|rd|rmdir|ri)\b[^|;&\n]*(?:-Recurse|/s)[^|;&\n]*"
+            r"""\s["']?[A-Za-z]:[\\/]?\*?["']?(?:\s|$)""",
+            re.IGNORECASE,
+        ),
+        "deletes a whole drive",
+    ),
+    (re.compile(r"\bmkfs(?:\.\w+)?\b"), "formats a disk"),
+    (re.compile(r"(?:^|[;&|]\s*)format(?:\.com)?\s+[A-Za-z]:", re.IGNORECASE), "formats a drive"),
+    (
+        re.compile(r"\bFormat-Volume\b|\bClear-Disk\b|\bInitialize-Disk\b", re.IGNORECASE),
+        "formats or wipes a disk",
+    ),
+    (re.compile(r"\bdiskpart\b", re.IGNORECASE), "repartitions disks"),
+    (
+        re.compile(r"\bdd\b[^|;&\n]*\bof=/dev/(?:sd|hd|nvme|disk|rdisk|mmcblk|xvd|vd)\w*"),
+        "writes straight to a physical disk",
+    ),
+    (
+        re.compile(r">\s*/dev/(?:sd|hd|nvme|disk|rdisk|mmcblk)\w*"),
+        "writes straight to a physical disk",
+    ),
+    (re.compile(r"\\\\\.\\PhysicalDrive\d", re.IGNORECASE), "writes straight to a physical disk"),
+    (re.compile(r":\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:"), "is a fork bomb"),
+)
+
+
+def catastrophic(command: str) -> str | None:
+    """Why `command` is on the catastrophic list, or None."""
+    for pattern, why in CATASTROPHIC:
+        if pattern.search(command or ""):
+            return why
+    return None
+
 
 # Choices: hard-list asks never offer a lasting grant.
 CHOICES_HARD = ("deny", "allow_once")
@@ -226,17 +308,34 @@ def is_local_host(host: str | None) -> bool:
 
 
 # Shell commands that send data out (a body, a form, an upload).
+# curl's one-letter options are case-sensitive: `-f` (fail on errors) is not
+# `-F` (send a form), nor is `-D` (save headers) `-d` (send data). Program
+# names and long options are not (plan 0.4.0 v2, V2-2).
 _SHELL_SENDS = re.compile(
-    r"\b(curl\b[^|;&]*\s(-d|--data[\w-]*|-F|--form|-T|--upload-file|-X\s*(POST|PUT|PATCH|DELETE))\b"
-    r"|wget\b[^|;&]*\s--post-(data|file)\b"
-    r"|(invoke-webrequest|invoke-restmethod|iwr|irm)\b[^|;&]*-method\s+(post|put|patch|delete)\b"
-    r"|scp\s|rsync\s[^|;&]*\S+:)",
-    re.IGNORECASE,
+    r"\b((?i:curl)\b[^|;&]*\s(-d|(?i:--data)[\w-]*|-F|(?i:--form)|-T|(?i:--upload-file)"
+    r"|-X\s*(?i:POST|PUT|PATCH|DELETE))\b"
+    r"|(?i:wget\b[^|;&]*\s--post-(data|file))\b"
+    r"|(?i:(invoke-webrequest|invoke-restmethod|iwr|irm)\b[^|;&]*-method\s+(post|put|patch|delete))\b"
+    r"|(?i:scp)\s|(?i:rsync)\s[^|;&]*\S+:)",
 )
 
 
 def shell_sends_data(command: str) -> bool:
     return bool(_SHELL_SENDS.search(command or ""))
+
+
+def foreign_content(scope: SessionScope, origin: str) -> bool:
+    """This turn read external content from somewhere other than `origin`.
+
+    Same connector, same destination (C5): what came from a connector going
+    back to that connector is not a new destination. Without known origins
+    the content counts as foreign (a caller that only set the flag).
+    """
+    if not scope.external_content:
+        return False
+    if not scope.external_origins:
+        return True
+    return any(seen != origin for seen in scope.external_origins)
 
 
 def is_sensitive_file(path: Path) -> bool:
@@ -246,6 +345,74 @@ def is_sensitive_file(path: Path) -> bool:
 
 def _inside_any(path: Path, roots: tuple[Path, ...]) -> bool:
     return any(path == root.resolve() or root.resolve() in path.parents for root in roots)
+
+
+#: What separates the pieces of a command that may be paths: blanks, quotes,
+#: shell operators, brackets, commas and `=` (so `--out=../x` and the path in
+#: `python -c "open('../x')"` are pieces of their own).
+_PIECES = re.compile(r"""[\s'"`;|&<>(){}\[\],=]+""")
+
+
+_QUOTED = re.compile(r""""([^"]*)"|'([^']*)'""")
+
+
+def _looks_path(piece: str) -> bool:
+    if "://" in piece or piece.startswith(("//", "\\\\")):
+        return False  # a URL or a network share: not this machine's folders
+    return (
+        "/" in piece or "\\" in piece or piece in (".", "..") or piece.startswith(("~", "$", "%"))
+    )
+
+
+def _expand(piece: str) -> str:
+    import os
+
+    if piece.lower().startswith("$env:"):
+        piece = "$" + piece[5:]  # PowerShell's $env:NAME
+    return os.path.expanduser(os.path.expandvars(piece))
+
+
+def engine_home_targets(command: str, scope: SessionScope) -> list[Path]:
+    """The places in Rinari's home a shell command names, as resolved paths.
+
+    The folder it runs in counts, and so does every piece of it that reads
+    as a path, quoted or not, resolved against that folder with ~ and
+    variables expanded. What a command builds at run time (a path put
+    together from pieces, encoded, read from a file, or a script written
+    first and run after) cannot be seen in its text: this check stops a
+    direct reach and is no substitute for an operating-system sandbox.
+    """
+    import os
+
+    home = scope.engine_home
+    if home is None:
+        return []
+    home = home.resolve()
+    base = Path(scope.command_cwd if scope.command_cwd is not None else scope.cwd)
+    found: list[Path] = []
+
+    def note(raw: str | Path) -> None:
+        try:
+            candidate = Path(raw)
+            path = (candidate if candidate.is_absolute() else base / candidate).resolve()
+        except (OSError, RuntimeError, ValueError):
+            return
+        if (path == home or home in path.parents) and path not in found:
+            found.append(path)
+
+    note(base)
+    text = command or ""
+    # A quoted path may hold blanks: the whole quote is a piece too.
+    quoted = [a or b for a, b in _QUOTED.findall(text)]
+    for piece in [*quoted, *_PIECES.split(text)]:
+        piece = piece.strip()
+        if piece and _looks_path(piece):
+            note(_expand(piece))
+            if "\\" in piece and os.sep == "/":
+                # A Windows-style path names the same place wherever the
+                # command ends up running (Git Bash, WSL, a script).
+                note(_expand(piece.replace("\\", "/")))
+    return found
 
 
 def classify_git_remote(command: str) -> str | None:
@@ -293,6 +460,27 @@ _REDIRECT_TARGET = re.compile(r"(?<!>)>>?\s*(?:\"([^\"]+)\"|'([^']+)'|([^\s;&|]+
 _PATH_TOKEN = re.compile(r"(?:\"([^\"]+)\"|'([^']+)'|([^\s;&|]+))")
 
 
+# Copying reads its sources and writes only its destination; moving changes
+# both, so `move`/`mv` keep every path (plan 0.4.0 v2, V2-2).
+_COPY_VERBS = frozenset({"cp", "copy", "xcopy", "robocopy", "copy-item", "cpi"})
+
+
+def _copy_destination(verb: str, raw: list[str], positional: list[str]) -> list[str]:
+    """The path a copy writes: `-Destination`/`-t` when named, robocopy's
+    second argument, else the last one."""
+    for index, token in enumerate(raw):
+        lowered = token.lower()
+        if lowered in ("-destination", "-t", "--target-directory") and index + 1 < len(raw):
+            return [raw[index + 1]]
+        if lowered.startswith("--target-directory="):
+            return [token.split("=", 1)[1]]
+    if verb == "robocopy":
+        return positional[1:2]
+    if verb in ("copy-item", "cpi") and len(positional) >= 2:
+        return [positional[1]]
+    return positional[-1:]
+
+
 def _local_part(command: str) -> str:
     """What runs here: a quoted `ssh host "..."` payload runs remotely."""
     match = re.match(r"^\s*ssh\b[^\"']*", command)
@@ -304,6 +492,95 @@ def _is_inspection(command: str) -> bool:
     return bool(_INSPECTION_SHELL.match(command)) and not _CHAINING.search(command)
 
 
+# ssh options that take a value (`ssh -p 22 -i key host cmd`): the host is the
+# first token that is neither an option nor the value of one.
+_SSH_VALUE_OPTIONS = frozenset("BbcDEeFIiJLlmOoPpQRSWw")
+_REMOTE_PATH = re.compile(r"^(?:[\w.-]+@)?[\w.-]+:")
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteAction:
+    """A command that reaches another machine (plan 0.4.0 v2, V2-7)."""
+
+    kind: str  # "exec" (ssh with a command or a login) | "send" | "fetch" (scp, rsync)
+    host: str
+    payload: str = ""  # what runs over there, for `exec`
+
+
+def _segments(command: str) -> list[list[str]]:
+    """The command's simple commands, split at `;`, `&&`, `||`, `|` and `&`,
+    with quotes respected (a quoted ssh payload stays one token)."""
+    import shlex
+
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+    lexer.whitespace_split = True
+    lexer.escape = ""  # Windows paths keep their backslashes
+    segments: list[list[str]] = [[]]
+    for token in lexer:
+        if token and set(token) <= set(";&|"):
+            segments.append([])
+        else:
+            segments[-1].append(token)
+    return [segment for segment in segments if segment]
+
+
+def _program(token: str) -> str:
+    name = re.split(r"[\\/]", token)[-1].lower()
+    return name[:-4] if name.endswith(".exe") else name
+
+
+def remote_actions(command: str) -> list[RemoteAction]:
+    """What in `command` runs on, or copies to or from, another machine.
+
+    The local analysis only sees `ssh host`: the payload runs over there and
+    `scp` moves files between machines, so neither is a local command in the
+    workspace. A command that cannot be tokenized but names ssh, scp or rsync
+    still counts, with an unknown host.
+    """
+    try:
+        segments = _segments(command or "")
+    except ValueError:
+        if re.search(r"(?:^|[\s;&|\\/])(?:ssh|scp|rsync)(?:\.exe)?\s", command or "", re.I):
+            return [RemoteAction("exec", "?", command)]
+        return []
+    found: list[RemoteAction] = []
+    for tokens in segments:
+        while tokens and _program(tokens[0]) in {"sudo", "env", "nohup", "time"}:
+            tokens = tokens[1:]
+        if not tokens:
+            continue
+        program = _program(tokens[0])
+        if program == "ssh":
+            host, index = None, 1
+            while index < len(tokens):
+                token = tokens[index]
+                if token == "--":
+                    index += 1
+                    break
+                if token.startswith("-") and len(token) > 1:
+                    if token[-1] in _SSH_VALUE_OPTIONS and len(token) == 2:
+                        index += 1  # its value is the next token
+                    index += 1
+                    continue
+                break
+            if index < len(tokens):
+                host, payload = tokens[index], " ".join(tokens[index + 1 :])
+                found.append(RemoteAction("exec", host, payload))
+        elif program in {"scp", "rsync"}:
+            paths = [token for token in tokens[1:] if not token.startswith("-")]
+            if not paths:
+                continue
+            target = paths[-1]
+            if _REMOTE_PATH.match(target) and not re.match(r"^[A-Za-z]:[\\/]", target):
+                found.append(RemoteAction("send", target.split(":", 1)[0]))
+            elif any(
+                _REMOTE_PATH.match(p) and not re.match(r"^[A-Za-z]:[\\/]", p) for p in paths[:-1]
+            ):
+                source = next(p for p in paths[:-1] if _REMOTE_PATH.match(p))
+                found.append(RemoteAction("fetch", source.split(":", 1)[0]))
+    return found
+
+
 def classify_shell_risk(command: str, scope: SessionScope) -> ShellRisk:
     """Recognise obvious filesystem mutation targets across common shells."""
 
@@ -312,6 +589,7 @@ def classify_shell_risk(command: str, scope: SessionScope) -> ShellRisk:
     mutation = bool(_MUTATING_SHELL.search(command) or _REDIRECT_TARGET.search(command))
     destructive = bool(_DESTRUCTIVE_SHELL.search(command))
     candidates: list[str] = []
+    reads: list[str] = []
     for match in _REDIRECT_TARGET.finditer(command):
         candidates.append(next(value for value in match.groups() if value is not None))
     if mutation:
@@ -324,16 +602,24 @@ def classify_shell_risk(command: str, scope: SessionScope) -> ShellRisk:
             ]
             # cmd.exe verbs take /switches (move /y, del /q): not paths.
             cmd_verb = bool(tokens) and tokens[0].lower() in _CMD_SWITCH_VERBS
-            candidates.extend(
+            arguments = [
                 token
                 for token in tokens[1:]
                 if not token.startswith("-")
                 and not (cmd_verb and re.fullmatch(r"/[A-Za-z?]{1,2}", token))
-            )
+            ]
+            verb = _program(tokens[0]) if tokens else ""
+            if verb in _COPY_VERBS:
+                written = _copy_destination(verb, tokens[1:], arguments)
+                # The sources are only read: still checked for secrets and
+                # private data, never counted as writes outside.
+                reads.extend(token for token in arguments if token not in written)
+                arguments = written
+            candidates.extend(arguments)
     external: list[str] = []
     sensitive = False
     private = False
-    for raw in candidates:
+    for raw, writes in [(item, True) for item in candidates] + [(item, False) for item in reads]:
         value = raw.strip().rstrip(",)")
         if not value or value in {"-", "/dev/null"} or value.upper() in {"NUL", "NUL:"}:
             continue
@@ -360,6 +646,8 @@ def classify_shell_risk(command: str, scope: SessionScope) -> ShellRisk:
             continue
         sensitive = sensitive or is_system_secret(resolved)
         private = private or _inside_any(resolved, scope.private_roots)
+        if not writes:
+            continue
         root = scope.root.resolve() if scope.root is not None else None
         home = scope.user_home.resolve() if scope.user_home is not None else None
         if root is not None and root == home:
@@ -386,6 +674,11 @@ def classify_shell_risk(command: str, scope: SessionScope) -> ShellRisk:
     )
 
 
+#: Cost bases a service declares (images/connectors.py `CostEstimate.basis`)
+#: that mean no money is spent per use.
+NO_EXTRA_COST = frozenset({"included", "local"})
+
+
 class PolicyEngine:
     def __init__(self, *, network: NetworkPolicy | None = None) -> None:
         from rinari.policy.network import NetworkPolicy  # local: avoid import cycle
@@ -410,34 +703,13 @@ class PolicyEngine:
         risk_class: str = "none",
         target: str | None = None,
         network_mode: str = "read",
+        cost_basis: str | None = None,
+        mcp: McpToolFacts | None = None,
     ) -> PolicyDecision:
+        guarded = self._engine_home(scope, capability, path, command)
+        if guarded is not None:
+            return guarded
         read_only = scope.profile is PermissionProfile.READ_ONLY
-        if capability == CAPABILITY_SESSION_MESSAGE:
-            if read_only:
-                return self._deny(
-                    capability,
-                    "PLAN, REVIEW and read-only sessions do not message other agents",
-                    target=target,
-                    risk=risk,
-                    risk_class=risk_class,
-                )
-            if not target:
-                return self._deny(
-                    capability,
-                    "peer message without a destination session",
-                    risk=risk,
-                    risk_class=risk_class,
-                )
-            return self._outbound(
-                scope,
-                capability,
-                "sending a message to another agent session (consent per destination)",
-                target=target,
-                risk=risk,
-                risk_class=risk_class,
-                rule_id="peer-message",
-                binding_mode="exact",
-            )
         if read_only and capability == CAPABILITY_SHELL:
             # A review re-runs the tests; a command can also change files, so
             # read-only asks for each one and never keeps the answer (as
@@ -467,6 +739,10 @@ class PolicyEngine:
             # Managing an approved process, reading harness state, or loading
             # tools into this session's exposure: no outside effect.
             return self._allow(capability, "local harness bookkeeping", risk, risk_class)
+        if capability == "agent.delegate":
+            # Subagents (#5): the child inherits this profile and can only
+            # narrow it, so a read-only session spawns read-only reviewers.
+            return self._allow(capability, "delegating within this profile", risk, risk_class)
         if capability == CAPABILITY_STATE_WRITE:
             if read_only:
                 return self._deny(
@@ -478,6 +754,8 @@ class PolicyEngine:
             return self._allow(capability, "local validation evidence", risk, risk_class)
         if capability == CAPABILITY_FS_WRITE:
             return self._fs_write(scope, path, risk, risk_class)
+        if capability in (CAPABILITY_MCP_READ, CAPABILITY_MCP_WRITE) and mcp is not None:
+            return self._mcp_tool(scope, capability, mcp, risk, risk_class)
         if capability in (CAPABILITY_BROWSER_READ, CAPABILITY_BROWSER_WRITE, CAPABILITY_MCP_READ):
             if read_only:
                 return self._deny(
@@ -505,6 +783,7 @@ class PolicyEngine:
                 return self._ask(
                     capability,
                     "interacting with a web page can act on the site",
+                    target=target,
                     risk=risk,
                     risk_class=risk_class,
                     rule_id="browser_interact",
@@ -523,13 +802,48 @@ class PolicyEngine:
                     risk=risk,
                     risk_class=risk_class,
                 )
-            return self._outbound(
-                scope,
+            # The owner registered the server: a trusted destination in every
+            # writing mode (plan-permisos-v4), also after external content.
+            return self._allow(
+                capability, "a tool from an MCP server the owner registered", risk, risk_class
+            )
+        if capability == "project.instructions.propose":
+            # /init (#81) runs read-only and ends by proposing RINARI.md. Proposing
+            # writes nothing: only the owner's «Guardar» does, outside the turn.
+            return self._allow(
+                capability, "a proposal the owner saves or discards", risk, risk_class
+            )
+        if capability == "media.generate":
+            # Creating or editing an image with a service (plan 0.4.0 #28):
+            # usually paid, and the prompt and images leave the machine. The
+            # target carries the connector, the model and the estimated cost.
+            # Full access does not ask (permissions v4); read-only and project
+            # mode ask, with the cost in front of the owner.
+            if scope.profile is PermissionProfile.FULL_ACCESS:
+                return self._allow(capability, "creating images", risk, risk_class, target=target)
+            if not read_only and cost_basis in NO_EXTRA_COST:
+                # P2: the service itself says it costs nothing extra (a plan
+                # that includes it, or a model on this computer). The budget
+                # precheck still guards money; nothing here is paid per use.
+                return self._allow(
+                    capability, "creating images at no extra cost", risk, risk_class, target=target
+                )
+            return self._ask(
                 capability,
-                "external MCP call can cause side effects",
+                "creating or editing an image with a service (it may cost money)",
+                target=target,
                 risk=risk,
                 risk_class=risk_class,
-                rule_id="mcp_call",
+                rule_id="media_generate",
+                choices=CHOICES_LASTING,
+            )
+        if capability == "file.present":
+            # Presenting a result only shows it to the owner in the chat: no
+            # side effects and nothing leaves the machine. It asked for
+            # approval as an «uncovered capability», which made no sense for
+            # the final delivery of the work.
+            return self._allow(
+                capability, "presenting a result to the owner has no side effects", risk, risk_class
             )
         if capability in {"channel.send_attachment", "channel.reply", "channel.delivery_get"}:
             return PolicyDecision(
@@ -614,8 +928,12 @@ class PolicyEngine:
             binding_mode=binding_mode,
         )
 
-    def _hard(self, capability, reason, *, target, rule_id, risk="critical", risk_class="none"):
-        """Hard list: asked in every profile, never granted for good."""
+    def _hard(
+        self, scope, capability, reason, *, target, rule_id, risk="critical", risk_class="none"
+    ):
+        """Hard list: asked every time in project mode; full access does not ask."""
+        if scope.profile is PermissionProfile.FULL_ACCESS:
+            return self._allow(capability, f"full-access: {reason}", risk, risk_class, target)
         return self._ask(
             capability,
             reason,
@@ -626,7 +944,15 @@ class PolicyEngine:
             choices=CHOICES_HARD,
         )
 
-    def _secret(self, capability, resolved, *, write: bool) -> PolicyDecision:
+    def _secret(self, scope, capability, resolved, *, write: bool) -> PolicyDecision:
+        if scope.profile is PermissionProfile.FULL_ACCESS:
+            return self._allow(
+                capability,
+                "full-access: a system secret",
+                "critical" if write else "high",
+                "credential",
+                str(resolved),
+            )
         return self._ask(
             capability,
             "system secret (SSH/GPG/cloud keys or a credential store)",
@@ -649,9 +975,18 @@ class PolicyEngine:
         risk_class="none",
         rule_id: str,
         binding_mode="capability",
+        trusted: bool = False,
     ) -> PolicyDecision:
-        """An action that sends data or acts outside this machine."""
-        if scope.external_content:
+        """An action that sends data or acts outside this machine.
+
+        `trusted`: the destination is one the owner set up (the project's git
+        remote); full access never asks for it.
+        """
+        full = scope.profile is PermissionProfile.FULL_ACCESS
+        guard = scope.external_content and (
+            not full or (scope.ask_new_destinations and not trusted)
+        )
+        if guard:
             return self._ask(
                 capability,
                 f"{reason}, after reading external content in this turn",
@@ -662,7 +997,7 @@ class PolicyEngine:
                 choices=CHOICES_SESSION,
                 binding_mode=binding_mode,
             )
-        if scope.profile is PermissionProfile.FULL_ACCESS:
+        if full:
             return self._allow(capability, f"full-access: {reason}", risk, risk_class, target)
         return self._ask(
             capability,
@@ -672,6 +1007,96 @@ class PolicyEngine:
             risk_class=risk_class,
             rule_id=rule_id,
             binding_mode=binding_mode,
+        )
+
+    # -- MCP tools (connectors plan, C5) -----------------------------------------
+
+    def _mcp_tool(
+        self,
+        scope: SessionScope,
+        capability: str,
+        facts: McpToolFacts,
+        risk: str,
+        risk_class: str,
+    ) -> PolicyDecision:
+        """One MCP tool call: the owner's setting, the annotations and the mode.
+
+        Block holds in every mode. Read-only calls no MCP tool. Full access
+        asks for nothing else (a registered server is a trusted destination).
+        In workspace the owner's Ask, or a destructive tool without Allow,
+        asks with «always» (which saves Allow for the tool); a call that can
+        send data out after external content from another source asks for
+        this session at most, whatever the setting.
+        """
+        name = f"{facts.server}/{facts.tool}"
+        by = "for this tool" if facts.decision_source == "tool" else "for this server"
+        if facts.decision == DECISION_DENY:
+            return self._deny(
+                capability,
+                f"the owner blocked {name} ({by}) in Settings",
+                target=name,
+                risk=risk,
+                risk_class=risk_class,
+                rule_id=RULE_BLOCKED,
+            )
+        if scope.profile is PermissionProfile.READ_ONLY:
+            return self._deny(
+                capability,
+                "read-only profile does not call MCP tools",
+                target=name,
+                risk=risk,
+                risk_class=risk_class,
+            )
+        if facts.destructive:
+            risk, risk_class = "high", "remote-destructive"
+        if scope.profile is PermissionProfile.FULL_ACCESS:
+            return self._allow(
+                capability, f"full-access: {name}, a server the owner registered", risk, risk_class
+            )
+        guard = facts.sends_out and scope.external_content and foreign_content(scope, facts.origin)
+        asks = facts.decision == DECISION_ASK or (
+            facts.destructive and facts.decision != DECISION_ALLOW
+        )
+        if asks:
+            reason = (
+                f"the owner asked to be asked before {name} ({by})"
+                if facts.decision == DECISION_ASK
+                else f"{name} says it is destructive (deletes or overwrites)"
+            )
+        if guard:
+            reason = (
+                f"{reason}; " if asks else f"{name} can send data out; "
+            ) + "after reading external content from another source in this turn"
+            return self._ask(
+                capability,
+                reason,
+                target=name,
+                risk="high",
+                risk_class=risk_class if facts.destructive else "communication",
+                rule_id="external_content_send",
+                choices=CHOICES_SESSION,
+                binding_mode="exact",
+            )
+        if asks:
+            return self._ask(
+                capability,
+                reason,
+                target=name,
+                risk="high" if facts.destructive else risk,
+                risk_class=risk_class,
+                rule_id=RULE_TOOL_ASK if facts.decision == DECISION_ASK else RULE_DESTRUCTIVE,
+                choices=CHOICES_LASTING,
+                binding_mode="exact",
+            )
+        if facts.decision == DECISION_ALLOW:
+            return self._allow(capability, f"the owner allowed {name} ({by})", risk, risk_class)
+        return self._allow(
+            capability,
+            "a read-only MCP call"
+            if facts.read_only
+            else "a tool from an MCP server the owner registered",
+            risk,
+            risk_class,
         )
 
     # -- network ---------------------------------------------------------------
@@ -788,7 +1213,7 @@ class PolicyEngine:
                 choices=("deny",),
             )
         if is_system_secret(resolved):
-            return self._secret(CAPABILITY_FS_READ, resolved, write=False)
+            return self._secret(scope, CAPABILITY_FS_READ, resolved, write=False)
         return self._allow(
             CAPABILITY_FS_READ,
             f"inside the {scope.kind} session root"
@@ -826,7 +1251,7 @@ class PolicyEngine:
                 choices=("deny",),
             )
         if is_system_secret(resolved):
-            return self._secret(CAPABILITY_FS_WRITE, resolved, write=True)
+            return self._secret(scope, CAPABILITY_FS_WRITE, resolved, write=True)
         if scope.profile is PermissionProfile.READ_ONLY:
             return self._deny(
                 CAPABILITY_FS_WRITE, "read-only profile cannot write", target=str(resolved)
@@ -895,9 +1320,20 @@ class PolicyEngine:
         risk: str,
         risk_class: str,
     ) -> PolicyDecision:
+        why = catastrophic(command or "")
+        if why is not None:
+            return self._deny(
+                CAPABILITY_SHELL,
+                f"on the catastrophic list: the command {why}; Rinari never runs it",
+                target=command,
+                risk="critical",
+                risk_class="local-destructive",
+                rule_id="catastrophic",
+            )
         remote = classify_git_remote(command or "")
         if remote == "force":
             return self._hard(
+                scope,
                 CAPABILITY_SHELL,
                 "force push rewrites remote history",
                 target=command,
@@ -914,7 +1350,7 @@ class PolicyEngine:
                 risk_class="private-runtime-state",
                 rule_id="private_change_snapshot",
             )
-        if shell_risk.sensitive_target:
+        if shell_risk.sensitive_target and scope.profile is not PermissionProfile.FULL_ACCESS:
             return self._ask(
                 CAPABILITY_SHELL,
                 "command targets a system secret",
@@ -929,8 +1365,62 @@ class PolicyEngine:
             return self._deny(
                 CAPABILITY_SHELL, "read-only profile cannot execute commands", target=command
             )
+        machines = remote_actions(command or "")
+        if machines:
+            # What runs on another machine is not a local command in the
+            # workspace (V2-7): the local analysis only saw `ssh host`.
+            hosts = ", ".join(dict.fromkeys(action.host for action in machines))
+            for action in machines:
+                why = catastrophic(action.payload) if action.payload else None
+                if why is not None:
+                    return self._deny(
+                        CAPABILITY_SHELL,
+                        f"on the catastrophic list on {action.host}: the command {why}",
+                        target=command,
+                        risk="critical",
+                        risk_class="remote-destructive",
+                        rule_id="catastrophic",
+                    )
+            if any(
+                action.payload and _DESTRUCTIVE_SHELL.search(action.payload) for action in machines
+            ):
+                return self._hard(
+                    scope,
+                    CAPABILITY_SHELL,
+                    f"deletes on another machine ({hosts})",
+                    target=command,
+                    rule_id="remote_destructive",
+                    risk_class="remote-destructive",
+                )
+            sends = any(action.kind == "send" for action in machines)
+            if scope.profile is not PermissionProfile.FULL_ACCESS:
+                if sends:
+                    reason = f"copies files to another machine ({hosts})"
+                elif all(action.kind == "fetch" for action in machines):
+                    reason = f"copies files from another machine ({hosts})"
+                else:
+                    reason = f"runs a command on another machine ({hosts})"
+                return self._ask(
+                    CAPABILITY_SHELL,
+                    reason,
+                    target=command,
+                    risk="high",
+                    risk_class="communication" if sends else "remote-reversible",
+                    rule_id="shell_remote",
+                )
+            if sends and scope.external_content:
+                return self._outbound(
+                    scope,
+                    CAPABILITY_SHELL,
+                    "command sends data out",
+                    target=command,
+                    risk="high",
+                    risk_class="communication",
+                    rule_id="shell_send",
+                )
         if shell_risk.destructive and shell_risk.external_path_targets:
             return self._hard(
+                scope,
                 CAPABILITY_SHELL,
                 "deletes outside the project: " + ", ".join(shell_risk.external_path_targets[:3]),
                 target=command,
@@ -946,6 +1436,7 @@ class PolicyEngine:
                 risk="high",
                 risk_class="remote-reversible",
                 rule_id="git_remote_mutation",
+                trusted=True,
             )
         if scope.external_content and shell_sends_data(command or ""):
             return self._outbound(
@@ -982,6 +1473,80 @@ class PolicyEngine:
                 rule_id="shell_cwd_outside",
             )
         return self._allow(CAPABILITY_SHELL, "local command in the workspace", risk, risk_class)
+
+    # -- Rinari's own home (Rinari Agency) -------------------------------------
+
+    def _engine_home(
+        self,
+        scope: SessionScope,
+        capability: str,
+        path: str | Path | None,
+        command: str | None,
+    ) -> PolicyDecision | None:
+        """An agent's conversation never reads or writes Rinari's own home.
+
+        In every mode: its database, the other conversations and their
+        outputs, credentials and settings are the Engine's, not an agent's.
+        Its own workspace and outputs stay usable, and installed skills
+        readable. None when the action does not reach the home.
+        """
+        home = scope.engine_home
+        if home is None:
+            return None
+        if capability in (CAPABILITY_FS_READ, CAPABILITY_GIT_LOCAL, CAPABILITY_FS_WRITE):
+            if path is None:
+                return None
+            target = self._resolve(scope, path)
+            writes = [target] if capability == CAPABILITY_FS_WRITE else []
+            if self._home_allows(scope, [target], writes):
+                return None
+            return self._deny(
+                capability,
+                "Rinari's own data folder is off limits to an Agency agent",
+                target=str(target),
+                risk="critical",
+                risk_class="private-runtime-state",
+                rule_id="engine_home",
+            )
+        if capability == CAPABILITY_SHELL:
+            targets = engine_home_targets(command or "", scope)
+            if not targets:
+                return None
+            # What it writes outside its folder (a redirect, cp, mv...): read-only
+            # places of the home (installed skills) are only run or read.
+            risk = classify_shell_risk(command or "", scope)
+            writes = [Path(item) for item in risk.external_path_targets]
+            if self._home_allows(scope, targets, writes):
+                return None
+            return self._deny(
+                capability,
+                "the command reaches Rinari's own data folder, off limits to an Agency agent",
+                target=command,
+                risk="critical",
+                risk_class="private-runtime-state",
+                rule_id="engine_home",
+            )
+        return None
+
+    def _home_allows(self, scope: SessionScope, targets: list[Path], writes: list[Path]) -> bool:
+        """Every place of the home it reads is open or readable, and every place it writes, open."""
+        home = scope.engine_home.resolve() if scope.engine_home is not None else None
+        if home is None:
+            return True
+
+        def inside_home(path: Path) -> bool:
+            return path == home or home in path.parents
+
+        for target in targets:
+            if inside_home(target) and not (
+                _inside_any(target, scope.engine_home_open)
+                or _inside_any(target, scope.engine_home_readable)
+            ):
+                return False
+        return all(
+            not inside_home(written) or _inside_any(written, scope.engine_home_open)
+            for written in writes
+        )
 
     # -- helpers --------------------------------------------------------------
 

@@ -22,7 +22,12 @@ from rinari.application.credentials import (
 from rinari.providers.adapters.base import ProviderHealth
 from rinari.providers.registry import adapter_for, validate_provider_type
 from rinari.shared.clock import now_iso
-from rinari.shared.errors import ConflictError, InvalidUsageError, NotFoundError
+from rinari.shared.errors import (
+    ConflictError,
+    InvalidUsageError,
+    NotFoundError,
+    ProviderDisabledError,
+)
 from rinari.shared.locking import file_lock
 from rinari.storage.records import (
     ConfigValue,
@@ -96,8 +101,25 @@ class ProviderService:
         )
         return enabled
 
-    def list(self) -> list[ProviderRecord]:
-        return self._ctx.provider_repo.list()
+    def list(self, *, include_disabled: bool = True) -> list[ProviderRecord]:
+        records = self._ctx.provider_repo.list()
+        return records if include_disabled else [r for r in records if r.enabled]
+
+    def set_enabled(self, ref: str, enabled: bool) -> ProviderRecord:
+        """Turn a provider on or off (plan 0.4.0 #97). Off, its models leave
+        every picker and nothing calls it; the credential stays. Turning off
+        the active provider leaves Rinari without one until another is used."""
+        record = self.get(ref)
+        if record.enabled != enabled:
+            record.enabled = enabled
+            record.updated_at = self._now()
+            self._ctx.provider_repo.update(record)
+        return record
+
+    @staticmethod
+    def ensure_enabled(record: ProviderRecord, model: str | None = None) -> None:
+        if not record.enabled:
+            raise ProviderDisabledError(record.id, record.alias, model)
 
     def get(self, ref: str) -> ProviderRecord:
         record = self._ctx.provider_repo.get(ref)
@@ -456,7 +478,11 @@ class ProviderService:
         record = self.get(ref)
         active_id = self._ctx.config_repo.get(KEY_ACTIVE_PROVIDER)
         was_active = active_id == record.id
-        if was_active and switch_to is None:
+        others = [p for p in self._ctx.provider_repo.list() if p.id != record.id]
+        # The only provider can go (plan 0.4.0 #19): Rinari is left without
+        # one and the app opens the setup assistant. With others, which one
+        # takes over is still the owner's choice.
+        if was_active and switch_to is None and others:
             raise InvalidUsageError(
                 f"Provider {record.alias!r} is active. Select another provider first.",
                 hint=f"rinari providers remove {record.alias} --switch-to <alias>",
@@ -675,6 +701,7 @@ class ProviderService:
 
     def use(self, ref: str) -> ProviderSelection:
         record = self.get(ref)
+        self.ensure_enabled(record)
         model = self._default_model_for(record)
         now = self._now()
         with self._ctx.db.transaction():
@@ -694,7 +721,7 @@ class ProviderService:
         if provider_id is None:
             return None
         provider = self._ctx.provider_repo.get(provider_id)
-        if provider is None:
+        if provider is None or not provider.enabled:
             return None
         model_id = self._ctx.config_repo.get(KEY_ACTIVE_MODEL)
         model = self._ctx.model_repo.get(model_id) if model_id else None
@@ -802,5 +829,7 @@ class ProviderService:
 
     def _http(self) -> httpx.Client:
         if self._client is None:
-            self._client = httpx.Client(timeout=10.0)
+            from rinari.net import client as net_client
+
+            self._client = net_client(self._ctx.home, timeout=10.0)
         return self._client

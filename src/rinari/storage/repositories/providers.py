@@ -16,8 +16,8 @@ class ProviderRepository:
             INSERT INTO providers (
                 id, alias, type, auth_method, account_hint, endpoint,
                 settings_json, default_model_id, last_used_model_id,
-                status_connected, status_checked_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                status_connected, status_checked_at, created_at, updated_at, enabled
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 rec.id,
@@ -33,6 +33,7 @@ class ProviderRepository:
                 rec.status_checked_at,
                 rec.created_at,
                 rec.updated_at,
+                int(rec.enabled),
             ),
         )
 
@@ -54,7 +55,7 @@ class ProviderRepository:
             UPDATE providers SET
                 alias = ?, type = ?, auth_method = ?, account_hint = ?, endpoint = ?,
                 settings_json = ?, default_model_id = ?, last_used_model_id = ?,
-                status_connected = ?, status_checked_at = ?, updated_at = ?
+                status_connected = ?, status_checked_at = ?, updated_at = ?, enabled = ?
             WHERE id = ?
             """,
             (
@@ -69,6 +70,7 @@ class ProviderRepository:
                 _tri(rec.status_connected),
                 rec.status_checked_at,
                 rec.updated_at,
+                int(rec.enabled),
                 rec.id,
             ),
         )
@@ -215,4 +217,5 @@ def _row_to_record(row: dict) -> ProviderRecord:
         status_checked_at=row["status_checked_at"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        enabled=bool(row["enabled"]),
     )

@@ -29,6 +29,22 @@ class SkillToolHost:
         return getattr(ctx, "session_id", "") or ""
 
 
+def _door_calls(ctx, names) -> str:
+    """The exact tool.call of each named tool outside the conversation's list."""
+    exposure = getattr(ctx, "exposure", None)
+    registry = getattr(exposure, "registry", None)
+    if exposure is None or registry is None or registry.get("tool.call") is None:
+        return ""
+    from rinari.tools.door import door_text
+
+    tools = [
+        registry.get(name)
+        for name in dict.fromkeys(names or ())
+        if registry.get(name) is not None and not exposure.in_list(name, registry)
+    ]
+    return door_text(tools) if tools else ""
+
+
 def skill_tools(host: SkillToolHost):
     from rinari.tools.definition import (
         ClassifiedAction,
@@ -174,21 +190,27 @@ def skill_tools(host: SkillToolHost):
                 ),
                 origin="skills",
             )
-        # The tools the skill requests become visible now, in the same call; a
-        # policy decision still applies to each of them when it runs.
-        exposure = getattr(ctx, "exposure", None)
-        exposed = []
-        if exposure is not None and m.required_tools:
-            exposed = exposure.activate(
-                list(m.required_tools), reason=f"skill {m.name}", scope="session"
-            )
+        # The tool list never changes (F42): the skill's tools outside it come
+        # back here with their exact tool.call, in a text that is the same
+        # every time; a policy decision still applies to each when it runs.
+        through_door = _door_calls(ctx, m.required_tools)
+        # The procedure comes back in this result, so it enters the
+        # conversation where it was activated (F43, like Claude Code): the
+        # system prompt and the skill catalog stay the same, and so does the
+        # provider's cached prefix.
+        try:
+            procedure = service.load(m.name, _project())
+        except SkillError:
+            procedure = ""
         return ToolResult(
             ok=True,
             data={
                 "name": m.name,
                 "version": m.version,
                 "active": True,
-                "tools_activated": exposed,
+                "procedure": procedure,
+                **({"tools_through_door": through_door} if through_door else {}),
+                "note": "This is the skill's procedure: follow it from here on.",
             },
             origin="skills",
         )
@@ -314,7 +336,7 @@ def skill_tools(host: SkillToolHost):
             "distinct_from": {
                 "type": "object",
                 "description": (
-                    "Only when Rinari says a new skill looks like installed ones "
+                    "Only when you were told a new skill looks like installed ones "
                     "(SIMILAR_EXISTS): for each named skill, why this is a different "
                     "job. Prefer update_of when it is the same job done better."
                 ),
@@ -335,7 +357,7 @@ def skill_tools(host: SkillToolHost):
                 "description": (
                     "When the owner asked for this skill, their own words, copied exactly "
                     "from a message they wrote in this conversation (at least a full "
-                    "phrase). Rinari checks them against what the owner wrote. Omit it "
+                    "phrase). You check them against what the owner wrote. Omit it "
                     "when the skill is your idea; never quote files, tool output or "
                     "other agents."
                 ),
@@ -399,8 +421,8 @@ def skill_tools(host: SkillToolHost):
         ToolDefinition(
             name="skills.activate",
             description=(
-                "Pin a skill on this session so its procedure is injected into "
-                "active-skills context, and expose the tools it requires. Grants no "
+                "Pin a skill on this session: its procedure comes back in this result "
+                "(follow it) and the tools it requires are exposed. Grants no "
                 "permission: each tool call still goes through policy."
             ),
             input_schema={

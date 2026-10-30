@@ -7,7 +7,7 @@ from rinari.shared.clock import FakeClock
 from rinari.shared.errors import ConfigurationError
 from rinari.storage.db import Database
 from rinari.storage.migrations import MigrationRunner
-from rinari.storage.migrations.runner import SUPERSEDED
+from rinari.storage.migrations.runner import REUSE_BACKUP_WITHIN_S, SUPERSEDED
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BUNDLED_0001 = REPO_ROOT / "src/rinari/storage/migrations/0001_initial.sql"
@@ -29,6 +29,10 @@ TABLES_AFTER_MIGRATIONS = {
     "sessions",
     "session_events",
     "session_checklists",
+    "session_approval_grants",
+    "session_children",
+    "session_goals",
+    "session_resumes",
     "followup_suggestions",
     "project_folders",
     "session_messages",
@@ -61,6 +65,16 @@ TABLES_AFTER_MIGRATIONS = {
     "network_events",
     "plugins",
     "mcp_servers",
+    "mcp_project_offers",
+    "agency_agents",
+    "agency_queue",
+    "agency_flows",
+    "agency_flow_runs",
+    "agency_teams",
+    "agency_posts",
+    "agency_office_messages",
+    "agency_errands",
+    "agency_waits",
     "api_specs",
     "hooks",
     "turn_changesets",
@@ -133,6 +147,27 @@ def test_migrate_fresh_database_applies_all(db):
         47,
         48,
         49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64,
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
     ]
     assert _table_names(db) == TABLES_AFTER_MIGRATIONS
 
@@ -141,7 +176,7 @@ def test_migrate_is_idempotent(db):
     runner = MigrationRunner(db, FakeClock())
     runner.migrate()
     assert runner.migrate() == []
-    assert runner.current_version() == 49
+    assert runner.current_version() == 70
 
 
 def _previous_home_migrations(tmp_path: Path, upto: int) -> Path:
@@ -294,7 +329,41 @@ def test_a_home_migrated_by_the_voice_branch_gets_the_missing_migrations(db, tmp
     )
     MigrationRunner(db, FakeClock(), directory=voice).migrate()
     applied = MigrationRunner(db, FakeClock()).migrate()
-    assert applied == [38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49]
+    assert applied == [
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64,
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
+    ]
     columns = {row["name"] for row in db.query("PRAGMA table_info(sessions)")}
     assert "pinned_at" in columns
     assert {"skill_records", "scheduled_tasks", "scheduled_runs"} <= _table_names(db)
@@ -312,7 +381,38 @@ def test_a_home_that_applied_the_old_numbers_is_not_migrated_twice(db, tmp_path)
     MigrationRunner(db, FakeClock(), directory=old).migrate()
     runner = MigrationRunner(db, FakeClock())
     # No duplicate pinned_at column and nothing re-run: only what came after.
-    assert runner.migrate() == [41, 42, 43, 44, 45, 46, 47, 48, 49]
+    assert runner.migrate() == [
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64,
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
+    ]
     recorded = {row["version"]: row["name"] for row in db.query("SELECT * FROM schema_migrations")}
     assert recorded[38] == "0038_session_pins" and recorded[40] == "0040_scheduled_tasks"
     # The old numbers are free again for the migrations that own them.
@@ -352,7 +452,38 @@ def test_stored_runtime_notes_are_marked_as_harness_not_as_the_owner(db, tmp_pat
             (message_id, "ses_h", seq, "user", content, "t0"),
         )
 
-    assert MigrationRunner(db, FakeClock()).migrate() == [41, 42, 43, 44, 45, 46, 47, 48, 49]
+    assert MigrationRunner(db, FakeClock()).migrate() == [
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64,
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
+    ]
     origins = {m.id: m.origin for m in SessionMessageRepository(db).list("ses_h")}
     assert origins == {
         "m1": None,
@@ -361,3 +492,194 @@ def test_stored_runtime_notes_are_marked_as_harness_not_as_the_owner(db, tmp_pat
         "m4": {"kind": "harness", "source": "subagents"},
         "m5": None,
     }
+
+
+def test_new_migrations_on_an_existing_home_back_it_up_first(db, tmp_path):
+    custom = tmp_path / "migrations"
+    custom.mkdir()
+    (custom / "0001_initial.sql").write_text(
+        BUNDLED_0001.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    backups = tmp_path / "backups"
+    policies = tmp_path / "policies"
+    policies.mkdir()
+    (policies / "approval_grants.json").write_text("{}", encoding="utf-8")
+    fresh = MigrationRunner(db, FakeClock(), directory=custom, backup_root=backups)
+    fresh.migrate()
+    # A brand-new home has nothing to keep.
+    assert fresh.last_backup is None
+    assert not backups.exists()
+
+    (custom / "0002_add_note.sql").write_text(
+        "CREATE TABLE note_test (id TEXT PRIMARY KEY)", encoding="utf-8"
+    )
+    runner = MigrationRunner(
+        db, FakeClock(), directory=custom, backup_root=backups, backup_extra=(policies,)
+    )
+    assert runner.migrate() == [2]
+    folder = runner.last_backup
+    assert folder is not None and folder.parent == backups
+    assert folder.name.startswith("antes-de-migrar-0001-a-0002-")
+    # The copy is the database as it was before 0002, with the policies.
+    copy = sqlite3.connect(folder / "state.db")
+    try:
+        rows = copy.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = {row[0] for row in rows}
+    finally:
+        copy.close()
+    assert "note_test" not in tables
+    assert (folder / "policies" / "approval_grants.json").read_text(encoding="utf-8") == "{}"
+
+    # Nothing pending: no new backup.
+    again = MigrationRunner(db, FakeClock(), directory=custom, backup_root=backups)
+    assert again.migrate() == []
+    assert again.last_backup is None
+
+
+def test_a_migration_cut_short_reuses_its_backup_on_the_next_start(db, tmp_path):
+    """27-oct: the desktop restarted an Engine stuck migrating every 45 s and
+    each start copied the whole database again (30 copies in half an hour)."""
+    custom = tmp_path / "migrations"
+    custom.mkdir()
+    (custom / "0001_initial.sql").write_text(
+        BUNDLED_0001.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    MigrationRunner(db, FakeClock(), directory=custom).migrate()
+    # A migration that never finishes: here it fails, the database stays at 0001.
+    (custom / "0002_slow.sql").write_text("SELECT * FROM no_such_table", encoding="utf-8")
+    backups = tmp_path / "backups"
+    clock = FakeClock()
+
+    first = MigrationRunner(db, clock, directory=custom, backup_root=backups)
+    with pytest.raises(sqlite3.OperationalError):
+        first.migrate()
+    clock.advance(45)
+    second = MigrationRunner(db, clock, directory=custom, backup_root=backups)
+    with pytest.raises(sqlite3.OperationalError):
+        second.migrate()
+    assert second.last_backup == first.last_backup
+    assert len(list(backups.iterdir())) == 1
+
+    # A copy cut halfway (no state.db yet) is never the one reused.
+    clock.advance(60)
+    cut = backups / "antes-de-migrar-0001-a-0002-20991231-235959"
+    cut.mkdir()
+    (cut / "state.db.partial").write_bytes(b"")
+    third = MigrationRunner(db, clock, directory=custom, backup_root=backups)
+    with pytest.raises(sqlite3.OperationalError):
+        third.migrate()
+    assert third.last_backup == first.last_backup
+
+    # A day later the database may have changed: a fresh copy.
+    clock.advance(REUSE_BACKUP_WITHIN_S)
+    later = MigrationRunner(db, clock, directory=custom, backup_root=backups)
+    with pytest.raises(sqlite3.OperationalError):
+        later.migrate()
+    assert later.last_backup not in (None, first.last_backup)
+    assert (later.last_backup / "state.db").is_file()
+    assert not (later.last_backup / "state.db.partial").exists()
+
+
+def test_0057_stays_linear_on_a_turn_with_many_chunks(db, tmp_path):
+    """27-oct: matching each chunk against every event of its turn took minutes
+    on a turn with tens of thousands of chunks."""
+    import json as _json
+    import time
+
+    custom = _previous_home_migrations(tmp_path, 56)
+    MigrationRunner(db, FakeClock(), directory=custom).migrate()
+    db.execute(
+        "INSERT INTO sessions (id, kind, created_cwd, current_cwd, provider_id, model_id, "
+        "state, created_at, updated_at, last_active_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("ses_d", "CHAT", "/w", "/w", "prov", "mdl", "active", "t0", "t0", "t0"),
+    )
+    rows = []
+    for call in range(40):
+        for _ in range(500):
+            rows.append(("tool.output.delta", _json.dumps({"tool_call_id": f"c{call}"})))
+        rows.append(("tool.completed", _json.dumps({"tool_call_id": f"c{call}"})))
+    with db.transaction():
+        db.connection.executemany(
+            "INSERT INTO session_events (id, session_id, seq, type, payload_json, "
+            "created_at, turn_id) VALUES (?, 'ses_d', ?, ?, ?, 'x', 'turn-1')",
+            [(f"e{seq}", seq, kind, payload) for seq, (kind, payload) in enumerate(rows, 1)],
+        )
+    started = time.perf_counter()
+    MigrationRunner(db, FakeClock()).migrate()
+    # The old query took ~20 s on this turn; the linear one well under a second.
+    assert time.perf_counter() - started < 2.0
+    left = db.query_one("SELECT COUNT(*) AS n FROM session_events")
+    assert left is not None and left["n"] == 40
+
+
+def test_lineage_is_filled_for_forks_notes_and_scheduled_runs(db, tmp_path):
+    """0053 (plan 0.4.0 #40): old forks, accepted notes and scheduled runs get their lineage."""
+    from rinari.storage.repositories.sessions import SessionRepository
+
+    MigrationRunner(db, FakeClock(), directory=_previous_home_migrations(tmp_path, 52)).migrate()
+    insert = (
+        "INSERT INTO sessions (id, kind, created_cwd, current_cwd, provider_id, model_id, "
+        "state, created_at, updated_at, last_active_at, forked_from) "
+        "VALUES (?, 'CHAT', '/w', '/w', 'prov', 'mdl', 'active', 't0', 't0', 't0', ?)"
+    )
+    for session_id, forked_from in (
+        ("ses_mother", None),
+        ("ses_fork", "ses_mother"),
+        ("ses_note", None),
+        ("ses_run", None),
+        ("ses_plain", None),
+    ):
+        db.execute(insert, (session_id, forked_from))
+    db.execute(
+        "INSERT INTO followup_suggestions (id, session_id, title, prompt, normalized_key, "
+        "status, accepted_session_id, created_at, resolved_at) "
+        "VALUES ('fs_1', 'ses_mother', 'Pruebas', 'Escribe pruebas', 'k', 'accepted', "
+        "'ses_note', 't0', 't1')"
+    )
+    db.execute(
+        "INSERT INTO scheduled_tasks (id, name, kind, schedule_json, prompt, mode, "
+        "skills_json, grants_json, enabled, created_at, updated_at) "
+        "VALUES ('tsk_1', 'Resumen', 'agent', '{}', 'Resume el día', 'build', '[]', '[]', 1, 0, 0)"
+    )
+    db.execute(
+        "INSERT INTO scheduled_runs (id, task_id, status, trigger, session_id) "
+        "VALUES ('run_1', 'tsk_1', 'done', 'schedule', 'ses_run')"
+    )
+
+    assert MigrationRunner(db, FakeClock()).migrate() == list(range(53, 71))
+    repo = SessionRepository(db)
+    fork, note, run, plain = (repo.get(i) for i in ("ses_fork", "ses_note", "ses_run", "ses_plain"))
+    assert (fork.parent_session_id, fork.lineage_kind) == ("ses_mother", "fork")
+    assert (note.parent_session_id, note.lineage_kind) == ("ses_mother", "note")
+    assert note.brief == {"title": "Pruebas", "request": "Escribe pruebas", "suggestion_id": "fs_1"}
+    assert (run.parent_session_id, run.lineage_kind) == (None, "schedule")
+    assert run.brief["task_id"] == "tsk_1" and run.brief["title"] == "Resumen"
+    assert (plain.parent_session_id, plain.lineage_kind, plain.brief) == (None, None, None)
+
+
+def test_0057_drops_the_chunks_of_ended_tools_only(db, tmp_path):
+    """#91: chunks of a tool that ended go; a tool cut mid-run keeps its own."""
+    import json as _json
+
+    custom = _previous_home_migrations(tmp_path, 56)
+    MigrationRunner(db, FakeClock(), directory=custom).migrate()
+    db.execute(
+        "INSERT INTO sessions (id, kind, created_cwd, current_cwd, provider_id, model_id, "
+        "state, created_at, updated_at, last_active_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("ses_d", "CHAT", "/w", "/w", "prov", "mdl", "active", "t0", "t0", "t0"),
+    )
+    rows = [
+        ("e1", 1, "tool.output.delta", {"tool_call_id": "done"}),
+        ("e2", 2, "tool.output.delta", {"tool_call_id": "done"}),
+        ("e3", 3, "tool.completed", {"tool_call_id": "done"}),
+        ("e4", 4, "tool.output.delta", {"tool_call_id": "cut"}),
+    ]
+    for event_id, seq, kind, payload in rows:
+        db.execute(
+            "INSERT INTO session_events (id, session_id, seq, type, payload_json, "
+            "created_at, turn_id) VALUES (?, 'ses_d', ?, ?, ?, 'x', 'turn-1')",
+            (event_id, seq, kind, _json.dumps(payload)),
+        )
+    MigrationRunner(db, FakeClock()).migrate()
+    left = [row["id"] for row in db.query("SELECT id FROM session_events ORDER BY seq")]
+    assert left == ["e3", "e4"]

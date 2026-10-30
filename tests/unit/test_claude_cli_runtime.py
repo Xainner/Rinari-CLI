@@ -617,7 +617,8 @@ def test_invoke_builds_history_from_rinari_not_from_claude(tmp_path):
     assert not any("Sos Rinari." in text for text in texts)
     assert response.provider_state["transport"] == "claude-cli"
     assert response.provider_state["resolved_model"] == "claude-sonnet-4-6-20260219"
-    assert response.usage.input_tokens == 11
+    # 11 read plus 3 from the cache (#78).
+    assert response.usage.input_tokens == 14
 
 
 # -- razonamiento ----------------------------------------------------------
@@ -861,3 +862,27 @@ def test_the_login_command_always_asks_for_the_subscription():
 
     for binary in (None, ClaudeCliBinary("C:/x/claude.cmd", "env")):
         assert login_command(binary).endswith("auth login --claudeai")
+
+
+def test_the_plan_limits_it_reports_are_kept(tmp_path):
+    """Plan 0.4.0 #78: `rate_limit_event` carries the subscription's windows."""
+    from rinari.providers.claude_cli import forget_rate_limit, latest_rate_limit
+
+    forget_rate_limit()
+    info = {
+        "status": "allowed_warning",
+        "rateLimitType": "five_hour",
+        "utilization": 0.82,
+        "resetsAt": 1_790_000_000,
+        "unifiedWindows": {"seven_day": {"utilization": 0.4, "resetsAt": 1_790_400_000}},
+    }
+    ClaudeCliStream(runtime(tmp_path, FAKE_CLAUDE_RATE_LIMIT=json.dumps(info))).run(
+        ClaudeRunRequest(model=None, system=None, messages=({"role": "user", "content": []},))
+    )
+    seen = latest_rate_limit()
+    assert seen is not None and seen["status"] == "allowed_warning"
+    assert seen["windows"] == {
+        "five_hour": {"utilization": 0.82, "resetsAt": 1_790_000_000},
+        "seven_day": {"utilization": 0.4, "resetsAt": 1_790_400_000},
+    }
+    forget_rate_limit()

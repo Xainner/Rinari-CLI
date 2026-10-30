@@ -8,7 +8,6 @@ persistence → approval → error → retry → resume) are covered.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -179,7 +178,7 @@ def test_e2e_tool_budget_boundary_exact(tmp_path) -> None:
     assert "RESOURCE_EXHAUSTED" in envelope
 
 
-# -- dynamic tools: 150 registered, budgeted exposure, search→activate -----------------
+# -- many tools: 150 registered, a fixed list, search -> tool.call (F42) ----------------
 
 
 def _lazy_plugin_tool(i: int) -> ToolDefinition:
@@ -193,12 +192,15 @@ def _lazy_plugin_tool(i: int) -> ToolDefinition:
     )
 
 
-def test_e2e_dynamic_tools_budget_and_activation(tmp_path) -> None:
+def test_e2e_many_tools_fixed_list_and_the_door(tmp_path) -> None:
+    from rinari.tools.door import door_tool
+
     env = _harness(tmp_path, approvals="y")
     registry = env["registry"]
     registry.register_all([_lazy_plugin_tool(i) for i in range(150)])
     registry.register(capability_search_tool(registry))
     registry.register_all(capability_activation_tools(registry))
+    registry.register(door_tool())
     assert len(registry.names()) >= 150
 
     env["ctx"].tool_ctx = replace(env["ctx"].tool_ctx, exposure=ToolExposure())
@@ -208,12 +210,12 @@ def test_e2e_dynamic_tools_budget_and_activation(tmp_path) -> None:
             _calls(ToolCall(id="s1", name="capability.search", arguments={"query": "tool_7"})),
             _calls(
                 ToolCall(
-                    id="a1",
-                    name="capability.activate",
-                    arguments={"names": ["plugin.tool_7"], "scope": "session"},
+                    id="c1",
+                    name="tool.call",
+                    arguments={"name": "plugin.tool_7", "arguments": "{}"},
                 )
             ),
-            _answer("activated"),
+            _answer("done"),
         ]
     )
     loop = AgentLoop(model, env["runtime"], PromptAssembler())
@@ -223,11 +225,14 @@ def test_e2e_dynamic_tools_budget_and_activation(tmp_path) -> None:
     assert result.kind == "answer"
     search_msg = env["ctx"].history[2]
     assert "plugin.tool_7" in (search_msg.content or "")
-    first = {t.name for t in model.requests[0].tools}
-    assert "plugin.tool_7" not in first
-    assert len(model.requests[0].tools) <= 96
-    last = {t.name for t in model.requests[-1].tools}
-    assert "plugin.tool_7" in last
+    assert '"tool": "tool.call"' in (search_msg.content or "")
+    first = model.requests[0].tools
+    assert "plugin.tool_7" not in {t.name for t in first}
+    assert len(first) <= 128
+    # The same list in every request; the plugin tool ran through the door.
+    assert all(request.tools == first for request in model.requests)
+    ran = env["ctx"].history[4]
+    assert ran.role == "tool" and ran.name == "tool.call" and '"ok": true' in (ran.content or "")
 
 
 # -- provider switch mid-session ---------------------------------------------------------
@@ -245,7 +250,7 @@ def test_e2e_provider_switch_next_request_goes_to_b(tmp_path) -> None:
     second = loop.turn(env["ctx"], "hi again")
     assert second.content == "from B"
     assert len(model_a.requests) == 1 and len(model_b.requests) == 1
-    roles = [m.role for m in env["ctx"].history]
+    roles = [m.role for m in env["ctx"].history if (m.origin or {}).get("source") != "turn-state"]
     assert roles == ["user", "assistant", "user", "assistant"]
 
 
@@ -281,9 +286,11 @@ def test_e2e_large_output_spills_and_stays_bounded(tmp_path) -> None:
 
     uri = result.data["result_ref"]
     assert uri == result.artifacts[0].uri
-    assert result.data["recovery"]["tool"] == "artifact.read"
+    # Plan 0.4.0 #76: the saved text is paged like a file; artifact.read by
+    # bytes still works on the same reference.
+    assert result.data["recovery"]["tool"] == "fs.read_lines"
     assert result.data["recovery"]["uri"] == uri
-    assert result.data["recovery"]["start_byte"] == 0
+    assert result.data["recovery"]["start"] == 1
     assert len(result.to_model_text("test.big").encode("utf-8")) <= (
         tool_ctx.observation_budget_bytes
     )
@@ -323,10 +330,8 @@ def test_e2e_large_output_spills_and_stays_bounded(tmp_path) -> None:
 
     recovered_text = "".join(pages)
     assert len(recovered_text.encode("utf-8")) == size_bytes
-    recovered = json.loads(recovered_text)
-    assert recovered["ok"] is True
-    assert recovered["tool"] == "test.big"
-    assert recovered["data"] == big
+    # The text inside the result, not its JSON envelope.
+    assert recovered_text == big
 
 
 # -- approval deny: no execution, no double exec ----------------------------------------------

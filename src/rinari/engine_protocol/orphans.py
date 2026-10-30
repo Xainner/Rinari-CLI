@@ -35,7 +35,7 @@ TERMINAL_TURN_EVENTS = ("turn.completed", "turn.failed", "turn.cancelled", "turn
 ENGINE_EXITED = "ENGINE_EXITED"
 REASON = "engine_exited"
 MESSAGE = (
-    "Rinari's engine stopped before this turn finished, so it was closed as interrupted. "
+    "Your engine stopped before this turn finished, so it was closed as interrupted. "
     "What ran before that point is kept; you can continue or retry."
 )
 

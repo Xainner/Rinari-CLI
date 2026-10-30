@@ -59,8 +59,10 @@ def test_interval_and_once() -> None:
     [
         None,
         {"kind": "hourly"},
-        {"kind": "interval", "minutes": 1},
+        {"kind": "interval", "seconds": 4},
         {"kind": "interval", "minutes": True},
+        {"kind": "interval", "minutes": 1, "seconds": 30},
+        {"kind": "interval"},
         {"kind": "daily", "time": "24:00"},
         {"kind": "daily", "time": "8:30"},
         {"kind": "weekly", "days": [], "time": "08:00"},
@@ -122,7 +124,7 @@ def test_the_service_validates_and_schedules(services) -> None:
         {"project_id": "prj_missing"},
         {"model": "no-such-model"},
         {"grants": [{"target": "x"}]},
-        {"schedule": {"kind": "interval", "minutes": 2}},
+        {"schedule": {"kind": "interval", "seconds": 2}},
     ):
         with pytest.raises(ScheduledTaskError):
             schedules.create(_task(**bad))
@@ -234,13 +236,21 @@ def test_an_agent_run_is_a_turn_in_its_own_session(server, monkeypatch) -> None:
         "kind": "schedule",
         "task_id": task["id"],
         "run_id": run_id,
+        "notify": "all",
     }
+    assert (
+        next(e for e in seen if e["event"] == "schedule.run.completed")["payload"]["notify"]
+        == "all"
+    )
     run = server._services.ctx.schedule_repo.run(run_id)
     assert run["status"] == "completed" and run["summary"] == "Todo en orden."
     session = server._services.sessions.show(run["session_id"])
     assert session.title.startswith("⏰ Resumen diario · ")
+    # Its lineage (plan 0.4.0 #40): a scheduled run, briefed by its task.
+    assert (session.parent_session_id, session.lineage_kind) == (None, "schedule")
+    assert session.brief["run_id"] == run_id and session.brief["title"] == "Resumen diario"
     # The task's grants were seeded as session grants of the run's session.
-    [grant] = server.turns.peers.session_grants(run["session_id"])
+    [grant] = server.turns.grants.for_session(run["session_id"])
     assert grant.capability == "shell.exec" and grant.scope is GrantScope.SESSION
     runs = _ok(_call(server, "schedule.get", {"task_id": task["id"]}))["runs"]
     assert [item["id"] for item in runs] == [run_id]
@@ -327,7 +337,7 @@ def test_the_owner_asking_creates_the_task_without_grants(services) -> None:
 
     announced: list[dict] = []
     services.schedules.on_proposed = announced.append
-    [tool] = schedule_tools(ScheduleToolHost(service=services.schedules, project_id=None))
+    tool = schedule_tools(ScheduleToolHost(service=services.schedules, project_id=None))[0]
     owner = SimpleNamespace(session_id="ses_1", origin_kind="user")
     result = tool.handler(
         {**_task(), "grants": [{"capability": "shell.exec"}], "in_this_project": True}, owner
@@ -345,13 +355,160 @@ def test_the_owner_asking_creates_the_task_without_grants(services) -> None:
     assert bad.ok is False and "HH:MM" in bad.error.message
 
 
-@pytest.mark.parametrize("origin", ["peer", "schedule"])
-def test_a_request_from_elsewhere_is_only_proposed(services, origin) -> None:
+def test_a_request_from_another_pane_goes_by_permissions(services) -> None:
+    """Scheduling is a `state.write` like any other: the permissions of the
+    session decide (read-only refuses it), not where the request came from."""
     from types import SimpleNamespace
 
     from rinari.schedule.tools import ScheduleToolHost, schedule_tools
 
-    [tool] = schedule_tools(ScheduleToolHost(service=services.schedules, project_id=None))
-    result = tool.handler(_task(), SimpleNamespace(session_id="ses_2", origin_kind=origin))
-    assert result.ok is True and result.data["status"] == "proposed"
+    tool = schedule_tools(ScheduleToolHost(service=services.schedules, project_id=None))[0]
+    result = tool.handler(_task(), SimpleNamespace(session_id="ses_2", origin_kind="peer"))
+    assert result.ok is True and result.data["status"] == "created"
+    assert len(services.schedules.list()) == 1
+    assert tool.capabilities == ("state.write",)
+
+
+def test_a_scheduled_run_does_not_schedule_more(services) -> None:
+    from types import SimpleNamespace
+
+    from rinari.schedule.tools import ScheduleToolHost, schedule_tools
+
+    tool = schedule_tools(ScheduleToolHost(service=services.schedules, project_id=None))[0]
+    result = tool.handler(_task(), SimpleNamespace(session_id="ses_2", origin_kind="schedule"))
+    assert result.ok is False and "scheduled run" in result.error.message
     assert services.schedules.list() == []
+
+
+# -- cron and «command» tasks (plan 0.4.0 #50) -------------------------------------------
+
+
+def test_cron_expressions() -> None:
+    weekdays = parse_schedule({"kind": "cron", "expr": "*/15  9-18 * * 1-5"})
+    assert weekdays.to_dict() == {"kind": "cron", "expr": "*/15 9-18 * * 1-5"}
+    # 2026-10-17 is a Saturday: next is Monday 09:00.
+    assert next_run(weekdays, _epoch("2026-10-17T18:50")) == _epoch("2026-10-19T09:00")
+    assert next_run(weekdays, _epoch("2026-10-19T09:07")) == _epoch("2026-10-19T09:15")
+    monthly = parse_schedule({"kind": "cron", "expr": "0 8 1 * *"})
+    assert next_run(monthly, _epoch("2026-10-19T09:07")) == _epoch("2026-11-01T08:00")
+    # Day of month and weekday both given: either one matches (classic cron).
+    either = parse_schedule({"kind": "cron", "expr": "30 6 13 * 5"})
+    assert next_run(either, _epoch("2026-10-17T00:00")) == _epoch("2026-10-23T06:30")
+    assert describe(weekdays) == "cron */15 9-18 * * 1-5"
+    for bad in ("* * *", "61 * * * *", "* 25 * * *", "a b c d e", "*/0 * * * *"):
+        with pytest.raises(ScheduleError):
+            parse_schedule({"kind": "cron", "expr": bad})
+
+
+def _command_task(command: str, **spec):
+    return _task(
+        name="Copia",
+        kind="command",
+        prompt="",
+        command={"command": command, **spec},
+    )
+
+
+def _finished(server, run_id):
+    events = _events(
+        server,
+        {"schedule.run.completed"},
+        lambda seen: any(e["payload"]["run_id"] == run_id for e in seen),
+    )
+    return next(e for e in events if e["payload"]["run_id"] == run_id)["payload"]
+
+
+def test_a_command_task_runs_without_the_model_and_keeps_its_output(server, tmp_path) -> None:
+    import sys
+
+    script = tmp_path / "backup.py"
+    script.write_text("print('copiados 12 archivos')\n", encoding="utf-8")
+    task = _ok(
+        _call(
+            server,
+            "schedule.create",
+            {"task": _command_task(f'"{sys.executable}" "{script}"', cwd=str(tmp_path))},
+        )
+    )["task"]
+    assert task["command"]["on_result"] == "notify_failure"
+    run = _ok(_call(server, "schedule.run_now", {"task_id": task["id"]}))["run"]
+    payload = _finished(server, run["id"])
+    assert payload["status"] == "completed"
+    # It went well and only failures are told: the desktop stays quiet.
+    assert payload["quiet"] is True
+    stored = server._services.ctx.schedule_repo.run(run["id"])
+    assert "copiados 12 archivos" in stored["summary"]
+    assert stored["session_id"] is None
+
+
+def test_a_failing_command_is_told(server, tmp_path) -> None:
+    import sys
+
+    task = _ok(
+        _call(
+            server,
+            "schedule.create",
+            {"task": _command_task(f'"{sys.executable}" -c "raise SystemExit(3)"')},
+        )
+    )["task"]
+    run = _ok(_call(server, "schedule.run_now", {"task_id": task["id"]}))["run"]
+    payload = _finished(server, run["id"])
+    assert payload["status"] == "failed" and "quiet" not in payload
+    assert payload["reason"] == "exit code 3"
+
+
+def test_on_result_agent_hands_the_output_to_a_turn(server, tmp_path, monkeypatch) -> None:
+    import sys
+
+    seen: list[ModelRequest] = []
+
+    class Reviewer:
+        def capabilities(self):
+            return ProviderCapabilities(streaming=False, tool_calls=True, structured_output=True)
+
+        def invoke(self, request):
+            seen.append(request)
+            return ModelResponse(content="Todo bien.", stop_reason=StopReason.END_TURN)
+
+    monkeypatch.setattr(agent_runtime, "_caller_for", lambda services, record: Reviewer())
+    task = _ok(
+        _call(
+            server,
+            "schedule.create",
+            {
+                "task": {
+                    **_command_task(f'"{sys.executable}" -c "print(42)"', on_result="agent"),
+                    "prompt": "¿Salió bien?",
+                }
+            },
+        )
+    )["task"]
+    run = _ok(_call(server, "schedule.run_now", {"task_id": task["id"]}))["run"]
+    payload = _finished(server, run["id"])
+    assert payload["status"] == "completed" and payload.get("session_id")
+    text = "\n".join(str(m.content) for m in seen[0].messages)
+    assert "¿Salió bien?" in text and "exit code 0" in text and "42" in text
+
+
+def test_command_tasks_are_validated(server) -> None:
+    bad = _call(server, "schedule.create", {"task": _command_task("")})
+    assert bad["ok"] is False
+    bad = _call(server, "schedule.create", {"task": _command_task("echo", on_result="sms")})
+    assert bad["ok"] is False
+    bad = _call(server, "schedule.create", {"task": _command_task("echo", timeout_s=99999)})
+    assert bad["ok"] is False
+
+
+def test_an_interval_may_be_seconds_with_no_minimum_but_the_scheduler_tick() -> None:
+    """The owner asked a team for 30 s cycles and the scheduler refused anything
+    under 5 minutes, a floor nobody had decided (22-oct)."""
+    every_30s = parse_schedule({"kind": "interval", "seconds": 30})
+    assert next_run(every_30s, 1000.0) == 1030.0
+    assert every_30s.to_dict() == {"kind": "interval", "seconds": 30}
+    every_minute = parse_schedule({"kind": "interval", "minutes": 1})
+    assert next_run(every_minute, 1000.0) == 1060.0
+    # Whole minutes keep the form every client already reads.
+    assert parse_schedule({"kind": "interval", "seconds": 120}).to_dict() == {
+        "kind": "interval",
+        "minutes": 2,
+    }

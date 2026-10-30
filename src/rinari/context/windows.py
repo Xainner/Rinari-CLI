@@ -58,7 +58,52 @@ def normalize(metadata):
         result["max_input_tokens"] = incoming
     if outgoing:
         result["max_output_tokens"] = outgoing
+    vision = _vision(metadata)
+    if vision is not None:
+        result["vision"] = vision
+    limits = metadata.get("vision_limits")
+    images = positive("max_images_per_request", "max_images") or (
+        limits.get("max_images")
+        if isinstance(limits, dict)
+        and type(limits.get("max_images")) is int
+        and limits["max_images"] > 0
+        else None
+    )
+    if images:
+        result["max_images"] = images
     return result
+
+
+def _vision(metadata):
+    """Whether the endpoint says the model reads images (plan 0.4.0 #14).
+
+    The usual shapes: `supports_vision`, `input_modalities` (or OpenRouter's
+    `architecture.input_modalities`, `modalities.input`) and llama.cpp's
+    `capabilities` list with `multimodal`/`vision`. Nothing stated is `None`.
+    """
+    flag = metadata.get("supports_vision")
+    if isinstance(flag, bool):
+        return flag
+
+    def modalities(value):
+        return [str(item).lower() for item in value] if isinstance(value, list) else None
+
+    for candidate in (
+        metadata.get("input_modalities"),
+        (metadata.get("modalities") or {}).get("input")
+        if isinstance(metadata.get("modalities"), dict)
+        else None,
+        (metadata.get("architecture") or {}).get("input_modalities")
+        if isinstance(metadata.get("architecture"), dict)
+        else None,
+    ):
+        listed = modalities(candidate)
+        if listed is not None:
+            return "image" in listed
+    capabilities = modalities(metadata.get("capabilities"))
+    if capabilities is not None and any(item in {"multimodal", "vision"} for item in capabilities):
+        return True
+    return None
 
 
 def _key(provider):

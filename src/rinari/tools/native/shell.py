@@ -30,6 +30,55 @@ from rinari.tools.definition import (
 DEFAULT_TIMEOUT_S = 60.0
 MAX_OUTPUT_BYTES = 1_000_000
 MAX_CAPTURE_BYTES = 50 * 1024 * 1024
+# #32: a foreground command that reaches its time limit moves to the
+# background instead of dying, unless the model asked for a short limit (it
+# expected a quick answer) or the command waits for a person (ssh, editors).
+SHORT_EXPLICIT_TIMEOUT_S = 30.0
+_INTERACTIVE = ("vim", "vi", "nano", "emacs", "less", "more", "top", "htop", "man")
+
+
+class ForegroundRun:
+    """A shell.exec in the foreground that the owner can send to the background."""
+
+    def __init__(self) -> None:
+        self.requested = threading.Event()
+        self.reason = ""
+
+    def to_background(self, reason: str) -> None:
+        self.reason = reason
+        self.requested.set()
+
+
+_FOREGROUND: dict[tuple[str, str], ForegroundRun] = {}
+_FOREGROUND_LOCK = threading.Lock()
+
+
+def request_background(session_id: str, tool_call_id: str, reason: str = "owner") -> bool:
+    """Move a running foreground command to the background (#32). False if none."""
+    with _FOREGROUND_LOCK:
+        run = _FOREGROUND.get((session_id, tool_call_id))
+    if run is None:
+        return False
+    run.to_background(reason)
+    return True
+
+
+def running_foreground(session_id: str) -> list[str]:
+    """Tool call ids of this session's commands running in the foreground."""
+    with _FOREGROUND_LOCK:
+        return [call for (sid, call) in _FOREGROUND if sid == session_id]
+
+
+def _waits_for_a_person(command: Any) -> bool:
+    text = command if isinstance(command, str) else " ".join(map(str, command or []))
+    words = text.strip().split()
+    if not words:
+        return False
+    program = os.path.basename(words[0]).lower().removesuffix(".exe")
+    if program in _INTERACTIVE:
+        return True
+    # ssh with no remote command opens an interactive shell.
+    return program == "ssh" and len([w for w in words[1:] if not w.startswith("-")]) <= 1
 
 
 def resolve_argv(command: Any, env: dict[str, str]) -> Any:
@@ -159,6 +208,13 @@ def _drain(stream, buffer: _BoundedBuffer, name: str, sink=None, capture=None) -
         pass
 
 
+def _terminate(process: subprocess.Popen, job: Any) -> None:
+    """End a command and everything it started: the job, else the process tree."""
+    if job is not None and job.terminate():
+        return
+    _kill_tree(process)
+
+
 def _kill_tree(process: subprocess.Popen) -> None:
     if sys.platform == "win32":
         with contextlib.suppress(OSError, subprocess.SubprocessError):
@@ -167,11 +223,13 @@ def _kill_tree(process: subprocess.Popen) -> None:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                timeout=1.0,
+                # 1 s was not enough with the machine loaded (#90).
+                timeout=5.0,
                 check=False,
             )
         with contextlib.suppress(OSError):
-            process.kill()
+            if process.poll() is None:
+                process.kill()
     else:
         import signal
 
@@ -314,8 +372,12 @@ def shell_exec(input: dict, ctx: ToolContext) -> ToolResult:
         cwd = str(ctx.cwd)
 
     max_bytes = min(ctx.limits.max_output_bytes, MAX_OUTPUT_BYTES)
-    stdout = _BoundedBuffer(max_bytes)
-    stderr = _BoundedBuffer(max_bytes)
+    # The same buffers as a background process: if this command moves to the
+    # background (#32), the registry takes them with the output so far.
+    from rinari.tools.native.process import _ProcessBuffer
+
+    stdout = _ProcessBuffer(max_bytes)
+    stderr = _ProcessBuffer(max_bytes)
     capture = _ExecutionCapture()
 
     kwargs: dict[str, Any] = {
@@ -333,8 +395,10 @@ def shell_exec(input: dict, ctx: ToolContext) -> ToolResult:
     else:
         kwargs["start_new_session"] = True
 
+    from rinari.tools.native.jobs import popen_in_job
+
     try:
-        process = subprocess.Popen(resolve_argv(command, env), **kwargs)
+        process, job = popen_in_job(resolve_argv(command, env), **kwargs)
     except (OSError, ValueError) as exc:
         return _fail(
             ToolErrorCode.DEPENDENCY_ERROR, f"Failed to start process: {exc.__class__.__name__}"
@@ -365,29 +429,84 @@ def shell_exec(input: dict, ctx: ToolContext) -> ToolResult:
 
         def terminate_on_cancel() -> None:
             if process.poll() is None:
-                _kill_tree(process)
+                _terminate(process, job)
 
         remove_cancel_callback = cancellation.on_cancel(terminate_on_cancel)
+    registry = getattr(ctx, "processes", None)
+    from rinari.tools.native.process import ProcessRegistry
+
+    can_background = isinstance(registry, ProcessRegistry) and bool(ctx.tool_call_id)
+    run = ForegroundRun()
+    key = (ctx.session_id, ctx.tool_call_id)
+    if can_background:
+        with _FOREGROUND_LOCK:
+            _FOREGROUND[key] = run
+    explicit = timeout["source"] == "argument"
+    background_on_timeout = (
+        can_background
+        and not (explicit and timeout_s <= SHORT_EXPLICIT_TIMEOUT_S)
+        and not _waits_for_a_person(input.get("argv") or input.get("command"))
+        and timeout["source"] != "deadline"
+    )
+    moved: str | None = None
     try:
-        try:
-            process.wait(timeout=timeout_s)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            _kill_tree(process)
+        deadline = time.monotonic() + timeout_s
+        while process.poll() is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                if background_on_timeout:
+                    run.to_background("timeout")
+                else:
+                    timed_out = True
+                    _terminate(process, job)
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        process.wait(timeout=1)
+                    break
+            if run.requested.is_set():
+                moved = registry.adopt(process, job, command, cwd or "", stdout, stderr, readers)
+                break
             with contextlib.suppress(subprocess.TimeoutExpired):
-                process.wait(timeout=1)
+                process.wait(timeout=min(0.2, max(remaining, 0.01)))
     finally:
+        if can_background:
+            with _FOREGROUND_LOCK:
+                _FOREGROUND.pop(key, None)
         if remove_cancel_callback is not None:
             remove_cancel_callback()
         cancelled = cancellation is not None and cancellation.cancelled
-        if process.poll() is None:
-            _kill_tree(process)
+        if moved is None and process.poll() is None:
+            _terminate(process, job)
             with contextlib.suppress(subprocess.TimeoutExpired):
                 process.wait(timeout=1)
-        for reader in readers:
-            reader.join(timeout=1)
+        if moved is None:
+            for reader in readers:
+                reader.join(timeout=1)
+            if job is not None:
+                job.close()
+
+    if moved is not None:
+        why = (
+            "Moved to the background by the user"
+            if run.reason != "timeout"
+            else f"Still running after {timeout_s:.0f}s, so it moved to the background"
+        )
+        return _ok(
+            {
+                "command": command,
+                "cwd": cwd,
+                "background": True,
+                "handle": moved,
+                "reason": run.reason or "owner",
+                "stdout": stdout.text()[-4000:],
+                "stderr": stderr.text()[-4000:],
+                "note": f"{why}: {moved}. Its output keeps arriving; read it with "
+                "process.logs or wait with process.wait.",
+            }
+        )
 
     exit_code = process.returncode if process.returncode is not None else -1
+    expected = input.get("expect_exit")
+    expected = [expected] if isinstance(expected, int) else list(expected or [])
     data = {
         "command": command,
         "cwd": cwd,
@@ -397,6 +516,11 @@ def shell_exec(input: dict, ctx: ToolContext) -> ToolResult:
         "truncated": stdout.truncated or stderr.truncated,
         "timeout": timeout,
     }
+    if expected and exit_code != 0 and exit_code in expected:
+        # A red the model asked for on purpose is not a failed tool: it no
+        # longer counts as an incident nor dirties the metrics (F4, F27).
+        data["expected_exit"] = expected
+        data["as_expected"] = True
     if cancelled:
         result = _fail(ToolErrorCode.CANCELLED, "Command cancelled", data=data)
     elif timed_out:
@@ -440,14 +564,36 @@ def shell_tools() -> list[ToolDefinition]:
                         "maxItems": 256,
                     },
                     "background": {"type": "boolean", "default": False},
+                    "notify": {
+                        "type": "string",
+                        "enum": ["exit", "failure", "never", "wake"],
+                        "description": (
+                            "With background: when to be told it ended (default: failure); "
+                            "wake also starts a new turn here when it ends after your turn."
+                        ),
+                    },
                     "cwd": {"type": "string"},
                     "timeout_s": {
                         "type": "number",
                         "minimum": 1,
-                        "description": "Seconds; default 60, max 600 (longer: background=true).",
+                        "description": (
+                            "Seconds; default 60, max 600. A longer-running command moves to "
+                            "the background (process handle) unless timeout_s <= 30."
+                        ),
                     },
                     "env": {"type": "object"},
                     "shell": SHELL_SCHEMA,
+                    "expect_exit": {
+                        "type": ["integer", "array"],
+                        "items": {"type": "integer"},
+                        "description": (
+                            "Exit code(s) that mean the command did what you expected, e.g. 1 "
+                            "for tests you expect to fail before a fix. Default 0. Some "
+                            "programs report success with codes other than 0 (their "
+                            "documentation lists them); pass those codes here so the run "
+                            "is not counted as a failure."
+                        ),
+                    },
                 },
                 "oneOf": [{"required": ["command"]}, {"required": ["argv"]}],
             },

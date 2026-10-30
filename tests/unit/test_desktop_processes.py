@@ -39,6 +39,24 @@ def test_lists_owned_process_and_rejects_another_session():
         api.stop({"session_id": "other", "id": row["id"]})
 
 
+def test_a_named_server_with_its_port_opens_in_the_browser():
+    """#90: the row carries its name, port (as a URL) and whether it is kept."""
+    handle = SimpleNamespace(
+        id="proc_002",
+        command="npm run dev",
+        cwd="C:/app",
+        started_at=1,
+        name="vite",
+        port=5173,
+        persist=True,
+        process=SimpleNamespace(pid=998, poll=lambda: None),
+    )
+    api = service(SimpleNamespace(list=lambda: [handle]))
+    row = api.list({"session_id": "owner"})["processes"][0]
+    assert row["url"] == "http://localhost:5173"
+    assert row["name"] == "vite" and row["persist"] is True
+
+
 def test_finished_process_stop_is_idempotent_and_output_is_bounded():
     handle = SimpleNamespace(
         id="proc_001",
@@ -93,8 +111,12 @@ def test_recent_logs_continue_after_model_capture_limit():
     buffer.write("Servidor actualizado: ñ".encode())
     assert buffer.text() == "a" * 100
     assert buffer.tail_text().endswith("Servidor actualizado: ñ")
-    assert len(buffer._tail) <= 64000
+    # The panel gets the last 64 KB; process.logs reads up to 512 KiB (#90).
+    assert len(buffer.tail_text().encode()) <= 64000 + 3
+    assert not buffer.tail_truncated
+    buffer.write(b"b" * (600 * 1024))
     assert buffer.tail_truncated
+    assert buffer.tail_text(10**7).endswith("b" * 10)
 
 
 def test_preview_stop_is_routed_to_its_owning_preview_service():

@@ -149,30 +149,41 @@ def test_capability_search_requires_query(tmp_path):
     assert result.error.code.value == "INVALID_ARGUMENT"
 
 
-def test_search_load_respects_budget(tmp_path):
+def test_search_gives_the_call_of_what_is_outside_the_list(tmp_path):
     from rinari.tools.exposure import ToolExposure
 
     registry = _registry()
-    ctx = _ctx(tmp_path)
-    ctx = replace(ctx, exposure=ToolExposure(max_schema_count=100))
+    registry.register(
+        _tool("mcp.git.get_diff", "git diff via MCP", manifest={"source": "mcp", "server": "git"})
+    )
+    ctx = replace(_ctx(tmp_path), exposure=ToolExposure())
+    listed = ctx.exposure.for_model(registry)
     tool = capability_search_tool(registry)
-    result = tool.handler({"query": "read files", "load": True}, ctx)
-    assert result.data["loaded"]
-    ctx = replace(ctx, exposure=ToolExposure(max_schema_count=0))
-    result = tool.handler({"query": "read files", "load": True}, ctx)
-    assert result.data["loaded"] == []
-    assert "budget" in result.data["load_error"]
-    assert not ctx.exposure.activated
+    result = tool.handler({"query": "git", "load": True}, ctx)
+    rows = {row["name"]: row for row in result.data["results"]}
+    assert rows["mcp.git.get_diff"]["server"] == "git"
+    assert rows["mcp.git.get_diff"]["in_list"] is False
+    assert rows["mcp.git.get_diff"]["how_to_call"]["call"] == {
+        "tool": "tool.call",
+        "arguments": {"name": "mcp.git.get_diff", "arguments": "{}"},
+    }
+    assert "loaded" not in result.data
+    assert ctx.exposure.for_model(registry) == listed
+    native = tool.handler({"query": "read files"}, ctx)
+    row = next(r for r in native.data["results"] if r["name"] == "fs.read")
+    assert row["in_list"] is True and "how_to_call" not in row
 
 
-def test_activation_budget_failure_is_atomic(tmp_path):
+def test_activation_never_changes_the_list(tmp_path):
     from rinari.capability_search import capability_activation_tools
     from rinari.tools.exposure import ToolExposure
 
     registry = _registry()
-    ctx = _ctx(tmp_path)
-    ctx = replace(ctx, exposure=ToolExposure(max_schema_count=0))
-    result = capability_activation_tools(registry)[0].handler({"names": ["fs.read"]}, ctx)
-    assert not result.ok
-    assert result.error.code.value == "RESOURCE_EXHAUSTED"
-    assert not ctx.exposure.activated
+    ctx = replace(_ctx(tmp_path), exposure=ToolExposure())
+    listed = ctx.exposure.for_model(registry)
+    result = capability_activation_tools(registry)[0].handler(
+        {"names": ["browser.open", "fs.read"]}, ctx
+    )
+    assert result.ok and result.data["in_list"] == ["fs.read"]
+    assert [row["name"] for row in result.data["outside_list"]] == ["browser.open"]
+    assert ctx.exposure.for_model(registry) == listed

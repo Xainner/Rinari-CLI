@@ -397,3 +397,22 @@ def test_plan_tool_asks_and_resumes_real_agent_loop(desktop, monkeypatch):
     finally:
         if desktop._turns.has_active_turn(session["id"]):
             desktop._turns.cancel_turn(session["id"])
+
+
+def test_preview_list_shows_what_runs_in_the_session(desktop):
+    """Plan 0.4.0 #46: «En marcha» en la página de inicio del navegador."""
+    session = create(desktop)
+    other = create(desktop)
+    root = Path(session["current_cwd"])
+    (root / "index.html").write_text("<h1>hola</h1>", encoding="utf-8")
+    started = desktop._previews.start({"session_id": session["id"], "path": "index.html"})
+    try:
+        listed = desktop._previews.list({"session_id": session["id"]})["previews"]
+        assert [row["preview_id"] for row in listed] == [started["preview_id"]]
+        assert listed[0]["label"] == "index.html"
+        assert listed[0]["url"] == started["url"]
+        # Otra conversación sin proyecto no ve las vistas previas de esta.
+        assert desktop._previews.list({"session_id": other["id"]})["previews"] == []
+    finally:
+        desktop._previews.stop({"session_id": session["id"], "preview_id": started["preview_id"]})
+    assert desktop._previews.list({"session_id": session["id"]})["previews"] == []

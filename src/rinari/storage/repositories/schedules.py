@@ -18,9 +18,19 @@ _TASK_COLUMNS = (
     "prompt",
     "project_id",
     "mode",
+    "permission_profile",
     "model",
     "skills_json",
     "grants_json",
+    "command_json",
+    "tool_json",
+    "watch_json",
+    "agent_id",
+    "target",
+    "session_id",
+    "deliver_json",
+    "paused_by",
+    "notify",
     "enabled",
     "next_run_at",
     "created_at",
@@ -45,6 +55,19 @@ def _task(row: Any) -> dict[str, Any]:
     item["schedule"] = json.loads(item.pop("schedule_json"))
     item["skills"] = json.loads(item.pop("skills_json"))
     item["grants"] = json.loads(item.pop("grants_json"))
+    raw_command = item.pop("command_json", None)
+    item["command"] = json.loads(raw_command) if raw_command else None
+    raw_tool = item.pop("tool_json", None)
+    item["tool"] = json.loads(raw_tool) if raw_tool else None
+    raw_watch = item.pop("watch_json", None)
+    item["watch"] = json.loads(raw_watch) if raw_watch else None
+    item["agent_id"] = item.get("agent_id")
+    item["target"] = item.get("target") or "new_session"
+    item["session_id"] = item.get("session_id")
+    raw_deliver = item.pop("deliver_json", None)
+    item["deliver_to"] = json.loads(raw_deliver) if raw_deliver else None
+    item["paused_by"] = item.get("paused_by")
+    item["notify"] = item.get("notify") or "all"
     item["enabled"] = bool(item["enabled"])
     return item
 
@@ -79,9 +102,26 @@ class ScheduleRepository:
             "prompt": task.get("prompt") or "",
             "project_id": task.get("project_id"),
             "mode": task.get("mode") or "build",
+            "permission_profile": task.get("permission_profile"),
             "model": task.get("model"),
             "skills_json": json.dumps(list(task.get("skills") or [])),
             "grants_json": json.dumps(list(task.get("grants") or []), sort_keys=True),
+            "command_json": (
+                json.dumps(task["command"], sort_keys=True) if task.get("command") else None
+            ),
+            "tool_json": json.dumps(task["tool"], sort_keys=True) if task.get("tool") else None,
+            "watch_json": (
+                json.dumps(task["watch"], sort_keys=True) if task.get("watch") else None
+            ),
+            "agent_id": task.get("agent_id"),
+            "target": task.get("target") or "new_session",
+            "session_id": task.get("session_id"),
+            "deliver_json": (
+                json.dumps(task["deliver_to"], sort_keys=True) if task.get("deliver_to") else None
+            ),
+            # Kept only while the task stays off: switching it on clears it.
+            "paused_by": None if task.get("enabled", True) else task.get("paused_by"),
+            "notify": task.get("notify") or "all",
             "enabled": 1 if task.get("enabled", True) else 0,
             "next_run_at": task.get("next_run_at"),
             "created_at": task["created_at"],
@@ -97,6 +137,30 @@ class ScheduleRepository:
             (task_id, *(row[column] for column in _TASK_COLUMNS)),
         )
         return self.get(task_id) or {}
+
+    def set_enabled(
+        self, task_id: str, enabled: bool, updated_at: float, *, paused_by: str | None = None
+    ) -> None:
+        """Turn a task on or off without validating it again («Detener a todos»).
+
+        `paused_by` says who switched it off when it was not the owner, so
+        resuming switches back on only what that pause switched off.
+        """
+        self._db.execute(
+            "UPDATE scheduled_tasks SET enabled = ?, paused_by = ?, updated_at = ? WHERE id = ?",
+            (int(enabled), None if enabled else paused_by, updated_at, task_id),
+        )
+
+    def set_watch_fingerprint(self, task_id: str, fingerprint: str) -> None:
+        """What a watched folder looked like at its last check (kept across restarts)."""
+        task = self.get(task_id)
+        if task is None or not task.get("watch"):
+            return
+        watch = {**task["watch"], "fingerprint": fingerprint}
+        self._db.execute(
+            "UPDATE scheduled_tasks SET watch_json = ? WHERE id = ?",
+            (json.dumps(watch, sort_keys=True), task_id),
+        )
 
     def delete(self, task_id: str) -> bool:
         existed = self.get(task_id) is not None
@@ -126,9 +190,38 @@ class ScheduleRepository:
         )
         return dict(row) if row else None
 
+    def has_active_run(self, task_id: str) -> bool:
+        """A run of the task still waiting, running or asking, however old it is."""
+        row = self._db.query_one(
+            "SELECT 1 FROM scheduled_runs WHERE task_id = ? "
+            "AND status IN ('queued', 'running', 'needs_you') LIMIT 1",
+            (task_id,),
+        )
+        return row is not None
+
+    def queued_runs_of(self, task_id: str | None = None) -> list[dict[str, Any]]:
+        """Runs waiting in a conversation's queue: a task's, or every task's."""
+        if task_id is None:
+            rows = self._db.query("SELECT * FROM scheduled_runs WHERE status = 'queued'")
+        else:
+            rows = self._db.query(
+                "SELECT * FROM scheduled_runs WHERE task_id = ? AND status = 'queued'",
+                (task_id,),
+            )
+        return [dict(row) for row in rows]
+
     def unfinished_runs(self) -> list[dict[str, Any]]:
         rows = self._db.query(
-            "SELECT * FROM scheduled_runs WHERE status IN ('running', 'needs_you')"
+            "SELECT * FROM scheduled_runs WHERE status IN ('queued', 'running', 'needs_you')"
+        )
+        return [dict(row) for row in rows]
+
+    def queued_runs(self, session_id: str) -> list[dict[str, Any]]:
+        """Runs waiting in a conversation's queue («Repetir aquí»), oldest first."""
+        rows = self._db.query(
+            "SELECT * FROM scheduled_runs WHERE session_id = ? AND status = 'queued' "
+            "ORDER BY scheduled_for, started_at",
+            (session_id,),
         )
         return [dict(row) for row in rows]
 

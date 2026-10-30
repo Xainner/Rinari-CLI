@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 from collections.abc import Callable
@@ -240,6 +241,12 @@ class AnthropicAdapter(ProviderAdapter):
                             calls.append_json(
                                 _optional_int(event.get("index")), delta.get("partial_json")
                             )
+                            if request.tool_input_observer is not None and block is not None:
+                                # How much of the tool call is written so far (F26).
+                                with contextlib.suppress(Exception):
+                                    request.tool_input_observer(
+                                        block.get("name"), delta.get("partial_json")
+                                    )
                     elif event_type == "message_delta":
                         stop_reason = _stop_reason_from_anthropic(
                             (event.get("delta") or {}).get("stop_reason")
@@ -251,6 +258,7 @@ class AnthropicAdapter(ProviderAdapter):
                             input_tokens=usage.input_tokens,
                             output_tokens=output_tokens,
                             cached_input_tokens=usage.cached_input_tokens,
+                            cache_write_tokens=usage.cache_write_tokens,
                         )
                 if not terminal_seen:
                     raise NetworkError(
@@ -688,10 +696,29 @@ def _usage_from_anthropic(raw: Any) -> Usage:
     if not isinstance(raw, dict):
         return Usage()
     return Usage(
-        input_tokens=_optional_int(raw.get("input_tokens")),
+        input_tokens=anthropic_input_total(raw),
         output_tokens=_optional_int(raw.get("output_tokens")),
         cached_input_tokens=_optional_int(raw.get("cache_read_input_tokens")),
+        cache_write_tokens=_optional_int(raw.get("cache_creation_input_tokens")),
     )
+
+
+def anthropic_input_total(raw: dict[str, Any]) -> int | None:
+    """Everything the model read, as the other providers count it (#78).
+
+    Anthropic's `input_tokens` leaves out what came from the prompt cache
+    (`cache_read_input_tokens`) and what was written to it
+    (`cache_creation_input_tokens`): with a warm cache it was a few hundred
+    tokens of a 100k context, and the context ring and the usage report read
+    that as the size of the request.
+    """
+    base = _optional_int(raw.get("input_tokens"))
+    if base is None:
+        return None
+    extra = (_optional_int(raw.get("cache_read_input_tokens")) or 0) + (
+        _optional_int(raw.get("cache_creation_input_tokens")) or 0
+    )
+    return base + extra
 
 
 def _stop_reason_from_anthropic(reason: Any) -> StopReason:

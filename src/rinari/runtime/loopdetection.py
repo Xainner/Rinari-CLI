@@ -109,6 +109,35 @@ def _error_signature(code: str, message: str) -> str:
     return f"{code}:{message[:80]}"
 
 
+# Result fields that change on every call without meaning progress.
+_VOLATILE_KEYS = frozenset(
+    {
+        "elapsed_ms",
+        "duration_ms",
+        "fetched_at",
+        "timestamp",
+        "started_at",
+        "completed_at",
+        "attempts",
+        "checked_at",
+        "now",
+    }
+)
+
+
+def _stable(value: object) -> object:
+    if isinstance(value, dict):
+        return {k: _stable(v) for k, v in value.items() if k not in _VOLATILE_KEYS}
+    if isinstance(value, list):
+        return [_stable(item) for item in value]
+    return value
+
+
+def outcome_digest(data: object) -> str:
+    """What a call returned, minus clocks: equal digests mean nothing moved."""
+    return _digest(_canonical_args(_stable(data)))[:16]
+
+
 class LoopDetector:
     def __init__(self, *, repeats: int = 3, window: int = 12) -> None:
         self._repeats = max(2, repeats)
@@ -142,13 +171,26 @@ class LoopDetector:
         """The calls that follow come from a new model response."""
         self._response = (self._response or 0) + 1
 
-    def record_tool(self, name: str, arguments: object) -> None:
+    def record_tool(
+        self, name: str, arguments: object, outcome: str | None = None, *, applied: bool = True
+    ) -> None:
+        """One call; `outcome` (see outcome_digest) is what it returned.
+
+        The same call returning something new each time is waiting on a job
+        that advances, not a loop (plan 0.4.0 #48): its key carries the
+        outcome, so only identical calls with identical results repeat.
+        `applied=False` (the call failed) records the action but no file
+        state: a rejected edit changed nothing, so retrying it is not a
+        rewrite (plan 0.4.0 v2, V2-9).
+        """
         self._action_serial += 1
         key = f"{name}|{_canonical_args(arguments)}"
+        if outcome is not None:
+            key = f"{key}|{outcome}"
         self._actions.append(key)
         del self._actions[: -self._window]
         self._last_rewrite = None
-        for path, state, undo in _file_changes(name, arguments):
+        for path, state, undo in _file_changes(name, arguments) if applied else ():
             seen = self._file_states.setdefault(path, set())
             if state in seen or (undo is not None and undo in seen):
                 key = (name, path)

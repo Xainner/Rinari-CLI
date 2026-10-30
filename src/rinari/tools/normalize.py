@@ -87,17 +87,92 @@ def fs_patch(arguments: dict) -> tuple[dict, list[str]]:
     Only that exact shape maps: with `old_string`, `replace_all` or `files`
     alongside, the call means something else and validation rejects it.
     """
+    notes: list[str] = []
+    if isinstance(arguments.get("edits"), str):
+        # A list of edits sent as JSON text (F12): the top-level `edits` is not
+        # in the schema, so the generic coercion never sees it.
+        try:
+            parsed = json.loads(arguments["edits"])
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, list):
+            arguments = {**arguments, "edits": parsed}
+            notes.append("used edits as a list (received it as text)")
     keys = set(arguments)
+    if isinstance(arguments.get("files"), list) and keys & _PATCH_SIMPLE_FORM:
+        return _patch_both_forms(arguments, notes)
     if (
         not {"path", "edits"} <= keys
         or not keys <= _PATCH_SINGLE_FILE
         or not isinstance(arguments["edits"], list)
     ):
-        return arguments, []
+        return arguments, notes
     row = {"path": arguments["path"], "edits": arguments["edits"]}
     if "expected_hash" in arguments:
         row["expected_hash"] = arguments["expected_hash"]
-    return {"files": [row]}, ["used files=[{path, edits}] (received top-level path and edits)"]
+    return {"files": [row]}, [
+        *notes,
+        "used files=[{path, edits}] (received top-level path and edits)",
+    ]
+
+
+_PATCH_SIMPLE_FORM = frozenset({"path", "old_string", "new_string", "replace_all"})
+
+
+def _patch_both_forms(arguments: dict, notes: list[str]) -> tuple[dict, list[str]]:
+    """Both forms filled in (F41): `files` is the call; the simple form is dropped.
+
+    Models that send the same edit twice (once per form) used to be refused
+    until a loop guard stopped the turn. When the simple form repeats an edit
+    already in `files`, nothing is lost; when it does not, the result says
+    that it was left out, so the model can send it on its own.
+    """
+    simple = {key: arguments[key] for key in _PATCH_SIMPLE_FORM if key in arguments}
+    kept = {key: value for key, value in arguments.items() if key not in _PATCH_SIMPLE_FORM}
+    if "expected_hash" in kept and len(kept["files"]) == 1:
+        # The top-level hash belongs to the one file of the batch.
+        row = kept["files"][0]
+        if isinstance(row, dict) and "expected_hash" not in row:
+            kept["files"] = [{**row, "expected_hash": kept["expected_hash"]}]
+        kept.pop("expected_hash")
+    if _simple_edit_in_files(simple, kept["files"]):
+        notes.append(
+            "used files (path, old_string and new_string repeated an edit already in files)"
+        )
+    else:
+        notes.append(
+            "used files and left out the separate path/old_string/new_string, which did not "
+            "match any edit in files; send that edit again on its own if it is still needed"
+        )
+    return kept, notes
+
+
+def _simple_edit_in_files(simple: dict, files: list) -> bool:
+    path, old, new = simple.get("path"), simple.get("old_string"), simple.get("new_string")
+    if not (isinstance(path, str) and isinstance(old, str) and isinstance(new, str)):
+        return False
+    if simple.get("replace_all"):
+        return False
+    wanted = _same_path(path)
+    for row in files:
+        if not isinstance(row, dict) or not isinstance(row.get("path"), str):
+            continue
+        if _same_path(row["path"]) != wanted:
+            continue
+        for edit in row.get("edits") or ():
+            if (
+                isinstance(edit, dict)
+                and edit.get("old_string") == old
+                and edit.get("new_string") == new
+            ):
+                return True
+    return False
+
+
+def _same_path(path: str) -> str:
+    import os
+
+    return os.path.normcase(os.path.normpath(path.strip()))
 
 
 def fs_read_lines(arguments: dict) -> tuple[dict, list[str]]:

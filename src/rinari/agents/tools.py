@@ -11,10 +11,12 @@ Tool semantics (TODO.md "Agent Orchestrator"):
     agent.synthesize merge several results: duplicate work, contradictions,
                      task-graph join
 
-Spawning is classified `state.write`: allowed in workspace profiles, denied
-in read-only ones (a review-only session cannot spawn writers or readers).
-The orchestrator itself is the source of truth for limits; these tools only
-delegate.
+Spawning, messaging and cancelling are classified `agent.delegate` (plan
+0.4.0 #5): allowed in every profile, because a child inherits the parent's
+profile and can only narrow it. A read-only (PLAN/REVIEW) session gets
+read-only reviewers, and its spawns never create a worktree. `state.write`
+keeps guarding validation records. The orchestrator itself is the source of
+truth for limits; these tools only delegate.
 """
 
 from __future__ import annotations
@@ -95,18 +97,28 @@ def _agent_tools(host: AgentToolHost):
             while True:
                 if ctx.cancellation:
                     ctx.cancellation.throw_if_cancelled()
+                if _owner_wrote(ctx):
+                    return _owner_wrote_result({"agent_ids": ids})
                 rows = []
-                terminal = False
+                fresh = False
+                finished = 0
                 for agent_id in ids:
                     result = orch.result(agent_id)
+                    delivered = result is not None and orch.result_delivered(agent_id)
                     rows.append(
                         {
                             "agent_id": agent_id,
                             "result": _result_dict(result) if result else None,
                             "state": orch.status(agent_id)["state"],
+                            **({"delivered_before": True} if delivered else {}),
                         }
                     )
-                    terminal |= result is not None
+                    finished += result is not None
+                    # A result the model already read does not end the wait:
+                    # the coordinator re-asked 25 times in a row once the first
+                    # child was done (F38, plan 0.4.0 v2, V2-12).
+                    fresh |= result is not None and not delivered
+                terminal = fresh or finished == len(ids)
                 if terminal or time.time() >= deadline:
                     for row in rows:
                         if row["result"] is not None:
@@ -123,6 +135,8 @@ def _agent_tools(host: AgentToolHost):
         while True:
             if ctx.cancellation:
                 ctx.cancellation.throw_if_cancelled()
+            if _owner_wrote(ctx):
+                return _owner_wrote_result({"agent_id": agent_id})
             remaining = deadline - time.time()
             if remaining <= 0:
                 return ToolResult(
@@ -154,7 +168,10 @@ def _agent_tools(host: AgentToolHost):
             return _err(None, "agent_id and text required")
         try:
             delivery = orch.deliver(
-                agent_id, text, parent_budget=getattr(ctx, "parent_budget", None)
+                agent_id,
+                text,
+                parent_budget=getattr(ctx, "parent_budget", None),
+                steer_id=getattr(ctx, "tool_call_id", "") or None,
             )
         except Exception as exc:
             return _err(getattr(exc, "code", ""), str(exc))
@@ -210,7 +227,7 @@ def _agent_tools(host: AgentToolHost):
         return ToolResult(ok=True, data=report, origin="agents")
 
     read = ("state.read",)
-    write = ("state.write",)
+    write = ("agent.delegate",)
     return [
         ToolDefinition(
             name="agent.spawn",
@@ -233,7 +250,7 @@ def _agent_tools(host: AgentToolHost):
             capabilities=write,
             side_effects="local_reversible",
             idempotent=False,
-            classify=lambda _i: ClassifiedAction("state.write"),
+            classify=lambda _i: ClassifiedAction("agent.delegate"),
             handler=spawn,
         ),
         ToolDefinition(
@@ -287,7 +304,7 @@ def _agent_tools(host: AgentToolHost):
             capabilities=write,
             side_effects="local_reversible",
             idempotent=False,
-            classify=lambda _i: ClassifiedAction("state.write"),
+            classify=lambda _i: ClassifiedAction("agent.delegate"),
             handler=message,
         ),
         ToolDefinition(
@@ -301,7 +318,7 @@ def _agent_tools(host: AgentToolHost):
             capabilities=write,
             side_effects="local_reversible",
             idempotent=False,
-            classify=lambda _i: ClassifiedAction("state.write"),
+            classify=lambda _i: ClassifiedAction("agent.delegate"),
             handler=cancel,
         ),
         ToolDefinition(
@@ -333,6 +350,32 @@ def _agent_tools(host: AgentToolHost):
             handler=synthesize,
         ),
     ]
+
+
+def _owner_wrote(ctx) -> bool:
+    """The owner wrote to this conversation while it waits (P7)."""
+    turn_state = getattr(ctx, "turn_state", None)
+    check = getattr(turn_state, "owner_is_waiting", None)
+    return bool(callable(check) and check(getattr(ctx, "session_id", None)))
+
+
+def _owner_wrote_result(data: dict):
+    from rinari.tools.definition import ToolResult
+
+    return ToolResult(
+        ok=True,
+        data={
+            **data,
+            "state": "waiting",
+            "status": "owner_wrote",
+            "timed_out": False,
+            "note": (
+                "The user wrote while you waited; their message comes next. The agents keep "
+                "working: wait for them again with agent.wait when it fits."
+            ),
+        },
+        origin="agents",
+    )
 
 
 def _result_dict(result) -> dict:

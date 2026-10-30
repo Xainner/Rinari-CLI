@@ -75,6 +75,8 @@ class FakeCdpServer:
         self._next_session = 1
         self.commands: list[tuple[str, dict, str | None]] = []
         self.download_file: bytes | None = None
+        #: The page shows a human verification check (plan 0.4.0 #45).
+        self.human_check: str | None = None
         self.last_pong: bytes | None = None
         self._conns: list[socket.socket] = []
         self._thread = threading.Thread(target=self._serve, daemon=True)
@@ -93,6 +95,10 @@ class FakeCdpServer:
 
     def drop(self) -> None:
         for conn in list(self._conns):
+            # On Linux a bare close() does not reach the peer while another
+            # thread is blocked reading the socket: shut it down first.
+            with suppress(OSError):
+                conn.shutdown(socket.SHUT_RDWR)
             with suppress(OSError):
                 conn.close()
 
@@ -403,6 +409,8 @@ class FakeCdpServer:
             return {}, False, []
         if method in ("Page.enable", "Accessibility.enable", "DOM.enable"):
             return {}, False, []
+        if method in ("Emulation.setDeviceMetricsOverride", "Emulation.clearDeviceMetricsOverride"):
+            return {}, False, []
         if method == "Runtime.evaluate":
             inner = self._evaluate(params.get("expression", ""))
             if "exceptionDetails" in inner:
@@ -493,6 +501,13 @@ class FakeCdpServer:
         raise _CdpRouteError(f"Unknown method: {method}")
 
     def _evaluate(self, expression: str) -> dict:
+        if "_cf_chl_opt" in expression:
+            if self.human_check is None:
+                return {"type": "object", "value": None}
+            return {
+                "type": "object",
+                "value": {"kind": self.human_check, "url": "https://login.example/"},
+            }
         if "document.documentElement" in expression:
             if self.big_html:
                 html = "<html><body>" + ("x" * 300_000) + "</body></html>"
@@ -1299,9 +1314,19 @@ def test_browser_screenshot_is_a_session_image_the_chat_can_show(
     assert result.ok, result.error
     uri = result.data["uri"]
     assert uri.startswith("artifact://") and result.data["artifact"] == uri
-    assert result.data["markdown"] == f"![{result.data['name']}]({uri})"
+    # P4: the owner sees a capture through file.present, not inline Markdown.
+    assert "markdown" not in result.data
     assert result.presentation["kind"] == "image"
     assert result.artifacts[0].kind == "image" and result.artifacts[0].uri == uri
+    # The model sees the capture in the same step: no fs.read_image afterwards (#11).
+    assert [image.uri for image in result.images] == [uri]
+    assert result.images[0].path.is_file()
+    # Its path is the stored file, and no loose copy is left in the
+    # conversation's folder for a later call to name instead (it made
+    # `artifact://<session>/<file>`, which nothing could open).
+    assert Path(result.data["path"]) == result.images[0].path
+    folder = ctx.artifact_root / ctx.session_id
+    assert not list(folder.glob("screenshot-*.png")) if folder.exists() else True
     manager.close()
 
 
@@ -1399,3 +1424,158 @@ def test_local_page_paths() -> None:
     assert local_page_path(Path("/tmp/x y/p.html").resolve().as_uri()) == str(
         Path("/tmp/x y/p.html").resolve()
     )
+
+
+def test_a_human_check_stops_the_agent_instead_of_retrying(tmp_path, fake_cdp, monkeypatch) -> None:
+    """Plan 0.4.0 #45: the page asks for a person; the tool says so."""
+    from rinari.browser import human_check
+
+    monkeypatch.setattr(human_check, "SETTLE_S", 0.0)
+    manager = _connected_manager(tmp_path, fake_cdp, monkeypatch)
+    runtime = _runtime(tmp_path, manager=manager, network_mode="allow")
+    ctx = _ctx(tmp_path, manager=manager, network=NetworkGuard(NetworkPolicy(mode="allow")))
+    fake_cdp.human_check = "turnstile"
+    result = runtime.execute("browser.navigate", {"url": "https://login.example/"}, ctx)
+    assert not result.ok
+    assert result.data["browser_error"] == "HUMAN_CHECK"
+    assert result.data["check"] == "turnstile"
+    assert result.data["url"] == "https://login.example/"
+    assert result.error.retryable is False
+    assert "must not try to solve" in result.error.message
+    assert "user.ask" in result.error.message
+    # Looking at the page again says the same, so the agent does not loop.
+    again = runtime.execute("browser.snapshot", {}, ctx)
+    assert again.data["browser_error"] == "HUMAN_CHECK"
+
+    fake_cdp.human_check = None
+    clear = runtime.execute("browser.snapshot", {}, ctx)
+    assert clear.ok, clear.error
+    manager.close()
+
+
+def test_the_session_moves_to_a_real_chrome_and_comes_back(tmp_path, fake_cdp, monkeypatch) -> None:
+    """Plan 0.4.0 #45: «Abrir en Chrome/Edge con Rinari» and closing it."""
+
+    class Native:
+        kind = "electron-native"
+        closed = False
+        connected = True
+        control = "agent"
+        control_revision = 1
+
+        def status(self):
+            return {"backend": self.kind}
+
+        def targets(self):
+            return [{"target_id": "native", "url": "https://login.example/", "title": ""}]
+
+        def close(self):
+            self.closed = True
+
+    native = Native()
+    manager = BrowserManager(session_id="s1", home_root=tmp_path, backend=native)
+    launched: list[tuple[bool, Path]] = []
+
+    def launch(command=None, port=None):
+        launched.append((manager._headless, manager.profile_dir))
+        return manager.connect(fake_cdp.base_url)
+
+    monkeypatch.setattr(manager, "launch", launch)
+    profile = tmp_path / "browser" / "profiles" / "external" / "proj-1"
+    opened = manager.use_external("https://login.example/", profile)
+    assert opened["url"] == "https://login.example/"
+    # A visible window, with the project's own profile.
+    assert launched == [(False, profile)]
+    assert manager.external
+    assert manager.status()["external"] is True
+    # The agent now works over there.
+    assert any(page["url"] == "https://login.example/" for page in manager.targets())
+
+    # The owner closes that window: the desktop browser is back.
+    fake_cdp.drop()
+    deadline = time.monotonic() + 3
+    while manager.external and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not manager.external
+    assert manager.targets()[0]["target_id"] == "native"
+    assert manager.profile_dir != profile
+    manager.close()
+    assert native.closed
+
+
+def test_browser_viewport_validates_the_width(tmp_path, fake_cdp, monkeypatch) -> None:
+    """Plan 0.4.0 #44b."""
+    from rinari.browser import human_check
+
+    monkeypatch.setattr(human_check, "SETTLE_S", 0.0)
+    manager = _connected_manager(tmp_path, fake_cdp, monkeypatch)
+    runtime = _runtime(tmp_path, manager=manager, network_mode="allow", answer="y")
+    ctx = _ctx(tmp_path, manager=manager)
+    for bad in (100, 9000, "wide", True):
+        result = runtime.execute("browser.viewport", {"width": bad}, ctx)
+        assert not result.ok
+    ok = runtime.execute("browser.viewport", {"width": 390}, ctx)
+    assert ok.ok, ok.error
+    assert ok.data["width"] == 390
+    assert any(cmd[0] == "Emulation.setDeviceMetricsOverride" for cmd in fake_cdp.commands)
+    back = runtime.execute("browser.viewport", {"width": "fit"}, ctx)
+    assert back.ok and back.data["width"] is None
+    manager.close()
+
+
+def test_an_empty_target_id_means_the_active_tab(tmp_path, fake_cdp, monkeypatch) -> None:
+    """A model sent target_id="" to browser.navigate and the tool refused."""
+    from rinari.browser import human_check
+
+    monkeypatch.setattr(human_check, "SETTLE_S", 0.0)
+    manager = _connected_manager(tmp_path, fake_cdp, monkeypatch)
+    runtime = _runtime(tmp_path, manager=manager, network_mode="allow")
+    ctx = _ctx(tmp_path, manager=manager, network=NetworkGuard(NetworkPolicy(mode="allow")))
+    result = runtime.execute(
+        "browser.navigate", {"url": "https://example.com/x", "target_id": ""}, ctx
+    )
+    assert result.ok, result.error
+    manager.close()
+
+
+def test_navigate_with_no_tab_open_opens_one_and_says_so(tmp_path, fake_cdp, monkeypatch) -> None:
+    # P6: with no tab, navigate failed with «the page is gone» and the model
+    # went around in circles before trying browser.open.
+    manager = _connected_manager(tmp_path, fake_cdp, monkeypatch)
+    opened: list[str] = []
+    monkeypatch.setattr(manager, "targets", lambda: [])
+    monkeypatch.setattr(
+        manager,
+        "new_page",
+        lambda url="about:blank": (opened.append(url), {"target_id": "t9", "url": url})[1],
+    )
+    runtime = _runtime(tmp_path, manager=manager, network_mode="allow")
+    ctx = _ctx(tmp_path, manager=manager, network=NetworkGuard(NetworkPolicy(mode="allow")))
+    result = runtime.execute("browser.navigate", {"url": "https://example.com/"}, ctx)
+    assert result.ok, result.error
+    assert opened == ["https://example.com/"]
+    assert result.data["opened_new_tab"] is True and result.data["target_id"] == "t9"
+    manager.close()
+
+
+def test_a_transient_capture_failure_is_retryable_and_reports_its_code(
+    tmp_path, fake_cdp, monkeypatch
+) -> None:
+    # P5: UnknownVizError came back as UNKNOWN, not retryable, without the
+    # browser_error the other browser tools carry.
+    from rinari.browser.manager import BrowserError
+
+    manager = _connected_manager(tmp_path, fake_cdp, monkeypatch)
+
+    def fail(*args, **kwargs):
+        raise BrowserError("CAPTURE_TRANSIENT", "the page could not be copied right now")
+
+    monkeypatch.setattr(manager, "screenshot", fail)
+    runtime = _runtime(tmp_path, manager=manager, network_mode="allow")
+    ctx = _ctx(tmp_path, manager=manager, network=NetworkGuard(NetworkPolicy(mode="allow")))
+    result = runtime.execute("browser.screenshot", {"target_id": "t1"}, ctx)
+    assert result.ok is False
+    assert result.error.retryable is True
+    assert result.data["browser_error"] == "CAPTURE_TRANSIENT"
+    assert result.data["outcome"] == "failed"
+    manager.close()

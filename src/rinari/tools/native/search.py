@@ -133,6 +133,7 @@ def search_tools() -> list[ToolDefinition]:
     return [
         ToolDefinition(
             name="search.files",
+            always_loaded=False,
             concurrency="local-read",
             description=(
                 "Exact file search by glob pattern (e.g. **/*.py, tests/test_*.py). "
@@ -183,6 +184,7 @@ def search_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="search.symbols",
+            always_loaded=False,
             description=(
                 "Symbol search (functions/classes/methods/constants) for a name; "
                 "supports qualified structural queries like Class.method."
@@ -206,6 +208,7 @@ def search_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="search.references",
+            always_loaded=False,
             description="Find references to an identifier (definition optional via flag).",
             input_schema={
                 "type": "object",
@@ -226,6 +229,7 @@ def search_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="search.hybrid",
+            always_loaded=False,
             description=(
                 "Ranked hybrid search combining symbol identity, references, text, and "
                 "filename signal; returns explainable scores per hit."

@@ -17,25 +17,25 @@ def layout(tmp_path):
 
 def test_defaults_only_when_no_user_file(layout):
     effective = load_effective_config(layout)
-    assert effective.config.agent.max_turns == 200
+    assert effective.config.agents.max_total == 12
     assert [layer.name for layer in effective.layers] == ["defaults"]
 
 
 def test_user_overrides_defaults(layout):
     user = {**load_defaults()}
-    user["agent"] = {**user["agent"], "max_turns": 77}
+    user["agents"] = {**user["agents"], "max_total": 77}
     effective = load_effective_config(layout, user_data=user)
-    assert effective.config.agent.max_turns == 77
-    assert effective.config.agent.max_tool_calls == 500
+    assert effective.config.agents.max_total == 77
+    assert effective.config.agents.max_depth == 2
 
 
 def test_user_file_is_read_from_disk(layout):
     (layout.config_file).write_text(
-        'user_name = "Xainner"\n\n[agent]\nmax_turns = 11\n', encoding="utf-8"
+        'user_name = "Xainner"\n\n[agents]\nmax_total = 11\n', encoding="utf-8"
     )
     effective = load_effective_config(layout)
     assert effective.config.user_name == "Xainner"
-    assert effective.config.agent.max_turns == 11
+    assert effective.config.agents.max_total == 11
     assert LAYER_USER in [layer.name for layer in effective.layers]
 
 
@@ -62,7 +62,7 @@ def test_profile_layer_sits_above_user(layout):
     assert effective.config.permissions.profile == "read-only"
     assert effective.config.network.mode == "ask"
     # Profile does not define these keys -> they inherit from lower layers.
-    assert effective.config.agent.max_turns == 200
+    assert effective.config.agents.max_total == 12
     assert effective.config.user_name == ""
 
 
@@ -113,12 +113,12 @@ def test_sources_for_reports_contributing_layers(layout, tmp_path):
     effective = load_effective_config(layout)
     sources = effective.sources_for("model")
     assert sources == [("defaults", ""), ("user", "user-model")]
-    assert effective.sources_for("agent.max_turns") == [("defaults", 200)]
+    assert effective.sources_for("agents.max_total") == [("defaults", 12)]
 
 
 def test_effective_value_follows_precedence(layout):
     user = {**load_defaults()}
-    user["agent"] = {**user["agent"], "max_turns": 50}
+    user["agents"] = {**user["agents"], "max_total": 50}
     effective = load_effective_config(layout, user_data=user)
-    assert effective.value("agent.max_turns") == 50
+    assert effective.value("agents.max_total") == 50
     assert effective.value("unknown.key") is None

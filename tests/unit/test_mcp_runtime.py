@@ -340,3 +340,29 @@ def test_remove_disconnects(mcp_service):
     mcp_service.mcp.connect("srv1")
     assert mcp_service.mcp.remove("srv1") is True
     assert mcp_service.mcp.show("srv1") is None
+
+
+def test_tool_calls_carry_a_progress_token() -> None:
+    # Plan 0.4.0 #48: without a token, servers never send progress.
+    from rinari.mcp.client import McpClient
+    from rinari.mcp.transport import InProcessTransport
+
+    seen: list[dict] = []
+
+    def handler(frame: str) -> str | None:
+        message = json.loads(frame)
+        seen.append(message)
+        if "id" not in message:
+            return None
+        if message["method"] == "initialize":
+            result = {"protocolVersion": "2025-03-26", "capabilities": {}}
+        else:
+            result = {"content": [{"type": "text", "text": "ok"}]}
+        return json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": result})
+
+    client = McpClient(InProcessTransport(handler))
+    client.connect()
+    client.call_tool("echo", {"x": 1})
+    call = next(m for m in seen if m.get("method") == "tools/call")
+    assert call["params"]["arguments"] == {"x": 1}
+    assert str(call["params"]["_meta"]["progressToken"]).startswith("rinari-")

@@ -93,7 +93,10 @@ def recover_legacy_turns(records, events):
         for kind, data in entries:
             call = data.get("tool_call_id")
             if kind == "ToolRequested" and call and isinstance(data.get("arguments"), dict):
-                requests[call] = data
+                requests.setdefault(call, data)
+            if kind == "tool.requested" and call and isinstance(data.get("full_arguments"), dict):
+                # Since 0.4.0 the Engine stores only this one (#91).
+                requests.setdefault(call, {**data, "arguments": data["full_arguments"]})
             if kind in {"tool.completed", "tool.failed", "tool.cancelled"} and call:
                 results[call] = data
         messages = []

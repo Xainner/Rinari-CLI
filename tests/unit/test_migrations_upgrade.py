@@ -130,3 +130,28 @@ def test_newer_schema_than_supported_rejected(db_path, tmp_path):
     with pytest.raises(ConfigurationError):
         MigrationRunner(db2, clock).verify()
     db2.close()
+
+
+def test_existing_memories_start_as_used_at_their_last_change(db_path, tmp_path):
+    """Plan 0.4.0 #75: after the upgrade an old memory is not «sin usar hace
+    tiempo» just because nobody tracked its use before 0060."""
+    clock = _clock()
+    staged = _stage_migrations(tmp_path, 59)
+    db = Database(db_path)
+    MigrationRunner(db, clock, directory=staged).migrate()
+    changed = "2026-10-01T00:00:00+00:00"
+    db.execute(
+        "INSERT INTO user_memory (id, kind, topic, text, provenance, confidence, "
+        "created_at, updated_at) VALUES ('mem_u', 'preference', 't', 'x', 'user', 1.0, ?, ?)",
+        ("2026-01-01T00:00:00+00:00", changed),
+    )
+    db.execute(
+        "INSERT INTO project_memory (id, project_root, kind, topic, text, provenance, "
+        "confidence, created_at, updated_at) "
+        "VALUES ('mem_p', '/p', 'convention', 't', 'x', 'user', 1.0, ?, ?)",
+        ("2026-01-01T00:00:00+00:00", changed),
+    )
+    MigrationRunner(db, clock).migrate()
+    for table, memory_id in (("user_memory", "mem_u"), ("project_memory", "mem_p")):
+        row = db.query_one(f"SELECT last_used_at FROM {table} WHERE id = ?", (memory_id,))
+        assert row["last_used_at"] == changed

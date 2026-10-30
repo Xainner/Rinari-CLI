@@ -131,21 +131,92 @@ def search_capabilities(
         score = base * _RELIABILITY.get(source, 0.9) - _RISK_DEMOTION.get(tool.risk, 0.0)
         if tool.name == query:
             score += 10  # exact tool-name match wins outright
+        if (tool.manifest or {}).get("configured_service"):
+            # Backed by a service the owner chose (V2-1): it goes before a
+            # skill's or an MCP server's tool that does the same.
+            score += 5
         scored.append((score, tool.name, tool))
-    scored.sort(key=lambda item: (-item[0], item[1]))
+    # By match, then by name: never by which server connected or registered
+    # first (C6). Rounded so float noise cannot break a tie.
+    scored.sort(key=lambda item: (-round(item[0], 6), item[1]))
     results: list[dict] = []
     for score, _, tool in scored[: max(1, limit)]:
-        results.append(
+        row = {
+            "name": tool.name,
+            "source": classify_source(tool),
+            "description": tool.description,
+            "risk": tool.risk,
+            "side_effects": tool.side_effects,
+            "score": round(score, 3),
+        }
+        server = (tool.manifest or {}).get("server")
+        if server and row["source"] == SOURCE_MCP:
+            row["server"] = str(server)
+        results.append(row)
+    return results
+
+
+# Results outside the list that come back with their schema and exact call:
+# enough to act in the next step, without paying every schema of a long list.
+_CALLS_IN_SEARCH = 3
+
+
+def _outside_list(ctx, registry: ToolRegistry, name: str) -> bool:
+    exposure = getattr(ctx, "exposure", None)
+    if exposure is None:
+        return False
+    return not exposure.in_list(name, registry)
+
+
+def _add_calls(results: list[dict], ctx, registry: ToolRegistry) -> int:
+    """Mark each result in or out of the list; the first ones out get their call."""
+    from rinari.tools.door import how_to_call
+
+    given = 0
+    for item in results:
+        tool = registry.get(item["name"])
+        outside = tool is not None and _outside_list(ctx, registry, item["name"])
+        item["in_list"] = not outside
+        if outside and given < _CALLS_IN_SEARCH and item.get("available") is not False:
+            item["how_to_call"] = how_to_call(tool)
+            given += 1
+    return given
+
+
+def _mark_waiting_servers(results: list[dict], ctx) -> set[str]:
+    """Mark the results of MCP servers waiting for a new sign-in (C6).
+
+    Their tools stay findable so the model can tell the owner what is wrong,
+    but they come back unavailable and without a call. Returns those servers.
+    """
+    from rinari.tools.index import unavailable_reason
+
+    service = getattr(ctx, "mcp", None)
+    if service is None or not hasattr(service, "connectors"):
+        return set()
+    try:
+        rows = {
+            str(row["name"]): row
+            for row in service.connectors(
+                getattr(ctx, "project_root", None), getattr(ctx, "session_id", None)
+            )
+        }
+    except Exception:
+        return set()
+    reauth: set[str] = set()
+    for item in results:
+        row = rows.get(str(item.get("server") or ""))
+        if row is None or row.get("status") != "reauth_required":
+            continue
+        reauth.add(str(row["name"]))
+        item.update(
             {
-                "name": tool.name,
-                "source": classify_source(tool),
-                "description": tool.description,
-                "risk": tool.risk,
-                "side_effects": tool.side_effects,
-                "score": round(score, 3),
+                "available": False,
+                "reason": unavailable_reason(str(row["name"]), "reauth_required"),
+                "requires": ["reconnect"],
             }
         )
-    return results
+    return reauth
 
 
 def search_skills(skills, query: str, limit: int = 5) -> list[dict]:
@@ -199,38 +270,51 @@ def capability_search_tool(registry: ToolRegistry, skills=None) -> ToolDefinitio
 
         for item in results:
             item.update(availability(item["name"], ctx))
-        loaded = []
-        load_error = None
-        if arguments.get("load") and getattr(ctx, "exposure", None) is not None:
-            names = [item["name"] for item in results if item["available"] is not False]
-            from rinari.tools.exposure import _schema_tokens
-
-            visible = set(ctx.exposure.exposed_names(registry)) | set(names)
-            if (
-                len(visible) <= ctx.exposure.max_schema_count
-                and sum(_schema_tokens(registry.get(n)) for n in visible)
-                <= ctx.exposure.max_schema_tokens
-            ):
-                loaded = ctx.exposure.activate(names, reason=query, scope="turn")
-            else:
-                load_error = (
-                    "Schema budget exceeded; request fewer matches or deactivate unused tools."
-                )
-        elif arguments.get("load"):
-            load_error = "Dynamic exposure is not enabled in this context."
+        reconnect = _mark_waiting_servers(results, ctx)
+        # The tool list never changes (F42): what is outside it comes back
+        # with its schema and the exact tool.call to run it.
+        given = _add_calls(results, ctx, registry)
         skill_matches: list[dict] = []
         if skills is not None:
             try:
                 skill_matches = search_skills(skills(), query)
             except Exception:
                 skill_matches = []
-        if skill_matches:
+        configured = next(
+            (
+                item
+                for item in results
+                if (registry.get(item["name"]) is not None)
+                and (registry.get(item["name"]).manifest or {}).get("configured_service")
+            ),
+            None,
+        )
+        native = [item["name"] for item in results if item.get("source") == "native"][:3]
+        if configured is not None:
+            service = registry.get(configured["name"]).manifest["configured_service"]
+            guidance = (
+                f"The owner chose a service for this: use {configured['name']} ({service}). "
+                "Use a skill or an MCP server for it only if the owner names one."
+            )
+        elif skill_matches:
             guidance = (
                 f"A skill covers this: activate {skill_matches[0]['name']!r} with skills.activate "
                 "and follow its procedure before improvising with tools."
             )
+            if native:
+                guidance += " Typed tools that match: " + ", ".join(native) + "."
+        elif reconnect and results[0].get("server") in reconnect:
+            guidance = (
+                f"The best match needs its MCP server {results[0]['server']} reconnected: tell "
+                "the owner to reconnect it in Settings → Connectors instead of trying another way."
+            )
         elif results:
-            guidance = "Use an exact returned tool name."
+            guidance = (
+                "Call a tool marked in_list directly; run any other through tool.call exactly "
+                "as its how_to_call shows."
+                if given
+                else "Use an exact returned tool name."
+            )
         else:
             guidance = (
                 "No registered capability matched. Check the integration configuration; "
@@ -243,8 +327,6 @@ def capability_search_tool(registry: ToolRegistry, skills=None) -> ToolDefinitio
                 "skills": skill_matches,
                 "results": results,
                 "matched": bool(results or skill_matches),
-                "loaded": loaded,
-                "load_error": load_error,
                 "diagnostics": list(registry.diagnostics),
                 "guidance": guidance,
             },
@@ -257,15 +339,14 @@ def capability_search_tool(registry: ToolRegistry, skills=None) -> ToolDefinitio
             "Search the capabilities available this session across all sources "
             "(skills, native, plugin, MCP, OpenAPI and browser). A matching skill is a "
             "ready procedure: activate it first. Prefer typed "
-            "API/connector matches over browser automation. Set load=true to "
-            "activate matching schemas in the same call, within the schema budget."
+            "API/connector matches over browser automation. A tool outside your list comes "
+            "back with its schema and the exact tool.call that runs it."
         ),
         input_schema={
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "What you want to do (service, verb)."},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
-                "load": {"type": "boolean", "default": False},
             },
             "required": ["query"],
         },
@@ -280,27 +361,13 @@ def capability_search_tool(registry: ToolRegistry, skills=None) -> ToolDefinitio
 
 
 def capability_activation_tools(registry: ToolRegistry) -> list[ToolDefinition]:
-    """capability.activate / capability.deactivate over the session exposure.
+    """capability.activate / capability.deactivate, kept for what names them.
 
-    Explicit, traceable activation (review §4, Etapa B): the model searches
-    with capability.search, then activates exactly what it needs. Turn-scoped
-    activations decay automatically; session scope persists for the session.
+    The tool list never changes in the middle of a conversation (F42), so
+    activating is finding: it returns each tool's schema and the exact
+    tool.call that runs it, and deactivating has nothing to undo. Skills and
+    instructions written for the old flow keep working.
     """
-
-    def _exposure(ctx):
-        from rinari.tools.definition import ToolErrorCode, ToolErrorInfo, ToolResult
-
-        exposure = getattr(ctx, "exposure", None)
-        if exposure is None:
-            return None, ToolResult(
-                ok=False,
-                error=ToolErrorInfo(
-                    ToolErrorCode.INVALID_ARGUMENT,
-                    "dynamic exposure is not enabled in this context",
-                ),
-                origin="capability",
-            )
-        return exposure, None
 
     def _names(arguments: dict) -> list[str]:
         raw = arguments.get("names") or []
@@ -310,10 +377,8 @@ def capability_activation_tools(registry: ToolRegistry) -> list[ToolDefinition]:
 
     def activate_handler(arguments: dict, ctx) -> object:
         from rinari.tools.definition import ToolErrorCode, ToolErrorInfo, ToolResult
+        from rinari.tools.door import how_to_call
 
-        exposure, err = _exposure(ctx)
-        if err is not None:
-            return err
         names = _names(arguments)
         if not names:
             return ToolResult(
@@ -331,67 +396,25 @@ def capability_activation_tools(registry: ToolRegistry) -> list[ToolDefinition]:
                 ),
                 origin="capability",
             )
-        scope = str(arguments.get("scope") or "turn")
-        if scope not in ("turn", "session"):
-            return ToolResult(
-                ok=False,
-                error=ToolErrorInfo(
-                    ToolErrorCode.INVALID_ARGUMENT, "scope must be 'turn' or 'session'"
-                ),
-                origin="capability",
-            )
-        try:
-            ttl = max(1, min(32, int(arguments.get("ttl_rounds") or 4)))
-        except (TypeError, ValueError):
-            ttl = 4
-        reason = str(arguments.get("reason") or "")
-        from rinari.tools.exposure import _schema_tokens
-
-        visible = set(exposure.exposed_names(registry)) | set(names)
-        if (
-            len(visible) > exposure.max_schema_count
-            or sum(_schema_tokens(registry.get(n)) for n in visible) > exposure.max_schema_tokens
-        ):
-            return ToolResult(
-                ok=False,
-                error=ToolErrorInfo(
-                    ToolErrorCode.RESOURCE_EXHAUSTED,
-                    "Schema budget exceeded; activate fewer tools or deactivate unused tools.",
-                ),
-                origin="capability",
-            )
-        activated = exposure.activate(names, reason=reason, scope=scope, ttl_rounds=ttl)
-        return ToolResult(
-            ok=True,
-            data={"activated": activated, "scope": scope, "reason": reason},
-            origin="capability",
+        in_list = [n for n in names if not _outside_list(ctx, registry, n)]
+        outside = [how_to_call(registry.get(n)) for n in names if n not in in_list]
+        data: dict = {"in_list": in_list, "outside_list": outside}
+        data["note"] = (
+            "Your tool list does not change. Call the in_list tools directly; run the others "
+            "through tool.call exactly as each call shows."
+            if outside
+            else "These tools are already in your list: call them directly."
         )
+        return ToolResult(ok=True, data=data, origin="capability")
 
     def deactivate_handler(arguments: dict, ctx) -> object:
-        from rinari.tools.definition import ToolErrorCode, ToolErrorInfo, ToolResult
+        from rinari.tools.definition import ToolResult
 
-        exposure, err = _exposure(ctx)
-        if err is not None:
-            return err
-        names = _names(arguments)
-        if not names:
-            return ToolResult(
-                ok=False,
-                error=ToolErrorInfo(ToolErrorCode.INVALID_ARGUMENT, "names is required"),
-                origin="capability",
-            )
-        removed = exposure.deactivate(names)
         return ToolResult(
             ok=True,
             data={
-                "deactivated": removed,
-                "still_exposed": [
-                    name for name in names if name in exposure.exposed_names(registry)
-                ],
-                "note": (
-                    "Core or recently used tools may remain visible "
-                    "after explicit activation is removed."
-                ),
+                "deactivated": [],
+                "note": "Your tool list does not change; there is nothing to deactivate.",
             },
             origin="capability",
         )
@@ -400,10 +423,8 @@ def capability_activation_tools(registry: ToolRegistry) -> list[ToolDefinition]:
         ToolDefinition(
             name="capability.activate",
             description=(
-                "Expose on-demand tools (browser, MCP, OpenAPI, plugins) to this "
-                "session. Search first with capability.search, then activate exactly "
-                "what the task needs. Turn scope lasts a few model rounds, session "
-                "scope persists."
+                "Get the schema and the exact tool.call of tools outside your list, by exact "
+                "name (find them with capability.search). Your tool list does not change."
             ),
             input_schema={
                 "type": "object",
@@ -411,35 +432,23 @@ def capability_activation_tools(registry: ToolRegistry) -> list[ToolDefinition]:
                     "names": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Exact tool names to expose.",
-                    },
-                    "scope": {
-                        "type": "string",
-                        "enum": ["turn", "session"],
-                        "default": "turn",
-                    },
-                    "ttl_rounds": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 32,
-                        "default": 4,
-                        "description": "Model rounds a turn-scoped activation survives.",
+                        "description": "Exact tool names.",
                     },
                     "reason": {"type": "string", "description": "Why the task needs these."},
                 },
                 "required": ["names"],
             },
-            capabilities=("state.mutate",),
+            capabilities=("state.read",),
             risk="low",
-            idempotent=False,
+            idempotent=True,
             namespace="capability",
             manifest={"source": "native", "kind": "capability-activation"},
-            classify=lambda _input: ClassifiedAction("state.mutate"),
+            classify=lambda _input: ClassifiedAction("state.read"),
             handler=activate_handler,
         ),
         ToolDefinition(
             name="capability.deactivate",
-            description="Drop previously activated tools from this session's exposure.",
+            description="Kept for old instructions: your tool list does not change.",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -447,12 +456,13 @@ def capability_activation_tools(registry: ToolRegistry) -> list[ToolDefinition]:
                 },
                 "required": ["names"],
             },
-            capabilities=("state.mutate",),
+            capabilities=("state.read",),
             risk="low",
-            idempotent=False,
+            idempotent=True,
             namespace="capability",
+            always_loaded=False,
             manifest={"source": "native", "kind": "capability-activation"},
-            classify=lambda _input: ClassifiedAction("state.mutate"),
+            classify=lambda _input: ClassifiedAction("state.read"),
             handler=deactivate_handler,
         ),
     ]

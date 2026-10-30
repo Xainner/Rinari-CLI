@@ -1,6 +1,6 @@
 # Working on a remote machine over SSH
 
-Typed tools work on registered SSH destinations and static OpenSSH config aliases. They are on demand: `capability.search` with `query: "ssh"` and `load=true` exposes them.
+Typed tools work on registered SSH destinations and static OpenSSH config aliases. They are on demand: `capability.search` with `query: "ssh"` gives their schema and exact call, and they run through `tool.call`.
 
 ## Read first, act second
 - Hardware and OS facts: `ssh.inspect` (`section: "hardware"` gathers everything in one connection).

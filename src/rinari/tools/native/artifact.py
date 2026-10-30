@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import codecs
+import contextlib
 import hashlib
 import mimetypes
 import shutil
@@ -24,6 +25,26 @@ from rinari.tools.definition import (
 MAX_ARTIFACT_SLICE = 32 * 1024
 
 
+#: An artifact:// a connector returned (its own store uses the same scheme).
+FOREIGN_ARTIFACT = (
+    "This artifact:// URI is not from Rinari's store: it belongs to the connector that "
+    "returned it. Use that connector's tools to inspect or download it; to show it to the "
+    "owner, download the file and present it."
+)
+
+
+def foreign_artifact(ctx, uri: str) -> bool:
+    """Whether an artifact:// is not in Rinari's store at all (a connector's URI)."""
+    store = getattr(ctx, "artifact_store", None)
+    if store is None:
+        return False
+    try:
+        store.meta(uri)
+    except Exception:
+        return True
+    return False
+
+
 def _error(code: ToolErrorCode, message: str) -> ToolResult:
     return ToolResult(ok=False, error=ToolErrorInfo(code=code, message=message))
 
@@ -38,10 +59,13 @@ def _path_for(uri: object, ctx: ToolContext) -> tuple[Path | None, ToolResult | 
             "expected artifact://<session>/<namespace>/<name>",
         )
     session_id, namespace, name = parts
-    if session_id != ctx.session_id:
+    shared = getattr(ctx, "shared_artifact_sessions", ()) or ()
+    if session_id != ctx.session_id and session_id not in shared:
+        if foreign_artifact(ctx, uri):
+            return None, _error(ToolErrorCode.NOT_FOUND, FOREIGN_ARTIFACT)
         return None, _error(
             ToolErrorCode.PERMISSION_DENIED,
-            "artifacts are readable only from the current session",
+            "artifacts are readable only from the current session or a teammate's post",
         )
     if any(part in (".", "..") or "\\" in part for part in parts):
         return None, _error(ToolErrorCode.INVALID_ARGUMENT, "invalid artifact URI")
@@ -174,6 +198,8 @@ def artifact_export(input: dict, ctx: ToolContext) -> ToolResult:
     path, error = _path_for(input.get("uri"), ctx)
     if error is not None:
         return error
+    if input.get("extract") is True:
+        return _export_extracted(input, path, ctx)
     target = input.get("path") or _plain_name(path)
     if not isinstance(target, str):
         return _error(ToolErrorCode.INVALID_ARGUMENT, "path must be a string")
@@ -212,6 +238,55 @@ def artifact_export(input: dict, ctx: ToolContext) -> ToolResult:
             "size_bytes": dest.stat().st_size,
             "mime_type": mimetypes.guess_type(dest.name)[0] or "application/octet-stream",
             "sha256": actual,
+        },
+    )
+
+
+def _export_extracted(input: dict, path: Path, ctx: ToolContext) -> ToolResult:
+    """Unpack an archive artifact into a new folder (never into an existing one)."""
+    from rinari.artifacts.archives import ArchiveError, archive_type, extract
+
+    name = _plain_name(path)
+    store = ctx.artifact_store
+    if store is not None:
+        with contextlib.suppress(Exception):
+            name = store.meta(input["uri"]).name or name
+    shown = _plain_name(Path(name))
+    if archive_type(shown) is None:
+        return _error(
+            ToolErrorCode.INVALID_ARGUMENT,
+            "extract=true is for .zip, .tar, .tar.gz and .tgz artifacts.",
+        )
+    stem = shown
+    for suffix in (".tar.gz", ".tgz", ".tar", ".zip"):
+        if stem.lower().endswith(suffix):
+            stem = stem[: -len(suffix)] or "archive"
+            break
+    target = input.get("path") or stem
+    if not isinstance(target, str):
+        return _error(ToolErrorCode.INVALID_ARGUMENT, "path must be a string")
+    try:
+        dest = ctx.sandbox.resolve(target, base=ctx.cwd)
+        if dest.is_dir():
+            dest = dest / stem
+        dest = _free_path(dest)
+        ctx.sandbox.assert_writable(dest)
+    except Exception as exc:  # SandboxViolationError, FileExistsError
+        return _error(ToolErrorCode.SANDBOX_VIOLATION, getattr(exc, "message", str(exc)))
+    try:
+        written = extract(path, dest, shown)
+    except ArchiveError as exc:
+        return _error(ToolErrorCode.INVALID_ARGUMENT, f"Not extracted: {exc}")
+    except OSError as exc:
+        return _error(ToolErrorCode.PERMISSION_DENIED, f"Extract failed: {exc.__class__.__name__}")
+    return ToolResult(
+        ok=True,
+        data={
+            "uri": input["uri"],
+            "path": str(dest),
+            "files": len(written),
+            "size_bytes": sum(item.stat().st_size for item in written),
+            "first": [str(item.relative_to(dest)) for item in written[:20]],
         },
     )
 
@@ -268,6 +343,7 @@ def artifact_tools() -> list[ToolDefinition]:
             description=(
                 "Copy an artifact:// original of this session (e.g. an attachment) to a file "
                 "for programs or uploads. path: file or folder (default: working directory). "
+                "extract=true unpacks a .zip/.tar/.tar.gz/.tgz into a new folder instead. "
                 "Never overwrites."
             ),
             input_schema={
@@ -275,6 +351,7 @@ def artifact_tools() -> list[ToolDefinition]:
                 "properties": {
                     "uri": {"type": "string"},
                     "path": {"type": "string"},
+                    "extract": {"type": "boolean"},
                 },
                 "required": ["uri"],
             },

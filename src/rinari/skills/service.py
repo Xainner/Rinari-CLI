@@ -112,7 +112,7 @@ class SkillService:
         self._ctx = ctx
         self._trust = trust
         self._user_home = Path(user_home) if user_home is not None else Path.home()
-        self._fetcher = fetcher or SkillFetcher()
+        self._fetcher = fetcher or SkillFetcher(home=ctx.home)
         # Set by the Engine server: a learned skill becomes a `skill.learned` event.
         self.on_learned = None
         from rinari.skills.learning import SkillLearning
@@ -510,37 +510,78 @@ class SkillService:
 
     # -- install / update / import -------------------------------------------------
 
-    def inspect(self, source: str) -> dict:
-        """What installing `source` would bring in, with its review. Installs nothing."""
+    def inspect(self, source: str, name: str | None = None, *, allow_large: bool = False) -> dict:
+        """What installing `source` would bring in, with its review. Installs nothing.
+
+        With `name` (or a source that names one skill), only that skill is
+        fetched. When a source holds too many skills to bring them all, only
+        their SKILL.md come in: each candidate says `partial` and is reviewed
+        whole when it is chosen (plan 0.4.0 #53).
+        """
         spec = parse_source(source)
         with tempfile.TemporaryDirectory(
             prefix="rinari-skill-", ignore_cleanup_errors=True
         ) as work:
-            root = self._fetcher.materialize(spec, Path(work))
-            candidates = [self._candidate_view(folder, root) for folder in find_candidates(root)]
-        return {"source": spec.display, "kind": spec.kind, "candidates": candidates}
+            fetched = self._fetcher.fetch(spec, Path(work), name=name, allow_large=allow_large)
+            library = self.library()
+            candidates = [
+                self._candidate_view(
+                    folder, fetched.root, library=library, review=not fetched.partial
+                )
+                for folder in find_candidates(fetched.root)
+            ]
+        return {
+            "source": spec.display,
+            "kind": spec.kind,
+            "candidates": candidates,
+            "partial": fetched.partial,
+        }
 
     def import_scan(self) -> list[dict]:
-        """Skills in Claude's, Codex's and the shared `.agents` folders."""
-        found: list[dict] = []
+        """Skills in Claude's, Codex's and the shared `.agents` folders.
+
+        A quick list (plan 0.4.0 #53): name, description, where it is and
+        whether it is installed, without reading the skill's content. Folders
+        of 100+ MB took over a minute to review and blocked the Engine. The
+        review runs, as a job, only for the skills the owner picks (`inspect`
+        with the folder). The same skill in several folders is listed once,
+        with every place it is in.
+        """
+        library = self.library()
+        found: dict[str, dict] = {}
         for kind, relative in IMPORT_FOLDERS:
             base = self._user_home / relative
             if not base.is_dir():
                 continue
             for folder in find_candidates(base):
-                view = self._candidate_view(folder, None)
-                view["kind"] = kind
-                found.append(view)
-        return found
+                real = str(folder.resolve())
+                view = self._candidate_view(folder, None, library=library, review=False)
+                key = f"{view['name']}\0{view['description']}"
+                if key in found:
+                    if real not in found[key]["paths"]:
+                        found[key]["paths"].append(real)
+                        found[key]["kinds"].append(kind)
+                    continue
+                view.update(kind=kind, kinds=[kind], paths=[real])
+                found[key] = view
+        return list(found.values())
 
-    def _candidate_view(self, folder: Path, root: Path | None) -> dict:
+    def _candidate_view(
+        self,
+        folder: Path,
+        root: Path | None,
+        *,
+        library: list[dict] | None = None,
+        review: bool = True,
+    ) -> dict:
         try:
             manifest: SkillManifest | None = load_skill_manifest(folder, "user")
             error = None
         except SkillError as exc:
             manifest, error = None, {"code": exc.code, "message": exc.message}
         name = manifest.name if manifest else folder.name
-        existing = next((row for row in self.library() if row["name"] == name), None)
+        rows = library if library is not None else self.library()
+        existing = next((row for row in rows if row["name"] == name), None)
         return {
             "name": name,
             "description": manifest.description if manifest else "",
@@ -548,7 +589,7 @@ class SkillService:
             "format": manifest.format if manifest else None,
             "path": folder.relative_to(root).as_posix() if root else str(folder),
             "error": error,
-            "review": review_skill(folder).to_dict(),
+            "review": review_skill(folder).to_dict() if review else None,
             "installed": (
                 {"origin": existing["origin"], "source": existing["provenance"]["source"]}
                 if existing
@@ -563,6 +604,7 @@ class SkillService:
         *,
         expected_hash: str | None = None,
         replace: bool = False,
+        allow_large: bool = False,
     ) -> SkillManifest:
         """Copy one skill from `source` into ~/.rinari/skills.
 
@@ -574,8 +616,8 @@ class SkillService:
         with tempfile.TemporaryDirectory(
             prefix="rinari-skill-", ignore_cleanup_errors=True
         ) as work:
-            root = self._fetcher.materialize(spec, Path(work))
-            folder = self._pick(find_candidates(root), name)
+            fetched = self._fetcher.fetch(spec, Path(work), name=name, allow_large=allow_large)
+            folder = self._pick(find_candidates(fetched.root), name or spec.skill)
             manifest = load_skill_manifest(folder, "user")
             review = review_skill(folder)
             if review.findings and expected_hash != review.content_hash:

@@ -9,11 +9,17 @@ conservative: a hint is only emitted for markers that actually exist.
 from __future__ import annotations
 
 import json
+import os
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 SCAN_ENTRY_LIMIT = 50_000
+#: The scan only ranks languages, and it runs before every turn: a sample is
+#: enough, and a large folder must not hold the turn (SOIN, 23-oct: three turns
+#: in a row timed out preparing).
+SCAN_TIME_LIMIT_S = 2.0
 
 _GENERATED_DIRS = {
     "node_modules",
@@ -114,20 +120,50 @@ class RepositorySummary:
         }
 
 
+#: Recent summaries by root. The summary goes into the system prompt: computed
+#: again on every turn, a time-limited sample could differ and change the
+#: prompt, losing the provider's cache, and a large folder paid the walk each turn.
+#: A change to the root folder itself (a new module, a new manifest) drops it.
+_RECENT: dict[str, tuple[float, int, RepositorySummary]] = {}
+RECENT_TTL_S = 600.0
+
+
+def _root_stamp(root: Path) -> int:
+    try:
+        return root.stat().st_mtime_ns
+    except OSError:
+        return -1
+
+
 def analyze_repository(root: str | Path) -> RepositorySummary:
-    root_path = Path(root).expanduser().resolve()
+    key = str(Path(root).expanduser().resolve())
+    now = time.monotonic()
+    stamp = _root_stamp(Path(key))
+    recent = _RECENT.get(key)
+    if recent is not None and now - recent[0] < RECENT_TTL_S and recent[1] == stamp:
+        return recent[2]
+    summary = _analyze(Path(key))
+    _RECENT[key] = (now, stamp, summary)
+    return summary
+
+
+def _analyze(root_path: Path) -> RepositorySummary:
     summary = RepositorySummary(root=str(root_path))
     if not root_path.is_dir():
         return summary
 
     ext_counts: dict[str, int] = {}
     entries_seen = 0
-    for path in _walk(root_path):
+    deadline = time.monotonic() + SCAN_TIME_LIMIT_S
+    for name in _walk(root_path):
         entries_seen += 1
-        if entries_seen > SCAN_ENTRY_LIMIT:
+        if entries_seen > SCAN_ENTRY_LIMIT or (
+            entries_seen % 256 == 0 and time.monotonic() >= deadline
+        ):
             break
-        if path.suffix in _LANGUAGE_EXTENSIONS:
-            language = _LANGUAGE_EXTENSIONS[path.suffix]
+        suffix = os.path.splitext(name)[1]
+        if suffix in _LANGUAGE_EXTENSIONS:
+            language = _LANGUAGE_EXTENSIONS[suffix]
             ext_counts[language] = ext_counts.get(language, 0) + 1
 
     js_deps = _read_js_deps(root_path / "package.json")
@@ -148,20 +184,29 @@ def analyze_repository(root: str | Path) -> RepositorySummary:
 
 
 def _walk(root: Path):
-    stack = [root]
+    """File names under `root`, skipping generated folders.
+
+    With `os.scandir` the type of each entry comes with the listing; asking each
+    path took a call to the disk per file, ten times slower on Windows.
+    """
+    stack = [str(root)]
     while stack:
         current = stack.pop()
         try:
-            children = sorted(current.iterdir())
+            with os.scandir(current) as listing:
+                children = sorted(listing, key=lambda entry: entry.name)
         except OSError:
             continue
         for child in children:
-            if child.is_dir():
-                if child.name in _GENERATED_DIRS or child.name.endswith(".egg-info"):
-                    continue
-                stack.append(child)
-            elif child.is_file():
-                yield child
+            try:
+                if child.is_dir():
+                    if child.name in _GENERATED_DIRS or child.name.endswith(".egg-info"):
+                        continue
+                    stack.append(child.path)
+                elif child.is_file():
+                    yield child.name
+            except OSError:
+                continue
 
 
 def _top_level_entries(root: Path) -> list[Path]:

@@ -146,7 +146,10 @@ def test_direct_answer(env) -> None:
     assert "constitution" in first_message.content
     assert "Rinari identity" in first_message.content
     # conversation state: user + assistant appended
-    assert [m.role for m in env["ctx"].history] == ["user", "assistant"]
+    # The turn state is kept in the conversation (F42), as a harness note.
+    assert [
+        m.role for m in env["ctx"].history if (m.origin or {}).get("source") != "turn-state"
+    ] == ["user", "assistant"]
     types = [t for _, t, _ in events]
     assert "AgentTurnStarted" in types
     assert "ModelInvoked" in types
@@ -278,7 +281,16 @@ def test_local_image_visual_delivery(env, app_ctx, vision, confirmed, success, a
     assert loop.turn(env["ctx"], "Mira la imagen").kind == "answer"
     message = next(m for m in model.requests[-1].messages if m.tool_call_id == "image")
     assert bool(message.images) == success
-    assert len([m for m in env["ctx"].history if m.role == "user"]) == 1
+    assert (
+        len(
+            [
+                m
+                for m in env["ctx"].history
+                if m.role == "user" and (m.origin or {}).get("source") != "turn-state"
+            ]
+        )
+        == 1
+    )
     if not success:
         assert '"ok": false' in message.content
         return
@@ -464,27 +476,110 @@ def test_request_carries_session_id(env) -> None:
     assert model.requests[0].session_id == "s1"
 
 
-def test_exposure_view_limits_lazy_tools(env) -> None:
-    # With a session exposure, the request carries core tools only...
+def test_the_tool_list_stays_the_same_between_requests_and_turns(env) -> None:
+    # With a session exposure, the request carries the core only...
     exposure = ToolExposure()
     env["ctx"].tool_ctx = replace(env["ctx"].tool_ctx, exposure=exposure)
-    model = FakeModel(scripted=[ModelResponse(content="done")])
+    model = FakeModel(
+        scripted=[
+            ModelResponse(
+                content="",
+                tool_calls=(ToolCall("find", "capability.activate", {"names": ["fs.diff"]}),),
+            ),
+            ModelResponse(content="done"),
+        ]
+    )
     loop = AgentLoop(model, env["runtime"], env["assembler"])
     loop.turn(env["ctx"], "hello")
-    names = {t.name for t in model.requests[0].tools}
+    first = model.requests[0].tools
+    names = {t.name for t in first}
     assert "fs.read" in names
-    assert not any(n.startswith("browser.") for n in names)
-    # ...until the model activates what it needs.
-    exposure.activate(["browser.open"], reason="need page", scope="session")
-    model2 = FakeModel(scripted=[ModelResponse(content="done")])
-    loop2 = AgentLoop(model2, env["runtime"], env["assembler"])
-    loop2.turn(env["ctx"], "hello again")
-    names2 = {t.name for t in model2.requests[0].tools}
-    assert "browser.open" not in names2  # No browser service in this session.
+    assert not any(n.startswith("browser.") for n in names) and "fs.diff" not in names
+    # ...and activating, a new turn or a service that appears change nothing (F42).
+    assert model.requests[1].tools == first
     env["ctx"].tool_ctx = replace(env["ctx"].tool_ctx, browser=object())
-    model3 = FakeModel(scripted=[ModelResponse(content="done")])
-    AgentLoop(model3, env["runtime"], env["assembler"]).turn(env["ctx"], "with browser")
-    assert "browser.open" in {t.name for t in model3.requests[0].tools}
+    model2 = FakeModel(scripted=[ModelResponse(content="done")])
+    AgentLoop(model2, env["runtime"], env["assembler"]).turn(env["ctx"], "hello again")
+    assert model2.requests[0].tools == first
+
+
+def _door_env(env):
+    from rinari.tools.door import door_tool
+
+    env["runtime"].registry.register(door_tool())
+    env["ctx"].tool_ctx = replace(env["ctx"].tool_ctx, exposure=ToolExposure())
+
+
+def test_tool_call_runs_the_real_tool_under_its_own_name(env) -> None:
+    _door_env(env)
+    (env["root"] / "a.txt").write_text("one\n", encoding="utf-8")
+    (env["root"] / "b.txt").write_text("two\n", encoding="utf-8")
+    arguments = '{"a": "a.txt", "b": "b.txt"}'
+    model = FakeModel(
+        scripted=[
+            ModelResponse(
+                content="",
+                tool_calls=(
+                    ToolCall("d1", "tool.call", {"name": "fs.diff", "arguments": arguments}),
+                    ToolCall(
+                        "r1", "tool.call", {"name": "fs.read", "arguments": '{"path": "a.txt"}'}
+                    ),
+                ),
+            ),
+            ModelResponse(content="done"),
+        ]
+    )
+    activity: list = []
+    loop = AgentLoop(
+        model,
+        env["runtime"],
+        env["assembler"],
+        activity_sink=lambda name, payload: activity.append((name, payload)),
+    )
+    loop.turn(env["ctx"], "compare")
+    requested = [p["tool"] for name, p in activity if name == "tool.requested"]
+    assert requested == ["fs.diff", "fs.read"]
+    completed = {p["tool"]: p["ok"] for name, p in activity if name == "tool.completed"}
+    assert completed == {"fs.diff": True, "fs.read": True}
+    # The history answers the call the model wrote, under the name it used.
+    results = [m for m in env["ctx"].history if m.role == "tool"]
+    assert [(m.tool_call_id, m.name) for m in results] == [("d1", "tool.call"), ("r1", "tool.call")]
+    assert "-one" in (results[0].content or "") and "+two" in (results[0].content or "")
+    assert model.requests[1].tools == model.requests[0].tools
+
+
+def test_a_door_that_cannot_open_says_how_to_fix_it(env) -> None:
+    import json
+
+    _door_env(env)
+    model = FakeModel(
+        scripted=[
+            ModelResponse(
+                content="",
+                tool_calls=(
+                    ToolCall("u1", "tool.call", {"name": "fs.difff", "arguments": "{}"}),
+                    ToolCall("j1", "tool.call", {"name": "fs.diff", "arguments": "{a: 1"}),
+                    ToolCall("s1", "tool.call", {"name": "fs.diff", "arguments": '{"a": "x.txt"}'}),
+                ),
+            ),
+            ModelResponse(content="done"),
+        ]
+    )
+    AgentLoop(model, env["runtime"], env["assembler"]).turn(env["ctx"], "go")
+    results = {
+        m.tool_call_id: json.loads(m.content) for m in env["ctx"].history if m.role == "tool"
+    }
+    unknown = results["u1"]["error"]
+    assert unknown["code"] == "INVALID_ARGUMENT" and unknown["retryable"] is True
+    assert "fs.diff" in unknown["message"]
+    assert unknown["details"]["matches"][0]["name"] == "fs.diff"
+    assert len(unknown["details"]["matches"]) <= 3
+    bad_json = results["j1"]["error"]
+    assert "not valid JSON" in bad_json["message"]
+    assert bad_json["details"]["call"]["arguments"]["name"] == "fs.diff"
+    missing = results["s1"]["error"]
+    assert missing["code"] == "INVALID_ARGUMENT"
+    assert missing["details"]["how_to_call"]["parameters"]["required"] == ["a", "b"]
 
 
 def test_gateway_switch_changes_provider_mid_session(env) -> None:
@@ -501,7 +596,14 @@ def test_gateway_switch_changes_provider_mid_session(env) -> None:
     assert len(first.requests) == 1
     assert len(second.requests) == 1
     # History is provider-independent and preserved across the switch.
-    assert [m.role for m in env["ctx"].history] == ["user", "assistant", "user", "assistant"]
+    assert [
+        m.role for m in env["ctx"].history if (m.origin or {}).get("source") != "turn-state"
+    ] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
 
 
 def test_malformed_tool_arguments_never_execute(env) -> None:
@@ -822,8 +924,9 @@ def test_first_tool_batch_waits_for_an_opening_sentence(env) -> None:
     reminder = next(m for m in sent if (m.origin or {}).get("source") == "opening")
     assert reminder.origin == {"kind": "harness", "source": "opening"}
     assert "none of those calls ran" in reminder.content
-    # The opening it asks for must follow the owner, not the Soul's examples.
-    assert "The user is writing in Spanish" in (sent[-1].content or "")
+    # The opening it asks for must follow the owner, not the Soul's examples:
+    # the language rides in the turn state the conversation keeps (F42).
+    assert any("The user is writing in Spanish" in (m.content or "") for m in sent)
     assert events.count("OpeningRequested") == 1
 
 
@@ -1049,3 +1152,52 @@ def test_the_language_rewrite_is_asked_only_once(env) -> None:
     loop = AgentLoop(model, env["runtime"], env["assembler"])
     result = loop.turn(env["ctx"], "¿Qué dice el informe del servidor?")
     assert result.kind == "answer" and len(model.requests) == 2
+
+
+# -- empty final responses (plan 0.4.0 #66a) -----------------------------------------
+
+
+def test_an_empty_final_response_gets_one_note_and_another_call(env) -> None:
+    listing = {"path": str(env["root"])}
+    model = FakeModel(
+        scripted=[
+            ModelResponse(content="Reviso.", tool_calls=(ToolCall("l1", "fs.list", listing),)),
+            ModelResponse(content=""),
+            ModelResponse(content="Listo: tiene una carpeta src."),
+        ]
+    )
+    events: list[str] = []
+    loop = AgentLoop(
+        model, env["runtime"], env["assembler"], event_sink=lambda s, t, p: events.append(t)
+    )
+    result = loop.turn(env["ctx"], "Revisa el proyecto")
+    assert result.kind == "answer"
+    assert result.content == "Listo: tiene una carpeta src."
+    sent = model.requests[2].messages
+    note = next(m for m in sent if (m.origin or {}).get("source") == "empty")
+    assert "your last response was empty" in note.content
+    # The empty answer itself is not kept in the history.
+    assert not any(
+        m.role == "assistant" and not (m.content or "") and not m.tool_calls for m in sent
+    )
+    assert events.count("EmptyResponse") == 1
+
+
+def test_two_empty_responses_stop_the_turn_as_recoverable(env) -> None:
+    model = FakeModel(scripted=[ModelResponse(content=""), ModelResponse(content="  \n")])
+    loop = AgentLoop(model, env["runtime"], env["assembler"])
+    result = loop.turn(env["ctx"], "Hola")
+    assert result.kind == "empty_response"
+    assert result.stop_reason == "empty_response"
+    assert result.recoverable is True
+    assert len(model.requests) == 2
+
+
+def test_a_cut_answer_is_not_treated_as_empty(env) -> None:
+    from rinari.models.types import StopReason
+
+    model = FakeModel(scripted=[ModelResponse(content="", stop_reason=StopReason.MAX_TOKENS)])
+    loop = AgentLoop(model, env["runtime"], env["assembler"])
+    result = loop.turn(env["ctx"], "Hola")
+    assert result.kind == "truncated"
+    assert len(model.requests) == 1

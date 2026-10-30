@@ -12,10 +12,14 @@ DuckDuckGo HTML search endpoint (keyless, no extra dependency).
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urljoin
 
@@ -24,6 +28,26 @@ import httpx
 USER_AGENT = "Rinari/0.1 CLI (web tools)"
 DEFAULT_TIMEOUT_S = 15.0
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+# web.download writes to disk as it arrives; the cap is for the file, not the
+# page cap above (a 10 s video was cut at 2 MiB, plan 0.4.0 #48).
+DOWNLOAD_MAX_BYTES = 1024 * 1024 * 1024
+DOWNLOAD_CHUNK_BYTES = 256 * 1024
+# Bytes que se miran para decidir si un cuerpo es texto.
+BINARY_SNIFF_BYTES = 8192
+_BINARY_SIGNATURES = (
+    b"\x1f\x8b",  # gzip
+    b"PK\x03\x04",  # zip / docx / xlsx
+    b"\x89PNG",
+    b"\xff\xd8\xff",  # jpeg
+    b"GIF8",
+    b"%PDF",
+    b"\x28\xb5\x2f\xfd",  # zstd
+    b"BZh",
+    b"\xfd7zXZ",
+    b"7z\xbc\xaf",
+    b"RIFF",
+    b"OggS",
+)
 SEARCH_ENDPOINT = "https://html.duckduckgo.com/html/"
 SEARCH_MAX_RESULTS_DEFAULT = 10
 SEARCH_MAX_RESULTS_LIMIT = 50
@@ -62,8 +86,27 @@ class Fetched:
         return hashlib.sha256(self.body).hexdigest()
 
 
-def default_client_factory(timeout_s: float) -> httpx.Client:
-    return httpx.Client(
+def looks_binary(body: bytes) -> bool:
+    """`True` if `body` (already decompressed) is not readable text.
+
+    Checks well-known binary signatures, a NUL byte, and the share of control
+    characters in the first few KiB; text with a few stray controls passes.
+    """
+    head = body[:BINARY_SNIFF_BYTES]
+    if not head:
+        return False
+    if head.startswith(_BINARY_SIGNATURES) or b"\x00" in head:
+        return True
+    controls = sum(1 for byte in head if byte < 32 and byte not in (9, 10, 12, 13, 27))
+    return controls / len(head) > 0.1
+
+
+def default_client_factory(timeout_s: float, home=None) -> httpx.Client:
+    from rinari.net import client as net_client
+
+    # Tools carry no Rinari home: the default one (RINARI_HOME or ~/.rinari).
+    return net_client(
+        home,
         timeout=httpx.Timeout(timeout_s),
         follow_redirects=True,
         headers={"User-Agent": USER_AGENT},
@@ -130,8 +173,112 @@ def fetch(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class Downloaded:
+    url: str
+    final_url: str
+    status: int
+    content_type: str
+    path: Path
+    bytes: int
+    sha256: str
+    elapsed_ms: float
+    #: The file name the server gave (Content-Disposition), if any.
+    filename: str = ""
+
+
+def disposition_name(header: str) -> str:
+    """The file name of a Content-Disposition header (`filename*` first), or ""."""
+    from email.message import Message
+
+    if not header:
+        return ""
+    message = Message()
+    message["content-disposition"] = header
+    name = message.get_filename() or ""
+    return name.replace("\\", "/").rsplit("/", 1)[-1].strip()
+
+
+def download_to(
+    url: str,
+    directory: Path,
+    name_for: Callable[[str, str], str],
+    *,
+    client_factory: Any = None,
+    timeout_s: float = DEFAULT_TIMEOUT_S,
+    max_bytes: int = DOWNLOAD_MAX_BYTES,
+    is_cancelled: Callable[[], bool] | None = None,
+) -> Downloaded:
+    """Stream `url` into a file in `directory`, never holding it in memory.
+
+    The body is decoded (Content-Encoding undone) and hashed as it is
+    written. Past `max_bytes` the partial file is removed and the error says
+    the limit. `name_for(final_url, sha256)` names the finished file.
+    """
+    client = client_factory() if client_factory is not None else default_client_factory(timeout_s)
+    started = time.monotonic()
+    directory.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with client.stream("GET", url) as response:
+            error = map_status(response.status_code)
+            if error is not None:
+                raise error
+            digest = hashlib.sha256()
+            size = 0
+            with tempfile.NamedTemporaryFile(
+                dir=directory, prefix=".download-", delete=False
+            ) as handle:
+                temporary = Path(handle.name)
+                for chunk in response.iter_bytes(DOWNLOAD_CHUNK_BYTES):
+                    if is_cancelled is not None and is_cancelled():
+                        raise WebRequestError("CANCELLED", "Download cancelled")
+                    size += len(chunk)
+                    if size > max_bytes:
+                        raise WebRequestError(
+                            "RESOURCE_EXHAUSTED",
+                            f"Download is larger than the {max_bytes // (1024 * 1024)} MiB limit; "
+                            "nothing was kept.",
+                        )
+                    digest.update(chunk)
+                    handle.write(chunk)
+            sha256 = digest.hexdigest()
+            target = directory / name_for(str(response.url), sha256)
+            os.replace(temporary, target)
+            temporary = None
+            return Downloaded(
+                url=url,
+                final_url=str(response.url),
+                status=response.status_code,
+                content_type=response.headers.get("content-type", ""),
+                path=target,
+                bytes=size,
+                sha256=sha256,
+                elapsed_ms=(time.monotonic() - started) * 1000,
+                filename=disposition_name(response.headers.get("content-disposition", "")),
+            )
+    except httpx.TimeoutException as exc:
+        raise WebRequestError(
+            "TIMEOUT",
+            f"Download timed out after {timeout_s:.0f}s without data: {exc.__class__.__name__}",
+            retryable=True,
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise WebRequestError(
+            "NETWORK_ERROR", f"Download failed: {exc.__class__.__name__}", retryable=True
+        ) from exc
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+        client.close()
+
+
 def _read_bounded(client: httpx.Client, url: str) -> tuple[httpx.Response, bytes, bool]:
-    """Stream the body, capping at MAX_RESPONSE_BYTES.
+    """Stream the decoded body, capping at MAX_RESPONSE_BYTES.
+
+    `iter_bytes` undoes the Content-Encoding (gzip, deflate, and br/zstd when
+    their decoders are installed), so the cap applies to what the tool reads.
+    A compression bomb stops at the cap too: decoding is per network chunk.
 
     NOTE: 4xx/5xx are mapped by the caller after the read; error pages are
     small in practice, so the cap behavior is identical for both paths.
@@ -146,7 +293,7 @@ def _read_bounded(client: httpx.Client, url: str) -> tuple[httpx.Response, bytes
             return response, raw[:MAX_RESPONSE_BYTES], len(raw) > MAX_RESPONSE_BYTES
         body = bytearray()
         truncated = False
-        for chunk in response.iter_raw():
+        for chunk in response.iter_bytes():
             body.extend(chunk)
             if len(body) > MAX_RESPONSE_BYTES:
                 truncated = True

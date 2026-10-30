@@ -42,13 +42,13 @@ FIELDS = {
     "fs.search_text": "root:s pattern:s matches:a files_searched:i truncated:b",
     "fs.stat": "path:s type:s size_bytes:i modified:s executable:b",
     "fs.diff": "a:s b:s diff:s truncated:b changes:i",
-    "git.status": "branch:s? dirty:b files:a total_files:i truncated:b",
-    "git.diff": "diff:s truncated:b",
+    "git.status": "branch:s? dirty:b files:a total_files:i truncated:b is_repo:b?",
+    "git.diff": "diff:s truncated:b is_repo:b?",
     "git.log": "entries:a truncated:b",
     "git.show": "ref:s stat:s truncated:b",
     "git.branch": "current:s? branches:a",
     "shell.exec": "exit_code:i stdout:s stderr:s truncated:b handle:s running:b",
-    "process.start": "handle:s pid:i? running:b",
+    "process.start": "handle:s pid:i? running:b name:s? port:i? ready:b? reused:b?",
     "process.wait": "handle:s exit_code:i? timed_out:b",
     "process.output": "handle:s stdout:s stderr:s cursor:o has_more:b running:b exit_code:i?",
     "process.signal": "handle:s signal:s",
@@ -89,8 +89,13 @@ FIELDS = {
         "name:s version:s valid:b issues:a warnings:a review:o previous_version:s? unchanged:b"
     ),
     "skills.propose": "name:s status:s version:s update:b review:s warnings:a previous_version:s?",
-    "skills.activate": "name:s version:s active:b tools_activated:a?",
+    "skills.activate": "name:s version:s active:b procedure:s? tools_through_door:s?",
     "schedule.propose": "status:s proposal:o? task_id:s? next_run_at:n? description:s note:s",
+    "schedule.list": "tasks:a",
+    "schedule.update": (
+        "status:s id:s name:s when:s? enabled:b next_run_local:s? here:b notify:s prompt:s"
+    ),
+    "schedule.cancel": "status:s id:s name:s",
     "rinari.status": (
         "engine:o providers:a models:a? models_total:i context:o soul:s? skills:a "
         "sessions_total:i note:s"
@@ -99,9 +104,9 @@ FIELDS = {
     "rinari.session": "session:o turns:a turns_total:i turns_shown:i note:s",
     "rinari.turn": "id:s outcome:s session_id:s tools:a? events:a? note:s",
     "skills.deactivate": "name:s active:b removed:b",
-    "capability.search": "query:s results:a matched:b loaded:a load_error:s? diagnostics:a",
-    "capability.activate": "activated:a scope:s reason:s",
-    "capability.deactivate": "deactivated:a",
+    "capability.search": "query:s results:a matched:b diagnostics:a",
+    "capability.activate": "in_list:a outside_list:a note:s",
+    "capability.deactivate": "deactivated:a note:s",
     "agent.spawn": "agent_id:s agent:s state:s limits:o",
     "agent.wait": "agent_id:s state:s status:s timed_out:b",
     "agent.result": "agent_id:s state:s",
@@ -110,9 +115,24 @@ FIELDS = {
     "agent.synthesize": "conflicts:a",
     "user.ask": "request_id:s status:s answers:o",
     "checklist.update": "revision:i counts:o warnings:a",
+    "goal.update": "state:s iteration:i note:s",
+    "file.present": "presented:i items:a",
+    "process.logs": (
+        "handle:s name:s? pid:i running:b exit_code:i? port:i? "
+        "ready:b? persist:b last_line:s? age_s:n lines:a older_dropped:b"
+    ),
+    "process.stop": (
+        "handle:s name:s? pid:i running:b exit_code:i? port:i? "
+        "ready:b? persist:b last_line:s? age_s:n stopped:b"
+    ),
+    "project.instructions.propose": "proposal_id:s status:s updates:b message:s",
+    "audio.transcribe": "file:s text:s segments:a? model:s language:s elapsed_ms:i",
     "followup.suggest": "suggestion_id:s status:s",
-    "session.peers": "peers:a",
-    "session.send": "message_id:s to_session_id:s state:s hop:i",
+    "image.generate": "operation:s connector:s model:s cost:s images:a note:s",
+    "image.edit": "operation:s connector:s model:s cost:s images:a note:s",
+    "image.variations": "operation:s connector:s model:s cost:s images:a note:s",
+    "image.upscale": "operation:s connector:s model:s cost:s images:a note:s",
+    "image.remove_background": "operation:s connector:s model:s cost:s images:a note:s",
     "verify.record": "id:s kind:s result:s summary:s",
     "verify.plan": "checks:a",
     "verify.evaluate": "outcome:s reasons:a",
@@ -142,6 +162,7 @@ FIELDS = {
     "browser.snapshot": "html:s bytes:i truncated:b",
     "browser.a11y": "nodes:a total:i truncated:b",
     "browser.screenshot": "path:s bytes:i sha256:s",
+    "browser.viewport": "width:i?",
     "browser.click": "clicked:o",
     "browser.fill": "filled:s chars:i",
     "browser.type": "typed:i",

@@ -264,7 +264,7 @@ def api_test(
         )
         if op is None:
             raise NotFoundError(f"operation not found: {operation}")
-        result = s.api.invoke(name, op, payload, _test_env())
+        result = s.api.invoke(name, op, payload, _test_env(s.ctx.home))
         if is_json(ctx):
             emit_json(success_envelope("api.test", result))
             return
@@ -272,12 +272,11 @@ def api_test(
         typer.echo(json.dumps(result.get("body"), ensure_ascii=False)[:1000])
 
 
-def _test_env():
-    import httpx
-
+def _test_env(home):
+    from rinari.net import client as net_client
     from rinari.openapi.service import _InvocationEnv
 
-    return _InvocationEnv(client=httpx.Client(timeout=30.0), network_guard=None, timeout_s=30.0)
+    return _InvocationEnv(client=net_client(home, timeout=30.0), network_guard=None, timeout_s=30.0)
 
 
 __all__ = ["app"]

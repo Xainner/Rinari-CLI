@@ -260,6 +260,37 @@ def test_title_generation_failure_keeps_fallback(services, home):
     assert result.title == "Revisar el proyecto"
 
 
+def test_title_failure_logs_what_the_provider_said(services, home, caplog) -> None:
+    """A bare "error:ProviderError" hid why titles failed: the log carries the
+    provider's code, model and message, never the user's message."""
+    from rinari.providers.errors import ProviderError, ProviderErrorCode
+
+    _configure(services, home)
+    record = services.sessions.start(home).session
+
+    def rejected(_):
+        raise ProviderError(
+            "max_tokens is below the minimum for this model",
+            code=ProviderErrorCode.SERVER_ERROR,
+            provider="opencode-go",
+            model="deepseek-v4.1-flash",
+            request_id="req_123",
+        )
+
+    with caplog.at_level("WARNING", logger="rinari.application.session_service"):
+        services.sessions.name_from_first_message(
+            record.id, "Plan secreto del cliente", title_factory=rejected
+        )
+    line = next(
+        r.getMessage() for r in caplog.records if "title generation failed" in r.getMessage()
+    )
+    assert "code=SERVER_ERROR" in line
+    assert "model=deepseek-v4.1-flash" in line
+    assert "request_id=req_123" in line
+    assert "max_tokens is below the minimum" in line
+    assert "Plan secreto" not in line
+
+
 def test_opening_an_active_session_does_not_bump_recency(services, home) -> None:
     """Clicking a conversation to read it must not reorder the list."""
     _configure(services, home)
@@ -343,7 +374,8 @@ def test_failed_title_is_provisional_and_retried_from_the_first_message(app_ctx,
         title_factory=lambda text: seen.append(text) or "Poema francés sobre los huskies",
     )
     assert result.title == "Poema francés sobre los huskies"
-    assert seen == [first, first]
+    # The retry reads the first message and the latest one (#61e).
+    assert seen == [first, f"{first}\n\nAhora en inglés"]
     assert _title_events(app_ctx, record.id, "SessionRenamed")[-1] == {
         "title": "Poema francés sobre los huskies",
         "source": "generated",
@@ -440,3 +472,40 @@ def test_a_greeting_does_not_name_the_session_the_next_topic_does(services, home
     _user_message(app_ctx, record.id, "El build falla con un error de tipos en la app")
     again = services.sessions.name_from_first_message(record.id, "otra cosa", title_factory=factory)
     assert again.title == "Arreglar el build de la app"
+
+
+def test_a_greeting_title_retries_with_the_latest_request(app_ctx, services, home):
+    # Plan 0.4.0 #61e: "Holi" whose title call failed stayed "Holi" because
+    # every retry read only "Holi".
+    _configure(services, home)
+    record = services.sessions.start(home).session
+
+    def failing(text):
+        raise RuntimeError("provider down")
+
+    result = services.sessions.name_from_first_message(record.id, "Holi", title_factory=failing)
+    assert result.title == "Holi"
+    _user_message(app_ctx, record.id, "Holi")
+    seen: list[str] = []
+    result = services.sessions.name_from_first_message(
+        record.id,
+        "Puedes buscar información de qwen 4 27b?",
+        title_factory=lambda text: seen.append(text) or "Información de Qwen 4 27B",
+    )
+    assert "qwen 4 27b" in seen[0]
+    assert result.title == "Información de Qwen 4 27B"
+
+
+def test_provisional_titles_skip_greetings_and_lead_ins():
+    from rinari.application.session_service import provisional_title
+
+    assert provisional_title("Holi") == "Holi"
+    assert provisional_title("Puedes buscar información de qwen 4 27b?") == (
+        "Buscar información de qwen 4 27b"
+    )
+    assert provisional_title(
+        "Necesito que hagas lo siguiente: Usando el MCP genera 5 imágenes"
+    ).startswith("Usando el MCP genera")
+    assert provisional_title("Can you please fix the login bug") == "Fix the login bug"
+    assert provisional_title("Arregla el bug del login") == "Arregla el bug del login"
+    assert len(provisional_title("palabra " * 40)) <= 72

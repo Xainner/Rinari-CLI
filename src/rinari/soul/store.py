@@ -56,8 +56,10 @@ def validate_soul_id(soul_id: Any) -> str:
 
 
 def validate_identity(identity: Any) -> str:
-    if not isinstance(identity, str) or not identity.strip():
-        raise InvalidUsageError("Soul identity text must be a non-empty string.")
+    # Empty is allowed (plan 0.4.0 #87): a soul without text speaks only with
+    # the personality level, and the editor says so.
+    if not isinstance(identity, str):
+        raise InvalidUsageError("Soul identity text must be a string.")
     if "\0" in identity:
         raise InvalidUsageError("Soul identity text must not contain NUL bytes.")
     if len(identity) > _MAX_IDENTITY_CHARS:
@@ -288,6 +290,88 @@ class SoulStore:
             tomli_w.dumps({"character_intensity": level}), encoding="utf-8"
         )
         return level
+
+    # -- sharing (plan 0.4.0 #87) ------------------------------------------------
+
+    def free_id(self, wanted: str) -> str:
+        """`wanted`, or `wanted-2`, `wanted-3`... when a soul already has it."""
+        taken = {definition.id for definition in self.list()}
+        base = wanted[:60].strip("-") or "alma"
+        candidate, number = base, 2
+        while candidate in taken:
+            candidate = f"{base}-{number}"
+            number += 1
+        return candidate
+
+    def export(self, soul_id: str, destination: Path) -> Path:
+        """Write a soul as it lives in the home: `<dest>/<id>/soul.toml` and
+        `identity.md`. Never over an existing folder: `<id>-2`..."""
+        definition = self.get(soul_id)
+        destination = Path(destination)
+        if not destination.is_dir():
+            raise InvalidUsageError(f"Not a folder: {destination}")
+        target, number = destination / definition.id, 2
+        while target.exists():
+            target = destination / f"{definition.id}-{number}"
+            number += 1
+        target.mkdir()
+        (target / "soul.toml").write_text(
+            tomli_w.dumps(
+                {
+                    "id": definition.id,
+                    "name": definition.name,
+                    "version": definition.version,
+                    "description": definition.description,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (target / "identity.md").write_text(definition.identity, encoding="utf-8")
+        return target
+
+    def import_files(self, paths: list[Path]) -> SoulDefinition:
+        """A soul from what the owner picked: its folder, or its `.toml` and
+        its `.md` (an `identity.md` or `<name>.md` next to the `.toml` is
+        found by itself). It is saved as a new custom soul; an id in use gets
+        a suffix, so nothing is overwritten."""
+        files = [Path(path) for path in paths]
+        if len(files) == 1 and files[0].is_dir():
+            folder = files[0]
+            files = [folder / "soul.toml", folder / "identity.md"]
+        meta_path = next((path for path in files if path.suffix.lower() == ".toml"), None)
+        identity_path = next((path for path in files if path.suffix.lower() == ".md"), None)
+        if meta_path is None:
+            raise InvalidUsageError("Pick the soul's .toml (and its .md), or its folder.")
+        if identity_path is None:
+            for sibling in (meta_path.with_name("identity.md"), meta_path.with_suffix(".md")):
+                if sibling.is_file():
+                    identity_path = sibling
+                    break
+        for path in (meta_path, identity_path):
+            if path is not None and (not path.is_file() or path.stat().st_size > 256_000):
+                raise InvalidUsageError(f"Cannot read {path.name}.")
+        try:
+            meta = tomllib.loads(meta_path.read_text(encoding="utf-8"))
+            identity = identity_path.read_text(encoding="utf-8") if identity_path else ""
+        except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+            raise InvalidUsageError(f"Not a soul file: {exc}") from exc
+        name = meta.get("name") if isinstance(meta, dict) else None
+        if not isinstance(name, str) or not name.strip():
+            raise InvalidUsageError("The .toml has no soul name.")
+        wanted = meta.get("id") if isinstance(meta.get("id"), str) else ""
+        if not _ID_RE.match(wanted or ""):
+            from rinari.profiles.bundles import slug_for
+
+            wanted = slug_for(name) or "alma"
+        description = meta.get("description", "")
+        version = meta.get("version", "1.0")
+        return self.create(
+            self.free_id(wanted),
+            name=name.strip()[:80],
+            identity=identity.replace("\r\n", "\n"),
+            description=description if isinstance(description, str) else "",
+            version=version if isinstance(version, str) and version.strip() else "1.0",
+        )
 
     @staticmethod
     def _bundled_dirs() -> dict[str, Path]:

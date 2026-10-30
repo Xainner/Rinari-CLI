@@ -144,6 +144,8 @@ class BrowserHostBridge:
         #: stdio: preguntarle al host desde ahí sería un bloqueo permanente
         #: (§5.4). El host avisa cuando algo cambia y la consulta es local.
         self._observed: dict[str, dict[str, Any]] = {}
+        #: Quién escucha el uso del dueño en cada contexto (plan 0.4.0 #46).
+        self._owner_listeners: dict[str, Callable[[bool, bool], None]] = {}
 
     # -- registro ----------------------------------------------------------
 
@@ -388,6 +390,17 @@ class BrowserHostBridge:
             }
             return {"accepted": True}
 
+        # El dueño usó el navegador (#46). `detail`: `hold` si el foco está en
+        # algo que el agente no debe interrumpir, `free` si no, y `release`
+        # cuando el foco salió sin que el dueño hiciera nada (no cuenta como uso).
+        if kind == "owner-activity" and isinstance(context_id, str) and context_id:
+            with self._lock:
+                listener = self._owner_listeners.get(context_id)
+            detail = params.get("detail")
+            if listener is not None:
+                listener(detail == "hold", detail != "release")
+            return {"accepted": True}
+
         if kind not in {"detached", "crashed", "context_closed"}:
             return {"accepted": True}
 
@@ -419,9 +432,15 @@ class BrowserHostBridge:
             snapshot = self._observed.get(context_id)
             return dict(snapshot) if snapshot else {"targets": [], "active_target_id": None}
 
+    def on_owner_activity(self, context_id: str, listener: Callable[[bool, bool], None]) -> None:
+        """Entrega el uso del dueño en `context_id` a su backend (#46)."""
+        with self._lock:
+            self._owner_listeners[context_id] = listener
+
     def forget(self, context_id: str) -> None:
         with self._lock:
             self._observed.pop(context_id, None)
+            self._owner_listeners.pop(context_id, None)
 
     def _drop(self, request_id: str) -> None:
         with self._lock:

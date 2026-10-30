@@ -109,8 +109,45 @@ def test_openai_transports_send_the_note_as_the_last_user_message(transport) -> 
         payload = CodexResponsesAdapter()._responses_payload(request, stream=True)
         assert payload["instructions"] == "rules"
         items = payload["input"]
+    if transport == "chat":
+        # Chat Completions: one user message, the note after the owner's text
+        # (templates that require user and assistant to alternate).
+        assert items[-1]["role"] == "user" and items[-2]["role"] == "system"
+        assert items[-1]["content"].startswith("hola\n\n<turn-context>")
+        return
     assert items[-2]["content"] == "hola"
     assert items[-1]["role"] == "user" and "<turn-context>" in items[-1]["content"]
+
+
+def test_chat_completions_never_send_two_user_messages_in_a_row() -> None:
+    from types import SimpleNamespace
+
+    from rinari.providers.adapters.openai_compatible import OpenAICompatibleAdapter
+
+    image = SimpleNamespace(encoded=lambda: "AAAA")
+    request = ModelRequest(
+        model="m",
+        messages=(
+            ChatMessage.system("rules"),
+            ChatMessage(role="user", content="mira esto", images=(image,)),
+            ChatMessage.harness("Local time now: 2026-10-21 18:30 (Wednesday).", "clock"),
+            ChatMessage.assistant("Veo un gráfico."),
+            ChatMessage.user("¿y ahora?"),
+            ChatMessage.harness("Local time now: 2026-10-21 18:31 (Wednesday).", "clock"),
+            _note(),
+        ),
+    )
+    items = OpenAICompatibleAdapter()._payload(request, stream=True)["messages"]
+    roles = [item["role"] for item in items]
+    assert roles == ["system", "user", "assistant", "user"]
+    # The image keeps its parts, and the note follows as one more text part.
+    first = items[1]["content"]
+    assert first[0] == {"type": "text", "text": "mira esto"}
+    assert first[1]["type"] == "image_url"
+    assert first[-1]["text"].startswith("Local time now: 2026-10-21 18:30")
+    last = items[-1]["content"]
+    assert last.startswith("¿y ahora?\n\nLocal time now: 2026-10-21 18:31")
+    assert last.endswith("</turn-context>")
 
 
 # -- end to end: a PROJECT session, one runtime per turn (as the desktop) -----
@@ -214,20 +251,25 @@ def test_consecutive_project_turns_share_the_prefix_up_to_the_history(project, m
     second = _turn(services, user_home, record, monkeypatch, "now run pytest", [done])
 
     previous, current = first[-1].messages, second[0].messages
-    # System prompt identical; the history the previous call sent is replayed
-    # unchanged; only the note that closes each request differs.
+    # System prompt identical; everything the previous call sent is replayed
+    # unchanged: the turn state lives in the conversation (F42), so nothing
+    # comes off the end.
     assert previous[0] == current[0]
-    assert previous[-1].is_turn_context and current[-1].is_turn_context
-    assert _wire(current[1 : len(previous) - 1]) == _wire(previous[1:-1])
-    assert sum(m.is_turn_context for m in current) == 1
+    assert not any(m.is_turn_context for m in (*previous, *current))
+    assert _wire(current[1 : len(previous)]) == _wire(previous[1:])
     # Within a turn every call shares it too.
     assert first[0].messages[0] == first[-1].messages[0]
 
-    # The volatile state still reaches the model, in its current version.
-    note = current[-1].content
+    # The changing state still reaches the model, in its current version: a
+    # new note kept after the owner's message when it changed (F42).
+    def states(messages):
+        return [m.content for m in messages if (m.origin or {}).get("source") == "turn-state"]
+
+    note = states(current)[-1]
     assert "Ship the web module" in note and "typescript" in note
     assert "Tests use pytest" in note
-    assert "Ship the web module" not in previous[-1].content
-    # And it never becomes history.
+    assert not any("Ship the web module" in text for text in states(previous))
+    # It is history now, one note per change, never rewritten.
     stored = services.ctx.message_repo.list(record.id)
-    assert not any("<turn-context>" in (row.content or "") for row in stored)
+    kept = [row for row in stored if (row.origin or {}).get("source") == "turn-state"]
+    assert len(kept) == 2 and kept[-1].content == note

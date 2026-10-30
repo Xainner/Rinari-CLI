@@ -276,9 +276,12 @@ def test_builtin_catalog_covers_session_tools_without_executing_them():
     from rinari.tools.catalog import builtin_catalog
 
     registry = builtin_catalog()
-    assert len(registry.names()) == 137
+    assert len(registry.names()) == 147
     assert {
         "artifact.export",
+        "schedule.list",
+        "schedule.update",
+        "schedule.cancel",
         "fs.read_image",
         "fs.read_pdf_pages",
         "ssh.inspect",
@@ -330,3 +333,83 @@ def test_hardware_sections_preserve_partial_results():
     assert not sections["gpu"]["ok"]
     assert sections["gpu"]["exit_code"] == 127
     assert not sections["memory"]["ok"]
+
+
+# -- MCP output schemas (plan 0.4.0 #48) -------------------------------------------
+
+_MCP_SCHEMA = {
+    "type": "object",
+    "properties": {"result": {"type": "string"}},
+    "required": ["result"],
+}
+
+
+def _mcp_tool(payload):
+    return _def(
+        "mcp.Lab.prompt_guide",
+        lambda args, ctx: ToolResult(ok=True, data=payload, origin="mcp"),
+        output_schema=_MCP_SCHEMA,
+        manifest={"source": "mcp", "server": "Lab", "raw_name": "prompt_guide"},
+    )
+
+
+def test_mcp_schema_applies_to_structured_content(project) -> None:
+    tmp_path, root = project
+    payload = {"content": [{"type": "text", "text": "guía"}], "structuredContent": {"result": "ok"}}
+    rt = _runtime([_mcp_tool(payload)])
+    result = rt.execute("mcp.Lab.prompt_guide", _args(root), _ctx(tmp_path, root))
+    assert result.ok, result.error
+    assert "schema_warning" not in result.data
+
+
+def test_mcp_output_off_its_schema_still_delivers_its_text(project) -> None:
+    tmp_path, root = project
+    payload = {"content": [{"type": "text", "text": "Usa prompts cortos y concretos."}]}
+    rt = _runtime([_mcp_tool(payload)])
+    result = rt.execute("mcp.Lab.prompt_guide", _args(root), _ctx(tmp_path, root))
+    assert result.ok, result.error
+    assert result.data["content"][0]["text"] == "Usa prompts cortos y concretos."
+    assert "does not match its schema" in result.data["schema_warning"]
+
+
+def test_mcp_output_with_nothing_usable_fails(project) -> None:
+    tmp_path, root = project
+    payload = {"content": [], "structuredContent": {"other": 1}}
+    rt = _runtime([_mcp_tool(payload)])
+    result = rt.execute("mcp.Lab.prompt_guide", _args(root), _ctx(tmp_path, root))
+    assert not result.ok
+    assert result.error.code == ToolErrorCode.VALIDATION_FAILED
+
+
+#: The core every request carries (docs/tools.md §63, AGENTS.md «Herramientas»). A
+#: tool joins it only by the owner's decision: everything else is found on demand.
+CORE_TOOLS = frozenset(
+    {
+        "agent.cancel", "agent.message", "agent.result", "agent.spawn", "agent.status",
+        "agent.synthesize", "agent.wait", "artifact.read", "audio.transcribe",
+        "capability.activate", "capability.search", "checklist.update", "file.present",
+        "followup.suggest", "fs.glob", "fs.list", "fs.patch", "fs.read", "fs.read_image",
+        "fs.read_lines", "fs.read_pdf_pages", "fs.search_text", "fs.stat", "fs.write",
+        "git.diff", "git.status", "goal.update", "http.request", "memory.episodic",
+        "memory.propose", "memory.recall", "memory.remember", "process.list",
+        "process.logs", "process.output", "process.signal", "process.start",
+        "process.stop", "process.wait", "search.regex", "shell.exec", "skills.activate",
+        "skills.deactivate", "skills.list", "skills.read", "skills.show", "user.ask",
+        "verify.evaluate", "verify.plan", "verify.record", "wait.for", "web.download",
+        "web.fetch", "web.open", "web.search",
+    }
+)  # fmt: skip
+
+
+def test_the_always_loaded_core_does_not_grow_by_itself():
+    """22-oct: schedule.propose was made always loaded to fix one model's answer, against
+    the standard. A model learns that an on-demand tool exists from a line of its prompt
+    (a fact, a skill, a team's section), not from loading its schema everywhere."""
+    from rinari.tools.catalog import builtin_catalog
+
+    registry = builtin_catalog()
+    core = {name for name in registry.names() if registry.get(name).always_loaded}
+    assert core == CORE_TOOLS, (
+        f"added: {sorted(core - CORE_TOOLS)}, removed: {sorted(CORE_TOOLS - core)} — "
+        "the core changes only by the owner's decision (AGENTS.md «Herramientas»)"
+    )

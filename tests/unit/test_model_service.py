@@ -182,6 +182,15 @@ def test_refresh_reports_error_when_provider_unreachable(models) -> None:
 
 def test_model_test_present_in_catalog(models) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/chat/completions"):
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"role": "assistant", "content": "OK"}, "finish_reason": "stop"}
+                    ]
+                },
+            )
         return httpx.Response(200, json={"data": [{"id": "gpt-1"}]})
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
@@ -192,6 +201,7 @@ def test_model_test_present_in_catalog(models) -> None:
     models.add("openai-personal", "gpt-1", "gpt-main")
     result = service.test("gpt-main")
     assert result.ok is True
+    assert result.detail.startswith("works · chat protocol · ")
 
 
 def test_model_test_missing_from_catalog(models) -> None:

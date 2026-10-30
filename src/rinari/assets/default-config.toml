@@ -6,17 +6,8 @@ language = ""
 model = ""
 profile = "workspace"
 
-[agent]
-max_turns = 200
-max_tool_calls = 500
-max_runtime_minutes = 120
-
-[runtime]
-execution = "automatic"
-
 [runtime.safeguards]
 loop_detection = true
-progress_detection = true
 context_compaction = true
 
 [runtime.emergency]
@@ -42,23 +33,14 @@ max_total = 12
 
 [permissions]
 profile = "workspace"
-approval_policy = "on-request"
+# Full access asks before sending data to a new destination after reading
+# external content (off: full access asks nothing).
+ask_new_destinations = false
 
 [network]
 # auto: the permission profile decides (read free, sending asks per profile).
 # ask: every host asks once. allow: no network prompts. off: no network.
 mode = "auto"
-
-[workspace]
-project_root_markers = [".git", "package.json", "pyproject.toml", "go.mod"]
-
-[instructions]
-global_file = "~/.rinari/RINARI.md"
-project_names = ["RINARI.override.md", "RINARI.md"]
-
-[telemetry]
-local_traces = true
-redact_secrets = true
 
 [runtime.tools]
 max_concurrency = 4

@@ -9,6 +9,7 @@ reduce tools / ask auth / stop.
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable
 from enum import StrEnum
@@ -164,6 +165,27 @@ def _error_payload(response: httpx.Response) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+_AFFORDABLE = re.compile(r"can only afford\s+([\d][\d,. ]*)", re.IGNORECASE)
+
+
+def affordable_output_tokens(message: str | None) -> int | None:
+    """The output tokens a 402 says the balance still covers, if it says so."""
+    match = _AFFORDABLE.search(message or "")
+    if match is None:
+        return None
+    digits = re.sub(r"\D", "", match.group(1))
+    return int(digits) if digits else None
+
+
+def _note_reset(error: ProviderError, response: httpx.Response, payload: Any) -> None:
+    """When the limit resets, if the provider said so (plan 0.4.0 #24)."""
+    from rinari.providers.resets import resets_at
+
+    moment = resets_at(payload=payload, headers=response.headers)
+    if moment is not None:
+        error.details["resets_at"] = moment
+
+
 def _safe_error_fields(payload: dict[str, Any] | None) -> tuple[str, str | None, str | None]:
     """Return bounded message/type/code fields from common provider envelopes."""
     if not payload:
@@ -246,6 +268,12 @@ def _classify_http_error(
             **common,
         )
         result.details["limit_kind"] = "quota"
+        _note_reset(result, response, payload)
+        affordable = affordable_output_tokens(error_message)
+        if affordable is not None:
+            # OpenRouter: «can only afford N» when the balance covers fewer
+            # output tokens than requested (plan 0.4.0 #3).
+            result.details["affordable_output_tokens"] = affordable
         return result
     if status in (401, 403):
         return ProviderError(
@@ -312,6 +340,7 @@ def _classify_http_error(
         # Without a code the provider did not say whether it is a rate or a
         # quota: the UI says so instead of guessing.
         result.details["limit_kind"] = limit or "unknown"
+        _note_reset(result, response, payload)
         return result
     if status >= 500 or status in (408, 409, 425, 502, 503, 504):
         return ProviderError(message, code=ProviderErrorCode.SERVER_ERROR, retryable=True, **common)

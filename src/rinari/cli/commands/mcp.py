@@ -6,13 +6,20 @@ Per docs/commands.md section 46. Project-scope servers require project trust;
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
+from typing import Any
 
 import typer
 
 from rinari.cli.deps import is_json, services, with_error_handling
 from rinari.cli.output import emit_json, success_envelope
-from rinari.shared.errors import InvalidUsageError, RinariError
+from rinari.shared.errors import (
+    AuthenticationRequiredError,
+    CancelledError,
+    InvalidUsageError,
+    RinariError,
+)
 
 app = typer.Typer(help="Manage MCP servers (stdio and remote HTTP).", no_args_is_help=True)
 
@@ -85,6 +92,27 @@ def mcp_add(
         help="Secret header: 'Name' (asked hidden) or 'Name=env://VAR' (repeatable).",
     ),
     timeout: float = typer.Option(None, "--timeout", help="Request timeout in seconds."),
+    use_oauth: bool = typer.Option(
+        False, "--oauth", help="Sign in with OAuth (then: rinari mcp login <name>)."
+    ),
+    client_id: str = typer.Option(
+        None, "--client-id", help="Your own OAuth client ID (servers without registration)."
+    ),
+    client_secret: bool = typer.Option(
+        False, "--client-secret", help="Ask for your OAuth client secret (hidden)."
+    ),
+    client_secret_env: str = typer.Option(
+        None, "--client-secret-env", help="OAuth client secret from this environment variable."
+    ),
+    oauth_scope: list[str] = typer.Option(
+        None, "--oauth-scope", help="OAuth scope to ask for (repeatable)."
+    ),
+    redirect_port: int = typer.Option(
+        None, "--redirect-port", help="Fixed loopback port for the OAuth redirect."
+    ),
+    client_metadata_url: str = typer.Option(
+        None, "--client-metadata-url", help="OAuth client ID metadata document URL (CIMD)."
+    ),
     command: list[str] = typer.Argument(None, help="Command to spawn (stdio)."),
 ) -> None:
     """Register an MCP server: a command (stdio) or a --url (remote).
@@ -92,6 +120,16 @@ def mcp_add(
     Secrets are never written to the database: tokens and secret headers go
     to the OS credential store (or stay as env:// references).
     """
+    oauth_options = (
+        client_id,
+        client_secret,
+        client_secret_env,
+        oauth_scope,
+        redirect_port,
+        client_metadata_url,
+    )
+    if any(oauth_options) and not use_oauth:
+        raise InvalidUsageError("--client-id, --oauth-scope and the like need --oauth")
     if scope not in ("global", "project"):
         raise InvalidUsageError("--scope must be global or project")
     if not command and not url:
@@ -130,8 +168,26 @@ def mcp_add(
                 headers[key] = {"value": value, "secret": True}
         if auth is None and headers and any(h["secret"] for h in headers.values()):
             auth = {"kind": "headers"}
-    elif bearer or bearer_env or header or secret_header:
-        raise InvalidUsageError("--bearer/--header/--secret-header apply to --url servers")
+        if use_oauth:
+            if auth is not None and auth["kind"] == "bearer":
+                raise InvalidUsageError("use either --oauth or --bearer")
+            if client_secret and client_secret_env:
+                raise InvalidUsageError("use either --client-secret or --client-secret-env")
+            auth = {"kind": "oauth"}
+            if client_id:
+                auth["client_id"] = client_id
+            if client_secret:
+                auth["client_secret"] = typer.prompt("OAuth client secret", hide_input=True)
+            elif client_secret_env:
+                auth["client_secret"] = f"env://{client_secret_env.strip()}"
+            if oauth_scope:
+                auth["scopes"] = list(oauth_scope)
+            if redirect_port:
+                auth["redirect_port"] = redirect_port
+            if client_metadata_url:
+                auth["client_metadata_url"] = client_metadata_url
+    elif bearer or bearer_env or header or secret_header or use_oauth:
+        raise InvalidUsageError("--bearer/--header/--secret-header/--oauth apply to --url servers")
     project = _project() if scope == "project" else None
     with services(ctx) as s:
         if (
@@ -230,6 +286,8 @@ def mcp_show(ctx: typer.Context, name: str = typer.Argument(...)) -> None:
             state = "configured" if token.get("configured") else "missing"
             suffix = f" ({state})" if view["auth"]["kind"] == "bearer" else ""
             typer.echo(f"auth:      {view['auth']['kind']}{suffix}")
+            if view["auth"]["kind"] == "oauth":
+                _show_oauth(s, row, view["auth"])
             for h in view["headers"]:
                 shown = "<secret>" if h["secret"] else h.get("value")
                 typer.echo(f"header:    {h['name']}: {shown}")
@@ -238,6 +296,124 @@ def mcp_show(ctx: typer.Context, name: str = typer.Argument(...)) -> None:
             typer.echo(f"env:       {e['name']}={source}")
         for warning in view["warnings"]:
             typer.echo(f"warning:   {warning}")
+
+
+def _show_oauth(s, row: dict, auth: dict) -> None:
+    from rinari.mcp.oauth import OAuthManager
+
+    if auth.get("client_id"):
+        secret = "configured" if auth["client_secret"]["configured"] else "none"
+        typer.echo(f"client:    {auth['client_id']} (secret: {secret})")
+    if auth.get("scopes"):
+        typer.echo(f"scopes:    {' '.join(auth['scopes'])}")
+    if auth.get("redirect_port"):
+        typer.echo(f"redirect:  http://127.0.0.1:{auth['redirect_port']}/callback")
+    status = OAuthManager(s.credentials, home=s.ctx.home).status(row["id"])
+    if not status["signed_in"]:
+        typer.echo(f"sign-in:   no (rinari mcp login {row['name']})")
+    elif status["reauth_required"]:
+        typer.echo(f"sign-in:   expired (rinari mcp login {row['name']})")
+    else:
+        expiry = f", expires {status['expires_at']}" if status["expires_at"] else ""
+        refresh = ", renews itself" if status["has_refresh_token"] else ""
+        typer.echo(f"sign-in:   yes{expiry}{refresh}")
+
+
+def _oauth_row(s, name: str) -> tuple[dict, Any, str | None]:
+    """Row, OAuth config and client secret of a saved oauth server."""
+    from rinari.mcp.config import AUTH_OAUTH, TRANSPORT_HTTP, OAuthConfig, draft_from_row
+
+    row = _row(s, name)
+    if row is None:
+        raise RinariError(f"MCP server not found: {name}")
+    draft = draft_from_row(row)
+    if draft.transport != TRANSPORT_HTTP or draft.auth_kind != AUTH_OAUTH:
+        raise InvalidUsageError(
+            f"{name} does not use OAuth (rinari mcp add {name} --url <url> --oauth)"
+        )
+    oauth = draft.oauth or OAuthConfig()
+    secret = None
+    if oauth.client_secret is not None and oauth.client_secret.ref:
+        secret = s.credentials.resolve(oauth.client_secret.ref)
+    return row, oauth, secret
+
+
+@app.command("login")
+@with_error_handling("mcp.login")
+def mcp_login(
+    ctx: typer.Context,
+    name: str = typer.Argument(...),
+    no_browser: bool = typer.Option(
+        False, "--no-browser", help="Print the URL instead of opening the browser."
+    ),
+    timeout: float = typer.Option(300.0, "--timeout", help="Seconds to wait for the browser."),
+) -> None:
+    """Sign in to a remote MCP server with OAuth in your browser."""
+    from rinari.mcp.oauth import OAuthError, OAuthManager
+
+    with services(ctx) as s:
+        row, oauth, secret = _oauth_row(s, name)
+        manager = OAuthManager(s.credentials, home=s.ctx.home)
+        try:
+            try:
+                flow = manager.start(
+                    row["id"],
+                    row["name"],
+                    row["url"],
+                    oauth,
+                    client_secret=secret,
+                    open_browser=not no_browser,
+                    timeout_s=timeout,
+                )
+            except OAuthError as exc:
+                raise AuthenticationRequiredError(exc.message, hint=exc.hint) from exc
+            # The URL goes to stderr so --json output stays one document.
+            typer.echo(f"Sign in to {name} in your browser:", err=True)
+            typer.echo(flow["authorize_url"], err=True)
+            typer.echo("Waiting for the browser…", err=True)
+            result = None
+            deadline = time.monotonic() + timeout + 5
+            try:
+                # Short waits keep Ctrl+C responsive (also on Windows).
+                while result is None and time.monotonic() < deadline:
+                    result = manager.wait(flow["flow_id"], 0.5)
+            except KeyboardInterrupt:
+                manager.cancel(row["id"])
+                raise CancelledError("sign-in cancelled") from None
+        finally:
+            manager.close()
+        if result is None or result["outcome"] != "signed_in":
+            error = (result or {}).get("error") or {}
+            raise AuthenticationRequiredError(
+                error.get("message") or "the sign-in did not finish", hint=error.get("hint")
+            )
+        s.mcp.disconnect(name)  # the next use connects with the token
+        if is_json(ctx):
+            emit_json(success_envelope("mcp.login", {"name": name, **result}))
+            return
+        typer.echo(f"signed in to {name}")
+
+
+@app.command("logout")
+@with_error_handling("mcp.logout")
+def mcp_logout(ctx: typer.Context, name: str = typer.Argument(...)) -> None:
+    """Sign out of an OAuth MCP server: revoke the tokens (if it can) and delete them."""
+    from rinari.mcp.oauth import OAuthManager
+
+    with services(ctx) as s:
+        row, oauth, secret = _oauth_row(s, name)
+        result = OAuthManager(s.credentials, home=s.ctx.home).signout(
+            row["id"], oauth, client_secret=secret
+        )
+        s.mcp.disconnect(name)
+        if is_json(ctx):
+            emit_json(success_envelope("mcp.logout", {"name": name, **result}))
+            return
+        if not result["removed"]:
+            typer.echo(f"{name} was not signed in")
+            return
+        revoked = "revoked and deleted" if result["revoked"] else "deleted"
+        typer.echo(f"signed out of {name} (tokens {revoked})")
 
 
 @app.command("connect")

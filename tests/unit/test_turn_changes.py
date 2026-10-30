@@ -81,6 +81,26 @@ def test_created_file_is_reviewable_and_conflict_safe_to_undo(changes_runtime) -
     assert not target.exists()
 
 
+def test_has_changes_says_whether_a_project_file_really_changed(changes_runtime) -> None:
+    # P1b: the completion gate asks this, so a turn that only made an image
+    # or a capture (no project file changed) is not flagged as unverified.
+    services, record, context, workspace = changes_runtime
+    target = workspace / "same.txt"
+    target.write_text("same\n", encoding="utf-8")
+    tracker = services.changes.begin(services, record, "turn_has_changes")
+    assert tracker.has_changes() is False
+
+    observation = tracker.before_tool("fs.write", {"path": str(target)}, context)
+    target.write_text("same\n", encoding="utf-8")
+    tracker.after_tool(observation)
+    assert tracker.has_changes() is False
+
+    observation = tracker.before_tool("fs.write", {"path": str(target)}, context)
+    target.write_text("different\n", encoding="utf-8")
+    tracker.after_tool(observation)
+    assert tracker.has_changes() is True
+
+
 def test_divergent_file_blocks_total_undo_and_is_audited(changes_runtime) -> None:
     services, record, context, workspace = changes_runtime
     target = workspace / "existing.txt"

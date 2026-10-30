@@ -215,13 +215,19 @@ class SkillMethods:
         source = params.get("source")
         if not isinstance(source, str) or not source.strip():
             raise EngineProtocolError(INVALID_PARAMS, "Param 'source' must be a non-empty string.")
-        if action == "inspect":
-            return lambda: self._skills.inspect(source)
         name = params.get("name")
         if name is not None and not isinstance(name, str):
             raise EngineProtocolError(INVALID_PARAMS, "Param 'name' must be a string.")
+        # «Instalar igual» for one skill over the size limits (plan 0.4.0 #53).
+        allow_large = params.get("allow_large", False)
+        if not isinstance(allow_large, bool):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'allow_large' must be a boolean.")
+        if action == "inspect":
+            return lambda: self._skills.inspect(source, name or None, allow_large=allow_large)
         return lambda: self._installed(
-            self._skills.install(source, name or None, expected_hash=expected)
+            self._skills.install(
+                source, name or None, expected_hash=expected, allow_large=allow_large
+            )
         )
 
     def _installed(self, manifest) -> dict[str, Any]:

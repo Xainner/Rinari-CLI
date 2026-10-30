@@ -23,7 +23,6 @@ from typing import Any
 from rinari.policy.approvals import ApprovalEngine, ApprovalRequest
 from rinari.policy.engine import (
     CAPABILITY_NETWORK,
-    CAPABILITY_SESSION_MESSAGE,
     PolicyAction,
     PolicyEngine,
     SessionScope,
@@ -49,7 +48,9 @@ from rinari.tools.definition import (
 )
 from rinari.tools.registry import ToolRegistry
 from rinari.tools.schema import (
+    coerce_types,
     declared_properties,
+    drop_empty_optionals,
     unknown_arguments_message,
     validate_against,
 )
@@ -72,6 +73,7 @@ PEER_ORIGIN_DENIED_CAPABILITIES = frozenset(
         "network.outbound",
         "mcp.call",
         "state.write",
+        "agent.delegate",
         "git.local",
     }
 )
@@ -82,11 +84,17 @@ PEER_ORIGIN_DENIED_TOOLS = frozenset(
 )
 
 
+# Key of the old «always in chats» grants. A loose chat no longer offers it
+# and the ones already stored no longer apply (#56): Settings lists them as
+# old so the owner can remove them.
+LOOSE_CHATS = "chats"
+
+
 def grant_scope_key(ctx: ToolContext) -> str:
-    """Where an "always" grant lives: the project root, or all loose chats."""
+    """Where an "always" grant lives: the project root (a loose chat has none)."""
     if ctx.kind == "PROJECT" and ctx.project_root is not None:
         return str(Path(ctx.project_root).resolve())
-    return "chats"
+    return LOOSE_CHATS
 
 
 def scope_from_context(ctx: ToolContext) -> SessionScope:
@@ -100,21 +108,34 @@ def scope_from_context(ctx: ToolContext) -> SessionScope:
         private_roots=ctx.private_roots,
         read_profile=ctx.read_profile,
         external_content=bool(getattr(ctx.turn_state, "external_content", False)),
+        external_origins=frozenset(getattr(ctx.turn_state, "origins", None) or ()),
+        ask_new_destinations=bool(getattr(ctx, "ask_new_destinations", False)),
         extra_roots=tuple(getattr(ctx, "extra_project_roots", ()) or ()),
+        engine_home=getattr(ctx, "engine_home", None),
+        engine_home_open=tuple(getattr(ctx, "engine_home_open", ()) or ()),
+        engine_home_readable=tuple(getattr(ctx, "engine_home_readable", ()) or ()),
     )
 
 
-def _external_source(action, tool) -> str | None:
-    """What makes this action's result untrusted outside content, if anything."""
+def _external_source(action, tool) -> tuple[str, str] | None:
+    """What makes this action's result untrusted outside content, if anything:
+    `(source, origin)`, where an MCP result's origin is its server (C5)."""
     from rinari.policy.engine import CAPABILITY_MCP_READ, CAPABILITY_MCP_WRITE, is_local_host
+    from rinari.policy.mcp_tools import mcp_origin
     from rinari.policy.network import normalize_host
 
     if action.capability in (CAPABILITY_MCP_READ, CAPABILITY_MCP_WRITE):
-        return f"mcp:{tool.name}"
+        facts = getattr(action, "mcp", None)
+        server = (
+            facts.server
+            if facts is not None
+            else (action.target or (tool.manifest or {}).get("server") or "*")
+        )
+        return f"mcp:{tool.name}", mcp_origin(str(server))
     if action.capability == CAPABILITY_NETWORK:
         host = normalize_host(action.target)
         if host and not is_local_host(host):
-            return host
+            return host, host
     return None
 
 
@@ -130,6 +151,24 @@ _RECOVERY_METADATA_BYTES = 1024
 
 # Tools whose schema comes from outside Rinari keep their own contract.
 _DYNAMIC_SOURCES = frozenset({"plugin", "mcp", "openapi"})
+
+
+def _tool_key(name: str) -> str:
+    """A tool name with dots, dashes and case folded: `mcp_X_y` ~ `mcp.X.y`."""
+    return name.replace(".", "_").replace("-", "_").casefold()
+
+
+def resolve_tool_name(name: str, names: list[str]) -> str | None:
+    """The one registered tool a misspelled separator means, or None.
+
+    Models write `mcp_Server_tool` for `mcp.Server.tool` (plan 0.4.0 #48).
+    Only an exact match after folding separators counts, and only when it is
+    unique: two candidates, or none, are never guessed. The resolved tool is
+    then validated, classified and approved exactly like its real name.
+    """
+    key = _tool_key(name)
+    matches = [candidate for candidate in names if _tool_key(candidate) == key]
+    return matches[0] if len(matches) == 1 else None
 
 
 class ToolRuntime:
@@ -155,6 +194,9 @@ class ToolRuntime:
         self._network_event_log = network_event_log
         self._receipts = OrderedDict()
         self._receipt_lock = threading.RLock()
+        # ToolRequested / ToolCompleted / ToolFailed. The Engine stores the
+        # activity events instead and turns these off (#91); the CLI keeps them.
+        self.legacy_events = True
 
     # ------------------------------------------------------------------
 
@@ -178,9 +220,12 @@ class ToolRuntime:
         if tool_call_id:
             requested["tool_call_id"] = tool_call_id
         requested.update(trace or {})
-        self._event("ToolRequested", requested)
+        if self.legacy_events:
+            self._event("ToolRequested", requested)
         request_id = arguments.get("request_id")
-        tool = self.registry.get(tool_name)
+        tool = self.registry.get(tool_name) or self.registry.get(
+            resolve_tool_name(tool_name, self.registry.names()) or ""
+        )
         if prepared is not None:
             result = prepared() if callable(prepared) else prepared
         elif request_id and (not isinstance(request_id, str) or len(request_id) > 128):
@@ -203,7 +248,13 @@ class ToolRuntime:
                     )
                 else:
                     result = self._execute_inner(tool_name, clean, ctx, tool_call_id)
-                    self._receipts[key] = (fingerprint, result)
+                    # A call rejected before running (bad arguments) did nothing:
+                    # the corrected retry may reuse its request_id (V2-8, F24).
+                    if not (
+                        result.error is not None
+                        and result.error.code is ToolErrorCode.INVALID_ARGUMENT
+                    ):
+                        self._receipts[key] = (fingerprint, result)
                     if len(self._receipts) > 256:
                         self._receipts.popitem(last=False)
         else:
@@ -226,7 +277,8 @@ class ToolRuntime:
         if tool_call_id:
             completed["tool_call_id"] = tool_call_id
         completed.update(trace or {})
-        self._event("ToolCompleted" if result.ok else "ToolFailed", completed)
+        if self.legacy_events:
+            self._event("ToolCompleted" if result.ok else "ToolFailed", completed)
         return dataclasses.replace(
             result,
             tool_call_id=tool_call_id or result.tool_call_id,
@@ -249,6 +301,12 @@ class ToolRuntime:
     def prepare(self, tool_name: str, arguments: dict, ctx: ToolContext, tool_call_id: str):
         """Validate and authorize on the coordinator; return a bounded execution closure."""
         tool = self.registry.get(tool_name)
+        resolved_from: str | None = None
+        if tool is None:
+            resolved = resolve_tool_name(tool_name, self.registry.names())
+            if resolved is not None:
+                resolved_from, tool_name = tool_name, resolved
+                tool = self.registry.get(tool_name)
         if tool is None:
             return self._error(
                 ctx,
@@ -274,18 +332,29 @@ class ToolRuntime:
             arguments = {**arguments, "url": snapshot.url}
 
         notes: tuple[str, ...] = ()
+        if resolved_from is not None:
+            notes = (f"used tool {tool_name} (received {resolved_from})",)
+        if tool.manifest.get("source") not in _DYNAMIC_SOURCES:
+            # Optional keys sent empty count as absent (plan 0.4.0 v2, V2-8).
+            arguments, emptied = drop_empty_optionals(tool.input_schema, arguments)
+            notes = (*notes, *emptied)
         if tool.normalize is not None and tool.manifest.get("source") not in _DYNAMIC_SOURCES:
             try:
                 arguments, rewritten = tool.normalize(arguments)
             except ValueError as exc:
                 return self._error(ctx, ToolErrorCode.INVALID_ARGUMENT, str(exc))
-            notes = tuple(rewritten)
-            if notes:
-                # Persisted so the variants models send can be measured.
-                normalized = {"tool": tool_name, "notes": list(notes)}
-                if tool_call_id:
-                    normalized["tool_call_id"] = tool_call_id
-                self._event("ToolArgumentsNormalized", normalized)
+            notes = (*notes, *rewritten)
+        # Lists, objects, booleans and numbers sent as text (plan 0.4.0 #66e):
+        # converted only when they parse to exactly the declared type, so the
+        # policy below judges the typed call.
+        arguments, coerced = coerce_types(tool.input_schema, arguments)
+        notes = (*notes, *coerced)
+        if notes:
+            # Persisted so the variants models send can be measured.
+            normalized = {"tool": tool_name, "notes": list(notes)}
+            if tool_call_id:
+                normalized["tool_call_id"] = tool_call_id
+            self._event("ToolArgumentsNormalized", normalized)
         prepared = self._authorize(tool, arguments, ctx, tool_call_id)
         if not notes:
             return prepared
@@ -376,8 +445,6 @@ class ToolRuntime:
                     )
             if tool_name.startswith("channel.") and ctx.channel_host is None:
                 return self._error(ctx, ToolErrorCode.PERMISSION_DENIED, "No channel binding")
-            if tool_name in ("session.peers", "session.send") and ctx.peer_host is None:
-                return self._error(ctx, ToolErrorCode.PERMISSION_DENIED, "No peer binding")
             self._event("PolicyChecked", {"tool": tool_name, "capability": action.capability})
             decision = self.policy.decide(
                 action.capability,
@@ -387,8 +454,17 @@ class ToolRuntime:
                 host=action.target if action.capability == CAPABILITY_NETWORK else None,
                 risk=tool.risk,
                 risk_class=tool.side_effects,
-                target=action.target if action.capability == CAPABILITY_SESSION_MESSAGE else None,
+                # The approval of an image shows its connector and cost (#28).
+                # What the owner judges on the card: an image's connector and cost
+                # (#28), the script a page would run (V2-13).
+                target=(
+                    action.target
+                    if action.capability in ("media.generate", "browser.mutate")
+                    else None
+                ),
                 network_mode=getattr(action, "mode", None) or "read",
+                cost_basis=getattr(action, "cost_basis", None),
+                mcp=getattr(action, "mcp", None),
             )
             self._event(
                 "PolicyDecision",
@@ -411,7 +487,9 @@ class ToolRuntime:
             if decision.action is PolicyAction.DENY:
                 return self._error(ctx, ToolErrorCode.POLICY_DENIED, decision.reason)
             if decision.action is PolicyAction.ASK:
-                granted, ctx = self._request_approval(tool, decision, ctx, tool_call_id)
+                granted, ctx = self._request_approval(
+                    tool, decision, ctx, tool_call_id, mcp=getattr(action, "mcp", None)
+                )
                 if not granted:
                     return self._error(ctx, ToolErrorCode.APPROVAL_DENIED, decision.reason)
 
@@ -424,8 +502,8 @@ class ToolRuntime:
                 return self._execute_authorized(tool, arguments, ctx, tool_call_id)
             finally:
                 # Whatever came back (even an error page) is outside content.
-                for source in sources:
-                    ctx.turn_state.mark_external(source)
+                for source, origin in sources:
+                    ctx.turn_state.mark_external(source, origin)
 
         return run_and_mark
 
@@ -455,16 +533,9 @@ class ToolRuntime:
                         result, data={**result.data, "source_id": snapshot_id(snapshot)}
                     )
             if result.ok and tool.output_schema:
-                # P0.5: the contract is enforced, not decorative â€” dynamic
+                # P0.5: the contract is enforced, not decorative: dynamic
                 # sources (plugins/MCP/OpenAPI) must honor their schema.
-                output_errors = validate_against(tool.output_schema, result.data)
-                if output_errors:
-                    return self._error(
-                        ctx,
-                        ToolErrorCode.VALIDATION_FAILED,
-                        f"tool {tool_name} output violates its output_schema: "
-                        + "; ".join(output_errors[:5]),
-                    )
+                result = self._check_output_schema(tool, tool_name, result, ctx)
             if (
                 result.ok
                 or attempt >= attempts
@@ -474,6 +545,47 @@ class ToolRuntime:
             if cancellation is not None:
                 cancellation.throw_if_cancelled()
         return self._postprocess(result, ctx, tool_call_id, tool)
+
+    def _check_output_schema(
+        self, tool: ToolDefinition, tool_name: str, result: ToolResult, ctx: ToolContext
+    ) -> ToolResult:
+        """Validate a result against the tool's declared output schema.
+
+        For MCP the schema describes `structuredContent` (the spec), not the
+        whole payload. A result that breaks its schema but carries readable
+        text still reaches the model, with a warning (plan 0.4.0 #48): the
+        text was what mattered, and refusing it cost a retry. Only a result
+        with nothing usable fails.
+        """
+        is_mcp = tool.manifest.get("source") == "mcp"
+        data = result.data if isinstance(result.data, dict) else {}
+        if is_mcp:
+            subject = data.get("structuredContent")
+            errors = (
+                ["structuredContent is missing"]
+                if subject is None
+                else validate_against(tool.output_schema, subject)
+            )
+        else:
+            errors = validate_against(tool.output_schema, result.data)
+        if not errors:
+            return result
+        summary = "; ".join(errors[:5])
+        texts = [
+            item.get("text")
+            for item in (data.get("content") or [])
+            if isinstance(item, dict) and isinstance(item.get("text"), str) and item["text"].strip()
+        ]
+        if is_mcp and texts:
+            return dataclasses.replace(
+                result,
+                data={**data, "schema_warning": f"the output does not match its schema: {summary}"},
+            )
+        return self._error(
+            ctx,
+            ToolErrorCode.VALIDATION_FAILED,
+            f"tool {tool_name} output violates its output_schema: {summary}",
+        )
 
     # NEVER auto-retry an ambiguous result for these: a duplicate send is
     # worse than surfacing the failure (P0.5).
@@ -628,18 +740,29 @@ class ToolRuntime:
         decision,
         ctx: ToolContext,
         tool_call_id: str,
+        *,
+        mcp=None,
     ) -> tuple[bool, ToolContext]:
+        scope_key = grant_scope_key(ctx)
+        on_always = self._save_tool_allow(decision, ctx, mcp)
         request = ApprovalRequest(
             capability=decision.capability,
             description=f"{tool.name}: {decision.reason}",
             target=decision.target,
             risk=decision.risk,
             session_id=ctx.session_id,
-            project_id=grant_scope_key(ctx),
+            project_id=scope_key,
             rule_id=decision.rule_id,
             reusable=decision.reusable,
-            choices=decision.choices,
+            # A loose chat has no «always»: what is allowed in one chat does
+            # not reach the others (#56).
+            choices=(
+                decision.choices
+                if scope_key != LOOSE_CHATS or on_always is not None
+                else tuple(c for c in decision.choices if c != "allow_project")
+            ),
             binding_mode=decision.binding_mode,
+            on_always=on_always,
         )
         outcome = self.approvals.check(request)
         self._event(
@@ -678,6 +801,26 @@ class ToolRuntime:
                 )
                 return True, dataclasses.replace(ctx, sandbox=sandbox)
         return True, ctx
+
+    @staticmethod
+    def _save_tool_allow(decision, ctx: ToolContext, mcp):
+        """«Siempre» on an MCP tool's card: Allow saved for that tool (C5).
+
+        Only for the asks the tool's setting can lift (the owner's Ask, a
+        destructive tool); the guard of external content never offers it.
+        """
+        from rinari.policy.mcp_tools import DECISION_ALLOW, LASTING_TOOL_RULES
+
+        service = getattr(ctx, "mcp", None)
+        if mcp is None or decision.rule_id not in LASTING_TOOL_RULES or service is None:
+            return None
+        if not hasattr(service, "set_tool_permission"):
+            return None
+
+        def save() -> None:
+            service.set_tool_permission(mcp.server, mcp.tool, decision=DECISION_ALLOW)
+
+        return save
 
     @staticmethod
     def _inside_any(path: Path, roots: tuple[Path, ...]) -> bool:
@@ -738,15 +881,21 @@ class ToolRuntime:
             truncated=result.truncated,
         )
 
-        from rinari.tools.observations import project_result
+        from rinari.tools.observations import omit_unreadable, project_result
 
         budget = self._result_budget(tool, data, ctx.observation_budget_bytes)
         try:
+            sanitized = omit_unreadable(
+                sanitized,
+                spill=lambda suffix, content: self._spill(f"{tool_call_id}-{suffix}", content, ctx),
+            )
             projected = project_result(
                 sanitized,
                 tool=tool.name if tool else "",
                 budget=budget - 128,
-                spill=lambda suffix, content: self._spill(f"{tool_call_id}-{suffix}", content, ctx),
+                spill=lambda suffix, content, extension=None: self._spill(
+                    f"{tool_call_id}-{suffix}", content, ctx, extension
+                ),
             )
             return dataclasses.replace(projected, full_observation=sanitized)
         except OSError as exc:
@@ -783,8 +932,8 @@ class ToolRuntime:
                 source,
                 tool=call.name,
                 budget=max(0, budget - 128),
-                spill=lambda suffix, content, call=call: self._spill(
-                    f"{call.id}-{suffix}", content, ctx
+                spill=lambda suffix, content, extension=None, call=call: self._spill(
+                    f"{call.id}-{suffix}", content, ctx, extension
                 ),
             )
             projected.append(
@@ -826,12 +975,18 @@ class ToolRuntime:
             return budget
         return min(budget, cap + _RECOVERY_METADATA_BYTES)
 
-    def _spill(self, tool_call_id: str, payload: str | bytes, ctx: ToolContext) -> ArtifactRef:
+    def _spill(
+        self,
+        tool_call_id: str,
+        payload: str | bytes,
+        ctx: ToolContext,
+        extension: str | None = None,
+    ) -> ArtifactRef:
         directory = ctx.artifact_root / ctx.session_id / "runtime"
         directory.mkdir(parents=True, exist_ok=True)
         safe_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in tool_call_id) or "result"
         safe_id = safe_id[:64]
-        suffix = ".bin" if isinstance(payload, bytes) else ".txt"
+        suffix = extension or (".bin" if isinstance(payload, bytes) else ".txt")
         digest = hashlib.sha256(
             payload if isinstance(payload, bytes) else payload.encode("utf-8")
         ).hexdigest()
@@ -878,6 +1033,11 @@ class ToolRuntime:
             # hide credentials recognizable by shape (a password typed into a
             # command). The call itself already ran with the real arguments.
             self._emit(type_, redact_value(payload, self._redactor.secrets))
+
+    def redact_arguments(self, arguments):
+        """Arguments as the stored record keeps them: known secrets and
+        credential-shaped values hidden."""
+        return redact_value(self._redact_payload(arguments), self._redactor.secrets)
 
     def _redact_payload(self, payload):
         if isinstance(payload, str):

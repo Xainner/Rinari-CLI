@@ -14,6 +14,7 @@ from email.utils import parsedate_to_datetime
 
 import httpx
 
+from rinari.net import client as net_client
 from rinari.providers.catalog import product_for
 
 
@@ -65,6 +66,58 @@ def window(key, value, *, scope="account", label=None):
     }
 
 
+def window_reset_passed(snapshot, now: float, fetched: float) -> bool:
+    """Whether a window in `snapshot` reset between `fetched` and `now`."""
+    for item in (snapshot or {}).get("windows") or []:
+        resets = item.get("resets_at")
+        if not isinstance(resets, str):
+            continue
+        try:
+            moment = datetime.fromisoformat(resets).timestamp()
+        except ValueError:
+            continue
+        if fetched < moment <= now:
+            return True
+    return False
+
+
+#: Claude Code's window names -> the ids the desktop already labels.
+CLAUDE_WINDOWS = {
+    "five_hour": ("rolling", "5 h"),
+    "seven_day": ("weekly", "7 days"),
+    "seven_day_opus": ("weekly:opus", "7 days · Opus"),
+    "seven_day_sonnet": ("weekly:sonnet", "7 days · Sonnet"),
+    "seven_day_overage_included": ("weekly:overage", "7 days · with extra usage"),
+    "overage": ("overage", "Extra usage"),
+}
+CLAUDE_USAGE_KEY = "provider.usage.claude-subscription"
+
+
+def claude_windows(observed: dict) -> list[dict]:
+    rows = []
+    for name, value in (observed.get("windows") or {}).items():
+        key, label = CLAUDE_WINDOWS.get(name, (name, name))
+        utilization = value.get("utilization")
+        used = None
+        if type(utilization) in (int, float) and math.isfinite(utilization):
+            # A fraction; past 1 when usage runs over the cap.
+            used = max(0.0, min(100.0, round(utilization * 100, 1)))
+        rows.append(
+            {
+                **window(
+                    key, {"used_percent": used, "resetsAt": value.get("resetsAt")}, label=label
+                ),
+            }
+        )
+    order = list(CLAUDE_WINDOWS)
+    return sorted(
+        rows,
+        key=lambda row: next(
+            (i for i, name in enumerate(order) if CLAUDE_WINDOWS[name][0] == row["id"]), 99
+        ),
+    )
+
+
 class ProviderUsageService:
     def __init__(self, providers, *, clock=time.time):
         self.providers = providers
@@ -98,6 +151,35 @@ class ProviderUsageService:
             snapshot["dashboard_url"] = DASHBOARDS.get(snapshot["product_id"])
             return snapshot
 
+    def _claude_subscription(self, base):
+        """The plan's windows as Claude Code last reported them (#78).
+
+        Seen in this Engine's runs, kept in the home so a restart still shows
+        them; until the first answer, «not reported yet».
+        """
+        from rinari.providers.claude_cli import latest_rate_limit
+
+        repository = self.providers._ctx.config_repo
+        saved = repository.get_json(CLAUDE_USAGE_KEY) or None
+        live = latest_rate_limit()
+        if live and (not saved or live["observed_at"] > saved.get("observed_at", 0)):
+            repository.set_json(CLAUDE_USAGE_KEY, live, updated_at=timestamp(live["observed_at"]))
+            saved = live
+        if not saved or not saved.get("windows"):
+            return {
+                **base,
+                "detail": "Claude Code reports the plan limits with its answers: "
+                "they show after the next one.",
+            }
+        return {
+            **base,
+            "status": "available",
+            "windows": claude_windows(saved),
+            "fetched_at": timestamp(saved.get("observed_at")),
+            "source": "claude-cli",
+            "detail": "As Claude Code reported them in its last answer.",
+        }
+
     def _get(self, ref, *, refresh):
         provider = self.providers.get(ref)
         product = product_for(provider)
@@ -113,6 +195,11 @@ class ProviderUsageService:
             "detail": "Remote account usage is not exposed by this integration.",
             "retry_at": None,
         }
+        if not getattr(provider, "enabled", True):
+            # Turned off (#97): its account is not read.
+            return {**base, "status": "disabled", "detail": "This provider is turned off."}
+        if product == "claude-subscription":
+            return self._claude_subscription(base)
         if product in ("ollama", "lmstudio"):
             return {**base, "detail": "Remote quotas do not apply to local providers."}
         if product not in ("opencode-go", "openrouter", "deepseek", "chatgpt"):
@@ -146,14 +233,24 @@ class ProviderUsageService:
         age = now - cached.get("fetched", 0)
         invalidated = repository.get_json(f"provider.usage.invalidated.{provider.id}") or 0
         refresh = refresh or invalidated > cached.get("fetched", 0)
-        if cached and (now < cached.get("retry", 0) or (not refresh and age < 60)):
+        # A window whose reset time passed after the snapshot was taken is
+        # stale whatever its age (plan 0.4.0 #27): «100 % used, resets at
+        # 23:03» kept showing at 23:03.
+        reset_passed = window_reset_passed(snapshot, now, cached.get("fetched", 0))
+        if reset_passed:
+            refresh = True
+        if cached and (
+            (now < cached.get("retry", 0) and not reset_passed) or (not refresh and age < 60)
+        ):
             return {
                 **snapshot,
                 "status": "stale"
                 if age > 300 and snapshot.get("fetched_at") and snapshot["status"] != "needs_auth"
                 else snapshot["status"],
             }
-        client = self.providers._client or httpx.Client(timeout=10, follow_redirects=False)
+        client = self.providers._client or net_client(
+            self.providers._ctx.home, timeout=10, follow_redirects=False
+        )
         headers = {"Authorization": f"Bearer {secret}", "User-Agent": "Rinari/1"}
         if product == "chatgpt":
             from rinari.providers.adapters.subscriptions import chatgpt_headers

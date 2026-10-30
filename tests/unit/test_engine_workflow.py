@@ -169,7 +169,8 @@ def test_profile_bundle_crud_and_apply(server, tmp_path) -> None:
         )
     )["profile"]
     assert created["soul_id"] == "rinari-default"
-    assert created["mode"] == "plan"
+    # The mode is no longer part of a profile (#86): accepted and ignored.
+    assert "mode" not in created
     assert (
         _err(
             server.handle_line(_req("b3", "profile_bundle.create", {"id": "foco", "name": "Dup"}))
@@ -183,14 +184,15 @@ def test_profile_bundle_crud_and_apply(server, tmp_path) -> None:
         == "INVALID_USAGE"
     )
     session_id = _create_chat(server, tmp_path, "b")
-    applied = _ok(
-        server.handle_line(
-            _req("b5", "profile_bundle.apply", {"id": "foco", "session_ref": session_id})
-        )
-    )["applied"]
-    assert applied["soul_id"] == "rinari-default"
-    assert applied["mode"] == "plan"
-    assert applied["session_id"] == session_id
+    assert session_id
+    # «Usar este perfil» activates it; nothing global changes (#86).
+    applied = _ok(server.handle_line(_req("b5", "profile_bundle.apply", {"id": "foco"})))["applied"]
+    assert applied == {"profile_id": "foco", "previous_id": "default"}
+    nameless = _ok(
+        server.handle_line(_req("b5b", "profile_bundle.create", {"name": "Diseño gráfico"}))
+    )["profile"]
+    assert nameless["id"] == "diseno-grafico" and nameless["soul_id"] == "rinari-default"
+    _ok(server.handle_line(_req("b5c", "profile_bundle.remove", {"id": "diseno-grafico"})))
     listed = _ok(server.handle_line(_req("b6", "profile_bundle.list", {})))["profiles"]
     assert [p["id"] for p in listed] == ["default", "foco"]
     removed = _ok(server.handle_line(_req("b7", "profile_bundle.remove", {"id": "foco"})))

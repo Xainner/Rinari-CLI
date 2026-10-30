@@ -57,6 +57,21 @@ class ConfigurationError(RinariError):
     machine_code = "CONFIGURATION_ERROR"
 
 
+class ProviderDisabledError(ConfigurationError):
+    """The owner turned this provider off (plan 0.4.0 #97): no call reaches it."""
+
+    machine_code = "PROVIDER_DISABLED"
+
+    def __init__(self, provider_id: str, alias: str, model: str | None = None) -> None:
+        super().__init__(
+            f"The provider {alias!r} is turned off",
+            hint="Turn it on in Settings → Providers, or pick a model from another provider.",
+        )
+        self.details = {"provider_id": provider_id, "provider_alias": alias}
+        if model:
+            self.details["model"] = model
+
+
 class AuthenticationRequiredError(RinariError):
     exit_code = ExitCode.AUTHENTICATION_REQUIRED
     machine_code = "AUTHENTICATION_REQUIRED"

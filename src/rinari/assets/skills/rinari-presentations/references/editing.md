@@ -6,7 +6,7 @@ Every edit produces a new revision; the original stays as it was. Address object
 
 1. `documents.inspect` → slide map, unsupported objects and risks.
 2. `documents.read` with a selection (`"3"`, `"2-4"`) → each shape with `shape_id`, name, box and text; tables and chart data included.
-3. Use `slide` (position from 1) or `slide_id`, plus `shape_id` (or a unique `shape_name`; decks built by Rinari name shapes `rinari:<slide>:<role>`).
+3. Use `slide` (position from 1) or `slide_id`, plus `shape_id` (or a unique `shape_name`; decks you built name shapes `rinari:<slide>:<role>`).
 
 ## Operations
 

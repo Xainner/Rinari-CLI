@@ -7,6 +7,7 @@ envelope; error codes follow the standard error classes in tools.md 62.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -54,6 +55,9 @@ class ToolErrorCode(StrEnum):
     PARTIAL_FAILURE = "PARTIAL_FAILURE"
     VALIDATION_FAILED = "VALIDATION_FAILED"
     TOOL_NOT_FOUND = "TOOL_NOT_FOUND"
+    # El recurso existe pero su contenido no es texto legible (una página que
+    # llegó binaria o comprimida). Nunca se entrega como texto al modelo.
+    CONTENT_BINARY = "CONTENT_BINARY"
     # La operación existe pero este backend no la implementa. Se distingue de
     # DEPENDENCY_ERROR a propósito: aquel es reintentable y este no lo es
     # —volver a intentarlo dará lo mismo—. Lo pide el documento 03 §4.2, que
@@ -124,7 +128,15 @@ class ToolResult:
         if "exit_code" in process:
             code = process["exit_code"]
             envelope["process_status"] = (
-                "running" if code is None else "failed" if code != 0 else "exited_zero"
+                "running"
+                if code is None
+                else "stopped"
+                if process.get("stop_requested")
+                else "exited_as_expected"
+                if process.get("as_expected")
+                else "failed"
+                if code != 0
+                else "exited_zero"
             )
             envelope["task_verified"] = False
         if self.ok:
@@ -180,7 +192,17 @@ class ToolResult:
                 lines.append(
                     "error_details: " + json.dumps(err.details, ensure_ascii=False, default=str)
                 )
-        status = "running" if code is None else "exited_zero" if code == 0 else "failed"
+        status = (
+            "running"
+            if code is None
+            else "exited_zero"
+            if code == 0
+            else "stopped"
+            if self.data.get("stop_requested")
+            else "exited_as_expected"
+            if self.data.get("as_expected")
+            else "failed"
+        )
         timing = f", {round(self.duration_ms)} ms" if self.duration_ms else ""
         lines.append(f"exit_code: {code} ({status}; task not verified{timing})")
         if self.notes:
@@ -212,13 +234,16 @@ class ToolResult:
         if isinstance(recovery, dict) and recovery.get("uri"):
             source = " (the capture itself was cut)" if data.get("source_partial") else ""
             lines.append(
-                "partial: head and tail shown; full result with artifact.read "
-                f'{{"uri": "{recovery["uri"]}"}}{source}'
+                "partial: head and tail shown; full text with fs.read_lines "
+                f'{{"path": "{recovery["uri"]}", "start": 1}} or fs.search_text{source}'
             )
+            hidden_note = True
+        else:
+            hidden_note = False
         if data.get("truncated"):
             lines.append("truncated: output exceeded the capture limit")
         for key, value in data.items():
-            if key in hidden or value is None:
+            if key in hidden or value is None or (hidden_note and key == "note"):
                 continue
             rendered = (
                 value
@@ -272,10 +297,18 @@ class ClassifiedAction:
         target: str | None = None,
         mode: str | None = None,
         cwd: str | None = None,
+        cost_basis: str | None = None,
+        mcp: Any = None,
     ) -> None:
         self.capability = capability
         self.target = target
         self.mode = mode
+        # MCP calls: the tool's annotations and the owner's setting
+        # (policy.mcp_tools.McpToolFacts, C5).
+        self.mcp = mcp
+        # Paid actions (an image service): how the service charges for it,
+        # as it declares (`included`, `local`, `per_image`, `unknown`).
+        self.cost_basis = cost_basis
         # Shell-like actions: the folder the command runs in, when the call
         # names one (`cwd` argument). Policy judges paths from there.
         self.cwd = cwd
@@ -300,9 +333,29 @@ class TurnState:
     def __init__(self) -> None:
         self.external_content = False
         self.sources: list[str] = []
+        # Every origin of that content (unbounded, unlike `sources`): the
+        # guard tells a connector's own results from anyone else's (C5).
+        self.origins: set[str] = set()
+        # Deliveries (P1): what file.present already showed this turn, by
+        # artifact URI or content hash, and the images a tool made for the
+        # owner. One picture gets one card; one never shown is shown at the end.
+        self.presented: set[str] = set()
+        self.to_present: list[dict] = []
+        # The owner wrote while the turn runs (P7): a wait (a child, a port,
+        # a while) ends at once, since waiting is no work to lose. Only the
+        # conversation the owner wrote to (`owner_session`) reacts; its
+        # subagents share this state and keep waiting.
+        self.owner_wrote = threading.Event()
+        self.owner_session: str | None = None
 
-    def mark_external(self, source: str) -> None:
+    def owner_is_waiting(self, session_id: str | None) -> bool:
+        return self.owner_wrote.is_set() and session_id == self.owner_session
+
+    def mark_external(self, source: str, origin: str | None = None) -> None:
+        """`origin` says who the content came from (`mcp:<server>` for a
+        connector, C5); without it the source itself is the origin."""
         self.external_content = True
+        self.origins.add(origin or source or "unknown")
         if source and source not in self.sources and len(self.sources) < 20:
             self.sources.append(source)
 
@@ -333,6 +386,9 @@ class ToolContext:
     # Mutable session-scoped process registry for process.* tools (None = disabled).
     ask_user: Any = None
     read_profile: PermissionProfile | None = None
+    # Full access asks before sending to a new destination after external
+    # content (Ajustes → Permisos, off by default; plan-permisos-v4).
+    ask_new_destinations: bool = False
     processes: Any = None
     # TurnState of the running turn (untrusted-content guard); None outside a
     # turn, which the policy reads as "nothing external seen".
@@ -349,6 +405,16 @@ class ToolContext:
     # Engine-private roots are never readable or writable by model tools,
     # including under FULL_ACCESS.
     private_roots: tuple[Path, ...] = ()
+    # Rinari Agency: an agent's conversation keeps out of Rinari's own home
+    # (policy.engine SessionScope.engine_home), except its own workspace and
+    # outputs (open) and installed skills (read only). None: Rinari herself.
+    engine_home: Path | None = None
+    engine_home_open: tuple[Path, ...] = ()
+    engine_home_readable: tuple[Path, ...] = ()
+    # Rinari Agency: the other posts of this post's team. What a teammate made
+    # (an image, a script) is handed over in the office by its artifact://, so
+    # this conversation may read their outputs, never write them.
+    shared_artifact_sessions: tuple[str, ...] = ()
     # Session-scoped LspManager (rinari.lsp); None for CHAT sessions or when
     # no language server is registered/available.
     lsp: Any = None
@@ -361,6 +427,9 @@ class ToolContext:
     # ChecklistService (rinari.checklist): checklist.update keeps the
     # conversation's live list. None outside a desktop or CLI session.
     checklist: Any = None
+    # GoalService (rinari.goals) while this conversation pursues a goal;
+    # None otherwise, which also hides goal.update.
+    goals: Any = None
     # FollowupService (rinari.followups): followup.suggest leaves notes.
     followups: Any = None
     # A project's other trusted working folders (policy treats them as the
@@ -402,11 +471,6 @@ class ToolContext:
     # Public web snapshots only, bounded and scoped to the runtime session.
     web_snapshots: dict[str, Any] = field(default_factory=dict)
     channel_host: Any = None
-    # Trusted host binding for peer messaging between agent sessions (Boards):
-    # `session.peers` / `session.send` execute through it. The host resolves
-    # source session, group and turn; tool arguments never carry identity.
-    # None when the session is not a member of an enabled peer group.
-    peer_host: Any = None
     # Provenance ceiling of the running turn: `user` (owner request),
     # `peer` (started by a message from another agent) or `automation`.
     # A peer-originated turn cannot mutate files, run shell, drive the
@@ -426,6 +490,9 @@ class ToolContext:
     # proposal card. None outside a desktop turn (CLI, tests).
     activity_sink: Any = None
     tool_call_id: str = ""
+    # SpeechService (speech.service): audio.transcribe listens with the
+    # dictation engine (plan 0.4.0 #36). None where there is none.
+    speech: Any = None
     # ReadView (tools.read_cache) of the agent conversation running this call:
     # fs.read / fs.read_lines answer an unchanged re-read with a pointer to the
     # earlier result the model still sees. None reads normally (tests, hosts

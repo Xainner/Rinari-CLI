@@ -9,12 +9,12 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, NoReturn
 
-import httpx
 import typer
 
 from rinari.application.context import AppContext, build_app_context
 from rinari.application.services import ServiceContainer, build_services
 from rinari.cli.output import emit_json, failure_envelope
+from rinari.net import shared_client
 from rinari.shared.errors import RinariError
 from rinari.shared.paths import HomeLayout
 
@@ -83,7 +83,8 @@ def home_layout(ctx: typer.Context | None = None) -> Iterator[HomeLayout]:
 def services(ctx: typer.Context) -> Iterator[ServiceContainer]:
     """App context + shared HTTP client + service container (closed together)."""
     with app_context(ctx) as c:
-        client = httpx.Client(timeout=10.0)
+        # Follows ~/.rinari/network.json while the Engine runs (plan 0.4.0 #96).
+        client = shared_client(c.home, timeout=10.0)
         try:
             yield build_services(c, http_client=client, user_home=Path.home())
         finally:

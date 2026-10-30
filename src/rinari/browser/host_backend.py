@@ -94,6 +94,8 @@ _MUTATING = {
     # Empezar a aceptar descargas cambia lo que la página puede provocar en el
     # disco. No muta el DOM, pero no es observación.
     "context.beginDownload",
+    # Cambiar el ancho de la página la vuelve a maquetar (plan 0.4.0 #44b).
+    "context.setViewport",
 }
 
 
@@ -165,6 +167,15 @@ class _MutationLease:
         return False
 
 
+#: Cuánto tiene que llevar el dueño sin tocar el navegador para que el agente
+#: lo retome (decisión del dueño, plan 0.4.0 #46).
+OWNER_IDLE_S = 3.0
+#: Cuánto espera el agente como mucho a que el dueño suelte el navegador
+#: antes de devolver el turno a quien llamó.
+OWNER_WAIT_S = 120.0
+_WAIT_STEP_S = 0.2
+
+
 class HostBackend:
     """Operaciones page-level ejecutadas por el host sobre la vista visible."""
 
@@ -210,6 +221,20 @@ class HostBackend:
         self._settled = threading.Event()
         self._settled.set()
         self._on_control_change: Callable[[str], None] | None = None
+        #: Control sin botones (plan 0.4.0 #46): el dueño toma el navegador
+        #: con solo usarlo y el host avisa de cada uso. El agente lo retoma
+        #: cuando el dueño lleva `OWNER_IDLE_S` sin tocarlo, y nunca con el
+        #: foco en una contraseña o un campo que el dueño está rellenando
+        #: (`_owner_hold`).
+        self._owner_active_at = float("-inf")
+        self._owner_hold = False
+        #: El agente espera a que el dueño suelte el navegador; la interfaz lo
+        #: enseña («Rinari espera a que termines»).
+        self._agent_waiting = False
+        self._on_waiting_change: Callable[[bool], None] | None = None
+        #: Ancho de página que pidió el agente (plan 0.4.0 #44b); `None` es
+        #: «ajustar al panel».
+        self._viewport_width: int | None = None
 
     # -- estado ------------------------------------------------------------
 
@@ -234,6 +259,8 @@ class HostBackend:
             "control_revision": self._control_revision,
             "control_automatic": self._automatic_user
             and self._control_state in ("user", "taking-user-control"),
+            "agent_waiting": self._agent_waiting,
+            "viewport_width": self._viewport_width,
         }
 
     @property
@@ -247,6 +274,32 @@ class HostBackend:
     def on_control_change(self, listener: Callable[[str], None]) -> None:
         """Avisa de cada transición ya resuelta. Main monta la barrera aquí."""
         self._on_control_change = listener
+
+    def on_waiting_change(self, listener: Callable[[bool], None]) -> None:
+        """Avisa cuando el agente empieza o deja de esperar al dueño (#46)."""
+        self._on_waiting_change = listener
+
+    def note_owner_activity(self, hold: bool = False, active: bool = True) -> None:
+        """El dueño usó el navegador ahora (#46). `hold`: el foco está en una
+        contraseña o en un campo a medio rellenar, y ahí el agente no entra
+        hasta que el dueño lo suelte. `active=False`: solo cambió el foco (la
+        página lo perdió), y eso no cuenta como uso."""
+        with self._control_lock:
+            if active:
+                self._owner_active_at = time.monotonic()
+            self._owner_hold = bool(hold)
+
+    def _owner_idle(self) -> bool:
+        return not self._owner_hold and time.monotonic() - self._owner_active_at >= OWNER_IDLE_S
+
+    def _set_waiting(self, waiting: bool) -> None:
+        with self._control_lock:
+            if self._agent_waiting == waiting:
+                return
+            self._agent_waiting = waiting
+            listener = self._on_waiting_change
+        if listener is not None:
+            listener(waiting)
 
     def wait_for_control(self, timeout: float = 10.0) -> str:
         """Espera a que la transición en curso se resuelva. **No** para el loop.
@@ -293,6 +346,9 @@ class HostBackend:
                     f"the browser control moved on: expected revision {expected_revision}, "
                     f"current is {self._control_revision}"
                 )
+            if owner == "user" and not automatic:
+                # Tomarlo es usarlo: el agente cuenta los segundos desde aquí.
+                self._owner_active_at = time.monotonic()
             if owner == self._control and self._control_state == owner:
                 if owner == "user" and not automatic:
                     # Tomarlo a mano cuando ya estaba en vivo lo hace tuyo.
@@ -372,7 +428,9 @@ class HostBackend:
             self._on_control_change(state)
 
     @contextlib.contextmanager
-    def mutation_scope(self, operation: str) -> Iterator[None]:
+    def mutation_scope(
+        self, operation: str, cancelled: Callable[[], bool] | None = None
+    ) -> Iterator[None]:
         """Cubre una mutación **semántica** entera con un solo lease (§7).
 
         Una herramienta que el usuario entiende como una acción —un click— no
@@ -398,7 +456,7 @@ class HostBackend:
                 self._scope.depth -= 1
             return
 
-        state = _MutationLease(self, self._take_lease(operation))
+        state = _MutationLease(self, self._take_lease(operation, cancelled))
         self._scope.depth = 1
         self._scope.lease_state = state
         try:
@@ -418,31 +476,62 @@ class HostBackend:
             return None
         return self._take_lease(operation)
 
-    def _take_lease(self, what: str) -> str:
-        """Comprueba el control y acuña un lease, o rechaza.
+    def _take_lease(self, what: str, cancelled: Callable[[], bool] | None = None) -> str:
+        """Comprueba el control y acuña un lease, esperando al dueño si hace falta.
 
         Aparte de `_admit` porque un `mutation_scope` **es** una mutación por
         definición y su nombre es el de la herramienta —`browser.click`—, no
         el de una operación del host. Filtrarlo por `_MUTATING` hacía que el
         scope no tomara lease ninguno, que es justo lo contrario de su razón
         de existir.
+
+        Con el dueño al mando el agente ya no recibe un error: espera a que
+        lleve `OWNER_IDLE_S` sin tocar el navegador (y a que suelte una
+        contraseña o un campo a medio rellenar) y lo retoma (plan 0.4.0 #46).
+        Corre en el hilo de la herramienta, nunca en el loop de stdio, así
+        que esperar aquí no bloquea al Engine.
         """
         from rinari.browser.manager import BrowserError
 
-        with self._control_lock:
-            if self._automatic_user and self._control_state in ("user", "taking-user-control"):
-                # Vista en vivo que dio la interfaz: el agente la recupera.
-                self._automatic_user = False
-                self._settle("agent", "agent")
-            if self._control_state != "agent":
-                raise BrowserError(
-                    "BROWSER_INTERVENED",
-                    f"the user took control of this browser; {what} is not "
-                    "available until they hand it back",
-                )
-            lease = secrets.token_hex(8)
-            self._leases[lease] = what
-            return lease
+        deadline: float | None = None
+        try:
+            while True:
+                with self._control_lock:
+                    if self._control_state in ("user", "taking-user-control") and (
+                        self._automatic_user or self._owner_idle()
+                    ):
+                        # La vista en vivo que dio la interfaz, o un dueño que
+                        # ya la soltó: el agente la recupera.
+                        self._automatic_user = False
+                        self._settle("agent", "agent")
+                    if self._control_state == "agent":
+                        lease = secrets.token_hex(8)
+                        self._leases[lease] = what
+                        return lease
+                    uncertain = self._control_state == "uncertain"
+                if uncertain:
+                    raise BrowserError(
+                        "BROWSER_INTERVENED",
+                        f"the browser control is uncertain; {what} is not available "
+                        "until the owner hands it back",
+                    )
+                now = time.monotonic()
+                if deadline is None:
+                    deadline = now + OWNER_WAIT_S
+                    self._set_waiting(True)
+                if cancelled is not None and cancelled():
+                    raise BrowserError("CANCELLED", "browser operation cancelled")
+                if now >= deadline:
+                    raise BrowserError(
+                        "BROWSER_INTERVENED",
+                        f"the owner is still using this browser; {what} waited "
+                        f"{int(OWNER_WAIT_S)} s. Wait for them to finish, or ask them, "
+                        "and try again",
+                    )
+                time.sleep(_WAIT_STEP_S)
+        finally:
+            if deadline is not None:
+                self._set_waiting(False)
 
     def _release(self, lease: str | None) -> None:
         if lease is None:
@@ -533,6 +622,20 @@ class HostBackend:
     def close_page(self, target_id: str) -> dict[str, Any]:
         return self._mutating_request("context.closePage", {}, target_id=target_id)
 
+    def set_viewport(
+        self, width: int | None, *, cancelled: Callable[[], bool] | None = None
+    ) -> dict[str, Any]:
+        """El ancho de la página, aparte del ancho del panel (#44b).
+
+        La página se maqueta a ese ancho y el panel la recorre en horizontal;
+        clics y capturas siguen en coordenadas de la página.
+        """
+        result = self._mutating_request(
+            "context.setViewport", {"width": width}, cancelled=cancelled
+        )
+        self._viewport_width = width
+        return dict(result)
+
     # -- operaciones -------------------------------------------------------
 
     def send(
@@ -614,7 +717,7 @@ class HostBackend:
         state = getattr(self._scope, "lease_state", None)
         owns_state = state is None
         if owns_state:
-            state = _MutationLease(self, self._take_lease(operation))
+            state = _MutationLease(self, self._take_lease(operation, cancelled))
         hold = state.hold()
         try:
             return self._request(

@@ -46,6 +46,10 @@ class SessionModelGateway:
 
     def __init__(self, current: ModelCaller) -> None:
         self._current = current
+        self._primary = current
+        # The fallback model's caller, built on demand (plan 0.4.0 #80).
+        self.fallback_factory: Callable[[], ModelCaller | None] | None = None
+        self.on_fallback = False
 
     @property
     def current(self) -> ModelCaller:
@@ -56,6 +60,35 @@ class SessionModelGateway:
             if hasattr(self._current, name) and hasattr(caller, name):
                 setattr(caller, name, getattr(self._current, name))
         self._current = caller
+        self._primary = caller
+        self.on_fallback = False
+
+    def use_fallback(self) -> ModelCaller | None:
+        """Switch this turn to the fallback model; None when there is none."""
+        if self.on_fallback or self.fallback_factory is None:
+            return None
+        try:
+            caller = self.fallback_factory()
+        except Exception:
+            return None
+        if caller is None:
+            return None
+        primary = self._primary
+        for name in ("activity_sink", "event_sink", "token", "budget_getter"):
+            if hasattr(primary, name) and hasattr(caller, name):
+                setattr(caller, name, getattr(primary, name))
+        self._current = caller
+        self.on_fallback = True
+        return caller
+
+    def restore_primary(self) -> None:
+        """A new turn tries the conversation's own model again."""
+        self._current = self._primary
+        self.on_fallback = False
+
+    @property
+    def primary_model_id(self) -> str | None:
+        return getattr(self._primary, "model_id", None)
 
     def capabilities(self) -> ProviderCapabilities:
         return self._current.capabilities()

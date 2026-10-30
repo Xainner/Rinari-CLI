@@ -215,7 +215,7 @@ class ApiService:
             client = factory() if factory is not None else None
             owns_client = client is None
             if owns_client:
-                client = _new_client()
+                client = _new_client(self._ctx.home)
             env = _InvocationEnv(
                 client=client,
                 network_guard=getattr(ctx, "network", None),
@@ -296,10 +296,10 @@ class ApiService:
         return _summarize_response(response)
 
 
-def _new_client() -> Any:
-    import httpx
+def _new_client(home: Any = None) -> Any:
+    from rinari.net import client as net_client
 
-    return httpx.Client(timeout=30.0)
+    return net_client(home, timeout=30.0)
 
 
 def _request(

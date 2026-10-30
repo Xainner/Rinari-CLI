@@ -97,11 +97,16 @@ def test_export_into_a_folder_drops_the_hash_prefix(app_ctx, tmp_path):
 
 
 def test_export_refuses_other_sessions_and_tampered_files(app_ctx, tmp_path):
-    store, item, _, root, ctx, runtime = _export_setup(app_ctx, tmp_path)
-    foreign = item.source.uri().replace(f"//{ctx.session_id}/", "//ses_other/")
-
-    denied = runtime.execute("artifact.export", {"uri": foreign}, ctx)
+    store, item, image, root, ctx, runtime = _export_setup(app_ctx, tmp_path)
+    # Another conversation's artifact, really in Rinari's store: refused.
+    other = prepare_attachments(store, "ses_other", [str(image)])[0]
+    denied = runtime.execute("artifact.export", {"uri": other.source.uri()}, ctx)
     assert denied.error.code is ToolErrorCode.PERMISSION_DENIED
+    # One that is in no store of Rinari's is a connector's URI: said so.
+    unknown = item.source.uri().replace(f"//{ctx.session_id}/", "//ses_nowhere/")
+    elsewhere = runtime.execute("artifact.export", {"uri": unknown}, ctx)
+    assert elsewhere.error.code is ToolErrorCode.NOT_FOUND
+    assert "connector" in elsewhere.error.message
 
     stored = store._storage_path(item.source.storage_path)
     stored.write_bytes(b"changed")

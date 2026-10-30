@@ -8,12 +8,13 @@ state (turns, tool calls) joins in phase 2 without changing this contract.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 from rinari.application.context import AppContext
-from rinari.application.project_service import ProjectService
+from rinari.application.project_service import ProjectService, default_permission
 from rinari.application.provider_service import ProviderService
 from rinari.application.reconcile import Finding, ResumeReconciler, trust_warning
 from rinari.policy.engine import PermissionProfile, normalize_profile
@@ -68,6 +69,55 @@ SESSION_MODE_PLAN = "plan"
 SESSION_MODE_BUILD = "build"
 SESSION_MODE_REVIEW = "review"
 SESSION_MODES = (SESSION_MODE_PLAN, SESSION_MODE_BUILD, SESSION_MODE_REVIEW)
+
+
+def _title_failure_detail(exc: Exception) -> str:
+    """What the provider said when a title failed, for the log only.
+
+    A bare "error:ProviderError" says nothing about the cause. The provider's
+    own fields (taxonomy code, provider, model, request id) and its message,
+    collapsed and cut to 300 characters, are enough to diagnose it. The
+    user's message is not logged; a provider message rarely quotes the
+    request, and the cut bounds it when it does."""
+    parts: list[str] = []
+    for label, value in (
+        ("code", getattr(exc, "error_code", None)),
+        ("provider", getattr(exc, "provider", None)),
+        ("model", getattr(exc, "model", None)),
+        ("request_id", getattr(exc, "request_id", None)),
+        ("retryable", getattr(exc, "retryable", None)),
+    ):
+        if value is not None and value != "":
+            parts.append(f"{label}={getattr(value, 'value', value)}")
+    message = " ".join(str(exc).split())
+    if message:
+        parts.append(f"message={message[:300]!r}")
+    return f" [{', '.join(parts)}]" if parts else ""
+
+
+# Lead-ins that say nothing about the topic: a provisional title skips them
+# ("Necesito que hagas lo siguiente: Usando el MCP…" -> "Usando el MCP…").
+_TITLE_LEAD_INS = re.compile(
+    r"^(?:(?:hola|holi|hey|buenas|buenos días|buenas tardes|buenas noches|hi|hello)[,!.\s]+)?"
+    r"(?:(?:oye|mira|por favor|please)[,\s]+)?"
+    r"(?:(?:necesito|quiero|quisiera|me gustaría) que (?:me )?(?:hagas|ayudes(?: a| con)?)"
+    r"(?: lo siguiente| esto)?|(?:puedes|podrías|podrias|me puedes|me podrías)"
+    r"|(?:can|could|would) you(?: please)?|i need you to|i want you to)?[\s:,]*",
+    re.IGNORECASE,
+)
+PROVISIONAL_TITLE_CHARS = 72
+
+
+def provisional_title(text: str) -> str:
+    """The request itself as a stand-in title, without greetings or lead-ins."""
+    clean = " ".join(text.split())
+    trimmed = _TITLE_LEAD_INS.sub("", clean, count=1).strip(" :,.¿?¡!")
+    if len(trimmed) >= 3:
+        clean = trimmed[0].upper() + trimmed[1:]
+    if len(clean) > PROVISIONAL_TITLE_CHARS:
+        prefix = clean[: PROVISIONAL_TITLE_CHARS - 3]
+        clean = (prefix.rsplit(" ", 1)[0] or prefix) + "…"
+    return clean
 
 
 def profile_for_mode(mode: str | None) -> PermissionProfile:
@@ -268,7 +318,7 @@ class SessionService:
         forced_chat: bool = False,
         *,
         mode: str | None = None,
-        permission_profile: str = "workspace",
+        permission_profile: str | None = None,
         rinari_profile_id: str | None = None,
         default_mode: str = "ask",
     ) -> SessionRecord:
@@ -289,6 +339,7 @@ class SessionService:
         now = self._now()
         project_id = None
         project_root_snapshot = None
+        project = None
         if project_root is not None:
             project = self._projects.upsert(project_root, rinari_profile_id=rinari_profile_id)
             project_id = project.id
@@ -299,7 +350,10 @@ class SessionService:
         normalized_mode = (mode or default_mode).strip().lower()
         if normalized_mode not in (*SESSION_MODES, "ask"):
             raise InvalidUsageError(f"Unknown session mode: {mode!r}.")
-        normalized_profile = normalize_profile(permission_profile).value
+        # Not asked for: the project's default mode, else Proyecto (P-5).
+        normalized_profile = normalize_profile(
+            permission_profile or default_permission(project) or "workspace"
+        ).value
         record = SessionRecord(
             id=self._ctx.ids.new("ses"),
             kind=kind,
@@ -332,7 +386,7 @@ class SessionService:
 
     # -- fork -------------------------------------------------------------------
 
-    def fork(self, ref: str, title: str | None = None) -> StartedSession:
+    def fork(self, ref: str, title: str | None = None, *, child: bool = False) -> StartedSession:
         """Create an independent session continuing from `ref`.
 
         Fork state: kind, project identity, cwd, provider/model/profile,
@@ -343,6 +397,15 @@ class SessionService:
         not modified in any way.
         """
         source = self._resolve(ref)
+        if getattr(source, "agent_id", None) and not child:
+            # Rinari Agency: an agent works in its direct chat and its posts.
+            # A fork would be a hidden copy spending its budget and writing its
+            # memory without doing the Agency's work (owner, 2026-10-21). Its
+            # children (`child=True`, a child with the fork context) still can.
+            raise InvalidUsageError(
+                "Rinari Agency conversations cannot be forked: an agent works in "
+                "its direct chat and its posts."
+            )
         # A fork copies message content into a new session with new message
         # identifiers.  Copying a privacy-retired source would otherwise
         # bypass its source tombstones and let the new session extract it
@@ -379,6 +442,9 @@ class SessionService:
             last_active_at=now,
             git_branch=source.git_branch,
             forked_from=source.id,
+            parent_session_id=source.id,
+            lineage_kind="fork",
+            brief={"title": source.title or source.id},
             active_skills=source.active_skills,
             permission_profile=source.permission_profile,
             soul_id=source.soul_id,
@@ -407,6 +473,7 @@ class SessionService:
             if messages:
                 self._ctx.message_repo.append_many(record.id, messages)
             self._append_event(record.id, EVENT_SESSION_FORKED, {"from": source.id})
+            inherit_agency(self._ctx, source, record)
         return StartedSession(session=record, created=True)
 
     # -- promotion ----------------------------------------------------------
@@ -584,6 +651,8 @@ class SessionService:
         state: str | None = None,
         limit: int = 50,
         rinari_profile_id: str | None = None,
+        agent_id: str | None = None,
+        exclude_agents: bool = False,
     ) -> list[SessionRecord]:
         records = self._ctx.session_repo.list(
             kind=kind,
@@ -591,6 +660,8 @@ class SessionService:
             state=state,
             limit=limit,
             rinari_profile_id=rinari_profile_id,
+            agent_id=agent_id,
+            exclude_agents=exclude_agents,
         )
         # Older Windows transports decoded UTF-8 titles with the ANSI locale.
         # Repair only the known generated title; never guess at user-authored text.
@@ -626,7 +697,7 @@ class SessionService:
         return record
 
     def name_from_first_message(
-        self, ref: str, message: str, *, title_factory=None
+        self, ref: str, message: str, *, title_factory=None, had_messages: bool | None = None
     ) -> SessionRecord:
         """Give an untouched session a title that summarizes the user's intent.
 
@@ -636,6 +707,10 @@ class SessionService:
         `TITLE_ATTEMPTS` failures in all; a manual rename always wins. Every
         failure leaves a `SessionTitleFailed` event with its reason (never the
         content), so a bad title can be diagnosed afterwards.
+
+        `had_messages` is whether the session had messages before this turn,
+        read by a caller that names it beside the turn (V2-4): by then the
+        turn has already stored this message.
         """
         record = self._resolve(ref)
         renames = [
@@ -655,7 +730,12 @@ class SessionService:
             }
             if record.title not in defaults:
                 return record
-            if self._ctx.message_repo.list(record.id):
+            earlier = (
+                had_messages
+                if had_messages is not None
+                else bool(self._ctx.message_repo.list(record.id))
+            )
+            if earlier:
                 # Earlier messages had no topic ("Hola"): name it from this one.
                 deferred = sum(
                     1
@@ -680,12 +760,13 @@ class SessionService:
                 (m for m in self._ctx.message_repo.list(record.id) if m.role == "user"), None
             )
             source_text = (first.display_content or first.content or "") if first else message
-        clean = " ".join(source_text.split())
+            # A first message without a topic ("Holi") retried forever from
+            # itself (#61e): the retry also reads the latest request.
+            if message.strip() and " ".join(message.split()) != " ".join(source_text.split()):
+                source_text = f"{source_text}\n\n{message}"
+        clean = provisional_title(source_text)
         if not clean:
             return record
-        if len(clean) > 72:
-            prefix = clean[:69]
-            clean = (prefix.rsplit(" ", 1)[0] or prefix) + "…"
         title, source, failure = clean, TITLE_SOURCE_FALLBACK, None
         if title_factory is None:
             failure = "unavailable"
@@ -717,7 +798,9 @@ class SessionService:
             except Exception as exc:
                 # Naming is optional metadata; provider failure must not lose the turn.
                 failure = getattr(exc, "title_failure", None) or f"error:{type(exc).__name__}"
-                logger.warning("Session title generation failed (%s)", failure)
+                logger.warning(
+                    "Session title generation failed (%s)%s", failure, _title_failure_detail(exc)
+                )
         latest = self._resolve(ref)
         current = [
             e for e in self._ctx.event_repo.list(record.id) if e.type == EVENT_SESSION_RENAMED
@@ -819,6 +902,9 @@ class SessionService:
         # After the rows: no turn can start in a session that is gone. A lock
         # still held is left for the engine-start sweep.
         discard_lock(lock_path(self._ctx.layout.dir("sessions"), record.id), record.id)
+        from rinari.context.session_state import discard
+
+        discard(self._ctx.layout, record.id)
         return record.id
 
     def sweep_turn_locks(self) -> int:
@@ -950,3 +1036,18 @@ class SessionService:
     def _default_title(cwd: Path, kind: str) -> str:
         name = cwd.name or "root"
         return f"{kind.lower()} in {name}"
+
+
+def inherit_agency(ctx: Any, parent: Any, child: Any) -> None:
+    """Rinari Agency: a fork or a child of an agent's conversation works for
+    the same agent (and team), with its card, its connectors, its memory and
+    its budget; never as Rinari's general assistant."""
+    agent_id = getattr(parent, "agent_id", None)
+    if not agent_id:
+        return
+    ctx.agency_repo.set_session_agent(child.id, agent_id)
+    child.agent_id = agent_id
+    team_id = getattr(parent, "team_id", None)
+    if team_id and getattr(ctx, "team_repo", None) is not None:
+        ctx.team_repo.set_session_team(child.id, team_id)
+        child.team_id = team_id

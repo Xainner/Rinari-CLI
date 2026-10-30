@@ -16,7 +16,13 @@ twice.
 
 from __future__ import annotations
 
+import calendar
+import logging
 import re
+import shutil
+import sqlite3
+import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,6 +40,14 @@ SUPERSEDED: dict[str, str] = {
     "0040_scheduled_tasks": "0037_scheduled_tasks",
 }
 _DEFAULT_DIR = Path(__file__).parent
+_log = logging.getLogger(__name__)
+_BACKUP_PREFIX = "antes-de-migrar-"
+_STAMP = "%Y%m%d-%H%M%S"
+#: A migration cut before it ends (the desktop gave up waiting and restarted
+#: the Engine) leaves the database as it was, so the next start reuses that
+#: copy instead of making another: a slow migration once left 30 full copies
+#: in half an hour (27-oct).
+REUSE_BACKUP_WITHIN_S = 24 * 3600.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,10 +69,28 @@ def discover_migrations(directory: Path | None = None) -> list[Migration]:
 
 
 class MigrationRunner:
-    def __init__(self, db: Database, clock: Clock, directory: Path | None = None) -> None:
+    def __init__(
+        self,
+        db: Database,
+        clock: Clock,
+        directory: Path | None = None,
+        *,
+        backup_root: Path | None = None,
+        backup_extra: Sequence[Path] = (),
+    ) -> None:
+        """With ``backup_root``, a database that already has a schema is copied
+        there (with ``backup_extra``) before new migrations touch it.
+
+        Migrations only go forward: once a newer build migrates a shared home,
+        an older build refuses it (`verify`). The copy is the way back, for
+        instance from Rinari Agent Nightly to the normal version.
+        """
         self._db = db
         self._clock = clock
         self._directory = directory
+        self._backup_root = backup_root
+        self._backup_extra = tuple(backup_extra)
+        self.last_backup: Path | None = None
         self._ensure_table()
 
     def _ensure_table(self) -> None:
@@ -105,6 +137,9 @@ class MigrationRunner:
         migrations = discover_migrations(self._directory)
         self._adopt_superseded(migrations)
         recorded = self._recorded()
+        pending = [m for m in migrations if m.version not in recorded]
+        if pending and recorded and self._backup_root is not None:
+            self.last_backup = self._backup(max(recorded), pending[-1].version)
         applied_now: list[int] = []
         for migration in migrations:
             if migration.version in recorded:
@@ -131,6 +166,54 @@ class MigrationRunner:
                 )
             applied_now.append(migration.version)
         return applied_now
+
+    def _backup(self, current: int, target: int) -> Path:
+        assert self._backup_root is not None
+        now = self._clock.now()
+        name = f"{_BACKUP_PREFIX}{current:04d}-a-{target:04d}-"
+        recent = self._recent_backup(name, now)
+        if recent is not None:
+            _log.warning(
+                "Reusing the backup made before migrating %s -> %s: %s", current, target, recent
+            )
+            return recent
+        folder = self._backup_root / f"{name}{time.strftime(_STAMP, time.gmtime(now))}"
+        folder.mkdir(parents=True, exist_ok=True)
+        # The copy only takes its final name once whole: a start cut mid-copy
+        # must not leave a backup the next start would reuse.
+        partial = folder / "state.db.partial"
+        copy = sqlite3.connect(partial)
+        try:
+            self._db.connection.backup(copy)
+        finally:
+            copy.close()
+        for extra in self._backup_extra:
+            if extra.is_dir():
+                shutil.copytree(extra, folder / extra.name, dirs_exist_ok=True)
+            elif extra.is_file():
+                shutil.copy2(extra, folder / extra.name)
+        partial.replace(folder / "state.db")
+        _log.warning(
+            "State database backed up before migrating %s -> %s: %s", current, target, folder
+        )
+        return folder
+
+    def _recent_backup(self, name: str, now: float) -> Path | None:
+        """A whole copy of this same migration made a short while ago, if any."""
+        assert self._backup_root is not None
+        if not self._backup_root.is_dir():
+            return None
+        newest: tuple[float, Path] | None = None
+        for folder in self._backup_root.glob(f"{name}*"):
+            try:
+                made = calendar.timegm(time.strptime(folder.name[len(name) :], _STAMP))
+            except ValueError:
+                continue
+            if not (folder / "state.db").is_file() or not 0 <= now - made <= REUSE_BACKUP_WITHIN_S:
+                continue
+            if newest is None or made > newest[0]:
+                newest = (made, folder)
+        return newest[1] if newest else None
 
     def verify(self) -> None:
         """Raise if the database is missing tables expected by the latest migration."""

@@ -9,9 +9,11 @@ bounded (harness.md section 65).
 from __future__ import annotations
 
 import codecs
+import contextlib
 import dataclasses
 import fnmatch
 import hashlib
+import json
 import os
 import re
 import time
@@ -34,6 +36,14 @@ from rinari.tools.definition import (
 from rinari.tools.read_cache import MIN_DEDUPE_CHARS, holds_rows, numbered_rows
 
 MAX_READ_BYTES = 256 * 1024
+# fs.read of a large file returns one page of the original, never a copy
+# (plan 0.4.0 #76): up to READ_PAGE_LINES lines and a share of the
+# observation budget, with long lines cut.
+READ_PAGE_LINES = 2000
+READ_PAGE_MAX_CHARS = 50 * 1024
+READ_PAGE_MIN_CHARS = 8000
+READ_LINE_MAX_CHARS = 2000
+_ARTIFACT_PREFIX = "artifact://"
 MAX_LIST_ENTRIES = 500
 MAX_SEARCH_RESULTS = 200
 FRESH_SCHEMA = {
@@ -52,9 +62,39 @@ def _fail(code: ToolErrorCode, message: str, *, retryable: bool = False) -> Tool
     )
 
 
+def _artifact_path(ctx: ToolContext, uri: str) -> tuple[Path | None, ToolResult | None]:
+    """`artifact://<session>/…` of this session: a saved output, read like a file.
+
+    Large outputs are saved there (plan 0.4.0 #76) and paged with fs.read_lines
+    and fs.search_text. Only this session's own artifacts resolve; the path
+    cannot climb out of them.
+    """
+    rest = uri[len(_ARTIFACT_PREFIX) :]
+    session, _, relative = rest.partition("/")
+    # A teammate's post too (Rinari Agency): what it hands over in the office.
+    shared = getattr(ctx, "shared_artifact_sessions", ()) or ()
+    owner = session if session in shared else ctx.session_id
+    base = (Path(ctx.artifact_root) / owner).resolve()
+    target = (base / relative).resolve() if relative else base
+    if session != owner and session != ctx.session_id:
+        from rinari.tools.native.artifact import FOREIGN_ARTIFACT, foreign_artifact
+
+        if foreign_artifact(ctx, uri):
+            return None, _fail(ToolErrorCode.NOT_FOUND, FOREIGN_ARTIFACT)
+    if session != owner or not (target == base or base in target.parents):
+        return None, _fail(
+            ToolErrorCode.SANDBOX_VIOLATION, "Only this conversation's saved outputs can be read"
+        )
+    if not target.exists():
+        return None, _fail(ToolErrorCode.NOT_FOUND, f"Saved output does not exist: {uri}")
+    return target, None
+
+
 def _resolve_read(ctx: ToolContext, path: Any) -> tuple[Path | None, ToolResult | None]:
     if not isinstance(path, str) or not path:
         return None, _fail(ToolErrorCode.INVALID_ARGUMENT, "path must be a non-empty string")
+    if path.startswith(_ARTIFACT_PREFIX):
+        return _artifact_path(ctx, path)
     try:
         resolved = ctx.sandbox.resolve(path, base=ctx.cwd)
         ctx.sandbox.assert_readable(resolved)
@@ -106,10 +146,13 @@ def fs_read(input: dict, ctx: ToolContext) -> ToolResult:
             ToolErrorCode.INVALID_ARGUMENT,
             "This is an image. Use fs.read_image to view its pixels, not fs.read.",
         )
-    raw = read_text_bounded(resolved)
+    page_chars = _page_chars(ctx, input.get("_page_chars"))
+    raw = read_text_bounded(resolved, max_bytes=page_chars)
     if raw.error:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, raw.error)
     size = resolved.stat().st_size
+    if raw.truncated or raw.text.count("\n") >= READ_PAGE_LINES:
+        return _read_page(resolved, size, page_chars, ctx)
     whole = not raw.truncated and ctx.reads is not None
     if whole and not input.get("fresh") and len(raw.text) >= MIN_DEDUPE_CHARS:
         earlier = ctx.reads.earlier(
@@ -131,6 +174,8 @@ def fs_read(input: dict, ctx: ToolContext) -> ToolResult:
             )
     if whole:
         ctx.reads.record(str(resolved), ctx.tool_call_id)
+    if ctx.reads is not None and not raw.truncated:
+        ctx.reads.note_sha(str(resolved), raw.sha256)
     return _ok(
         {
             "path": str(resolved),
@@ -139,6 +184,81 @@ def fs_read(input: dict, ctx: ToolContext) -> ToolResult:
             "truncated": raw.truncated,
             "sha256": raw.sha256,
         }
+    )
+
+
+def _page_chars(ctx: ToolContext, override: Any = None) -> int:
+    """Characters one fs.read page may take: a share of the observation budget."""
+    cap = min(
+        READ_PAGE_MAX_CHARS,
+        max(READ_PAGE_MIN_CHARS, int(ctx.observation_budget_bytes * 0.7)),
+    )
+    if isinstance(override, int) and override > 0:
+        cap = min(cap, max(2000, override))
+    return cap
+
+
+def _read_page(path: Path, size: int, page_chars: int, ctx: ToolContext) -> ToolResult:
+    """The first page of a file too large to read whole, with where to go next."""
+    digest = hashlib.sha256()
+    total = 0
+    last_byte = b""
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            if ctx.cancellation:
+                ctx.cancellation.throw_if_cancelled()
+            digest.update(chunk)
+            total += chunk.count(b"\n")
+            last_byte = chunk[-1:]
+    if size and last_byte != b"\n":
+        total += 1
+    lines: list[str] = []
+    used = 0
+    cut = 0
+    try:
+        with path.open("r", encoding="utf-8", newline="") as stream:
+            for raw_line in stream:
+                line = raw_line.rstrip("\r\n")
+                if len(line) > READ_LINE_MAX_CHARS:
+                    line = line[:READ_LINE_MAX_CHARS] + " … (line cut)"
+                    cut += 1
+                # What it costs in the observation: escaped, in UTF-8, with its "\n".
+                cost = len(json.dumps(line, ensure_ascii=False).encode("utf-8"))
+                if lines and (used + cost > page_chars or len(lines) >= READ_PAGE_LINES):
+                    break
+                lines.append(line)
+                used += cost
+    except UnicodeDecodeError:
+        return _fail(ToolErrorCode.INVALID_ARGUMENT, "File is binary or not UTF-8 text")
+    sha = digest.hexdigest()
+    if ctx.reads is not None:
+        ctx.reads.note_sha(str(path), sha)
+    end = len(lines)
+    following = end + 1 if end < total else None
+    note = f"Showing lines 1-{end} of {total} (sha {sha[:10]})."
+    if following is not None:
+        note += (
+            f" Continue with fs.read_lines from line {following}; use fs.search_text "
+            "to find something specific."
+        )
+    if cut:
+        note += f" {cut} long line(s) were cut at {READ_LINE_MAX_CHARS} characters."
+    return ToolResult(
+        ok=True,
+        data={
+            "path": str(path),
+            "size_bytes": size,
+            "text": "\n".join(lines),
+            # Cut lines also leave part of the file unseen.
+            "truncated": following is not None or cut > 0,
+            "sha256": sha,
+            "start_line": 1,
+            "end_line": end,
+            "total_lines": total,
+            "next_line": following,
+            "note": note,
+        },
+        truncated=following is not None or cut > 0,
     )
 
 
@@ -219,6 +339,7 @@ def fs_read_lines(input: dict, ctx: ToolContext) -> ToolResult:
                     last = number
                     used += len(text)
         rows = "\n".join(selected)
+        changed_note = _changed_since_read(ctx, resolved)
         data = {
             "path": str(resolved),
             "text": rows,
@@ -227,6 +348,8 @@ def fs_read_lines(input: dict, ctx: ToolContext) -> ToolResult:
             "total_lines": number if complete else None,
             "next_line": None if complete else (last + 1 if last is not None else start),
         }
+        if changed_note:
+            data["note"] = changed_note
         if ctx.reads is not None and not input.get("fresh") and len(rows) >= MIN_DEDUPE_CHARS:
             earlier = ctx.reads.earlier(
                 str(resolved), lambda tool, seen: _holds_range(tool, seen, rows, start, last)
@@ -244,6 +367,44 @@ def fs_read_lines(input: dict, ctx: ToolContext) -> ToolResult:
         return _fail(ToolErrorCode.PERMISSION_DENIED, f"Read failed: {type(exc).__name__}")
     except (TypeError, ValueError):
         return _fail(ToolErrorCode.INVALID_ARGUMENT, "start/end must be integers")
+
+
+def _file_sha(path: Path) -> str | None:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+def _changed_since_read(ctx: ToolContext, path: Path) -> str | None:
+    """A note when the file is not what this conversation last saw of it."""
+    known = ctx.reads.known_sha(str(path)) if ctx.reads is not None else None
+    if known is None or _file_sha(path) == known:
+        return None
+    if ctx.reads is not None:
+        ctx.reads.note_sha(str(path), _file_sha(path))
+    return (
+        "The file changed since your last read of it: line numbers may have moved "
+        "and earlier text may be stale."
+    )
+
+
+def _stale_for_write(ctx: ToolContext, path: Path) -> ToolResult | None:
+    """Overwriting a file that changed since this conversation saw it loses that change."""
+    if ctx.reads is None or not path.is_file():
+        return None
+    known = ctx.reads.known_sha(str(path))
+    if known is None or _file_sha(path) == known:
+        return None
+    return _fail(
+        ToolErrorCode.CONFLICT,
+        "The file changed since you last read or wrote it (another program or the user "
+        "edited it). Nothing was written. Read it again, then write.",
+    )
 
 
 def _holds_range(tool: str, seen: dict, rows: str, start: int, last: int | None) -> bool:
@@ -320,6 +481,9 @@ def fs_write(input: dict, ctx: ToolContext) -> ToolResult:
             f"Parent folder does not exist: {missing[0]}. Nothing was written. Check the "
             "path; if the folder is meant to be new, retry with create_parents=true.",
         )
+    stale = None if input.get("expected_hash") else _stale_for_write(ctx, resolved)
+    if stale is not None:
+        return stale
     # Classified before the write: the write itself changes the content hash.
     pre_existing = _classify_user_work(ctx, resolved)
     try:
@@ -335,6 +499,8 @@ def fs_write(input: dict, ctx: ToolContext) -> ToolResult:
         )
     except OSError as exc:
         return _fail(ToolErrorCode.PERMISSION_DENIED, f"Write failed: {exc.__class__.__name__}")
+    if ctx.reads is not None:
+        ctx.reads.note_sha(str(resolved), digest)
     data: dict = {
         "path": str(resolved),
         "bytes_written": len(content.encode("utf-8")),
@@ -351,6 +517,26 @@ def fs_write(input: dict, ctx: ToolContext) -> ToolResult:
 
 
 # -- fs.patch -----------------------------------------------------------------
+
+
+def _patch_precheck(input: dict, ctx: ToolContext) -> ToolResult | None:
+    """A patch of a file that does not exist cannot succeed: say so before
+    asking the owner to allow it (F36, plan 0.4.0 v2, V2-13)."""
+    rows = input.get("files") if isinstance(input.get("files"), list) else [input]
+    for row in rows:
+        path = row.get("path") if isinstance(row, dict) else None
+        if not isinstance(path, str) or not path or path.startswith(_ARTIFACT_PREFIX):
+            continue
+        candidate = Path(path).expanduser()
+        if not candidate.is_absolute():
+            candidate = Path(ctx.cwd) / candidate
+        with contextlib.suppress(OSError):
+            if not candidate.exists():
+                return _fail(
+                    ToolErrorCode.NOT_FOUND,
+                    f"{path} does not exist; fs.patch edits existing files (fs.write creates one)",
+                )
+    return None
 
 
 def fs_patch(input: dict, ctx: ToolContext) -> ToolResult:
@@ -406,6 +592,8 @@ def fs_patch(input: dict, ctx: ToolContext) -> ToolResult:
         return _fail(ToolErrorCode.CONFLICT, str(exc))
     except OSError as exc:
         return _fail(ToolErrorCode.PERMISSION_DENIED, f"Write failed: {exc.__class__.__name__}")
+    if ctx.reads is not None:
+        ctx.reads.note_sha(str(resolved), digest)
     data = {
         "path": str(resolved),
         "replacements": count if input.get("replace_all", False) else 1,
@@ -683,10 +871,13 @@ def filesystem_tools() -> list[ToolDefinition]:
             name="fs.read",
             concurrency="local-read",
             description=(
-                "Read a whole text file; use paths for up to 16 independent files in one "
-                "parallel batch. Every path is permission checked. For a line range use "
-                "fs.read_lines. Re-reading an unchanged file whose text you still have "
-                "returns unchanged=true instead of the text; fresh=true forces the text."
+                "Read a text file; use paths for up to 16 independent files in one "
+                "parallel batch. Every path is permission checked. A large file comes back "
+                "as its first page (start_line, end_line, total_lines, next_line): continue "
+                "with fs.read_lines or search it with fs.search_text. Saved outputs "
+                "(artifact://…) are read the same way. Re-reading an unchanged file whose "
+                "text you still have returns unchanged=true instead of the text; fresh=true "
+                "forces the text."
             ),
             input_schema={
                 "type": "object",
@@ -786,6 +977,7 @@ def filesystem_tools() -> list[ToolDefinition]:
             side_effects=SIDE_EFFECT_LOCAL_REVERSIBLE,
             idempotent=False,
             handler=fs_patch,
+            precheck=_patch_precheck,
             normalize=normalize.fs_patch,
             namespace="fs",
         ),
@@ -883,6 +1075,7 @@ def filesystem_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="fs.diff",
+            always_loaded=False,
             description="Unified diff between two text files.",
             input_schema={
                 "type": "object",

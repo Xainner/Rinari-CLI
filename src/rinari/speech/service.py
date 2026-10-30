@@ -12,6 +12,8 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -33,11 +35,16 @@ MIN_AUDIO_MS = 200
 MAX_AUDIO_S = 300
 MAX_VOCABULARY = 300
 TRANSCRIBE_TIMEOUT_S = 180.0
+#: A song or a recording Rinari listens to (audio.transcribe, plan 0.4.0 #36).
+TRANSCRIBE_FILE_TIMEOUT_S = 900.0
+#: What whisper.cpp decodes by itself; anything else goes through ffmpeg.
+NATIVE_FORMATS = (".wav", ".mp3", ".flac", ".ogg")
 #: Always in the hint: the assistant's own name is the word Whisper misspells
 #: most in dictation ("ReNari", "Reynari"). The bare name alone did not fix it
 #: on a real recording; with "Rinari Agent" next to it, it did.
 ALWAYS_VOCABULARY = "Rinari, Rinari Agent"
 
+_SEGMENT = re.compile(r"^\[(\d+:\d+:\d+\.\d+) --> (\d+:\d+:\d+\.\d+)\]\s*(.*)$")
 _WINDOWS = os.name == "nt"
 _BINARY_NAMES = ("whisper-cli.exe",) if _WINDOWS else ("whisper-cli",)
 #: Whisper's markers for what is not speech; they never belong in a message.
@@ -150,6 +157,9 @@ class SpeechService:
         return {
             **settings,
             "binary_found": binary is not None,
+            # Un build desde fuente no trae whisper.cpp: la app explica cómo
+            # configurarlo en vez de pedir que se reinstale.
+            "from_source": _from_source(),
             "model_installed": installed,
             "ready": binary is not None and installed,
             "models": models,
@@ -219,7 +229,13 @@ class SpeechService:
             return self._client_factory()
         import httpx
 
-        return httpx.Client(follow_redirects=True, timeout=httpx.Timeout(60.0, connect=20.0))
+        from rinari.net import client as net_client
+
+        return net_client(
+            self._ctx.layout.root,
+            follow_redirects=True,
+            timeout=httpx.Timeout(60.0, connect=20.0),
+        )
 
     # -- transcription ---------------------------------------------------------------
 
@@ -286,6 +302,138 @@ class SpeechService:
             "elapsed_ms": int((time.monotonic() - started) * 1000),
         }
 
+    def transcribe_file(
+        self, path: Path, *, language: str | None = None, timestamps: bool = False
+    ) -> dict[str, Any]:
+        """Listen to an audio or video file (plan 0.4.0 #36): the dictation engine
+        and model, nothing new to download. WAV, MP3, FLAC and OGG go straight
+        to whisper.cpp; other formats (m4a, mp4, webm…) need ffmpeg."""
+        binary = self.binary()
+        if binary is None:
+            raise SpeechError(
+                "NOT_INSTALLED", "the dictation engine (whisper.cpp) is not installed"
+            )
+        settings = self.settings()
+        model = MODELS[settings["model"]]
+        model_file = self.model_path(model)
+        if not model_file.is_file():
+            raise SpeechError(
+                "MODEL_MISSING", f"the {model.id} dictation model is not downloaded", model=model.id
+            )
+        lang = language or settings["language"] or "auto"
+        if lang not in LANGUAGES:
+            raise SpeechError("INVALID_LANGUAGE", f"unsupported language: {lang}")
+        if not path.is_file():
+            raise SpeechError("NOT_FOUND", f"no such file: {path.name}")
+        started = time.monotonic()
+        with tempfile.TemporaryDirectory(prefix="rinari-listen-") as work:
+            source = path
+            if path.suffix.lower() not in NATIVE_FORMATS:
+                ffmpeg = shutil.which("ffmpeg", path=self._env.get("PATH"))
+                if ffmpeg is None:
+                    raise SpeechError(
+                        "UNSUPPORTED_FORMAT",
+                        f"{path.suffix or 'this format'} needs ffmpeg to be read; convert it "
+                        "to WAV or MP3 first",
+                    )
+                source = Path(work) / "audio.wav"
+                try:
+                    converted = self._run(
+                        [
+                            ffmpeg,
+                            "-nostdin",
+                            "-y",
+                            "-i",
+                            str(path),
+                            "-vn",
+                            "-ac",
+                            "1",
+                            "-ar",
+                            str(SAMPLE_RATE),
+                            "-c:a",
+                            "pcm_s16le",
+                            str(source),
+                        ],
+                        capture_output=True,
+                        stdin=subprocess.DEVNULL,
+                        cwd=work,
+                        timeout=TRANSCRIBE_FILE_TIMEOUT_S,
+                        shell=False,
+                        **_quiet(),
+                    )
+                except (subprocess.TimeoutExpired, OSError) as exc:
+                    raise SpeechError(
+                        "CONVERT_FAILED", f"ffmpeg could not read the file: {exc}"
+                    ) from exc
+                if converted.returncode != 0 or not source.is_file():
+                    raise SpeechError("CONVERT_FAILED", "ffmpeg could not read the file")
+            argv = [
+                str(binary),
+                "-m",
+                str(model_file),
+                "-f",
+                str(source),
+                "-l",
+                lang,
+                "-t",
+                str(_threads()),
+                "-np",
+            ]
+            if not timestamps:
+                argv.append("-nt")
+            try:
+                completed = self._run(
+                    argv,
+                    capture_output=True,
+                    stdin=subprocess.DEVNULL,
+                    cwd=work,
+                    timeout=TRANSCRIBE_FILE_TIMEOUT_S,
+                    shell=False,
+                    **_quiet(),
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise SpeechError("TIMEOUT", "listening took too long") from exc
+            except OSError as exc:
+                raise SpeechError("NOT_INSTALLED", f"could not start whisper.cpp: {exc}") from exc
+        if completed.returncode != 0:
+            raise SpeechError(
+                "TRANSCRIBE_FAILED", f"whisper.cpp exited with {completed.returncode}"
+            )
+        raw = _decode(completed.stdout)
+        result: dict[str, Any] = {
+            "model": model.id,
+            "language": lang,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+        }
+        if timestamps:
+            segments = _segments(raw)
+            result["segments"] = segments
+            result["text"] = " ".join(segment["text"] for segment in segments)
+        else:
+            result["text"] = _clean_text(raw)
+        return result
+
+
+def _segments(raw: str) -> list[dict[str, Any]]:
+    """`[00:00:01.000 --> 00:00:04.200]  text` lines into {start_ms, end_ms, text}."""
+    segments = []
+    for line in raw.splitlines():
+        match = _SEGMENT.match(line.strip())
+        if not match:
+            continue
+        text = _clean_text(match.group(3))
+        if text:
+            segments.append(
+                {"start_ms": _ms(match.group(1)), "end_ms": _ms(match.group(2)), "text": text}
+            )
+    return segments
+
+
+def _ms(stamp: str) -> int:
+    hours, minutes, rest = stamp.split(":")
+    seconds, _, millis = rest.partition(".")
+    return ((int(hours) * 60 + int(minutes)) * 60 + int(seconds)) * 1000 + int(millis or 0)
+
 
 def _check_wav(audio: bytes) -> int:
     """Duration of a mono 16 kHz 16-bit WAV, or a clear refusal."""
@@ -348,3 +496,9 @@ def _quiet() -> dict[str, Any]:
 
 
 __all__ = ["SpeechError", "SpeechService"]
+
+
+def _from_source() -> bool:
+    """The Engine runs from a checkout (src layout next to pyproject.toml)."""
+    package = Path(__file__).resolve().parents[1]
+    return (package.parent.parent / "pyproject.toml").is_file() and package.parent.name == "src"

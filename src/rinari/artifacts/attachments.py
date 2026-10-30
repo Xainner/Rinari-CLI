@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from rinari.artifacts.archives import ArchiveError, archive_index, archive_type
 from rinari.artifacts.limits import limit
 from rinari.artifacts.ocr import OcrUnavailableError, run_ocr
 from rinari.artifacts.store import ArtifactRecord
@@ -32,6 +33,13 @@ from rinari.artifacts.transfer import import_file
 MAX_ATTACHMENTS = 8
 MAX_TOTAL_BYTES = 50 * 1024 * 1024
 MAX_DOCUMENT_BYTES = 25 * 1024 * 1024
+#: Audio and video are kept as they are, never read into the context, so
+#: they get the download cap instead of the document one (plan 0.4.0 #57).
+MAX_MEDIA_BYTES = 1024 * 1024 * 1024
+MEDIA_KINDS = ("audio", "video")
+#: Kept as files like media, never read into the context: the model gets an
+#: index of the members and extracts with artifact.export (Ideas-2, 24-oct).
+ARCHIVE_KIND = "archive"
 MAX_PDF_PAGES = 20
 MAX_OCR_PAGES = 20
 MAX_OCR_TOTAL_SECONDS = 120.0
@@ -358,30 +366,30 @@ def prepare_attachments(
                 raise ValueError(f"Attachment does not exist: {path}")
             source = None
             original_name = path.name
+        shown = original_name or path.name
         try:
             size = path.stat().st_size
-            if size > MAX_DOCUMENT_BYTES:
-                raise ValueError(
-                    f"Attachment exceeds {MAX_DOCUMENT_BYTES // (1024 * 1024)} MiB: {path.name}"
-                )
-            if total + size > MAX_TOTAL_BYTES:
-                raise ValueError("Attachment total exceeds 50 MiB")
-            kind, content_type = classify(path)
+            kind, content_type = classify(path, shown)
             if kind == "unsupported":
-                raise ValueError(f"Unsupported attachment type: {path.name}")
+                raise ValueError(f"Unsupported attachment type: {shown}")
+            media = kind in MEDIA_KINDS
+            kept = media or kind == ARCHIVE_KIND
+            cap = MAX_MEDIA_BYTES if kept else MAX_DOCUMENT_BYTES
+            if size > cap:
+                raise ValueError(f"Attachment exceeds {cap // (1024 * 1024)} MiB: {shown}")
+            if not kept and total + size > MAX_TOTAL_BYTES:
+                raise ValueError("Attachment total exceeds 50 MiB")
             if kind == "image" and size > limit("image_bytes", 10 * 1024 * 1024):
                 raise ValueError(
                     f"Image exceeds {limit('image_bytes', 10 * 1024 * 1024) // (1024 * 1024)} "
-                    f"MiB: {path.name}"
+                    f"MiB: {shown}"
                 )
             if source is None:
                 source = import_file(
                     store,
                     session_id,
                     path,
-                    maximum=limit("image_bytes", 10 * 1024 * 1024)
-                    if kind == "image"
-                    else MAX_DOCUMENT_BYTES,
+                    maximum=limit("image_bytes", 10 * 1024 * 1024) if kind == "image" else cap,
                     expected_hash=_sha256(path),
                     provenance="session-attachment",
                 )
@@ -412,6 +420,12 @@ def prepare_attachments(
                     if item.get(key) is not None
                 }
                 _validate_pdf_options(options)
+            if media:
+                # Kept as a file: the model gets name, type, size, duration and
+                # its URI to use with tools (audio.transcribe, ffmpeg).
+                duration = media_duration(path)
+                if duration is not None:
+                    options["duration_s"] = duration
             # Cache identity includes the immutable source digest and parser
             # options, so checking it here avoids doing PDF/OCR work twice.
             derived = None
@@ -466,6 +480,11 @@ def prepare_attachments(
                     extracted, warning = _extract_xlsx(path, cancellation=cancellation)
                 elif kind == "pptx":
                     extracted, warning = _extract_pptx(path, budget=MAX_CONTEXT_CHARS)
+                elif kind == ARCHIVE_KIND:
+                    try:
+                        extracted = archive_index(path, shown)
+                    except ArchiveError as exc:
+                        raise ValueError(f"{exc}: {shown}") from exc
                 if extracted:
                     provenance = f"{EXTRACTOR_VERSION}:{'ocr' if ocr else 'parser'}"
                     if warning:
@@ -515,7 +534,8 @@ def prepare_attachments(
                     coverage=coverage,
                 )
             )
-            total += size
+            if not kept:
+                total += size
         finally:
             if temporary_input is not None:
                 temporary_input.unlink(missing_ok=True)
@@ -545,6 +565,17 @@ def attachment_manifest(prepared: list[PreparedAttachment]) -> str:
             sent += "; text below" + (" (OCR)" if item.ocr else "")
         if item.coverage:
             sent += "; " + coverage_summary(item.coverage)
+        if item.kind in MEDIA_KINDS:
+            duration = item.options.get("duration_s")
+            sent += (f"; {duration:.1f} s" if isinstance(duration, (int, float)) else "") + (
+                "; kept as a file (not in the context): audio.transcribe listens to it, "
+                "artifact.export copies it for other programs"
+            )
+        if item.kind == ARCHIVE_KIND:
+            sent += (
+                "; kept as a file, its member list below: artifact.export with extract=true "
+                "unpacks it into a new folder"
+            )
         lines.append(
             f"{index}. {json.dumps(item.name, ensure_ascii=False)} - {item.content_type}, "
             f"{item.source.byte_count} bytes, {item.source.uri()} "
@@ -608,10 +639,44 @@ def attachment_prompt(prepared: list[PreparedAttachment]) -> str:
     return "\n".join(chunks)
 
 
-def classify(path: Path) -> tuple[str, str]:
+def media_duration(path: Path) -> float | None:
+    """Seconds of an audio or video file: WAV by itself, the rest with ffprobe
+    when it is installed. None when it cannot be told."""
+    import shutil
+    import wave
+
+    with contextlib.suppress(Exception), wave.open(str(path)) as wav:
+        return round(wav.getnframes() / float(wav.getframerate()), 2)
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe is None:
+        return None
+    from rinari.projects._git_process import run_process
+
+    result = run_process(
+        [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
+        path.parent,
+        timeout_s=10.0,
+        label="ffprobe",
+    )
+    with contextlib.suppress(ValueError):
+        if result.returncode == 0:
+            return round(float(result.stdout.strip()), 2)
+    return None
+
+
+def classify(path: Path, name: str | None = None) -> tuple[str, str]:
+    """(kind, MIME) of an attachment; `name`, the one the owner sees, tells
+    archives apart (a stored copy or a pasted file may lose «.tar.gz»)."""
     with path.open("rb") as stream:
         header = stream.read(16)
     suffix = path.suffix.lower()
+    from rinari.engine_protocol.desktop import _file_kind
+
+    sniffed, mime = _file_kind(path, header)
+    if sniffed in MEDIA_KINDS:
+        return sniffed, mime
+    if suffix in _MEDIA_SUFFIXES:
+        return _MEDIA_SUFFIXES[suffix]
     if header.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image", "image/png"
     if header.startswith(b"\xff\xd8\xff"):
@@ -626,6 +691,9 @@ def classify(path: Path) -> tuple[str, str]:
         return "xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     if suffix == ".pptx":
         return "pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    archive = archive_type(name or path.name) or archive_type(path.name)
+    if archive is not None:
+        return ARCHIVE_KIND, archive[1]
     if suffix in TEXT_EXTENSIONS or path.name.lower() in {
         "dockerfile",
         "makefile",
@@ -634,6 +702,19 @@ def classify(path: Path) -> tuple[str, str]:
     }:
         return "text", mimetypes.guess_type(path.name)[0] or "text/plain"
     return "unsupported", "application/octet-stream"
+
+
+# Containers the first bytes do not always tell apart (m4a/mov variants, mkv).
+_MEDIA_SUFFIXES = {
+    ".mp3": ("audio", "audio/mpeg"),
+    ".m4a": ("audio", "audio/mp4"),
+    ".aac": ("audio", "audio/aac"),
+    ".opus": ("audio", "audio/opus"),
+    ".mp4": ("video", "video/mp4"),
+    ".mov": ("video", "video/quicktime"),
+    ".mkv": ("video", "video/x-matroska"),
+    ".webm": ("video", "video/webm"),
+}
 
 
 def _sha256(path: Path) -> str:

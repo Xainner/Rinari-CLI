@@ -34,7 +34,7 @@ from rinari.tools.definition import (
     ToolResult,
 )
 from rinari.tools.native.web import _client_factory, _fail, _guard, _ok, _safe_name, _validate_url
-from rinari.web.client import MAX_RESPONSE_BYTES, WebRequestError
+from rinari.web.client import MAX_RESPONSE_BYTES, WebRequestError, looks_binary
 
 MAX_BODY_PREVIEW_CHARS = 8_000
 MAX_BODY_PRETTY_CHARS = 1_024
@@ -64,24 +64,39 @@ def _query_input(value: Any) -> dict[str, str] | None:
     return _headers_input(value)
 
 
-def _artifact_path(ctx: ToolContext, name: str, body: bytes) -> str:
+def _artifact_path(ctx: ToolContext, name: str, body: bytes) -> tuple[str, str | None]:
+    """The response saved in this conversation's downloads, as web.download does.
+
+    It used to land in the root shared by every conversation, where an Agency
+    agent could not read it back (Rinari's home is closed to it) and two
+    conversations could overwrite each other's file. Returns (path, uri).
+    """
     from pathlib import Path
 
-    root = Path(ctx.artifact_root)
-    root.mkdir(parents=True, exist_ok=True)
-    target = root / name
+    store = getattr(ctx, "artifact_store", None)
+    session_id = getattr(ctx, "session_id", None)
+    if store is not None and session_id:
+        record = store.create(
+            session_id, "downloads", name, body, provenance=f"http.request:{name}"[:500]
+        )
+        return str(store._storage_path(record.storage_path)), record.uri()
+    folder = Path(ctx.artifact_root) / (session_id or "") / "downloads"
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / name
     target.write_bytes(body)
-    return str(target)
+    return str(target), None
 
 
-def _is_textual(content_type: str) -> bool:
+def _is_textual(content_type: str, body: bytes = b"") -> bool:
+    """Text by content-type and by content: binary bodies never reach the model."""
     ctype = (content_type or "").lower()
-    return not ctype or "text" in ctype or "json" in ctype or "xml" in ctype
+    claims_text = not ctype or "text" in ctype or "json" in ctype or "xml" in ctype
+    return claims_text and not looks_binary(body)
 
 
 def _attach_body(data: dict, resp: HttpResponse, save_as: str | None, ctx: ToolContext) -> None:
     body = resp.body
-    textual = _is_textual(resp.content_type)
+    textual = _is_textual(resp.content_type, body)
     if textual:
         text = body.decode("utf-8", errors="replace")
         if len(text) <= MAX_BODY_PREVIEW_CHARS:
@@ -92,9 +107,11 @@ def _attach_body(data: dict, resp: HttpResponse, save_as: str | None, ctx: ToolC
         data["binary"] = True
     name = _safe_name(save_as or "", f"http-response-{resp.sha256[:12]}")
     try:
-        path = _artifact_path(ctx, name, body)
+        path, uri = _artifact_path(ctx, name, body)
         data["artifact"] = {"path": path, "bytes": len(body), "sha256": resp.sha256}
-    except OSError as exc:
+        if uri:
+            data["artifact"]["uri"] = uri
+    except Exception as exc:  # saving is a nicety: the response itself stands
         data["artifact_error"] = f"Could not save response artifact: {exc.__class__.__name__}"
 
 
@@ -180,7 +197,11 @@ def http_request(input: dict, ctx: ToolContext) -> ToolResult:
     }
     if resp.retry_after_s is not None and resp.status == 429:
         data["retry_after_s"] = resp.retry_after_s
-    if save_as or not _is_textual(resp.content_type) or len(resp.body) > MAX_BODY_PREVIEW_CHARS:
+    if (
+        save_as
+        or not _is_textual(resp.content_type, resp.body)
+        or len(resp.body) > MAX_BODY_PREVIEW_CHARS
+    ):
         _attach_body(data, resp, save_as, ctx)
     else:
         data["body"] = resp.body.decode("utf-8", errors="replace")
@@ -341,6 +362,7 @@ def http_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="http.sse",
+            always_loaded=False,
             description=(
                 "Consume a text/event-stream endpoint; returns bounded parsed "
                 "SSE events (event, data, id, retry) within the timeout."

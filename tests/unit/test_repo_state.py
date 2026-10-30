@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from rinari.repo.state import analyze_repository
 
 
@@ -108,3 +110,42 @@ def test_language_ranking_by_count(tmp_path) -> None:
     (tmp_path / "c.py").write_text("x = 1\n", encoding="utf-8")
     s = analyze_repository(tmp_path)
     assert s.languages == ["go", "python"]
+
+
+def test_a_large_folder_does_not_hold_the_turn(tmp_path, monkeypatch) -> None:
+    # SOIN, 23-oct: the scan runs before every turn, and a large project made
+    # three turns in a row time out preparing. It stops at its time limit.
+    from rinari.repo import state
+
+    for index in range(600):
+        (tmp_path / f"m{index}.py").write_text("", encoding="utf-8")
+    monkeypatch.setattr(state, "SCAN_TIME_LIMIT_S", 0.0)
+    summary = state.analyze_repository(tmp_path)
+    assert summary.scanned_files == 256
+    assert summary.languages == ["python"]
+
+
+def test_the_summary_is_reused_between_turns(tmp_path, monkeypatch) -> None:
+    # It goes into the system prompt: the same folder gives the same summary
+    # for a while, without walking it again.
+    from rinari.repo import state
+
+    (tmp_path / "a.py").write_text("", encoding="utf-8")
+    first = state.analyze_repository(tmp_path)
+    monkeypatch.setattr(state, "_walk", lambda _root: pytest.fail("walked again"))
+    assert state.analyze_repository(tmp_path) is first
+    monkeypatch.setattr(state, "RECENT_TTL_S", 0.0)
+    monkeypatch.setattr(state, "_walk", lambda _root: iter(()))
+    assert state.analyze_repository(tmp_path) is not first
+
+
+def test_a_new_entry_at_the_root_refreshes_the_summary(tmp_path) -> None:
+    # A new module between turns reaches the next turn, not ten minutes later.
+    from rinari.repo import state
+
+    (tmp_path / "a.py").write_text("", encoding="utf-8")
+    first = state.analyze_repository(tmp_path)
+    (tmp_path / "web").mkdir()
+    (tmp_path / "web" / "m.ts").write_text("", encoding="utf-8")
+    again = state.analyze_repository(tmp_path)
+    assert again is not first and "typescript" in again.languages

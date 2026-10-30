@@ -239,3 +239,23 @@ def test_protocol_create_validate_and_manage_folders(server, services, tmp_path)
         server, "project.folder.remove", {"project_id": project["id"], "path": str(extra)}
     )["result"]["project"]
     assert len(removed["folders"]) == 2
+
+
+def test_validate_says_which_folders_bring_commands(server, tmp_path):
+    """Plan 0.4.0 #60: hooks or MCP files keep «Confiar» off with a warning."""
+    plain = _dir(tmp_path, "plain")
+    hooked = _dir(tmp_path, "hooked")
+    (hooked / ".rinari").mkdir()
+    (hooked / ".rinari" / "hooks.json").write_text("[]", encoding="utf-8")
+    served = _dir(tmp_path, "served")
+    (served / ".mcp.json").write_text("{}", encoding="utf-8")
+    report = _call(
+        server, "project.folders.validate", {"paths": [str(plain), str(hooked), str(served)]}
+    )["result"]["folders"]
+    assert [(f["has_hooks"], f["has_mcp"]) for f in report] == [
+        (False, False),
+        (True, False),
+        (False, True),
+    ]
+    missing = _call(server, "project.folders.validate", {"paths": [str(tmp_path / "nope")]})
+    assert missing["result"]["folders"][0]["has_hooks"] is False

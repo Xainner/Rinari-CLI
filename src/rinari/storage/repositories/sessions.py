@@ -24,8 +24,9 @@ class SessionRepository:
                 created_cwd, current_cwd, provider_id, model_id,
                 profile_id, mode, state, compact_state_json,
                 created_at, updated_at, last_active_at, git_branch, forked_from,
-                active_skills_json, permission_profile, soul_id, rinari_profile_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                active_skills_json, permission_profile, soul_id, rinari_profile_id,
+                parent_session_id, lineage_kind, brief_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 rec.id,
@@ -54,6 +55,9 @@ class SessionRepository:
                 rec.permission_profile,
                 rec.soul_id,
                 rec.rinari_profile_id,
+                rec.parent_session_id,
+                rec.lineage_kind,
+                json.dumps(rec.brief, sort_keys=True) if rec.brief else None,
             ),
         )
 
@@ -111,12 +115,19 @@ class SessionRepository:
         state: str | None = None,
         limit: int | None = None,
         rinari_profile_id: str | None = None,
+        agent_id: str | None = None,
+        exclude_agents: bool = False,
     ) -> list[SessionRecord]:
         sql = "SELECT * FROM sessions WHERE 1=1"
         params: list[object] = []
         if rinari_profile_id is not None:
             sql += " AND rinari_profile_id = ?"
             params.append(rinari_profile_id)
+        if agent_id is not None:
+            sql += " AND agent_id = ?"
+            params.append(agent_id)
+        elif exclude_agents:
+            sql += " AND agent_id IS NULL"
         if kind is not None:
             sql += " AND kind = ?"
             params.append(kind)
@@ -131,6 +142,25 @@ class SessionRepository:
             sql += " LIMIT ?"
             params.append(limit)
         return [_session_to_record(r) for r in self._db.query(sql, params)]
+
+    def set_lineage(
+        self,
+        session_id: str,
+        parent_session_id: str | None,
+        lineage_kind: str,
+        brief: dict | None = None,
+    ) -> None:
+        """Only writer of a conversation's lineage after insert (plan 0.4.0 #40)."""
+        self._db.execute(
+            "UPDATE sessions SET parent_session_id = ?, lineage_kind = ?, brief_json = ? "
+            "WHERE id = ?",
+            (
+                parent_session_id,
+                lineage_kind,
+                json.dumps(brief, sort_keys=True) if brief else None,
+                session_id,
+            ),
+        )
 
     def set_rinari_profile(self, session_ids: list[str], rinari_profile_id: str) -> None:
         """Only writer of a conversation's profile (see SessionRecord)."""
@@ -187,7 +217,30 @@ def _session_to_record(row: dict) -> SessionRecord:
         soul_id=row["soul_id"],
         pinned_at=row["pinned_at"],
         rinari_profile_id=row["rinari_profile_id"] or "default",
+        parent_session_id=_column(row, "parent_session_id"),
+        lineage_kind=_column(row, "lineage_kind"),
+        brief=_brief(_column(row, "brief_json")),
+        agent_id=_column(row, "agent_id"),
+        team_id=_column(row, "team_id"),
     )
+
+
+def _column(row, name: str):
+    """A column that older homes (before migration 0053) do not have yet."""
+    try:
+        return row[name]
+    except (IndexError, KeyError):
+        return None
+
+
+def _brief(raw: str | None) -> dict | None:
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
 
 
 class SessionEventRepository:
@@ -267,6 +320,41 @@ class SessionEventRepository:
             sql += " LIMIT ?"
             params.append(limit)
         return [_event_to_record(r) for r in self._db.query(sql, params)]
+
+    def turn_order(self, session_id: str) -> list[str]:
+        """Turn ids in the order they started, without reading their events."""
+        rows = self._db.query(
+            "SELECT turn_id, MIN(seq) AS first FROM session_events "
+            "WHERE session_id = ? AND turn_id IS NOT NULL GROUP BY turn_id ORDER BY first",
+            (session_id,),
+        )
+        return [str(row["turn_id"]) for row in rows]
+
+    def list_for_turns(self, session_id: str, turn_ids: Sequence[str]) -> list[SessionEventRecord]:
+        """Only the events of these turns: a page of the timeline, not all of it."""
+        if not turn_ids:
+            return []
+        marks = ", ".join("?" for _ in turn_ids)
+        rows = self._db.query(
+            f"SELECT * FROM session_events WHERE session_id = ? AND turn_id IN ({marks}) "
+            "ORDER BY seq ASC",
+            (session_id, *turn_ids),
+        )
+        return [_event_to_record(r) for r in rows]
+
+    def compact_tool_output(self, session_id: str, turn_id: str, tool_call_id: str) -> int:
+        """Drop the live output chunks of a tool that ended (#91).
+
+        The terminal event carries the output; the chunks only served the live
+        view. Rows of a tool still running are never touched.
+        """
+        cursor = self._db.execute(
+            "DELETE FROM session_events WHERE session_id = ? AND turn_id = ? "
+            "AND type = 'tool.output.delta' "
+            "AND json_extract(payload_json, '$.tool_call_id') = ?",
+            (session_id, turn_id, tool_call_id),
+        )
+        return int(getattr(cursor, "rowcount", 0) or 0)
 
     def latest(self, session_id: str, types: Sequence[str]) -> SessionEventRecord | None:
         """The most recent event of these types, if any."""
@@ -360,6 +448,42 @@ class SessionMessageRepository:
         rows = self._db.query(
             "SELECT * FROM session_messages WHERE session_id = ? ORDER BY seq ASC",
             (session_id,),
+        )
+        return [_message_to_record(r) for r in rows]
+
+    def count(self, session_id: str) -> int:
+        row = self._db.query_one(
+            "SELECT COUNT(*) AS n FROM session_messages WHERE session_id = ?", (session_id,)
+        )
+        return int(row["n"]) if row else 0
+
+    def page(
+        self, session_id: str, limit: int, before_seq: int | None = None
+    ) -> list[SessionMessageRecord]:
+        """The newest `limit` messages (before `before_seq`), oldest first (#70).
+
+        A long conversation used to be read whole to keep its last 200 rows.
+        """
+        sql = "SELECT * FROM session_messages WHERE session_id = ?"
+        params: list[object] = [session_id]
+        if before_seq is not None:
+            sql += " AND seq < ?"
+            params.append(before_seq)
+        sql += " ORDER BY seq DESC LIMIT ?"
+        params.append(limit)
+        rows = self._db.query(sql, params)
+        return [_message_to_record(r) for r in reversed(rows)]
+
+    def list_for_turns(
+        self, session_id: str, turn_ids: Sequence[str]
+    ) -> list[SessionMessageRecord]:
+        if not turn_ids:
+            return []
+        marks = ", ".join("?" for _ in turn_ids)
+        rows = self._db.query(
+            f"SELECT * FROM session_messages WHERE session_id = ? AND turn_id IN ({marks}) "
+            "ORDER BY seq ASC",
+            (session_id, *turn_ids),
         )
         return [_message_to_record(r) for r in rows]
 

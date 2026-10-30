@@ -381,7 +381,8 @@ def test_anthropic_invoke_normalizes() -> None:
     response = adapter.invoke(_request(), "key", None)
     assert response.content == "hola mundo"
     assert response.stop_reason is StopReason.END_TURN
-    assert response.usage.input_tokens == 8
+    # Input counts the cached tokens too, as other providers do (#78).
+    assert response.usage.input_tokens == 10
     assert response.usage.output_tokens == 12
     assert response.usage.cached_input_tokens == 2
 
@@ -547,7 +548,8 @@ def test_anthropic_stream() -> None:
     assert response.tool_calls[0].name == "fs.read"
     assert response.tool_calls[0].arguments == {"p": "x"}
     assert response.stop_reason is StopReason.TOOL_CALLS
-    assert response.usage.input_tokens == 5
+    # 5 read plus 1 from the cache (#78).
+    assert response.usage.input_tokens == 6
     assert response.usage.output_tokens == 7
     assert response.usage.cached_input_tokens == 1
 
@@ -1604,3 +1606,107 @@ def test_openai_compatible_payload_sends_the_projected_schema() -> None:
     sent = payload["tools"][0]["function"]["parameters"]
     assert "oneOf" not in sent and set(sent["properties"]) == {"command", "argv"}
     assert "oneOf" in schema
+
+
+def test_a_refused_protocol_is_learned_kept_and_the_call_goes_on(monkeypatch, tmp_path) -> None:
+    # Plan 0.4.0 #94: «Model does not support this protocol» on the chat route.
+    import json as _json
+
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        seen.append(url)
+        if "/google/" in url:
+            chunk = {
+                "candidates": [
+                    {
+                        "content": {"role": "model", "parts": [{"text": "OK"}]},
+                        "finishReason": "STOP",
+                    }
+                ]
+            }
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=f"data: {_json.dumps(chunk)}\n\n".encode(),
+            )
+        return httpx.Response(
+            400, json={"error": {"message": "Model does not support this protocol."}}
+        )
+
+    events: list = []
+    ctx, services = _app_and_services(handler, monkeypatch, tmp_path)
+    try:
+        provider = services.providers.add(_add_custom_input("go", OPENCODE_GO_URL))
+        model = services.models.add(provider.alias, "mystery-model", "mystery")
+        router = ModelRouter(services.providers, services.models, http_client=_client(handler))
+        request = _request(usage_observer=lambda name, payload: events.append((name, payload)))
+        response = router.invoke(provider, model.id, request)
+        assert response.content == "OK"
+        assert services.models.resolve(model.id).settings["transport"] == "google"
+        assert (
+            "provider.protocol.learned",
+            {"model": "mystery-model", "transport": "google"},
+        ) in events
+        # Next time it goes straight to the learned protocol.
+        seen.clear()
+        router.invoke(provider, model.id, _request())
+        assert all("/google/" in url for url in seen)
+    finally:
+        ctx.close()
+
+
+def test_opencode_calls_go_to_the_documented_address_per_protocol() -> None:
+    # Plan 0.4.0 #94 point 2: one address per protocol; custom ones are left alone.
+    from rinari.providers.opencode_routes import documented_route
+
+    go, zen = OPENCODE_GO_URL, "https://opencode.ai/zen/v1/"
+    assert documented_route(go, "chat") == "https://opencode.ai/inference/go/openai/v1"
+    assert documented_route(go, "responses") == "https://opencode.ai/inference/go/openai/v1"
+    assert documented_route(go, "anthropic") == "https://opencode.ai/inference/go/anthropic/v1"
+    assert documented_route(zen, "chat") == "https://opencode.ai/inference/zen/openai/v1"
+    assert documented_route(go, "google") is None
+    assert documented_route("https://api.test/v1", "chat") is None
+    assert documented_route("https://opencode.ai/inference/go/openai/v1", "chat") is None
+
+
+def test_opencode_new_address_404_falls_back_to_the_saved_one_and_remembers(
+    monkeypatch, tmp_path
+) -> None:
+    from rinari.providers.opencode_routes import forget
+
+    forget()
+    seen: list[str] = []
+    new_works = {"value": True}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        seen.append(url)
+        if "/inference/" in url and not new_works["value"]:
+            return httpx.Response(404, json={"error": {"message": "Not Found"}})
+        return httpx.Response(200, json=_chat_ok())
+
+    ctx, services = _app_and_services(handler, monkeypatch, tmp_path)
+    try:
+        provider = services.providers.add(_add_custom_input("go", OPENCODE_GO_URL))
+        model = services.models.add(provider.alias, "m-x", "mx")
+        router = ModelRouter(services.providers, services.models, http_client=_client(handler))
+        assert router.invoke(provider, model.id, _request()).content == "hola"
+        assert seen == ["https://opencode.ai/inference/go/openai/v1/chat/completions"]
+
+        forget()
+        seen.clear()
+        new_works["value"] = False
+        assert router.invoke(provider, model.id, _request()).content == "hola"
+        assert seen == [
+            "https://opencode.ai/inference/go/openai/v1/chat/completions",
+            "https://opencode.ai/zen/go/v1/chat/completions",
+        ]
+        # Remembered: the next call goes straight to the saved address.
+        seen.clear()
+        router.invoke(provider, model.id, _request())
+        assert seen == ["https://opencode.ai/zen/go/v1/chat/completions"]
+    finally:
+        forget()
+        ctx.close()

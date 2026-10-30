@@ -34,14 +34,17 @@ from rinari.engine_protocol import errors
 from rinari.engine_protocol.errors import EngineProtocolError
 from rinari.engine_protocol.messages import event
 from rinari.engine_protocol.operations import OperationStore
-from rinari.engine_protocol.peers import PeerBroker
 from rinari.engine_protocol.token_usage import TurnTokenTracker
 from rinari.models.types import ChatMessage
 from rinari.policy.approvals import ApprovalRequest
+from rinari.policy.engine import PermissionProfile
 from rinari.shared.clock import now_iso
 from rinari.shared.errors import CancelledError, RinariError
 from rinari.shared.redaction import redact_value
 from rinari.storage.records import SessionEventRecord
+
+#: Turns the Engine may start in one conversation per hour for finished work.
+MAX_WAKES_PER_HOUR = 6
 
 logger = logging.getLogger(__name__)
 
@@ -52,10 +55,31 @@ PREPARATION_POLL_S = 0.05
 MAX_DELTA_CHARS = 8000
 MAX_DETAIL_CHARS = 2000
 MAX_STREAM_CHARS = 64_000
+_TOOL_ENDS = frozenset({"tool.completed", "tool.failed", "tool.cancelled"})
+
+
+def _origin_kind(origin: dict[str, Any] | None) -> str:
+    """Who a turn's message comes from, for the tools that only trust the owner.
+
+    A child's brief and its mother's messages are shown as the owner's
+    (`kind: user`), but the model wrote them: they never count as the owner
+    asking (a rule, a quote to keep, a memory).
+    """
+    origin = origin or {}
+    kind = origin.get("kind") or "user"
+    if kind == "user" and origin.get("source") in ("child_brief", "parent_message"):
+        return "child_brief"
+    return kind
+
+
 MAX_QUEUE_DEPTH = 20
 MAX_QUEUE_MESSAGE_CHARS = 32768
 # What the model reads before a message the owner sent mid-turn. The chat
 # shows only the owner's text (display content).
+STEER_NOW_PREFIX = (
+    "[The user interrupted your current step to tell you this. Read it now; it may "
+    "change or refine the current task. Anything you were writing was cut off.]\n\n"
+)
 STEER_PREFIX = (
     "[The user sent this while you were working. Take it into account from here on; "
     "it may change or refine the current task.]\n\n"
@@ -66,11 +90,16 @@ _DECISION_TO_ANSWER = {"deny": "n", "allow_once": "y", "allow_session": "s", "al
 
 @dataclass
 class _QueuedPrompt:
-    """A manual queue entry (legacy `session.queue.add`), origin user."""
+    """A manual queue entry (legacy `session.queue.add`), origin user.
+
+    A scheduled task that runs in its conversation waits here too, with its
+    own origin and `memory_origin`: it is not the owner speaking.
+    """
 
     message: str
     origin: dict[str, Any] | None = None
     display_message: str | None = None
+    memory_origin: str = "interactive"
 
 
 @dataclass
@@ -83,8 +112,6 @@ class _ActiveTurn:
     # propietario. Un origen `peer` limita el runtime (techo de procedencia)
     # y alimenta la cadena/hop de cualquier envío posterior.
     origin: dict[str, Any] | None = None
-    peer_message_id: str | None = None
-    peer_sends: int = 0
     cancel_requested: threading.Event = field(default_factory=threading.Event)
     started_at: float = field(default_factory=time.time)
     status: str = "running"
@@ -103,6 +130,16 @@ class _ActiveTurn:
     continue_after: bool = False
     # Slash command that started the turn (`learn`…); becomes turn_command.
     command: str = ""
+    # Paths the turn changed, for a child's report to its mother.
+    changed_paths: list[str] = field(default_factory=list)
+    # Checklist the turn starts with: the steps of the plan it implements (#55).
+    seed_checklist: list[dict[str, Any]] | None = None
+    # `/init` (#81): this turn alone is read-only, whatever the session's
+    # mode, and starts with these tools already loaded.
+    read_only: bool = False
+    activate_tools: tuple[str, ...] = ()
+    # The process registry whose exits refresh this turn's context (#90).
+    process_watch: Any | None = None
     activity_lock: Any = field(default_factory=threading.RLock)
     # The first visible text of the turn decides `model.changed`, once.
     model_notice_checked: bool = False
@@ -119,6 +156,10 @@ class _ActiveTurn:
     steering_open: bool = True
     steer_count: int = 0
     terminal_event: str | None = None
+    # What the goal runner needs from a finished turn (plan 0.4.0 #23).
+    goal_result: Any = None
+    goal_error: tuple[str, str] = ("", "")
+    files_changed: int = 0
     governor: dict[str, Any] = field(
         default_factory=lambda: {
             "execution": "automatic",
@@ -229,15 +270,29 @@ class TurnManager:
         # servidor al construirse; sin ella el comportamiento es el de siempre.
         self._browser_registry: Any | None = None
         self._desktop_processes: dict[str, Any] = {}
+        # #90: the durable list of the processes the model starts.
+        self._process_ledger: Any | None = None
+        with contextlib.suppress(Exception):
+            from rinari.engine_protocol.process_ledger import ProcessLedger
+
+            self._process_ledger = ProcessLedger(services.ctx.layout.root)
         self._threads: dict[str, threading.Thread] = {}
         self._preparation_threads: set[threading.Thread] = set()
         self._approvals: dict[str, _PendingApproval] = {}
         self._observers: list[Any] = []
+        # session_id -> whether its last turn read something from outside the
+        # machine (the Agency passes that on to the turn it wakes).
+        self._last_external: dict[str, bool] = {}
+        # A resume waiting for a provider limit holds the session's queue
+        # (plan 0.4.0 #24); set by the resume runner.
+        self.queue_hold: Any = None
+        # Told what «Vaciar» took out of a session's queue: a scheduled run
+        # waiting there ends cancelled, set by the schedule runner.
+        self.queue_cleared: Any = None
         self._closed_approvals: dict[str, str] = {}
+        # session_id -> when the Engine woke it for finished work (a cap per hour).
+        self._wakes: dict[str, collections.deque[float]] = {}
         self._queue: dict[str, collections.deque[_QueuedPrompt]] = {}
-        # Sessions whose peer inbox admission is paused by an explicit Stop;
-        # `session.queue.resume` lifts it.
-        self._peer_paused: set[str] = set()
         self._lock = threading.RLock()
         self._local = threading.local()
         from rinari.engine_protocol.questions import QuestionBroker
@@ -246,9 +301,14 @@ class TurnManager:
         from rinari.engine_protocol.channels import ChannelBroker
 
         self.channels = ChannelBroker()
-        self.peers = PeerBroker(self)
-        # A new engine process never replays deliveries accepted by an older one.
-        self.peers.on_engine_start()
+        # «In this chat» / «in this session» grants, one list per conversation (#56).
+        from rinari.policy.session_grants import SessionGrantRegistry
+
+        self.grants = SessionGrantRegistry(services.ctx.db)
+        # Child sessions a conversation opens for a separate piece of work.
+        from rinari.engine_protocol.children import ChildSessions
+
+        self.children = ChildSessions(self)
         # Nor leaves its turns open: one that died mid-turn is closed now.
         self.reconcile_orphan_turns()
         try:
@@ -299,6 +359,82 @@ class TurnManager:
     def has_active_turns(self) -> bool:
         with self._lock:
             return any(not turn.done.is_set() for turn in self._turns.values())
+
+    def last_turn_external(self, session_id: str) -> bool:
+        """Whether the conversation's last finished turn read external content."""
+        with self._lock:
+            return self._last_external.get(session_id, False)
+
+    def _note_external(self, turn) -> None:
+        """Remember whether this turn read external content, before its terminal event.
+
+        Also when it failed or was cancelled: never the previous turn's value
+        (#75). Before the turn had a session, its origin's mark is all there is.
+        """
+        state = None
+        if turn.session is not None:
+            state = getattr(getattr(turn.session.context, "tool_ctx", None), "turn_state", None)
+        if state is not None:
+            external = bool(getattr(state, "external_content", False))
+        else:
+            external = bool((turn.origin or {}).get("external_content"))
+        with self._lock:
+            self._last_external[turn.session_id] = external
+
+    def wake(self, session_id: str, message: str, origin: dict[str, Any], display: str) -> str:
+        """Start a turn for work that finished while nobody was waiting.
+
+        "started", "busy" (a turn runs: try again later) or "refused" (the
+        conversation is closed, or it was woken too often this hour).
+        """
+        if self.has_active_turn(session_id):
+            return "busy"
+        now = time.monotonic()
+        with self._lock:
+            recent = self._wakes.setdefault(session_id, collections.deque())
+            while recent and now - recent[0] > 3600:
+                recent.popleft()
+            if len(recent) >= MAX_WAKES_PER_HOUR:
+                logger.warning("Not waking %s: %s wakes this hour", session_id, len(recent))
+                return "refused"
+            recent.append(now)
+        try:
+            self.start_turn(
+                session_id,
+                message,
+                origin=origin,
+                display_message=display,
+                memory_origin="automation",
+            )
+        except EngineProtocolError as exc:
+            with self._lock, contextlib.suppress(ValueError):
+                self._wakes[session_id].remove(now)
+            return "busy" if exc.code == errors.TURN_RUNNING else "refused"
+        return "started"
+
+    def _wake_after_exit(self, session_id: str, processes: Any) -> None:
+        """A process started with notify=wake ended after its turn: a new turn.
+
+        Its exit code and the end of its output reach the model through the
+        process note the new turn's watch builds.
+        """
+        pending = processes.pending_wakes()
+        if not pending:
+            return
+        names = ", ".join(handle.name or handle.id for handle in pending)
+        codes = sorted({handle.exit_code for handle in pending if handle.exit_code is not None})
+        message = (
+            f"[Rinari] Background work you asked to be woken for ended: {names} "
+            f"(exit code {', '.join(str(code) for code in codes) or 'unknown'}). "
+            "Its output is in the process note. Continue with what you were waiting for, "
+            "or tell the owner the result."
+        )
+        self.wake(
+            session_id,
+            message,
+            {"kind": "automation", "source": "process_exit", "source_label": names[:200]},
+            message,
+        )
 
     def has_active_turn(self, session_id: str) -> bool:
         with self._lock:
@@ -353,8 +489,20 @@ class TurnManager:
             logger.exception("checklist rollover failed")
             return
         if cleared is not None:
+            # Cleared (the last turn finished it) or active again (#66b).
+            reason = "rollover" if cleared.state == "cleared" else "resumed"
             self._activity_cb(turn)(
-                "checklist.updated", {"reason": "rollover", "checklist": cleared.as_dict()}
+                "checklist.updated", {"reason": reason, "checklist": cleared.as_dict()}
+            )
+        if turn.seed_checklist:
+            # Implementing a plan: its steps are the turn's list (plan 0.4.0 #55).
+            try:
+                seeded, _ = service.replace(turn.session_id, turn.seed_checklist)
+            except Exception:
+                logger.exception("plan checklist seed failed")
+                return
+            self._activity_cb(turn)(
+                "checklist.updated", {"reason": "plan", "checklist": seeded.as_dict()}
             )
 
     def _checklist_end(self, turn: _ActiveTurn) -> None:
@@ -533,6 +681,84 @@ class TurnManager:
             )
         return True
 
+    def start_init_turn(self, session_id: str) -> dict[str, Any]:
+        """`/init` (#81): explore the project read-only and propose its RINARI.md."""
+        from rinari.tools.native.instructions import (
+            INSTRUCTIONS_FILE,
+            REUSABLE,
+            current_instructions,
+        )
+
+        record = self._services.sessions.show(session_id)
+        root = Path(record.project_root_snapshot) if record.project_root_snapshot else None
+        if record.kind != "PROJECT" or root is None or not root.is_dir():
+            raise EngineProtocolError(
+                errors.INVALID_PARAMS,
+                "/init needs a conversation in a project: RINARI.md belongs to a project folder.",
+                details={"session_id": session_id},
+            )
+        existing = current_instructions(root)
+        reusable = [name for name in REUSABLE if (root / name).is_file()]
+        lines = [
+            "[/init] Get to know this project and propose its RINARI.md.",
+            "This turn is read-only: explore with reads, searches and listings; do not write, "
+            "install or run anything that changes the project.",
+            "Find out what the project is and its stack; how it is installed, tested, built and "
+            "run (the real commands from its manifests, scripts and CI); its conventions, "
+            "important folders and what must not be touched.",
+            "Then call project.instructions.propose once with the whole file. Put the commands "
+            "under a «## Cómo probar» (or «## How to test») section, one per line in backticks. "
+            "Write it in the user's language and keep it short and factual.",
+        ]
+        if existing is not None:
+            lines.append(
+                f"The project already has a {INSTRUCTIONS_FILE}: propose the updated whole file, "
+                "keeping what is still true. The user sees the difference before saving."
+            )
+        if reusable:
+            lines.append(
+                "It also has " + " and ".join(reusable) + ": reuse them (summarize what matters or "
+                "point to them) instead of duplicating, and list them in reuses."
+            )
+        lines.append("Finish with a two-line summary of what you proposed.")
+        return self.start_turn(
+            session_id,
+            "\n".join(lines),
+            display_message="/init",
+            origin={"kind": "user", "command": "init", "command_kind": "ui"},
+            command="init",
+            read_only=True,
+            activate_tools=("project.instructions.propose",),
+        )
+
+    def instructions_proposal(self, session_id: str, proposal_id: str) -> dict[str, Any] | None:
+        """The `instructions.proposed` event of a /init card, with its turn."""
+        for row in self._services.ctx.db.query(
+            "SELECT turn_id, payload_json FROM session_events "
+            "WHERE session_id = ? AND type = 'instructions.proposed' ORDER BY seq DESC",
+            (session_id,),
+        ):
+            payload = _json_payload(row["payload_json"])
+            if payload.get("proposal_id") == proposal_id:
+                return {**payload, "turn_id": row["turn_id"]}
+        return None
+
+    def emit_instructions_resolution(
+        self, session_id: str, turn_id: str | None, payload: dict[str, Any]
+    ) -> None:
+        """`instructions.proposal.resolved` on the turn whose card showed it."""
+        with self._lock:
+            live = self._turns.get(turn_id or "")
+        if live is not None and not live.done.is_set():
+            self._activity_cb(live)("instructions.proposal.resolved", payload)
+        elif turn_id:
+            self.emit_persisted_activity(
+                "instructions.proposal.resolved",
+                session_id=session_id,
+                turn_id=turn_id,
+                payload=payload,
+            )
+
     def runtime_state(self) -> dict[str, Any]:
         """Presentation-safe live state used to recover after a UI reload."""
         with self._lock:
@@ -577,6 +803,69 @@ class TurnManager:
 
     # -- turn lifecycle ----------------------------------------------------
 
+    def _warn_pasted_secret(self, session_id: str, message: str) -> None:
+        """Rinari Agency (D-11): the owner pasted what looks like a key in an agent's chat.
+
+        It already went to the model's provider with the message, so it cannot
+        be taken back: the desktop says so and recommends changing it. The
+        event never carries the text, only that it happened.
+        """
+        from rinari.memory.service import find_sensitive_match
+        from rinari.shared.redaction import redact_text
+
+        text = message or ""
+        if find_sensitive_match(text) is None and redact_text(text) == text:
+            return
+        self.emit_external(event("agency.secret_pasted", {"session_id": session_id}))
+
+    def _check_agent(self, record: Any) -> None:
+        """Rinari Agency: an agent's turn waits for the owner past its daily cap.
+
+        Checked before the turn exists, so nothing is spent. An unknown cost
+        (a model without a known price) never stops it: only a token cap can.
+        """
+        from rinari.engine_protocol.agency import spend_today
+
+        agency = getattr(self._services, "agency", None)
+        if agency is None:
+            return
+        agent = agency.for_session(record.id)
+        if agent is None:
+            raise EngineProtocolError(
+                errors.AGENT_ARCHIVED,
+                "This agent was archived; its conversation is read-only.",
+                details={"session_id": record.id, "agent_id": record.agent_id},
+            )
+        spend = spend_today(self._services, agent)
+        if spend["over_budget"]:
+            raise EngineProtocolError(
+                errors.AGENT_OVER_BUDGET,
+                f"{agent['name']} used today's budget; raise it or wait until tomorrow.",
+                details={"session_id": record.id, "agent_id": agent["id"], "spend": spend},
+            )
+        # A2: a post also stops at its team's cap, and every agent at the Agency's.
+        from rinari.engine_protocol.agency import agency_settings, spend_of
+
+        team_id = getattr(record, "team_id", None)
+        team = self._services.ctx.team_repo.get(team_id) if team_id else None
+        if team is not None and team.get("budget"):
+            team_spend = spend_of(self._services, "team", team["id"], team["budget"])
+            if team_spend["over_budget"]:
+                raise EngineProtocolError(
+                    errors.AGENT_OVER_BUDGET,
+                    f"The team {team['name']} used today's budget.",
+                    details={"session_id": record.id, "team_id": team["id"], "spend": team_spend},
+                )
+        global_budget = agency_settings(self._services)["budget"]
+        if global_budget:
+            total = spend_of(self._services, "agency", None, global_budget)
+            if total["over_budget"]:
+                raise EngineProtocolError(
+                    errors.AGENT_OVER_BUDGET,
+                    "The Agency used today's budget.",
+                    details={"session_id": record.id, "spend": total},
+                )
+
     def start_turn(
         self,
         session_id: str,
@@ -594,17 +883,35 @@ class TurnManager:
         memory_origin: str = "interactive",
         compaction_only: bool = False,
         origin: dict[str, Any] | None = None,
-        peer_message_id: str | None = None,
         command: str = "",
         continue_after: bool = False,
+        seed_checklist: list[dict[str, Any]] | None = None,
+        read_only: bool = False,
+        activate_tools: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         record = self._services.sessions.show(session_id)
-        if record.state in {SESSION_STATE_CLOSED, SESSION_STATE_ARCHIVED}:
+        # A scheduled task that runs in its conversation («Repetir aquí») runs
+        # there even when it was archived, and leaves it archived.
+        scheduled_here = (
+            record.state == SESSION_STATE_ARCHIVED
+            and memory_origin == "automation"
+            and (origin or {}).get("kind") == "schedule"
+        )
+        if record.state in {SESSION_STATE_CLOSED, SESSION_STATE_ARCHIVED} and not scheduled_here:
             raise EngineProtocolError(
                 errors.SESSION_CLOSED,
                 f"Session {record.id} is closed; resume it before starting turns.",
                 details={"session_id": record.id},
             )
+        if record.agent_id and not compaction_only:
+            self._check_agent(record)
+            if reasoning_effort is None:
+                # Rinari Agency: the agent's effort, for its chat, its posts,
+                # its rules and its children, unless the turn chose one.
+                agent = self._services.ctx.agency_repo.get(record.agent_id) or {}
+                reasoning_effort = agent.get("reasoning_effort") or None
+            if origin is None and memory_origin == "interactive":
+                self._warn_pasted_secret(record.id, message)
         # A turn is what recency means, and nothing else refreshed it here, so
         # a session stayed where it was however much was said in it. Compaction
         # is housekeeping the user did not ask for and must not reorder a list.
@@ -623,13 +930,15 @@ class TurnManager:
             operation_id=operation_id,
             attachments=attachments,
             origin=origin,
-            peer_message_id=peer_message_id,
             display_message=display_message,
             attachment_metadata=attachment_metadata,
             allow_unconfirmed_vision=allow_unconfirmed_vision,
             compaction_only=compaction_only,
             continue_after=continue_after and compaction_only,
             command=command,
+            seed_checklist=seed_checklist,
+            read_only=read_only,
+            activate_tools=tuple(activate_tools),
         )
         with self._lock:
             record = self._services.sessions.show(session_id)
@@ -652,14 +961,17 @@ class TurnManager:
                 **({"origin": origin} if origin else {}),
             },
         )
+        self.children.before_turn(turn)
         thread = threading.Thread(
             target=self._run_turn,
             args=(turn_id, record, message, reasoning_effort),
             daemon=True,
         )
+        # Registered and started together: close() joins every registered
+        # thread, and one not started yet cannot be joined (Windows CI).
         with self._lock:
             self._threads[turn_id] = thread
-        thread.start()
+            thread.start()
         return {"status": "started", "turn_id": turn_id, "session_id": record.id}
 
     def start_operation(
@@ -731,13 +1043,16 @@ class TurnManager:
                 self.operations.finish(turn.turn_id, "cancelling")
             return self.operations.get(operation_id) or operation
 
-    def cancel_turn(self, session_id: str) -> dict[str, Any]:
+    def cancel_turn(self, session_id: str, turn_id: str | None = None) -> dict[str, Any]:
+        """Cancel the session's running turn; with `turn_id`, only if it is that one."""
         with self._lock:
             turn = next(
                 (
                     active
                     for active in self._turns.values()
-                    if active.session_id == session_id and not active.done.is_set()
+                    if active.session_id == session_id
+                    and not active.done.is_set()
+                    and (turn_id is None or active.turn_id == turn_id)
                 ),
                 None,
             )
@@ -745,11 +1060,6 @@ class TurnManager:
             raise EngineProtocolError(
                 errors.NO_ACTIVE_TURN, f"Session {session_id} has no running turn."
             )
-        # Stop pauses peer admission before the cancellation lands so the
-        # turn's finally block never starts the next peer delivery.
-        with self._lock:
-            self._peer_paused.add(session_id)
-        self.operations.inbox_pause_session(session_id, "stopped by user")
         turn.cancel_requested.set()
         turn.status = "cancelling"
         if turn.session is not None:
@@ -836,8 +1146,16 @@ class TurnManager:
         # visor de capturas del backend externo, y con vista nativa la UI
         # muestra la superficie real, no una imagen de ella.
         if getattr(browser, "_backend", None) is not None:
+            # Cada turno prepara el navegador de su sesión por si lo usa, así
+            # que tenerlo no significa usarlo: «conectado» exige además una
+            # página abierta. Sin esto, cualquier conversación que hubiera
+            # corrido un turno encendía el botón Navegador «en vivo».
+            pages = (
+                self._browser_registry is not None
+                and self._browser_registry.describe(session_id).get("context_state") == "ready"
+            )
             return {
-                "state": "connected" if browser.connected else "disconnected",
+                "state": "connected" if browser.connected and pages else "disconnected",
                 "session_id": session_id,
                 "backend": "electron-native",
                 "native_surface": True,
@@ -902,12 +1220,23 @@ class TurnManager:
             changes_finalized = True
             changeset = tracker.finalize()
             if changeset is not None:
+                turn.files_changed = len(changeset.get("files") or [])
+                turn.changed_paths = [
+                    str(row.get("path"))
+                    for row in changeset.get("files") or []
+                    if isinstance(row, dict) and row.get("path")
+                ]
                 self._activity_cb(turn)("turn.changes.completed", changeset)
 
+        trusted_before = self._trusted_folders(record)
         try:
             self._checklist_begin(turn)
             agent_session = self._prepare_session(turn, record, reasoning_effort)
             context = agent_session.context
+            if turn.activate_tools:
+                # Announced with their exact call when outside the fixed list
+                # (F42); the list itself does not change.
+                agent_session.next_turn_tools = tuple(turn.activate_tools)
             with self._lock:
                 processes = self._desktop_processes.setdefault(
                     turn.session_id, context.tool_ctx.processes
@@ -928,6 +1257,7 @@ class TurnManager:
                         self._desktop_browsers[turn.session_id] = browser
                 if browser is not None:
                     context.tool_ctx = replace(context.tool_ctx, browser=browser)
+            self._watch_processes(turn, context, processes)
             tracker = self._services.changes.begin(
                 self._services,
                 record,
@@ -977,6 +1307,8 @@ class TurnManager:
                     turn_id=turn_id,
                     memory_origin=turn.memory_origin,
                 )
+            turn.goal_result = result
+            self._note_external(turn)
             if result.kind == "cancelled":
                 self._cancel_running_activities(turn)
                 finalize_changes()
@@ -1003,10 +1335,13 @@ class TurnManager:
                     {"kind": result.kind, "content": result.content},
                 )
         except CancelledError:
+            self._note_external(turn)
             self._cancel_running_activities(turn)
             finalize_changes()
             self._activity_cb(turn)("turn.cancelled", {})
         except EngineProtocolError as err:
+            self._note_external(turn)
+            turn.goal_error = (err.code, err.message)
             self._fail_running_activities(turn, err.message)
             finalize_changes()
             self._activity_cb(turn)(
@@ -1021,9 +1356,14 @@ class TurnManager:
                 },
             )
         except RinariError as err:
+            self._note_external(turn)
             self._fail_running_activities(turn, str(err))
             finalize_changes()
             mapped = errors.from_rinari_error(err)
+            turn.goal_error = (
+                str(getattr(err, "error_code", "") or mapped.code),
+                mapped.message,
+            )
             self._activity_cb(turn)(
                 "turn.failed",
                 {
@@ -1036,6 +1376,7 @@ class TurnManager:
                 },
             )
         except Exception as err:  # defensive: the desktop must see a terminal event
+            self._note_external(turn)
             self._fail_running_activities(turn, str(err))
             finalize_changes()
             self._activity_cb(turn)(
@@ -1078,7 +1419,88 @@ class TurnManager:
             self._local.token = None
             self._settle_steering(turn, leftover)
             self._checklist_end(turn)
+            watched = getattr(turn, "process_watch", None)
+            if watched is not None:
+                # What the model left running with notify=wake starts a new turn
+                # when it ends; the next turn's watch takes over meanwhile.
+                session_id = turn.session_id
+                watched.on_exit = lambda: self._wake_after_exit(session_id, watched)
+            self._trust_after_turn(record, trusted_before)
+            # The child's report first: a queued or goal turn that starts next
+            # must not be overwritten as finished (#100).
+            self.children.report_turn(turn)
             self._start_next_queued(turn.session_id)
+            self._goal_after_turn(turn)
+            self.children.after_turn(turn)
+
+    def _watch_processes(self, turn: _ActiveTurn, context: Any, processes: Any) -> None:
+        """Tell the model what it has running, and what ends during the turn (#90)."""
+        from rinari.tools.native.process import ProcessRegistry, processes_note
+
+        if not isinstance(processes, ProcessRegistry):
+            return
+        if processes.ledger is None and self._process_ledger is not None:
+            processes.ledger = self._process_ledger
+            processes.session_id = turn.session_id
+        base_state = context.assembler_base.task_state
+        ended: list[Any] = []
+
+        def refresh() -> None:
+            ended.extend(processes.take_exit_notices())
+            note = processes_note(processes, ended)
+            state = "\n\n".join(part for part in (base_state, note) if part) or None
+            context.assembler_base = replace(context.assembler_base, task_state=state)
+
+        refresh()
+        processes.on_exit = refresh
+        turn.process_watch = processes
+
+    def _trusted_folders(self, record: Any) -> dict[str, str]:
+        """The project's folders that were trusted when the turn started (#38)."""
+        if getattr(record, "kind", None) != "PROJECT" or not getattr(record, "project_id", None):
+            return {}
+        try:
+            folders = self._services.projects.folders.list(record.project_id)
+        except Exception:
+            return {}
+        trusted: dict[str, str] = {}
+        for folder in folders:
+            path = Path(folder["path"])
+            if not path.is_dir():
+                continue
+            with contextlib.suppress(Exception):
+                state = self._services.trust.status(path).state
+                if state == "trusted":
+                    trusted[str(path)] = state
+        return trusted
+
+    def _trust_after_turn(self, record: Any, trusted_before: dict[str, str]) -> None:
+        """Tell the desktop now when the turn changed a folder's identity (#38).
+
+        It used to find out only when the conversation was opened again. A
+        `git init` without remotes keeps the trust on its own and is reported
+        as information; any other change asks for trust again right away.
+        """
+        for raw, previous in trusted_before.items():
+            try:
+                status = self._services.trust.status(Path(raw))
+            except Exception:
+                continue
+            if status.state == previous and status.reidentified is None:
+                continue
+            self._emit(
+                event(
+                    "project.trust.changed",
+                    {
+                        "session_id": record.id,
+                        "project_id": record.project_id,
+                        "path": raw,
+                        "state": status.state,
+                        "previous_state": previous,
+                        "reason": status.reidentified or "identity-changed",
+                    },
+                )
+            )
 
     def _prepare_session(self, turn: _ActiveTurn, record: Any, reasoning_effort: str | None) -> Any:
         """Build the per-turn runtime without stranding cancellation or the UI.
@@ -1099,23 +1521,32 @@ class TurnManager:
                     record,
                     interactive=False,
                     user_home=self._user_home,
-                    profile=profile_for_session(record),
+                    profile=(
+                        PermissionProfile.READ_ONLY
+                        if turn.read_only
+                        else profile_for_session(record)
+                    ),
                     approval_prompt=self._prompt_for_current_turn,
                     question_prompt=lambda args, token, deadline: self.questions.ask(
-                        turn, self._activity_cb(turn), args, token, deadline
+                        turn,
+                        self._activity_cb(turn),
+                        # A model cannot dress a question up as an offer.
+                        {key: value for key, value in args.items() if key != "_host_offer"},
+                        token,
+                        deadline,
                     ),
                     activity_sink=self._activity_cb(turn),
                     reasoning_effort=reasoning_effort,
-                    origin_kind=(turn.origin or {}).get("kind") or "user",
-                    session_grants=self.peers.session_grants(record.id),
+                    origin_kind=_origin_kind(turn.origin),
+                    session_grants=self.grants.for_session(record.id),
                     **({"remote_target": turn.remote_target} if turn.remote_target else {}),
                     **(
                         {
-                            "peer_host": lambda tool, args, ctx: self.peers.call(
-                                turn, self._activity_cb(turn), tool, args, ctx
+                            "children_host": lambda tool, args, ctx: self.children.call(
+                                turn, tool, args, ctx
                             )
                         }
-                        if not turn.remote_target and self.peers.binding_for(record.id)
+                        if not turn.remote_target and not turn.channel
                         else {}
                     ),
                     **(
@@ -1129,6 +1560,12 @@ class TurnManager:
                     ),
                 )
                 session.next_turn_command = turn.command
+                # A child born after its mother read external content keeps the
+                # guard on for its first turn (plan-sesiones-hijas 5.2).
+                session.next_turn_external = bool((turn.origin or {}).get("external_content"))
+                session.next_turn_external_source = str(
+                    (turn.origin or {}).get("external_source") or ""
+                )
                 if abandoned.is_set():
                     session.end()
                     return
@@ -1156,12 +1593,20 @@ class TurnManager:
         )
         with self._lock:
             self._preparation_threads.add(thread)
-        thread.start()
+            thread.start()
+        # The limit is for a stage that does not move, not for the whole
+        # preparation: on a slow machine each stage took a few seconds and their
+        # sum passed the limit while every one of them was progressing (SOIN,
+        # 23-oct).
         deadline = time.monotonic() + PREPARATION_TIMEOUT_S
+        watched = turn.preparation_stage
         while True:
             if turn.cancel_requested.is_set():
                 abandoned.set()
                 raise CancelledError("Turn cancelled during runtime preparation")
+            if turn.preparation_stage != watched:
+                watched = turn.preparation_stage
+                deadline = time.monotonic() + PREPARATION_TIMEOUT_S
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 abandoned.set()
@@ -1191,9 +1636,33 @@ class TurnManager:
     # turn that was stopped or failed goes back to the owner (`steer.returned`)
     # instead of starting work they just stopped.
 
-    def steer(self, session_id: str, message: str) -> dict[str, Any]:
+    def steer(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        attachment_context: str = "",
+        image_refs: list | None = None,
+        attachment_metadata: list | None = None,
+        now: bool = False,
+        prefix: str | None = None,
+        source: str | None = None,
+        display: str | None = None,
+        origin_extra: dict[str, Any] | None = None,
+        queued_origin: dict[str, Any] | None = None,
+        queue_if_idle: bool = True,
+    ) -> dict[str, Any]:
+        """`attachment_context`, `image_refs` and `attachment_metadata` come from
+        the same preparation as a normal message (plan 0.4.0 #54): the files
+        reach the model with the text when it reads it.
+
+        With no turn to steer, the message waits for the next turn with
+        `queued_origin` (a mother's message stays hers, #100); with
+        `queue_if_idle` false it is not queued at all."""
         record = self._services.sessions.show(session_id)
         text = (message or "").strip()
+        if not text and attachment_metadata:
+            text = "(attached files)"
         if not text:
             raise EngineProtocolError(errors.INVALID_PARAMS, "Message is empty.")
         if len(text) > MAX_QUEUE_MESSAGE_CHARS:
@@ -1222,25 +1691,200 @@ class TurnManager:
                     )
                 turn.steer_count += 1
                 steer_id = f"{turn.turn_id}:steer_{turn.steer_count}"
+                body = (
+                    f"{attachment_context}\n\nUser request:\n{text}" if attachment_context else text
+                )
                 turn.steering.append(
                     ChatMessage(
                         role="user",
-                        content=STEER_PREFIX + text,
-                        display_content=text,
-                        origin={"kind": "user", "steer_id": steer_id},
+                        content=(
+                            prefix
+                            if prefix is not None
+                            else (STEER_NOW_PREFIX if now else STEER_PREFIX)
+                        )
+                        + body,
+                        display_content=display or text,
+                        images=self._steer_images(turn, record.id, image_refs),
+                        attachments=tuple(attachment_metadata or ()),
+                        origin={
+                            "kind": "user",
+                            "steer_id": steer_id,
+                            **({"interrupt": True} if now else {}),
+                            # `parent`: the mother conversation wrote it (child sessions).
+                            **({"source": source} if source else {}),
+                            **(origin_extra or {}),
+                        },
                     )
                 )
-                return {
+                target = turn
+                delivered = {
                     "session_id": record.id,
                     "delivery": "steer",
                     "turn_id": turn.turn_id,
                     "steer_id": steer_id,
                 }
+            else:
+                target = None
+        if target is not None:
+            self._owner_wrote(target)
+            if now:
+                delivered["interrupted"] = self._interrupt_step(target)
+            return delivered
         # No turn to steer (it just ended, or is finishing): an ordinary
         # message for the next turn, started now when the session is idle.
-        queued = self.queue_add(record.id, text)
+        if not queue_if_idle:
+            return {"session_id": record.id, "delivery": "none"}
+        if queued_origin is not None:
+            queued = self.queue_add(
+                record.id,
+                (prefix or "") + text,
+                origin=queued_origin,
+                display_message=text if prefix else None,
+            )
+        else:
+            queued = self.queue_add(record.id, text)
         self._start_next_queued(record.id)
         return {"session_id": record.id, "delivery": "queued", "position": queued["position"]}
+
+    @staticmethod
+    def _owner_wrote(turn: _ActiveTurn) -> None:
+        """A message for the running turn: its waits end so it is read now (P7)."""
+        session = turn.session
+        context = getattr(session, "context", None) if session is not None else None
+        tool_ctx = getattr(context, "tool_ctx", None)
+        wrote = getattr(getattr(tool_ctx, "turn_state", None), "owner_wrote", None)
+        if wrote is not None:
+            wrote.set()
+
+    def steer_promote(self, session_id: str, steer_id: str) -> dict[str, Any]:
+        """«Enviar ahora» on a message that waits (P7): cut the step and read it now."""
+        record = self._services.sessions.show(session_id)
+        with self._lock:
+            turn, index = self._queued_steer(record.id, steer_id)
+            current = turn.steering[index]
+            content = current.content or ""
+            if content.startswith(STEER_PREFIX):
+                content = STEER_NOW_PREFIX + content[len(STEER_PREFIX) :]
+            turn.steering[index] = replace(
+                current,
+                content=content,
+                origin={**(current.origin or {}), "interrupt": True},
+            )
+            turn_id = turn.turn_id
+        interrupted = self._interrupt_step(turn)
+        payload = {
+            "session_id": record.id,
+            "turn_id": turn_id,
+            "steer_id": steer_id,
+            "interrupt": True,
+        }
+        self._emit(event("steer.updated", payload))
+        return {**payload, "status": "promoted", "interrupted": interrupted}
+
+    def _interrupt_step(self, turn: _ActiveTurn) -> list[str]:
+        """End the current step, not the turn, so the message is read now (#31).
+
+        An answer being written is cut (it stays as partial); a command in the
+        foreground moves to the background (#32); a pending approval counts as
+        «no». Background processes and subagents are left alone.
+        """
+        from rinari.tools.native.shell import request_background, running_foreground
+
+        done: list[str] = []
+        session = turn.session
+        context = getattr(session, "context", None) if session is not None else None
+        self._owner_wrote(turn)
+        if context is not None:
+            if context.step_interrupt is None:
+                context.step_interrupt = threading.Event()
+            context.step_interrupt.set()
+            done.append("answer")
+        for call_id in running_foreground(turn.session_id):
+            if request_background(turn.session_id, call_id, "steer_now"):
+                done.append(f"command:{call_id}")
+        with self._lock:
+            pending = [
+                approval.approval_id
+                for approval in self._approvals.values()
+                if approval.session_id == turn.session_id and not approval.decided.is_set()
+            ]
+        for approval_id in pending:
+            with contextlib.suppress(Exception):
+                self.resolve_approval(approval_id, "deny")
+                done.append(f"approval:{approval_id}")
+        return done
+
+    def _steer_images(self, turn: _ActiveTurn, session_id: str, image_refs: list | None) -> tuple:
+        """Pixels only for a model that sees; otherwise the manifest names the
+        files and the model opens them with its tools (plan 0.4.0 #11)."""
+        if not image_refs:
+            return ()
+        from rinari.models.images import references
+        from rinari.runtime.vision import visual_status
+
+        session = turn.session
+        gateway = getattr(session, "gateway", None) if session is not None else None
+        if gateway is not None:
+            with contextlib.suppress(Exception):
+                if not visual_status(gateway).available:
+                    return ()
+        return tuple(references(self._services.artifacts, session_id, image_refs))
+
+    def _queued_steer(self, session_id: str, steer_id: str) -> tuple[_ActiveTurn, int]:
+        """The running turn and the index of an unread message; caller holds the lock."""
+        for active in self._turns.values():
+            if active.session_id != session_id or active.done.is_set():
+                continue
+            for index, item in enumerate(active.steering):
+                if (item.origin or {}).get("steer_id") == steer_id:
+                    return active, index
+        raise EngineProtocolError(
+            "STEER_ALREADY_READ",
+            "Rinari already read this message.",
+            details={"steer_id": steer_id},
+        )
+
+    def steer_update(self, session_id: str, steer_id: str, message: str) -> dict[str, Any]:
+        """Edit a message sent during the turn while Rinari has not read it (#54)."""
+        record = self._services.sessions.show(session_id)
+        text = (message or "").strip()
+        if not text:
+            raise EngineProtocolError(errors.INVALID_PARAMS, "Message is empty.")
+        if len(text) > MAX_QUEUE_MESSAGE_CHARS:
+            raise EngineProtocolError(
+                errors.INVALID_PARAMS, f"Message exceeds {MAX_QUEUE_MESSAGE_CHARS} chars."
+            )
+        with self._lock:
+            turn, index = self._queued_steer(record.id, steer_id)
+            current = turn.steering[index]
+            content = current.content or ""
+            # Keep the attachment preamble; replace the owner's words only.
+            marker = "\n\nUser request:\n"
+            if marker in content:
+                content = content.rsplit(marker, 1)[0] + marker + text
+            else:
+                content = STEER_PREFIX + text
+            turn.steering[index] = replace(current, content=content, display_content=text)
+            turn_id = turn.turn_id
+        payload = {
+            "session_id": record.id,
+            "turn_id": turn_id,
+            "steer_id": steer_id,
+            "message": text,
+        }
+        self._emit(event("steer.updated", payload))
+        return {**payload, "status": "updated"}
+
+    def steer_cancel(self, session_id: str, steer_id: str) -> dict[str, Any]:
+        """Withdraw a message sent during the turn before Rinari reads it (#54)."""
+        record = self._services.sessions.show(session_id)
+        with self._lock:
+            turn, index = self._queued_steer(record.id, steer_id)
+            turn.steering.pop(index)
+            turn_id = turn.turn_id
+        payload = {"session_id": record.id, "turn_id": turn_id, "steer_id": steer_id}
+        self._emit(event("steer.cancelled", payload))
+        return {**payload, "status": "cancelled"}
 
     def _drain_steering(self, turn: _ActiveTurn) -> list[ChatMessage]:
         with self._lock:
@@ -1254,14 +1898,39 @@ class TurnManager:
         return taken
 
     def _settle_steering(self, turn: _ActiveTurn, leftover: list[ChatMessage]) -> None:
+        # A child's report the mother did not read stays unreported: her turn's
+        # end wakes her with it (#100).
+        leftover = [m for m in leftover if (m.origin or {}).get("source") != "child_report"]
         if not leftover:
             return
         texts = [item.display_content or item.content for item in leftover]
         if turn.terminal_event == "turn.completed":
-            with self._lock:
-                self._queue.setdefault(turn.session_id, collections.deque()).appendleft(
-                    _QueuedPrompt(message="\n\n".join(texts), origin={"kind": "user"})
+            # A mother's message keeps its origin, so the child's turn reports
+            # back at once and not as if the owner had written it (#100).
+            parents = [m for m in leftover if (m.origin or {}).get("source") == "parent"]
+            owners = [m for m in leftover if (m.origin or {}).get("source") != "parent"]
+            queued = []
+            if owners:
+                queued.append(
+                    _QueuedPrompt(
+                        message="\n\n".join(m.display_content or m.content for m in owners),
+                        origin={"kind": "user"},
+                    )
                 )
+            if parents:
+                queued.append(
+                    _QueuedPrompt(
+                        message="\n\n".join(m.content for m in parents),
+                        display_message="\n\n".join(
+                            m.display_content or m.content for m in parents
+                        ),
+                        origin={"kind": "user", "source": "parent_message"},
+                    )
+                )
+            with self._lock:
+                pending = self._queue.setdefault(turn.session_id, collections.deque())
+                for item in reversed(queued):
+                    pending.appendleft(item)
             self._emit(
                 event(
                     "session.queue.updated",
@@ -1288,7 +1957,15 @@ class TurnManager:
     # Queued messages run FIFO after the live turn ends, preserving normal
     # turn boundaries and approvals. Bounded; engine-process memory only.
 
-    def queue_add(self, session_id: str, message: str) -> dict[str, Any]:
+    def queue_add(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        origin: dict[str, Any] | None = None,
+        display_message: str | None = None,
+        memory_origin: str = "interactive",
+    ) -> dict[str, Any]:
         record = self._services.sessions.show(session_id)
         text = (message or "").strip()
         if not text:
@@ -1305,7 +1982,14 @@ class TurnManager:
                     errors.INVALID_PARAMS,
                     f"Queue full ({MAX_QUEUE_DEPTH} pending).",
                 )
-            pending.append(_QueuedPrompt(message=text, origin={"kind": "user"}))
+            pending.append(
+                _QueuedPrompt(
+                    message=text,
+                    origin=origin or {"kind": "user"},
+                    display_message=display_message,
+                    memory_origin=memory_origin,
+                )
+            )
             position = len(pending)
         self._emit(
             event(
@@ -1316,40 +2000,24 @@ class TurnManager:
         return {"session_id": record.id, "position": position, "pending": position}
 
     def _pending_count(self, session_id: str) -> int:
-        manual = len(self._queue.get(session_id, ()))
-        inbox = len(self.operations.inbox_list(session_id, ("queued",)))
-        return manual + inbox
+        return len(self._queue.get(session_id, ()))
 
     def queue_list(self, session_id: str) -> dict[str, Any]:
-        """Legacy `queue: string[]` plus typed `entries` (manual and peer inbox)."""
+        """Legacy `queue: string[]` plus typed `entries`."""
         record = self._services.sessions.show(session_id)
         with self._lock:
             manual = list(self._queue.get(record.id, ()))
-        inbox = self.operations.inbox_list(record.id, ("queued", "paused", "uncertain"))
         entries: list[dict[str, Any]] = [
             {
                 "message_id": None,
                 "message": item.message,
                 "state": "queued",
                 "origin": item.origin or {"kind": "user"},
+                "display_message": item.display_message,
             }
             for item in manual
         ]
-        entries.extend(
-            {
-                "message_id": entry["message_id"],
-                "message": entry.get("display_message") or entry["content"],
-                "state": entry["state"],
-                "origin": entry["origin"],
-                "error": entry.get("error"),
-            }
-            for entry in inbox
-        )
-        queued_texts = [item.message for item in manual] + [
-            entry.get("display_message") or entry["content"]
-            for entry in inbox
-            if entry["state"] == "queued"
-        ]
+        queued_texts = [item.message for item in manual]
         return {
             "session_id": record.id,
             "queue": queued_texts,
@@ -1360,23 +2028,52 @@ class TurnManager:
     def queue_clear(self, session_id: str) -> dict[str, Any]:
         record = self._services.sessions.show(session_id)
         with self._lock:
-            removed = len(self._queue.pop(record.id, ()))
-        for entry in self.operations.inbox_list(record.id, ("queued", "paused")):
-            self.operations.inbox_cancel(entry["message_id"])
-            removed += 1
-            self._emit_peer_update(entry["message_id"])
+            dropped = list(self._queue.pop(record.id, ()))
         self._emit(event("session.queue.updated", {"session_id": record.id, "pending": 0}))
-        return {"session_id": record.id, "removed": removed}
+        listener = self.queue_cleared
+        if listener is not None and dropped:
+            try:
+                listener(record.id, [item.origin or {"kind": "user"} for item in dropped])
+            except Exception:
+                logger.exception("queue cleared listener failed")
+        return {"session_id": record.id, "removed": len(dropped)}
+
+    def queue_discard(self, session_id: str, run_ids: set[str]) -> int:
+        """Take scheduled runs out of a session's queue (their task was deleted or
+        turned off); the rest of the queue stays as it was."""
+        with self._lock:
+            pending = self._queue.get(session_id)
+            if not pending:
+                return 0
+            kept = collections.deque(
+                item
+                for item in pending
+                if not (
+                    (item.origin or {}).get("kind") == "schedule"
+                    and (item.origin or {}).get("run_id") in run_ids
+                )
+            )
+            removed = len(pending) - len(kept)
+            if kept:
+                self._queue[session_id] = kept
+            else:
+                self._queue.pop(session_id, None)
+        if removed:
+            self._emit(
+                event(
+                    "session.queue.updated",
+                    {"session_id": session_id, "pending": self._pending_count(session_id)},
+                )
+            )
+        return removed
 
     def queue_resume(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Explicit intervention: paused peer deliveries become eligible again."""
+        """Explicit intervention: the session's queue runs again."""
         session_id = params.get("session_id")
         if not isinstance(session_id, str) or not session_id:
             raise EngineProtocolError(errors.INVALID_PARAMS, "Param 'session_id' must be a string.")
         record = self._services.sessions.show(session_id)
-        with self._lock:
-            self._peer_paused.discard(record.id)
-        resumed = self.operations.inbox_resume_session(record.id)
+        resumed = 0
         self._emit(
             event(
                 "session.queue.updated",
@@ -1387,10 +2084,124 @@ class TurnManager:
         return {"session_id": record.id, "resumed": resumed}
 
     def start_next_queued(self, session_id: str) -> None:
-        """Single scheduler per session: manual queue first, then the peer inbox."""
+        """Single scheduler per session: the queued messages, in order."""
+        self._start_next_queued(session_id)
+
+    # -- goals (plan 0.4.0 #23) ---------------------------------------------------
+
+    def _goal_service(self) -> Any:
+        return getattr(self._services, "goals", None)
+
+    def emit_goal(self, goal: Any, session_id: str) -> None:
+        self._emit(
+            event(
+                "goal.updated",
+                {"session_id": session_id, "goal": goal.as_dict() if goal is not None else None},
+            )
+        )
+
+    def _goal_after_turn(self, turn: _ActiveTurn) -> None:
+        """Fold a finished turn into the goal and start the next iteration.
+
+        Runs after the owner's queue had its chance: a queued message goes
+        first and the goal goes on when that turn ends.
+        """
+        service = self._goal_service()
+        if service is None:
+            return
+        from rinari.goals.service import TurnOutcome
+
+        try:
+            origin = turn.origin or {}
+            terminal = (turn.terminal_event or "turn.completed").removeprefix("turn.")
+            if origin.get("source") == "goal":
+                result = turn.goal_result
+                usage = getattr(result, "usage", None)
+                tokens = int(getattr(usage, "input_tokens", 0) or 0) + int(
+                    getattr(usage, "output_tokens", 0) or 0
+                )
+                checklist = None
+                checklist_service = self._checklist_service()
+                if checklist_service is not None:
+                    with contextlib.suppress(Exception):
+                        current = checklist_service.get(turn.session_id)
+                        checklist = current.revision if current is not None else None
+                outcome = TurnOutcome(
+                    terminal=terminal,
+                    error_code=turn.goal_error[0],
+                    error_message=turn.goal_error[1],
+                    recoverable=bool(getattr(result, "recoverable", False)),
+                    gate=getattr(result, "completion", None),
+                    tokens=tokens,
+                    seconds=max(0.0, time.time() - turn.started_at),
+                    files_changed=turn.files_changed,
+                    checklist_revision=checklist,
+                )
+                goal, go_on = service.after_turn(turn.session_id, outcome)
+                self.emit_goal(goal, turn.session_id)
+            else:
+                goal = service.pursuing(turn.session_id)
+                if goal is not None and terminal == "cancelled":
+                    # The owner pressed Stop: nothing starts behind their back.
+                    self.emit_goal(service.pause(turn.session_id, "stopped"), turn.session_id)
+                    return
+                go_on = goal is not None
+            if go_on:
+                self.start_goal_turn(turn.session_id)
+        except Exception:
+            logger.exception("goal runner failed")
+
+    def start_goal_turn(self, session_id: str) -> dict[str, Any] | None:
+        """Start the next iteration of a pursued goal, if the session is free."""
+        service = self._goal_service()
+        if service is None:
+            return None
+        goal = service.pursuing(session_id)
+        if goal is None:
+            return None
+        with self._lock:
+            busy = any(
+                not active.done.is_set() and active.session_id == session_id
+                for active in self._turns.values()
+            ) or bool(self._queue.get(session_id))
+        if busy:
+            return None
+        message = service.continuation(goal)
+        goal = service.begin_iteration(session_id)
+        if goal is None:
+            return None
+        self.emit_goal(goal, session_id)
+        try:
+            return self.start_turn(
+                session_id,
+                message,
+                origin={
+                    "kind": "user",
+                    "source": "goal",
+                    "goal_id": goal.goal_id,
+                    "iteration": goal.iteration,
+                },
+                display_message=goal.objective,
+                memory_origin="automation",
+            )
+        except EngineProtocolError as exc:
+            if exc.code != errors.TURN_RUNNING:
+                paused = service.pause(session_id, exc.message)
+                self.emit_goal(paused, session_id)
+            return None
+
+    def kick_queue(self, session_id: str) -> None:
+        """Run the session's queue now if nothing holds it."""
         self._start_next_queued(session_id)
 
     def _start_next_queued(self, session_id: str) -> None:
+        hold = self.queue_hold
+        if hold is not None:
+            try:
+                if hold(session_id):
+                    return
+            except Exception:
+                logger.exception("queue hold check failed")
         with self._lock:
             if any(
                 not turn.done.is_set() and turn.session_id == session_id
@@ -1401,7 +2212,6 @@ class TurnManager:
             item = pending.popleft() if pending else None
             if pending is not None and not pending:
                 self._queue.pop(session_id, None)
-            peer_paused = session_id in self._peer_paused
         if item is not None:
             self._emit(
                 event(
@@ -1415,61 +2225,12 @@ class TurnManager:
                     item.message,
                     display_message=item.display_message,
                     origin=item.origin,
+                    memory_origin=item.memory_origin,
                 )
             except EngineProtocolError:
                 with self._lock:
                     self._queue.setdefault(session_id, collections.deque()).appendleft(item)
             return
-        if peer_paused:
-            return
-        turn_id = self._services.ctx.ids.new("turn")
-        entry = self.operations.inbox_claim_next(session_id, turn_id)
-        if entry is None:
-            return
-        binding = self.peers.binding_for(session_id)
-        if entry["origin"].get("kind") == "peer" and (
-            binding is None
-            or not binding["member"]["receive"]
-            or binding["group"]["authorization_epoch"] != entry.get("authorization_epoch")
-        ):
-            # Authorization changed after acceptance: never run with a stale grant.
-            self.operations.inbox_update(
-                entry["message_id"], "paused", error="authorization changed"
-            )
-            self._emit_peer_update(entry["message_id"])
-            return
-        try:
-            self.start_turn(
-                session_id,
-                entry["content"],
-                turn_id=turn_id,
-                display_message=entry.get("display_message"),
-                memory_origin="automation",
-                origin=entry["origin"],
-                peer_message_id=entry["message_id"],
-            )
-        except EngineProtocolError as exc:
-            if exc.code == errors.TURN_RUNNING:
-                # Lost a race with another scheduler call: the running turn's
-                # finally block will claim it again.
-                self.operations.inbox_update(entry["message_id"], "queued")
-            else:
-                self.operations.inbox_update(entry["message_id"], "paused", error=exc.message)
-                self._emit_peer_update(entry["message_id"])
-            return
-        self.operations.inbox_update(entry["message_id"], "running")
-        self._emit_peer_update(entry["message_id"])
-
-    def _emit_peer_update(self, message_id: str) -> None:
-        entry = self.operations.inbox_get(message_id)
-        if entry:
-            self.emit_external(
-                event("session.peer.message.updated", PeerBroker.message_payload(entry))
-            )
-
-    def _finish_peer_delivery(self, turn: _ActiveTurn, state: str) -> None:
-        for message_id in self.operations.inbox_finish_turn(turn.turn_id, state):
-            self._emit_peer_update(message_id)
 
     # -- streaming callbacks (worker thread) --------------------------------
 
@@ -1493,6 +2254,9 @@ class TurnManager:
         def _on_activity(event_name: str, payload: dict[str, Any]) -> None:
             if turn.done.is_set():
                 return
+            if event_name == "steer.applied" and payload.get("source") == "child_report":
+                # The mother read the reports inside her turn (#100).
+                self.children.reports_read(turn.session_id, payload.get("children") or [])
             effective = (
                 payload.get("child_event", event_name)
                 if event_name == "agent.activity"
@@ -1621,8 +2385,6 @@ class TurnManager:
                 turn.activities[activity_key] = {**current, **safe, "event": event_name}
             if event_name in {"turn.completed", "turn.failed", "turn.cancelled", "turn.stopped"}:
                 self.operations.finish(turn.turn_id, event_name.removeprefix("turn."))
-                if turn.peer_message_id:
-                    self._finish_peer_delivery(turn, event_name.removeprefix("turn."))
             if effective_event != "model.content.delta" and (
                 event_name != "usage.updated" or persist_usage
             ):
@@ -1746,6 +2508,9 @@ class TurnManager:
             # Suggested and resolved update one note in the timeline.
             key = payload.get("suggestion_id") or payload["suggestion"]["id"]
             return f"followup:{key}"
+        if event_name == "file.presented":
+            # Its own card, apart from the file.present tool row (#35).
+            return f"present:{payload.get('present_id')}"
         if event_name == "checklist.updated":
             # One card per turn that updates in place.
             return f"checklist:{turn.turn_id}"
@@ -1801,6 +2566,13 @@ class TurnManager:
                     activity_seq=int(payload["activity_seq"]),
                 )
             )
+            if event_name in _TOOL_ENDS and payload.get("tool_call_id"):
+                # The end carries the output: the live chunks go (#91).
+                self._services.ctx.event_repo.compact_tool_output(
+                    str(payload["session_id"]),
+                    str(payload["turn_id"]),
+                    str(payload["tool_call_id"]),
+                )
 
     def _cancel_running_activities(self, turn: _ActiveTurn) -> None:
         with self._lock:
@@ -1892,10 +2664,17 @@ class TurnManager:
             "choices": list(request.choices),
             "rule_id": request.rule_id,
             "reusable": request.reusable,
-            # Where "allow_project" keeps the grant: this project, or every
-            # loose chat.
-            "grant_scope": "chats" if request.project_id in (None, "chats") else "project",
-            # `exact`: a session grant binds to this target only (peer messaging).
+            # Where "allow_project" keeps the grant: this project, every loose
+            # chat, or (an MCP tool, mcp_tool_permissions_v1) Allow saved for
+            # the tool with its server.
+            "grant_scope": (
+                "mcp_tool"
+                if getattr(request, "on_always", None) is not None
+                else "chats"
+                if request.project_id in (None, "chats")
+                else "project"
+            ),
+            # `exact`: a session grant binds to this target only.
             "binding_mode": request.binding_mode,
         }
         if turn is not None:

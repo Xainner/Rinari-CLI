@@ -154,3 +154,32 @@ def test_slow_request_diagnostic_names_the_method_not_its_params(server, monkeyp
     assert "slow request" in stderr.getvalue()
     assert "session.history" in stderr.getvalue()
     assert "PARAMETRO-PRIVADO" not in stderr.getvalue()
+
+
+def test_a_slow_request_logs_what_the_other_threads_were_doing(monkeypatch, caplog) -> None:
+    # 23-oct: a listing of 35 ms took 4 s in the app, held back by another
+    # thread; the log said how long, never by what.
+    import logging
+    import threading
+    import time
+
+    from rinari.engine_protocol import dispatcher as dispatcher_module
+
+    monkeypatch.setattr(dispatcher_module, "STACKS_AFTER_S", 0.1)
+    hold = threading.Event()
+
+    def busy_neighbour() -> None:
+        hold.wait(5)
+
+    neighbour = threading.Thread(target=busy_neighbour, name="busy-neighbour", daemon=True)
+    neighbour.start()
+    dispatcher = dispatcher_module.EngineDispatcher()
+    dispatcher.register("slow.thing", lambda params: time.sleep(1.2) or {})
+    with caplog.at_level(logging.WARNING, logger=dispatcher_module.__name__):
+        response = dispatcher.dispatch('{"id": "1", "method": "slow.thing", "params": {}}')
+    hold.set()
+    assert response is not None and response["ok"] is True
+    dumps = [r.getMessage() for r in caplog.records if "other threads" in r.getMessage()]
+    assert len(dumps) == 1
+    assert "slow.thing" in dumps[0]
+    assert "busy-neighbour:" in dumps[0] and "busy_neighbour (" in dumps[0]

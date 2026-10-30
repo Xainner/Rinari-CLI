@@ -206,3 +206,26 @@ def test_the_agent_loop_dedupes_a_reread_in_the_same_turn(env):  # noqa: F811
     first, second = (json.loads(m.content)["data"] for m in results)
     assert first["text"] == BODY
     assert second["unchanged"] is True and "text" not in second
+
+
+def test_with_pressure_settling_the_cache_follows_the_conversation_boundary(tmp_path):
+    # F45: while nothing is settled, a read many rounds back is still in the
+    # request and can be pointed at; once the boundary moves past it, it cannot.
+    from rinari.context.settle import SettleState
+
+    base, conversation = _setup(tmp_path)
+    _read(conversation, base, "c1", path="notes.txt")
+    _other_rounds(conversation, KEEP_ROUNDS + BLOCK_ROUNDS)
+    state = SettleState()
+    state.by_pressure = True
+    conversation.settle_state = state
+
+    kept = _read(conversation, base, "c2", path="notes.txt")
+    assert kept.data.get("unchanged") is True
+
+    rounds = [
+        i for i, m in enumerate(conversation.history) if m.role == "assistant" and m.tool_calls
+    ]
+    state.move_to(rounds[-KEEP_ROUNDS], conversation.history)
+    again = _read(conversation, base, "c3", path="notes.txt")
+    assert again.data["text"] == BODY

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 from collections.abc import Callable
@@ -140,12 +141,16 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         *,
         stream: bool,
         tool_aliases: dict[str, str] | None = None,
+        fold_system: bool = False,
     ) -> dict[str, Any]:
+        messages = _with_reasoning_slots(
+            _joined_user_messages(
+                [_message_to_openai(m, tool_aliases) for m in expand_tool_images(request.messages)]
+            )
+        )
         payload: dict[str, Any] = {
             "model": request.model,
-            "messages": [
-                _message_to_openai(m, tool_aliases) for m in expand_tool_images(request.messages)
-            ],
+            "messages": _folded_system(messages) if fold_system else messages,
             "stream": stream,
         }
         if request.tools:
@@ -192,6 +197,30 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                 request, secret, endpoint, tool_aliases=tool_aliases
             )
         url = self._chat_url(endpoint)
+        key = (url, request.model)
+        fold = _SYSTEM_FOLD.get(key) is True
+        try:
+            return self._chat_once(request, secret, url, tool_aliases, fold_system=fold)
+        except ProviderModelError as exc:
+            if fold or not _may_refuse_system(exc, request, key):
+                raise
+            try:
+                response = self._chat_once(request, secret, url, tool_aliases, fold_system=True)
+            except ProviderModelError:
+                _SYSTEM_FOLD[key] = False
+                raise exc from None
+            _SYSTEM_FOLD[key] = True
+            return response
+
+    def _chat_once(
+        self,
+        request: ModelRequest,
+        secret: str | None,
+        url: str,
+        tool_aliases: dict[str, str] | None,
+        *,
+        fold_system: bool,
+    ) -> ModelResponse:
         headers = {
             **self.request_headers(secret, request),
             **session_affinity_headers(url, request.session_id),
@@ -202,7 +231,11 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             url,
             headers=headers,
             json_body=openai_cache_key(
-                self._payload(request, stream=False, tool_aliases=tool_aliases), url, request
+                self._payload(
+                    request, stream=False, tool_aliases=tool_aliases, fold_system=fold_system
+                ),
+                url,
+                request,
             ),
             timeout=MODEL_CALL_TIMEOUT,
         )
@@ -228,6 +261,40 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                 request, secret, endpoint, on_delta, tool_aliases=tool_aliases
             )
         url = self._chat_url(endpoint)
+        key = (url, request.model)
+        fold = _SYSTEM_FOLD.get(key) is True
+        sent = False
+
+        def relay(text: str) -> None:
+            nonlocal sent
+            sent = True
+            on_delta(text)
+
+        try:
+            return self._chat_stream(request, secret, url, relay, tool_aliases, fold_system=fold)
+        except ProviderModelError as exc:
+            if fold or sent or not _may_refuse_system(exc, request, key):
+                raise
+            try:
+                response = self._chat_stream(
+                    request, secret, url, on_delta, tool_aliases, fold_system=True
+                )
+            except ProviderModelError:
+                _SYSTEM_FOLD[key] = False
+                raise exc from None
+            _SYSTEM_FOLD[key] = True
+            return response
+
+    def _chat_stream(
+        self,
+        request: ModelRequest,
+        secret: str | None,
+        url: str,
+        on_delta: Callable[[str], None],
+        tool_aliases: dict[str, str] | None,
+        *,
+        fold_system: bool,
+    ) -> ModelResponse:
         content_parts: list[str] = []
         continuation_message: dict[str, Any] = {"role": "assistant"}
         continuation_tools: dict[int, dict[str, Any]] = {}
@@ -237,6 +304,8 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         done_seen = False
         stream_stats: dict[str, Any] = {}
         stream_usage: dict[str, Any] | None = None
+        stream_timings: dict[str, Any] | None = None
+        tool_names: dict[int, str] = {}
         headers_received = False
         saw_payload = False
         stream_started_at = time.monotonic()
@@ -258,7 +327,11 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                 "POST",
                 url,
                 json=openai_cache_key(
-                    self._payload(request, stream=True, tool_aliases=tool_aliases), url, request
+                    self._payload(
+                        request, stream=True, tool_aliases=tool_aliases, fold_system=fold_system
+                    ),
+                    url,
+                    request,
                 ),
                 headers=headers,
             ) as response:
@@ -283,6 +356,8 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                         raise classify_stream_error(chunk["error"], model=request.model)
                     if isinstance(chunk.get("usage"), dict):
                         stream_usage = chunk["usage"]
+                    if isinstance(chunk.get("timings"), dict):
+                        stream_timings = chunk["timings"]
                     choice = (chunk.get("choices") or [{}])[0]
                     delta = choice.get("delta") or {}
                     _continuation_delta(continuation_message, continuation_tools, delta)
@@ -290,6 +365,10 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                         content_parts.append(delta["content"])
                         on_delta(delta["content"])
                     calls.update(delta.get("tool_calls"))
+                    if request.tool_input_observer is not None:
+                        _report_tool_input(
+                            request.tool_input_observer, tool_names, delta.get("tool_calls")
+                        )
                     reason = choice.get("finish_reason")
                     if reason:
                         terminal_seen = True
@@ -346,7 +425,11 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             stop_reason = StopReason.TOOL_CALLS
         # §6.2: captured chunk usage is authoritative; silence is marked,
         # never zero-filled.
-        usage = _usage_from_openai(stream_usage) if stream_usage else Usage(source="unavailable")
+        usage = (
+            _usage_from_openai(stream_usage, stream_timings)
+            if stream_usage
+            else Usage(source="unavailable")
+        )
         if continuation_tools:
             continuation_message["tool_calls"] = [
                 continuation_tools[k] for k in sorted(continuation_tools)
@@ -372,6 +455,19 @@ class OpenAICompatibleAdapter(ProviderAdapter):
 
 
 # -- helpers -----------------------------------------------------------------
+
+
+def _report_tool_input(observer, names: dict[int, str], tool_calls) -> None:
+    """How much of each streamed tool call is written so far (F26)."""
+    for call in tool_calls or ():
+        if not isinstance(call, dict):
+            continue
+        index = call.get("index", 0) if isinstance(call.get("index", 0), int) else 0
+        function = call.get("function") or {}
+        if function.get("name"):
+            names[index] = str(function["name"])
+        with contextlib.suppress(Exception):
+            observer(names.get(index), function.get("arguments"))
 
 
 def _continuation_delta(message, tools, delta):
@@ -411,6 +507,110 @@ def _wire_tool_name(name: str, tool_aliases: dict[str, str] | None) -> str:
         return name
     alias_of = {real: alias for alias, real in tool_aliases.items()}
     return alias_of.get(name, sanitize_tool_name(name))
+
+
+# Servers whose chat template refused a system message, by (url, model):
+# True once the same request went through with the system folded into the
+# first user message, False when folding did not help either.
+_SYSTEM_FOLD: dict[tuple[str, str], bool] = {}
+# A plain refusal of the request: no provider code that says something more
+# specific (a limit, the context, a tool schema), and not an overload.
+_REFUSAL_STATUSES = frozenset({400, 422, 500})
+
+
+def _may_refuse_system(error: ProviderModelError, request: ModelRequest, key) -> bool:
+    """Whether to try the request once more with the system message folded.
+
+    Templates such as Gemma 2's reject the system role outright and llama.cpp
+    or vLLM answer with a plain 400/500. Nothing is read from the message:
+    only the status, the absence of a more specific code, and whether this
+    server and model were already tried.
+    """
+    if key in _SYSTEM_FOLD or error.details.get("partial"):
+        return False
+    if not any(message.role == "system" for message in request.messages):
+        return False
+    code = error.details.get("provider_error_code")
+    if code != "SERVER_ERROR" or error.details.get("http_status") not in _REFUSAL_STATUSES:
+        return False
+    # A refusal with a cause of its own is handled where that cause is: the
+    # reasoning control is repeated without it by the router.
+    from rinari.models.router import rejects_reasoning_control
+
+    return not (request.reasoning_effort and rejects_reasoning_control(error))
+
+
+def _folded_system(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The system message as the start of the first user message."""
+    system = [m for m in messages if m.get("role") == "system"]
+    rest = [m for m in messages if m.get("role") != "system"]
+    text = "\n\n".join(str(m.get("content") or "") for m in system if m.get("content"))
+    if not text:
+        return rest
+    for index, message in enumerate(rest):
+        if message.get("role") == "user":
+            rest[index] = {**message, "content": _joined_content(text, message.get("content"))}
+            return rest
+    return [{"role": "user", "content": text}, *rest]
+
+
+def _with_reasoning_slots(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every tool-calling assistant message carries `reasoning_content` once the
+    conversation does.
+
+    A thinking model can return a tool step with no reasoning at all; sent back
+    without the field, an endpoint that requires its reasoning to be returned
+    (DeepSeek's thinking mode) refused the whole request with a 400 and the turn
+    failed. Only a conversation that already carries the field gets it.
+    """
+    if not any(m.get("role") == "assistant" and "reasoning_content" in m for m in messages):
+        return messages
+    return [
+        {**m, "reasoning_content": ""}
+        if m.get("role") == "assistant" and m.get("tool_calls") and "reasoning_content" not in m
+        else m
+        for m in messages
+    ]
+
+
+def _joined_user_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Consecutive user messages as one: the turn's message and the harness notes
+    after it (the local time, the tools note, the turn context).
+
+    Chat templates that require user and assistant to alternate (Gemma and
+    Mistral on llama.cpp or vLLM) reject two user messages in a row. The join
+    is the same on every request, so the cached prefix does not move.
+    """
+    joined: list[dict[str, Any]] = []
+    for message in messages:
+        previous = joined[-1] if joined else None
+        if (
+            previous is not None
+            and message.get("role") == "user"
+            and previous.get("role") == "user"
+            and set(message) <= {"role", "content"}
+            and set(previous) <= {"role", "content"}
+        ):
+            joined[-1] = {
+                "role": "user",
+                "content": _joined_content(previous.get("content"), message.get("content")),
+            }
+            continue
+        joined.append(message)
+    return joined
+
+
+def _joined_content(first: Any, second: Any) -> Any:
+    if isinstance(first, list) or isinstance(second, list):
+        return _content_parts(first) + _content_parts(second)
+    texts = [text for text in (first, second) if text]
+    return "\n\n".join(str(text) for text in texts)
+
+
+def _content_parts(content: Any) -> list[dict[str, Any]]:
+    if isinstance(content, list):
+        return list(content)
+    return [{"type": "text", "text": str(content)}] if content else []
 
 
 def _message_to_openai(
@@ -492,7 +692,7 @@ def _response_from_openai(data: Any, url: str) -> ModelResponse:
     return ModelResponse(
         content=content,
         tool_calls=() if choice.get("finish_reason") == "length" else tool_calls,
-        usage=_usage_from_openai(data.get("usage")),
+        usage=_usage_from_openai(data.get("usage"), data.get("timings")),
         stop_reason=_stop_reason_from_openai(
             choice.get("finish_reason"), has_tool_calls=bool(tool_calls)
         ),
@@ -540,15 +740,26 @@ def _tool_call_from_openai(raw: Any) -> ToolCall:
     )
 
 
-def _usage_from_openai(raw: Any) -> Usage:
+def _usage_from_openai(raw: Any, timings: Any = None) -> Usage:
     if not isinstance(raw, dict):
         return Usage()
     prompt_details = raw.get("prompt_tokens_details") or {}
     completion_details = raw.get("completion_tokens_details") or {}
+    # The cache read, in whichever of the known shapes the server reports it
+    # (plan 0.4.0 v2, V2-11): the standard field, `prompt_cache_hit_tokens`
+    # (DeepSeek's own API) or llama.cpp's `timings.cache_n`. By protocol shape,
+    # for any provider or model that uses it; none of them is "no data", not 0.
+    cached = _optional_int(
+        prompt_details.get("cached_tokens") if isinstance(prompt_details, dict) else None
+    )
+    if cached is None:
+        cached = _optional_int(raw.get("prompt_cache_hit_tokens"))
+    if cached is None and isinstance(timings, dict):
+        cached = _optional_int(timings.get("cache_n"))
     return Usage(
         input_tokens=_optional_int(raw.get("prompt_tokens")),
         output_tokens=_optional_int(raw.get("completion_tokens")),
-        cached_input_tokens=_optional_int(prompt_details.get("cached_tokens")),
+        cached_input_tokens=cached,
         reasoning_tokens=_optional_int(completion_details.get("reasoning_tokens")),
     )
 

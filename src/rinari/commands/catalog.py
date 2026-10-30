@@ -41,7 +41,7 @@ LESSON_PROMPT = (
     "of the owner's skills, propose an update of it with skills.propose and "
     'update_of: add the rules under a "## Lecciones" section (create it if '
     "missing, in the skill's language), raise the version, keep the rest intact. "
-    "If the job has no skill of the owner's, or only one of Rinari's own, save "
+    "If the job has no skill of the owner's, or only one of your built-in ones, save "
     "each rule with memory.propose (kind workflow) instead. Never create a new "
     "skill for a lesson. Then say in one line where it was saved."
 )
@@ -100,14 +100,30 @@ COMMANDS: tuple[CommandSpec, ...] = (
     CommandSpec("lesson", "learn", "Save what the last turn taught as a lesson", "[focus]"),
     CommandSpec("merge-skills", "learn", "Merge similar skills into one", "<skill> <skill> [...]"),
     CommandSpec("skills", "ui", "Open the skill library (terminal: list or search)", "[query]"),
+    CommandSpec(
+        "goal",
+        "ui",
+        "Pursue a goal turn after turn until it is achieved",
+        "[objective | pause | resume | clear]",
+    ),
     CommandSpec("compact", "ui", "Compact the context now"),
+    CommandSpec(
+        "init", "ui", "Get to know the project and propose its RINARI.md", clients=("desktop",)
+    ),
+    CommandSpec(
+        "child",
+        "ui",
+        "Do a task in a child session that reports back here",
+        "<task>",
+        clients=("desktop",),
+    ),
     CommandSpec("context", "ui", "Context usage and what fills it"),
     CommandSpec("model", "ui", "Change the model of this conversation", "[alias]"),
     CommandSpec("diff", "ui", "Changes in the workspace"),
     CommandSpec("tasks", "ui", "This project's task tree", "[id]"),
     CommandSpec("fork", "ui", "Continue this conversation in a copy", clients=("desktop",)),
     CommandSpec("rename", "ui", "Rename this conversation", "<title>", clients=("desktop",)),
-    CommandSpec("usage", "ui", "Model and tool calls, tokens, cost", clients=("cli",)),
+    CommandSpec("usage", "ui", "Usage report: plan limits, context, tokens by model, tools"),
     CommandSpec("status", "ui", "Full runtime snapshot", clients=("cli",)),
     CommandSpec("provider", "ui", "List providers or switch", "[alias]", clients=("cli",)),
     CommandSpec("session", "ui", "Show this session", clients=("cli",)),

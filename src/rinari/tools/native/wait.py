@@ -304,6 +304,13 @@ def wait_for(input: dict, ctx: ToolContext) -> ToolResult:
         data["process"] = process
     if state == "timed_out":
         data["timeout"] = timeout
+        # A wait that only let time pass is a timer in disguise (22-oct: a file that
+        # never exists, to «check every minute»).
+        data["note"] = (
+            "Nothing changed. If you are waiting for time to pass or want to repeat a "
+            "check, end your turn and schedule it with schedule.propose "
+            "(in_this_conversation) instead of waiting again."
+        )
     return _ok(data)
 
 
@@ -324,6 +331,8 @@ def _poll(ctx: ToolContext, probe, watched, timeout_s: float, interval: float):
     wake = threading.Event()
     # The turn's cancel wakes the wait at once instead of after the interval.
     unregister = token.on_cancel(wake.set) if hasattr(token, "on_cancel") else None
+    turn_state = getattr(ctx, "turn_state", None)
+    owner_writes = getattr(turn_state, "owner_is_waiting", None)
     deadline = time.monotonic() + timeout_s
     checks = 0
     last: dict = {}
@@ -332,6 +341,10 @@ def _poll(ctx: ToolContext, probe, watched, timeout_s: float, interval: float):
         while True:
             if token is not None:
                 token.throw_if_cancelled()
+            if callable(owner_writes) and owner_writes(ctx.session_id):
+                # The owner wrote (P7): waiting is no work to lose, so the
+                # message is read now instead of after the wait.
+                return "owner_wrote", checks, last, process
             remaining = deadline - time.monotonic()
             checks += 1
             ready, last = probe(min(_PROBE_CAP_S, max(remaining, 0.2)))
@@ -359,7 +372,7 @@ def _poll(ctx: ToolContext, probe, watched, timeout_s: float, interval: float):
                     if "matched" in last:
                         process["output_tail"] = _tail(watched)
                 return "timed_out", checks, last, process
-            wake.wait(min(interval, remaining))
+            wake.wait(min(interval, remaining, 0.5))
     finally:
         if unregister is not None:
             unregister()
@@ -376,7 +389,11 @@ def wait_tools() -> list[ToolDefinition]:
                 "status_min..status_max, default 200..499), output (text, or a regex with "
                 "regex=true, appears in a process handle's output) or file (exists). "
                 "handle also stops the wait if that process exits. Returns state "
-                "ready/timed_out/exited, elapsed_s and the last observation."
+                "ready/timed_out/exited, elapsed_s and the last observation. It ends early "
+                "(owner_wrote) when the user writes: their message comes next. It waits for "
+                "a condition, never for time: what the user wants done later or repeatedly "
+                "is scheduled with schedule.propose (in_this_conversation), and the turn "
+                "ends so the conversation stays free meanwhile."
             ),
             input_schema={
                 "type": "object",

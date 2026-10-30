@@ -708,6 +708,55 @@ def test_a_file_the_running_turn_wrote_opens_before_the_turn_ends(desktop_runtim
         server._turns._turns.pop("turn_live", None)
 
 
+def test_a_file_the_session_presented_opens_outside_the_workspace(desktop_runtime) -> None:
+    # A shell command downloaded a song to Downloads and the agent presented
+    # it: the card showed, but playing it said it was outside the workspace.
+    from rinari.storage.records import SessionEventRecord
+
+    services, server, primary, other, _workspace, tmp_path = desktop_runtime
+    song = tmp_path / "Downloads" / "song.txt"
+    beside = tmp_path / "Downloads" / "other.txt"
+    song.parent.mkdir()
+    song.write_text("la la", encoding="utf-8")
+    beside.write_text("private", encoding="utf-8")
+    for seq, (kind, payload) in enumerate(
+        [
+            ("turn.started", {"turn_id": "turn_song"}),
+            (
+                "file.presented",
+                {"turn_id": "turn_song", "items": [{"path": str(song), "kind": "text"}]},
+            ),
+        ],
+        start=1,
+    ):
+        services.ctx.event_repo.insert(
+            SessionEventRecord(
+                id=f"evt_song_{seq}",
+                session_id=primary.id,
+                seq=seq,
+                type=kind,
+                payload=payload,
+                created_at="2026-01-01T00:00:00Z",
+                turn_id="turn_song",
+            )
+        )
+    for turn in ("turn_song", None):
+        params = {"session_id": primary.id, "path": str(song)}
+        if turn:
+            params["turn_id"] = turn
+        result = _request(server, "workspace.file.read", params)
+        assert result["ok"] is True, result
+        assert result["result"]["content"] == "la la"
+
+    # Only what was presented, and only for the session that presented it.
+    denied = _request(
+        server, "workspace.file.read", {"session_id": primary.id, "path": str(beside)}
+    )
+    assert denied["error"]["code"] == "PERMISSION_DENIED"
+    foreign = _request(server, "workspace.file.read", {"session_id": other.id, "path": str(song)})
+    assert foreign["error"]["code"] == "PERMISSION_DENIED"
+
+
 def test_resolve_reports_large_media_without_reading_it(desktop_runtime) -> None:
     """Large media resolve to path, size and kind; `read` still refuses them."""
     _services, server, primary, _other, workspace, _tmp = desktop_runtime
@@ -785,3 +834,71 @@ def test_artifacts_open_as_a_copy_and_only_from_their_session(desktop_runtime) -
     with pytest.raises(EngineProtocolError) as err:
         server._desktop.resolve_file({"session_id": other.id, "path": uri})
     assert err.value.code == "PERMISSION_DENIED"
+
+
+def test_a_presented_copy_opens_and_shows_its_original_while_unchanged(desktop_runtime) -> None:
+    # What a post presents reaches the office as a copy: «Abrir en el
+    # explorador» there should land on the file the agent made (28-oct).
+    from rinari.artifacts.transfer import import_file
+
+    services, server, primary, _other, _workspace, tmp_path = desktop_runtime
+    song = tmp_path / "Canciones" / "10.mp3"
+    song.parent.mkdir()
+    song.write_bytes(b"ID3 whistle")
+    record = import_file(services.artifacts, primary.id, song, provenance=f"file.present:{song}")
+    params = {"session_id": primary.id, "path": record.uri()}
+    resolved = _request(server, "workspace.file.resolve", params)
+    assert resolved["ok"] is True, resolved
+    assert Path(resolved["result"]["path"]) == song
+
+    # Once the file changes, the copy is what opens: never other bytes.
+    song.write_bytes(b"ID3 another take")
+    resolved = _request(server, "workspace.file.resolve", params)
+    assert resolved["ok"] is True, resolved
+    assert Path(resolved["result"]["path"]) != song
+    assert Path(resolved["result"]["path"]).read_bytes() == b"ID3 whistle"
+
+    # An artifact that was not presented from a file keeps opening as a copy.
+    plain = import_file(services.artifacts, primary.id, tmp_path / "Canciones" / "10.mp3")
+    resolved = _request(server, "workspace.file.resolve", {**params, "path": plain.uri()})
+    assert Path(resolved["result"]["path"]) != song
+
+
+def test_a_workspace_folder_resolves_to_be_shown_but_never_read(desktop_runtime) -> None:
+    # The tree offered «Abrir en el Explorador» on folders and it answered that
+    # the file no longer existed (28-oct).
+    _services, server, primary, _other, workspace, tmp_path = desktop_runtime
+    (workspace / "mv").mkdir()
+    resolved = _request(server, "workspace.file.resolve", {"session_id": primary.id, "path": "mv"})
+    assert resolved["ok"] is True, resolved
+    assert resolved["result"]["kind"] == "folder"
+    assert Path(resolved["result"]["path"]) == (workspace / "mv").resolve()
+    # Reading it is still for files only.
+    read = _request(server, "workspace.file.read", {"session_id": primary.id, "path": "mv"})
+    assert read["ok"] is False
+    # A folder outside the workspace stays out.
+    (tmp_path / "fuera").mkdir()
+    outside = _request(
+        server,
+        "workspace.file.resolve",
+        {"session_id": primary.id, "path": str(tmp_path / "fuera")},
+    )
+    assert outside["ok"] is False
+
+
+def test_artifact_resolve_gives_a_presented_copys_original(desktop_runtime) -> None:
+    # The app reveals and opens an artifact:// through artifact.resolve: the
+    # office's copy of a presented song showed the artifact store (28-oct).
+    from rinari.artifacts.transfer import import_file
+
+    services, server, primary, _other, _workspace, tmp_path = desktop_runtime
+    song = tmp_path / "Canciones" / "11.mp3"
+    song.parent.mkdir()
+    song.write_bytes(b"ID3 diva")
+    record = import_file(services.artifacts, primary.id, song, provenance=f"file.present:{song}")
+    resolved = _request(server, "artifact.resolve", {"uri": record.uri()})
+    assert resolved["ok"] is True, resolved
+    assert Path(resolved["result"]["path"]) == song
+    song.write_bytes(b"ID3 changed")
+    resolved = _request(server, "artifact.resolve", {"uri": record.uri()})
+    assert Path(resolved["result"]["path"]) != song

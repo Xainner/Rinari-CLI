@@ -27,6 +27,8 @@ dependencies = [
     "duckdb>=1.1,<2",
     "docxtpl>=0.19,<1",
     "pywinpty>=2.0.14; sys_platform == 'win32'",
+    # Red (plan 0.4.0 #96): los certificados del sistema (Windows) para HTTPS.
+    "truststore>=0.10.5,<1",
 ]
 
 [project.scripts]

@@ -29,6 +29,7 @@ from rinari.providers.adapters.http import (
 from rinari.providers.catalog import OPENCODE_RESPONSES_MODELS
 from rinari.providers.errors import invoke_with_retry
 from rinari.providers.metadata import effective_metadata
+from rinari.providers.opencode_routes import call_on_route
 from rinari.providers.registry import adapter_for
 from rinari.shared.errors import InvalidUsageError, ProviderModelError
 
@@ -56,12 +57,23 @@ def _resolve_transport(provider, model) -> str:
         ):
             return "responses"
         return "chat"
-    if transport not in ("chat", "responses", "anthropic"):
+    if transport not in ("chat", "responses", "anthropic", "google"):
         raise InvalidUsageError(
             f"unknown transport {transport!r} on model {model.alias!r}",
-            hint="Expected one of: chat, responses, anthropic.",
+            hint="Expected one of: chat, responses, anthropic, google.",
         )
     return transport
+
+
+# Protocols an aggregator may serve a model by, tried in this order when it
+# refuses the one Rinari picked (plan 0.4.0 #94).
+LEARNABLE_TRANSPORTS = ("google", "anthropic", "responses", "chat")
+
+
+def refuses_protocol(exc: Exception) -> bool:
+    """OpenCode's «Model does not support this protocol»: the route, not the request."""
+    text = str(exc).lower()
+    return "does not support this protocol" in text or "unsupported protocol" in text
 
 
 def _alias_map_for_request(endpoint: str | None, request: ModelRequest) -> dict[str, str] | None:
@@ -98,6 +110,21 @@ def _wire_alias(name: str, *, reserve: int = 0) -> str:
     before appending them.
     """
     return sanitize_tool_name(name)[: max(0, 64 - reserve)]
+
+
+def _vision_constraints(provider: ProviderRecord, model) -> dict[str, Any]:
+    """Image limits for one call: what the endpoint announced, then the saved settings."""
+    discovered = (model.settings or {}).get("discovered_capabilities") or {}
+    announced = (
+        {"max_images": discovered["max_images"]}
+        if type(discovered.get("max_images")) is int and discovered["max_images"] > 0
+        else {}
+    )
+    return {
+        **announced,
+        **(provider.settings or {}).get("vision_limits", {}),
+        **(model.settings or {}).get("vision_limits", {}),
+    }
 
 
 def _merge_capabilities(
@@ -258,6 +285,38 @@ def without_rejected_reasoning(request: ModelRequest, call, *, output_started=la
         return call(replace(request, reasoning_effort=None))
 
 
+# Below this, a smaller answer is not worth a second call.
+MIN_AFFORDABLE_TOKENS = 1024
+
+
+def within_affordable_tokens(request: ModelRequest, call, *, output_started=lambda: False):
+    """`call(request)`, repeated once with a lower max_tokens when the
+    provider said the balance only covers N output tokens (OpenRouter's 402
+    «can only afford N», plan 0.4.0 #3). Without max_tokens the provider
+    reserves the model's whole output to check the balance; 90 % of N fits.
+    """
+    try:
+        return call(request)
+    except ProviderModelError as exc:
+        affordable = exc.details.get("affordable_output_tokens")
+        current = request.max_tokens
+        if (
+            not isinstance(affordable, int)
+            or affordable < MIN_AFFORDABLE_TOKENS
+            or (current is not None and affordable >= current)
+            or exc.details.get("partial")
+            or output_started()
+        ):
+            raise
+        reduced = int(affordable * 0.9)
+        if request.usage_observer is not None:
+            request.usage_observer(
+                "provider.max_tokens.reduced",
+                {"model": request.model, "max_tokens": reduced, "affordable": affordable},
+            )
+        return call(replace(request, max_tokens=reduced))
+
+
 def scheduled(method):
     from functools import wraps
 
@@ -358,6 +417,7 @@ class ModelRouter:
             "chat",
             "responses",
             "anthropic",
+            "google",
         ):
             return replace(
                 base,
@@ -422,6 +482,8 @@ class ModelRouter:
                 hint="Add one first: `rinari models add --provider <alias> <model>`.",
             )
         model = self._models.resolve(model_id)
+        # A turned-off provider gets no call at all (plan 0.4.0 #97).
+        self._providers.ensure_enabled(provider, model.alias)
         if model.provider_id != provider.id:
             owner = self._providers.get(model.provider_id).alias
             raise InvalidUsageError(
@@ -512,11 +574,75 @@ class ModelRouter:
             if hasattr(adapter, "_anthropic_adapter"):
                 return adapter._anthropic_adapter(), "chat"
             return AnthropicAdapter(client=self._client), "chat"
+        if transport == "google":
+            from rinari.providers.adapters.google_native import GoogleNativeAdapter
+
+            return GoogleNativeAdapter(client=self._client), "chat"
         if transport not in ("chat", "responses"):
             raise InvalidUsageError(
                 "This model requires a transport not yet implemented by Rinari."
             )
         return self.adapter(provider), transport
+
+    def _learning_protocol(
+        self, provider, model, request, transport, call, *, output_started=lambda: False
+    ):
+        """`call(transport)`; when the endpoint refuses that protocol for this
+        model, find the one it serves with a minimal call, keep it on the model
+        and call again (plan 0.4.0 #94). An explicit per-model protocol is the
+        owner's choice and is never changed."""
+        try:
+            return call(transport)
+        except ProviderModelError as exc:
+            if (
+                not refuses_protocol(exc)
+                or output_started()
+                or (model.settings or {}).get("transport")
+            ):
+                raise
+            learned = self._learn_transport(provider, model, request, transport)
+            if learned is None:
+                raise
+            return call(learned)
+
+    def _learn_transport(self, provider, model, request, current):
+        from rinari.models.types import ChatMessage, ModelRequest
+
+        probe = ModelRequest(
+            model=request.model,
+            messages=(ChatMessage.user("Reply with OK."),),
+            max_tokens=32,
+            session_id=request.session_id,
+        )
+        for candidate in LEARNABLE_TRANSPORTS:
+            if candidate == current:
+                continue
+            try:
+                adapter, wire = self._transport_adapter(provider, candidate)
+                self._authenticated_call(
+                    provider,
+                    lambda secret, adapter=adapter, wire=wire, candidate=candidate: call_on_route(
+                        provider.endpoint,
+                        candidate,
+                        lambda endpoint: adapter.invoke(probe, secret, endpoint, transport=wire),
+                    ),
+                )
+            except Exception:
+                continue
+            ctx = getattr(self._models, "_ctx", None)
+            if ctx is not None:
+                with contextlib.suppress(Exception):
+                    ctx.model_repo.update(
+                        replace(model, settings={**(model.settings or {}), "transport": candidate})
+                    )
+            if request.usage_observer is not None:
+                with contextlib.suppress(Exception):
+                    request.usage_observer(
+                        "provider.protocol.learned",
+                        {"model": model.provider_model_id, "transport": candidate},
+                    )
+            return candidate
+        return None
 
     def _authenticated_call(self, provider, call, *, output_started=lambda: False):
         from rinari.providers.errors import ProviderError, ProviderErrorCode
@@ -578,11 +704,7 @@ class ModelRouter:
         request = self._validate_reasoning(provider, model, request)
         from rinari.models.visual_context import prepare_visual_payload
 
-        constraints = {
-            **(provider.settings or {}).get("vision_limits", {}),
-            **(model.settings or {}).get("vision_limits", {}),
-        }
-        request = prepare_visual_payload(request, constraints)
+        request = prepare_visual_payload(request, _vision_constraints(provider, model))
         real_by_alias = _alias_map_for_request(provider.endpoint, request)
         transport = _resolve_transport(provider, model)
         from rinari.models.usage_tracking import observe_call
@@ -592,8 +714,17 @@ class ModelRouter:
             lambda _: _unalias_response(
                 without_rejected_reasoning(
                     request,
-                    lambda attempt: self._adapter_invoke(
-                        provider, attempt, transport, real_by_alias
+                    lambda attempt: within_affordable_tokens(
+                        attempt,
+                        lambda current: self._learning_protocol(
+                            provider,
+                            model,
+                            current,
+                            transport,
+                            lambda chosen: self._adapter_invoke(
+                                provider, current, chosen, real_by_alias
+                            ),
+                        ),
                     ),
                 ),
                 real_by_alias,
@@ -637,13 +768,10 @@ class ModelRouter:
         request = self._validate_reasoning(provider, model, request)
         from rinari.models.visual_context import prepare_visual_payload
 
-        constraints = {
-            **(provider.settings or {}).get("vision_limits", {}),
-            **(model.settings or {}).get("vision_limits", {}),
-        }
-        request = prepare_visual_payload(request, constraints)
+        request = prepare_visual_payload(request, _vision_constraints(provider, model))
         real_by_alias = _alias_map_for_request(provider.endpoint, request)
         transport = _resolve_transport(provider, model)
+        original_transport = transport
         adapter, transport = self._transport_adapter(provider, transport)
         emitted = False
         from rinari.models.usage_tracking import observe_call
@@ -655,21 +783,46 @@ class ModelRouter:
                 if on_visible is not None:
                     on_visible(delta)
 
-            def attempt(current):
+            def stream_by(current, chosen):
+                stream_adapter, wire = (
+                    (adapter, transport)
+                    if chosen == original_transport
+                    else self._transport_adapter(provider, chosen)
+                )
                 return self._authenticated_call(
                     provider,
-                    lambda secret: adapter.invoke_stream(
-                        current,
-                        secret,
+                    lambda secret: call_on_route(
                         provider.endpoint,
-                        deliver,
-                        transport=transport,
-                        tool_aliases=real_by_alias,
+                        chosen,
+                        lambda endpoint: stream_adapter.invoke_stream(
+                            current,
+                            secret,
+                            endpoint,
+                            deliver,
+                            transport=wire,
+                            tool_aliases=real_by_alias,
+                        ),
                     ),
                     output_started=lambda: emitted,
                 )
 
-            return without_rejected_reasoning(request, attempt, output_started=lambda: emitted)
+            def attempt(current):
+                return self._learning_protocol(
+                    provider,
+                    model,
+                    current,
+                    original_transport,
+                    lambda chosen: stream_by(current, chosen),
+                    output_started=lambda: emitted,
+                )
+
+            return without_rejected_reasoning(
+                request,
+                lambda current: within_affordable_tokens(
+                    current, attempt, output_started=lambda: emitted
+                ),
+                output_started=lambda: emitted,
+            )
 
         response = observe_call(request, invoke, on_delta)
         return self._scope_response(
@@ -683,6 +836,7 @@ class ModelRouter:
         transport: str = "chat",
         tool_aliases: dict[str, str] | None = None,
     ) -> ModelResponse:
+        route = transport
         adapter, transport = self._transport_adapter(provider, transport)
         # §6.4: transient model-call failures retry with backoff. Streaming
         # deliberately does NOT retry: partial deltas already delivered make
@@ -690,12 +844,16 @@ class ModelRouter:
         response = self._authenticated_call(
             provider,
             lambda secret: invoke_with_retry(
-                lambda: adapter.invoke(
-                    request,
-                    secret,
+                lambda: call_on_route(
                     provider.endpoint,
-                    transport=transport,
-                    tool_aliases=tool_aliases,
+                    route,
+                    lambda endpoint: adapter.invoke(
+                        request,
+                        secret,
+                        endpoint,
+                        transport=transport,
+                        tool_aliases=tool_aliases,
+                    ),
                 ),
                 attempts=1 if any(message.images for message in request.messages) else 3,
             ),

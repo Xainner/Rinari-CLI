@@ -37,6 +37,16 @@ def _mock_models_client() -> httpx.Client:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/models"):
             return httpx.Response(200, json={"data": [{"id": "mx-1"}, {"id": "mx-2"}]})
+        if request.url.path.endswith("/chat/completions"):
+            # «Probar» is a real minimal call (plan 0.4.0 #94).
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"role": "assistant", "content": "OK"}, "finish_reason": "stop"}
+                    ]
+                },
+            )
         return httpx.Response(404, json={"error": {"message": "nope"}})
 
     return httpx.Client(transport=httpx.MockTransport(handler))
@@ -205,12 +215,43 @@ def test_provider_test_reports_catalog(live_server) -> None:
     assert provider["status_connected"] is True
 
 
-def test_model_discover_lists_without_saving(live_server) -> None:
+def test_model_discover_saves_what_the_provider_offers(live_server) -> None:
+    """#93: nothing stays «por guardar»; every list reloads on models.changed."""
     _create_local(live_server)
+    live_server.drain_events()
     found = _ok(_call(live_server, "model.discover", {"provider": "ollama"}, tag="d"))
     assert [m["provider_model_id"] for m in found["providers"]["ollama"]] == ["mx-1", "mx-2"]
+    assert found["added"] == {"ollama": ["mx-1", "mx-2"]}
     models = _ok(_call(live_server, "model.list", {"provider": "ollama"}, tag="l"))["models"]
-    assert models == []
+    assert sorted(m["provider_model_id"] for m in models) == ["mx-1", "mx-2"]
+    assert any(item.get("event") == "models.changed" for item in live_server.drain_events())
+    # A second discovery adds nothing.
+    again = _ok(_call(live_server, "model.discover", {"provider": "ollama"}, tag="d2"))
+    assert again["added"] == {}
+
+
+def test_a_removed_model_stays_hidden_until_shown(live_server) -> None:
+    _create_local(live_server)
+    _ok(_call(live_server, "model.discover", {"provider": "ollama"}, tag="d"))
+    _ok(_call(live_server, "model.remove", {"ref": "mx-2", "provider": "ollama"}, tag="r"))
+    hidden = _ok(_call(live_server, "model.hidden.list", {"provider": "ollama"}, tag="h"))
+    assert hidden["hidden"] == ["mx-2"]
+    # Neither discovery nor «Actualizar» bring it back.
+    _ok(_call(live_server, "model.discover", {"provider": "ollama"}, tag="d2"))
+    _ok(_call(live_server, "model.refresh", {"provider": "ollama", "add_new": True}, tag="f"))
+    models = _ok(_call(live_server, "model.list", {"provider": "ollama"}, tag="l"))["models"]
+    assert [m["provider_model_id"] for m in models] == ["mx-1"]
+    shown = _ok(
+        _call(
+            live_server,
+            "model.unhide",
+            {"provider": "ollama", "provider_model_id": "mx-2"},
+            tag="u",
+        )
+    )
+    assert shown["model"]["provider_model_id"] == "mx-2"
+    hidden = _ok(_call(live_server, "model.hidden.list", {"provider": "ollama"}, tag="h2"))
+    assert hidden["hidden"] == []
 
 
 def test_model_discovery_job_returns_before_network_work_completes(live_server) -> None:

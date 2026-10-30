@@ -28,9 +28,26 @@ def chatgpt_headers(secret):
     return headers
 
 
+def codex_session_id(session_id: str) -> str:
+    """A stable UUID for a Rinari conversation, as Codex CLI sends its own."""
+    import uuid
+
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"rinari:{session_id}"))
+
+
 class CodexResponsesAdapter(OpenAIResponsesAdapter):
     def _headers(self, secret):
         return chatgpt_headers(secret)
+
+    def request_headers(self, secret, request):
+        headers = self._headers(secret)
+        if request.session_id:
+            # The subscription backend keeps a conversation's prompt cache by
+            # this header, as Codex CLI sends it; `prompt_cache_key` alone did
+            # not. Measured 2026-10-18 (plan 0.4.0 v2, V2-10): without it 0 %
+            # of 8 calls came from cache, with it ~90 % from the second call.
+            headers["session_id"] = codex_session_id(request.session_id)
+        return headers
 
     def _responses_payload(self, request, *, stream, tool_aliases=None):
         payload = super()._responses_payload(request, stream=True, tool_aliases=tool_aliases)

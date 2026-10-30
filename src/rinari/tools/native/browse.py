@@ -18,6 +18,7 @@ Capability model (phase 5 "Browser engine" decision, AGENTS.md 11):
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import time
 from collections.abc import Callable
@@ -66,9 +67,12 @@ _CODE_MAP: dict[str, ToolErrorCode] = {
     # El código crudo viaja en `browser_error`, que es lo que lo distingue de
     # cualquier otro UNKNOWN.
     "CAPTURE_EMPTY": ToolErrorCode.UNKNOWN,
-    # El usuario tomó el control del browser (documento 03 §7). La herramienta
-    # recibe un estado de intervención explícito en vez de ejecutarse a
-    # escondidas o quedarse reintentando.
+    # El compositor no pudo copiar la página en ese momento (P5): el host ya
+    # reintentó; otro intento un poco más tarde suele salir.
+    "CAPTURE_TRANSIENT": ToolErrorCode.TIMEOUT,
+    # El dueño está usando el navegador (documento 03 §7). El agente espera a
+    # que lo suelte (plan 0.4.0 #46); si no lo suelta en un buen rato, la
+    # herramienta lo dice en vez de ejecutarse a escondidas o reintentar.
     "BROWSER_INTERVENED": ToolErrorCode.CONFLICT,
     "BROWSER_CONTROL_CONFLICT": ToolErrorCode.CONFLICT,
     # La identidad validada por el Engine ya no coincide cuando el host va a
@@ -117,6 +121,26 @@ def _retryable_for(exc: BrowserError, code: ToolErrorCode) -> bool:
     return exc.retryable or code in _RETRYABLE
 
 
+def _browser_failure(exc: BrowserError, manager: BrowserManager | None) -> ToolResult:
+    """The same failure for every browser tool: the raw code, the outcome, diagnostics."""
+    code = _CODE_MAP.get(exc.code, ToolErrorCode.UNKNOWN)
+    diagnostics: dict = {}
+    if manager is not None:
+        with contextlib.suppress(Exception):
+            diagnostics = manager.diagnostics()
+    return ToolResult(
+        ok=False,
+        data={
+            "browser_error": exc.code,
+            # Se dice en los datos, no sólo en el texto: el runtime y el
+            # modelo tienen que poder distinguir «no pasó» de «no se sabe».
+            "outcome": "unknown" if exc.uncertain else "failed",
+            "diagnostics": diagnostics,
+        },
+        error=ToolErrorInfo(code=code, message=exc.message, retryable=_retryable_for(exc, code)),
+    )
+
+
 def _run(ctx: ToolContext, fn: Callable[[], Any]) -> ToolResult:
     _manager_instance, error = _need_manager(ctx)
     if error is not None:
@@ -124,20 +148,7 @@ def _run(ctx: ToolContext, fn: Callable[[], Any]) -> ToolResult:
     try:
         return _ok(fn())
     except BrowserError as exc:
-        code = _CODE_MAP.get(exc.code, ToolErrorCode.UNKNOWN)
-        return ToolResult(
-            ok=False,
-            data={
-                "browser_error": exc.code,
-                # Se dice en los datos, no sólo en el texto: el runtime y el
-                # modelo tienen que poder distinguir «no pasó» de «no se sabe».
-                "outcome": "unknown" if exc.uncertain else "failed",
-                "diagnostics": _manager_instance.diagnostics() if _manager_instance else {},
-            },
-            error=ToolErrorInfo(
-                code=code, message=exc.message, retryable=_retryable_for(exc, code)
-            ),
-        )
+        return _browser_failure(exc, _manager_instance)
     except SandboxViolationError as exc:
         return ToolResult(
             ok=False, error=ToolErrorInfo(code=ToolErrorCode.SANDBOX_VIOLATION, message=exc.message)
@@ -302,7 +313,9 @@ def browser_tabs_close(input: dict, ctx: ToolContext) -> ToolResult:
 
 def _page_target(input: dict, ctx: ToolContext) -> str | ToolResult | None:
     target = input.get("target_id")
-    if target is None:
+    # Models send target_id="" to mean «the active tab»; that is no target,
+    # not an invalid one (a session failed browser.navigate on it).
+    if target is None or target == "":
         return None
     if not isinstance(target, str) or not target:
         return _run_invalid("target_id must be a non-empty string")
@@ -332,13 +345,7 @@ def browser_open(input: dict, ctx: ToolContext) -> ToolResult:
         created = manager.new_page(str(url))
         return _ok(created)
     except BrowserError as exc:
-        code = _CODE_MAP.get(exc.code, ToolErrorCode.UNKNOWN)
-        return ToolResult(
-            ok=False,
-            error=ToolErrorInfo(
-                code=code, message=exc.message, retryable=_retryable_for(exc, code)
-            ),
-        )
+        return _browser_failure(exc, manager)
 
 
 def browser_navigate(input: dict, ctx: ToolContext) -> ToolResult:
@@ -354,10 +361,33 @@ def browser_navigate(input: dict, ctx: ToolContext) -> ToolResult:
     target = _page_target(input, ctx)
     if isinstance(target, ToolResult):
         return target
+    if target is None:
+        opened = _open_when_no_tab(ctx, str(url))
+        if opened is not None:
+            return opened
     return _run(
         ctx,
         lambda: _manager(ctx).navigate(target, str(url), cancelled=_cancelled_fn(ctx)),  # type: ignore[union-attr]
     )
+
+
+def _open_when_no_tab(ctx: ToolContext, url: str) -> ToolResult | None:
+    """No tab open yet: «go to this page» opens one (P6), and says so.
+
+    Navigating with no tab failed with «the page is gone», and the model went
+    around in circles before trying browser.open. Only when there is no tab at
+    all: a stale explicit target_id still fails, with how to list the tabs.
+    """
+    manager = _manager(ctx)
+    if manager is None:
+        return None
+    try:
+        if manager.targets():
+            return None
+        created = manager.new_page(url)
+    except BrowserError as exc:
+        return _browser_failure(exc, manager)
+    return _ok({**created, "opened_new_tab": True, "note": "No tab was open; opened a new one."})
 
 
 def browser_snapshot(input: dict, ctx: ToolContext) -> ToolResult:
@@ -379,13 +409,7 @@ def browser_snapshot(input: dict, ctx: ToolContext) -> ToolResult:
             return _ok(snap)
         snap = manager.snapshot(target, cancelled=_cancelled_fn(ctx))
     except BrowserError as exc:
-        code = _CODE_MAP.get(exc.code, ToolErrorCode.UNKNOWN)
-        return ToolResult(
-            ok=False,
-            error=ToolErrorInfo(
-                code=code, message=exc.message, retryable=_retryable_for(exc, code)
-            ),
-        )
+        return _browser_failure(exc, manager)
     data: dict[str, Any] = {"bytes": snap["bytes"], "truncated": snap["truncated"]}
     artifacts: list[ArtifactRef] = []
     if snap["truncated"]:
@@ -419,34 +443,39 @@ def browser_screenshot(input: dict, ctx: ToolContext) -> ToolResult:
     try:
         png = manager.screenshot(target, cancelled=_cancelled_fn(ctx))
     except BrowserError as exc:
-        code = _CODE_MAP.get(exc.code, ToolErrorCode.UNKNOWN)
-        return ToolResult(
-            ok=False,
-            error=ToolErrorInfo(
-                code=code, message=exc.message, retryable=_retryable_for(exc, code)
-            ),
-        )
-    path = _artifact_dir(ctx) / f"screenshot-{int(time.time())}.png"
-    path.write_bytes(png)
-    digest = _sha256(path)
+        return _browser_failure(exc, manager)
+    name = f"screenshot-{int(time.time())}.png"
     store = getattr(ctx, "artifact_store", None)
     if store is None:
+        path = _artifact_dir(ctx) / name
+        path.write_bytes(png)
         ref = ArtifactRef(uri=f"file://{path}", name=path.name, kind="screenshot")
-        return _with_artifacts({"artifact": ref.uri, "bytes": len(png), "sha256": digest}, (ref,))
+        return _with_artifacts(
+            {"artifact": ref.uri, "bytes": len(png), "sha256": _sha256(path)}, (ref,)
+        )
     # In the session media store the chat and the activity can show it; a
     # bare file:// path renders as a broken image (the renderer cannot read it).
+    # The capture is written outside the conversation's folder and imported:
+    # no loose copy is left there for a path to name instead of the stored one.
+    import tempfile
+
     from PIL import Image
 
     from rinari.artifacts.transfer import import_file
 
-    record = import_file(
-        store,
-        ctx.session_id,
-        path,
-        expected_hash=digest,
-        cancellation=ctx.cancellation,
-        provenance=f"browser.screenshot:{path}",
-    )
+    with tempfile.TemporaryDirectory(prefix="rinari-capture-") as scratch:
+        draft = Path(scratch) / name
+        draft.write_bytes(png)
+        digest = _sha256(draft)
+        record = import_file(
+            store,
+            ctx.session_id,
+            draft,
+            expected_hash=digest,
+            cancellation=ctx.cancellation,
+            provenance=f"browser.screenshot:{name}",
+        )
+    path = store._storage_path(record.storage_path)
     width = height = None
     try:
         with Image.open(path) as image:
@@ -464,14 +493,41 @@ def browser_screenshot(input: dict, ctx: ToolContext) -> ToolResult:
         "width": width,
         "height": height,
         "mime_type": "image/png",
-        # How to show it to the owner: file:// paths do not render in the chat.
-        "markdown": f"![{path.name}]({uri})",
     }
+    # The capture goes to the model in the same step, as `fs.read_image` does:
+    # without it the model had to read the same file again, one more call and
+    # one more round per capture (plan 0.4.0 #11). A model without vision gets
+    # it retired with a note by the visual router; the turn goes on.
+    from rinari.models.images import ImageReference
+
+    image = ImageReference(uri, path, digest, "image/png")
     return ToolResult(
         ok=True,
         data=data,
+        images=(image,),
         artifacts=(ArtifactRef(uri, path.name, "image"),),
         presentation={"kind": "image", "image": data},
+    )
+
+
+#: Los anchos que se pueden pedir; fuera de esto no es una pantalla real.
+_VIEWPORT_RANGE = (320, 2560)
+
+
+def browser_viewport(input: dict, ctx: ToolContext) -> ToolResult:
+    """Ancho de la página para probar un diseño (plan 0.4.0 #44b)."""
+    width = input.get("width")
+    if width in (None, "fit"):
+        width = None
+    elif isinstance(width, bool) or not isinstance(width, int):
+        return _run_invalid('width must be an integer number of pixels, or "fit"')
+    elif not _VIEWPORT_RANGE[0] <= width <= _VIEWPORT_RANGE[1]:
+        return _run_invalid(
+            f"width must be between {_VIEWPORT_RANGE[0]} and {_VIEWPORT_RANGE[1]} pixels"
+        )
+    return _run(
+        ctx,
+        lambda: _manager(ctx).set_viewport(width, cancelled=_cancelled_fn(ctx)),  # type: ignore[union-attr]
     )
 
 
@@ -715,13 +771,7 @@ def browser_upload(input: dict, ctx: ToolContext) -> ToolResult:
             cancelled=_cancelled_fn(ctx),
         )
     except BrowserError as exc:
-        code = _CODE_MAP.get(exc.code, ToolErrorCode.UNKNOWN)
-        return ToolResult(
-            ok=False,
-            error=ToolErrorInfo(
-                code=code, message=exc.message, retryable=_retryable_for(exc, code)
-            ),
-        )
+        return _browser_failure(exc, manager)
     out["provenance"] = provenance
     return _ok(out)
 
@@ -736,13 +786,7 @@ def browser_download(input: dict, ctx: ToolContext) -> ToolResult:
             timeout_s=float(input.get("wait_s") or 15.0), cancelled=_cancelled_fn(ctx)
         )
     except BrowserError as exc:
-        code = _CODE_MAP.get(exc.code, ToolErrorCode.UNKNOWN)
-        return ToolResult(
-            ok=False,
-            error=ToolErrorInfo(
-                code=code, message=exc.message, retryable=_retryable_for(exc, code)
-            ),
-        )
+        return _browser_failure(exc, manager)
     if ref is None:
         return ToolResult(
             ok=False,
@@ -774,6 +818,71 @@ def browser_download(input: dict, ctx: ToolContext) -> ToolResult:
 # -- registry -----------------------------------------------------------------------
 
 
+#: Tools after which the page may be showing a human verification check
+#: (plan 0.4.0 #45): the ones that land on a page or change it, and the ones
+#: the agent uses to look at it.
+_HUMAN_CHECKED = {
+    "browser.open",
+    "browser.navigate",
+    "browser.click",
+    "browser.type",
+    "browser.snapshot",
+    "browser.a11y",
+    "browser.screenshot",
+}
+
+
+def _human_checked(handler: Callable[[dict, ToolContext], ToolResult]):
+    """Run the tool, then say so when the page asks for a human (#45).
+
+    The tool's own work stands (the page is open, the click happened); what
+    changes is that the agent gets `HUMAN_CHECK` instead of a page to keep
+    poking at, so it stops and asks the owner rather than retrying.
+    """
+    from rinari.browser import human_check
+
+    def run(input: dict, ctx: ToolContext) -> ToolResult:
+        result = handler(input, ctx)
+        manager = _manager(ctx)
+        if not result.ok or manager is None:
+            return result
+        # Mirar la página es un `evaluate`, y con el dueño usando el navegador
+        # eso esperaría a que lo suelte (#46). Si lo está usando, ya la ve él.
+        if manager.status().get("control_state", "agent") != "agent":
+            return result
+        target = input.get("target_id") if isinstance(input.get("target_id"), str) else None
+        if target is None and isinstance(result.data, dict):
+            created = result.data.get("target_id")
+            target = created if isinstance(created, str) and created else None
+        cancelled = _cancelled_fn(ctx)
+
+        def evaluate(expression: str) -> Any:
+            return manager.evaluate(target, expression, cancelled=cancelled).get("value")
+
+        found = human_check.detect(evaluate, cancelled=cancelled, settle_s=human_check.SETTLE_S)
+        if found is None:
+            return result
+        return ToolResult(
+            ok=False,
+            data={
+                "browser_error": "HUMAN_CHECK",
+                "check": found["kind"],
+                "url": found["url"],
+                # What the tool did still happened: the page is there.
+                "outcome": "applied",
+            },
+            error=ToolErrorInfo(
+                code=ToolErrorCode.AUTH_REQUIRED,
+                message=human_check.message(found),
+                retryable=False,
+            ),
+            artifacts=result.artifacts,
+            images=result.images,
+        )
+
+    return run
+
+
 def browse_tools() -> list[ToolDefinition]:
     optional_target = {
         "type": "object",
@@ -784,8 +893,8 @@ def browse_tools() -> list[ToolDefinition]:
         "properties": {"target_id": {"type": "string"}},
         "required": ["target_id"],
     }
-    # Nivel C (Etapa B): browser tools are on-demand, discovered via
-    # capability.search and exposed via capability.activate.
+    # Browser tools are on-demand: found with capability.search and run
+    # through tool.call (F42).
     tools = [
         ToolDefinition(
             name="browser.status",
@@ -949,8 +1058,9 @@ def browse_tools() -> list[ToolDefinition]:
         ToolDefinition(
             name="browser.screenshot",
             description=(
-                "Capture the page as a PNG image. It returns an artifact:// image; to show "
-                "it in the chat, include the returned `markdown` in your reply."
+                "Capture the page as a PNG image. The capture already comes to you as an "
+                "image in this result: do not read it again with fs.read_image. The owner "
+                "does not see it unless you show it with file.present (path: its uri)."
             ),
             input_schema=optional_target,
             risk=RISK_LOW,
@@ -959,6 +1069,33 @@ def browse_tools() -> list[ToolDefinition]:
             handler=browser_screenshot,
             namespace="browser",
             capabilities=("browser.read",),
+        ),
+        ToolDefinition(
+            name="browser.viewport",
+            description=(
+                "Set the page width to test a layout: 390 (phone), 768 (tablet), 1280 "
+                '(desktop), 1920 (wide), or any width from 320 to 2560; "fit" goes back to '
+                "the panel width. The page lays out at that width (the owner scrolls the panel "
+                "sideways to see it); clicks and screenshots stay in page coordinates."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "width": {
+                        "anyOf": [
+                            {"type": "integer", "minimum": 320, "maximum": 2560},
+                            {"type": "string", "enum": ["fit"]},
+                        ]
+                    }
+                },
+                "required": ["width"],
+            },
+            risk=RISK_LOW,
+            side_effects=SIDE_EFFECT_LOCAL_REVERSIBLE,
+            classify=_write_classify,
+            handler=browser_viewport,
+            namespace="browser",
+            capabilities=("browser.mutate",),
         ),
         ToolDefinition(
             name="browser.click",
@@ -1128,7 +1265,11 @@ def browse_tools() -> list[ToolDefinition]:
             },
             risk=RISK_HIGH,
             side_effects=SIDE_EFFECT_REMOTE_REVERSIBLE,
-            classify=_write_classify,
+            # The approval shows the script it would run, so the owner can judge
+            # it (F15, plan 0.4.0 v2, V2-13).
+            classify=lambda i: ClassifiedAction(
+                "browser.mutate", str((i or {}).get("expression") or "")[:500] or None
+            ),
             handler=browser_evaluate,
             namespace="browser",
             capabilities=("browser.mutate",),
@@ -1258,6 +1399,7 @@ def browse_tools() -> list[ToolDefinition]:
             tool,
             always_loaded=False,
             idempotent=tool.idempotent and tool.name not in non_repeatable,
+            handler=_human_checked(tool.handler) if tool.name in _HUMAN_CHECKED else tool.handler,
         )
         for tool in tools
     ]

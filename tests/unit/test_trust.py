@@ -117,7 +117,7 @@ def test_legacy_grant_upgrades_only_if_still_valid(services, tmp_path):
     entry.fingerprint = trust_store._sha256(f"head={head}\nremotes=")
     services.ctx.trust_repo.upsert(entry)
     assert services.trust.status(repo).state == STATE_TRUSTED
-    assert services.ctx.trust_repo.get(str(repo.resolve())).fingerprint.startswith("git-v2:")
+    assert services.ctx.trust_repo.get(str(repo.resolve())).fingerprint.startswith("git-v3:")
     entry.fingerprint = "old-invalid-fingerprint"
     services.ctx.trust_repo.upsert(entry)
     assert services.trust.status(repo).state == STATE_REVALIDATION
@@ -228,3 +228,78 @@ def test_revalidation_warns_on_resume(services, tmp_path) -> None:
 
     started = services.sessions.resume(record.id, cwd=repo)
     assert any("revalidation" in w for w in started.warnings)
+
+
+# -- plan 0.4.0 #38: `git init` inside a trusted folder ---------------------
+
+
+def test_git_init_without_remotes_keeps_trust_on_its_own(services, tmp_path) -> None:
+    folder = tmp_path / "plain"
+    folder.mkdir()
+    services.trust.add(folder)
+    _git(folder, "init", "-q")
+
+    status = services.trust.status(folder)
+    assert status.state == STATE_TRUSTED
+    assert status.reidentified == "git-init"
+    # Only once: the grant now holds the repository's identity.
+    assert services.trust.status(folder).reidentified is None
+
+
+def test_git_init_of_a_marker_project_keeps_trust(services, tmp_path) -> None:
+    folder = tmp_path / "marked"
+    (folder / ".rinari").mkdir(parents=True)
+    (folder / ".rinari" / "project.toml").write_text('name = "x"\n', encoding="utf-8")
+    services.trust.add(folder)
+    _git(folder, "init", "-q")
+    assert services.trust.status(folder).state == STATE_TRUSTED
+
+
+def test_a_repo_with_remotes_still_asks(services, tmp_path) -> None:
+    folder = tmp_path / "cloned"
+    folder.mkdir()
+    services.trust.add(folder)
+    _git(folder, "init", "-q")
+    _git(folder, "remote", "add", "origin", "https://example.invalid/other.git")
+
+    status = services.trust.status(folder)
+    assert status.state == STATE_REVALIDATION
+    assert status.reidentified is None
+
+
+def test_a_git_file_pointing_elsewhere_still_asks(services, tmp_path) -> None:
+    elsewhere = _git_repo(tmp_path)
+    folder = tmp_path / "linked"
+    folder.mkdir()
+    services.trust.add(folder)
+    (folder / ".git").write_text(f"gitdir: {elsewhere / '.git'}\n", encoding="utf-8")
+    assert services.trust.status(folder).state == STATE_REVALIDATION
+
+
+def test_a_v2_grant_upgrades_while_the_repository_is_the_same(services, tmp_path) -> None:
+    # Grants made before 0.4.0 keep working: same directory, same remotes.
+    repo = _git_repo(tmp_path)
+    entry = services.trust.add(repo)
+    entry.fingerprint = trust_store.fingerprint_for(repo, version=2)
+    services.ctx.trust_repo.upsert(entry)
+    assert services.trust.status(repo).state == STATE_TRUSTED
+    assert services.ctx.trust_repo.get(str(repo.resolve())).fingerprint.startswith("git-v3:")
+
+
+def test_a_trusted_repo_that_is_replaced_still_asks(services, tmp_path) -> None:
+    repo = _git_repo(tmp_path)
+    services.trust.add(repo)
+    import os
+    import shutil
+    import stat
+
+    def writable(func, path, _exc):  # Git objects are read-only on Windows
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+
+    shutil.rmtree(repo / ".git", onerror=writable)  # onexc is 3.12+
+    assert not (repo / ".git").exists()
+    _git(repo, "init", "-q")
+    # It was a repository before, not a plain folder: a new repository in its
+    # place is a different project.
+    assert services.trust.status(repo).state == STATE_REVALIDATION

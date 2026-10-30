@@ -29,16 +29,7 @@ from rinari.shared.errors import ConfigurationError
 from rinari.shared.paths import HomeLayout
 
 MODERN_SCALARS = ("user_name", "language", "model", "profile")
-MODERN_TABLES = (
-    "agent",
-    "context",
-    "agents",
-    "permissions",
-    "network",
-    "workspace",
-    "instructions",
-    "telemetry",
-)
+MODERN_TABLES = ("context", "agents", "permissions", "network")
 
 _SECRET_KEY_PARTS = ("key", "secret", "token", "password", "credential")
 _ENV_REF = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")

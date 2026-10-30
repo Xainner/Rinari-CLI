@@ -128,13 +128,37 @@ def verify_evaluate(input: dict, ctx: ToolContext) -> ToolResult:
     kinds = _as_str_list(input.get("required_kinds"), max_items=10)
     unresolved = _as_str_list(input.get("unresolved"), max_items=50)
     task_ids = _as_str_list(input.get("task_ids"), max_items=50)
-    if kinds is None or unresolved is None or task_ids is None:
+    record_ids = _as_str_list(input.get("record_ids"), max_items=50)
+    if kinds is None or unresolved is None or task_ids is None or record_ids is None:
         return _fail(
             ToolErrorCode.INVALID_ARGUMENT,
-            "required_kinds, unresolved and task_ids must be arrays",
+            "required_kinds, unresolved, task_ids and record_ids must be arrays",
         )
+    # Ids verify.record just returned, passed as task_ids, were refused as
+    # "Task not found" (plan 0.4.0 #61c): they are evidence ids.
+    from rinari.verify.records import VALIDATION_ID_PREFIX
+
+    evidence_ids = [i for i in task_ids if i.startswith(f"{VALIDATION_ID_PREFIX}_")]
+    task_ids = [i for i in task_ids if i not in evidence_ids]
+    record_ids = [*record_ids, *evidence_ids]
+    # Ids of this conversation's checklist, passed as task_ids, were refused
+    # again and again (F27 bis): they are checklist items, not tasks. An item
+    # not completed yet is still open work, so it counts as unresolved.
+    checklist_items = _checklist_items(ctx, task_ids)
+    if checklist_items:
+        task_ids = [i for i in task_ids if i not in checklist_items]
+        unresolved = [
+            *unresolved,
+            *(
+                f"checklist item {item_id} ({item.get('status')}): {item.get('content')}"
+                for item_id, item in checklist_items.items()
+                if item.get("status") != "completed"
+            ),
+        ]
     if not kinds:
-        kinds = ["test"]
+        # What verify.plan said: with no test suite, the evidence is checking
+        # the result by hand (manual/custom), not a test the project lacks.
+        kinds = ["test"] if service.has_test_suite(root) else []
     blocked_reason = input.get("blocked_reason")
     require_evidence = input.get("require_evidence")
     if not isinstance(blocked_reason, str) and blocked_reason is not None:
@@ -149,10 +173,35 @@ def verify_evaluate(input: dict, ctx: ToolContext) -> ToolResult:
             blocked_reason=blocked_reason,
             task_ids=task_ids,
             require_evidence=True if require_evidence is None else require_evidence,
+            record_ids=set(record_ids) if record_ids else None,
         )
     except Exception as exc:
         return _fail(ToolErrorCode.INVALID_ARGUMENT, getattr(exc, "message", str(exc)))
-    return _ok(decision.to_dict())
+    result = decision.to_dict()
+    if checklist_items:
+        result["checklist_ids"] = sorted(checklist_items)
+        result["note"] = (
+            "These ids are checklist items, not tasks (task_…); they were read from the "
+            "checklist and any item not completed counts as unresolved."
+        )
+    return _ok(result)
+
+
+def _checklist_items(ctx: ToolContext, ids: list[str]) -> dict[str, dict]:
+    """Items of this conversation's checklist named by `ids` (task ids excluded)."""
+    service = getattr(ctx, "checklist", None)
+    session_id = getattr(ctx, "session_id", None)
+    candidates = [i for i in ids if not i.startswith("task_")]
+    if service is None or not session_id or not candidates:
+        return {}
+    try:
+        current = service.get(session_id)
+    except Exception:
+        return {}
+    if current is None:
+        return {}
+    by_id = {str(item.get("id")): item for item in current.items}
+    return {i: by_id[i] for i in candidates if i in by_id}
 
 
 def verify_tools() -> list[ToolDefinition]:
@@ -224,7 +273,9 @@ def verify_tools() -> list[ToolDefinition]:
                 "Returns outcome DONE | IMPLEMENTED_UNVERIFIED | PARTIAL | BLOCKED | "
                 "FAILED plus reasons and the evidence used. Pass unresolved failures "
                 "you are aware of; a claimed success with failing recorded evidence "
-                "evaluates to FAILED."
+                "evaluates to FAILED. Without required_kinds, a project with a test "
+                "suite needs a test and one without needs any passing check (manual "
+                "counts). record_ids limits it to the evidence verify.record returned."
             ),
             input_schema={
                 "type": "object",
@@ -239,6 +290,10 @@ def verify_tools() -> list[ToolDefinition]:
                     },
                     "blocked_reason": {"type": "string"},
                     "task_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "record_ids": {
                         "type": "array",
                         "items": {"type": "string"},
                     },

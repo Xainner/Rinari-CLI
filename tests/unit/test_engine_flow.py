@@ -728,3 +728,49 @@ def test_a_flow_with_no_stages_is_not_truncated() -> None:
     assert flow["truncated"] is False
     assert flow["stages_omitted"] == 0
     assert flow["next_cursor"] is None
+
+
+# -- the checklist as evidence (plan 0.4.0 #7) -------------------------------------
+
+
+def _checklist(turn_id: str, statuses: list[str], at: str) -> SimpleNamespace:
+    items = [{"id": f"s{i}", "content": f"paso {i}", "status": s} for i, s in enumerate(statuses)]
+    return _event(turn_id, "checklist.updated", {"checklist": {"items": items}}, at)
+
+
+def test_a_finished_build_with_a_full_checklist_is_100_percent_and_counts_as_tasks():
+    events = _turn(
+        "t1",
+        "build",
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:05:00Z",
+        extra=[
+            _checklist("t1", ["completed", "in_progress", "pending"], "2026-01-01T00:01:00Z"),
+            _checklist("t1", ["completed", "completed", "completed"], "2026-01-01T00:04:00Z"),
+        ],
+    )
+    # The next turn clears the live list: an empty update must not erase it.
+    events += _turn(
+        "t2",
+        "build",
+        "2026-01-01T00:06:00Z",
+        "2026-01-01T00:07:00Z",
+        extra=[_event("t2", "checklist.updated", {"checklist": {"items": []}}, "x")],
+    )
+    turns = turn_facts_from_events(_record(), events)
+    assert turns[0].checklist == {"total": 3, "done": 3}
+    assert turns[1].checklist is None
+    flow = build_flow(scope={"kind": "session", "id": "ses_a"}, turns=turns, tasks=None)
+    (stage,) = flow["stages"]
+    assert stage["status"] == "done" and stage["progress"] == 1.0
+    assert flow["summary"]["tasks"] == {"total": 3, "done": 3, "open": 0}
+    assert flow["summary"]["progress"] == 1.0
+
+
+def test_without_a_checklist_nothing_changes():
+    turns = turn_facts_from_events(
+        _record(), _turn("t1", "build", "2026-01-01T00:00:00Z", "2026-01-01T00:05:00Z")
+    )
+    flow = build_flow(scope={"kind": "session", "id": "ses_a"}, turns=turns, tasks=None)
+    assert flow["stages"][0]["progress"] is None
+    assert flow["summary"]["tasks"] is None

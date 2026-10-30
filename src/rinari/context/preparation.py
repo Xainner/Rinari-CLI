@@ -205,6 +205,10 @@ def prepare(service, ctx, request, caller, rebuild, emit, cancel):
         )
         chunks = []
         for message in removed:
+            if (message.origin or {}).get("source") == "turn-state":
+                # The state the harness kept is redone after compaction; old
+                # copies would come back as facts (mode, folder, servers).
+                continue
             chunks.append(
                 json.dumps(
                     {

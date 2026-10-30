@@ -25,6 +25,8 @@ class ProviderRecord:
     status_checked_at: str | None
     created_at: str
     updated_at: str
+    #: Off: its models are hidden and nothing calls it (plan 0.4.0 #97).
+    enabled: bool = True
 
 
 @dataclass(slots=True)
@@ -103,6 +105,17 @@ class SessionRecord:
     # conversations have the project's. Like pinned_at, update() never
     # writes it: SessionRepository.set_rinari_profile does.
     rinari_profile_id: str = "default"
+    # Where it came from (plan 0.4.0 #40): the mother conversation, how
+    # (note | fork | schedule) and the brief (title, request). Written at
+    # insert or by SessionRepository.set_lineage, never by update().
+    parent_session_id: str | None = None
+    lineage_kind: str | None = None
+    brief: dict[str, Any] | None = None
+    # The Agency agent whose conversation this is (its direct chat); None for
+    # Rinari's own. Written by AgencyRepository.set_session_agent only.
+    agent_id: str | None = None
+    # Rinari Agency A2: the team of a post (agent_id + team_id); None otherwise.
+    team_id: str | None = None
 
 
 @dataclass(slots=True)

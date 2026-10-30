@@ -923,6 +923,11 @@ the active soul; subagents stay functional. `soul.settings.get` →
 {character_intensity: "minimal" | "balanced" | "full"}` (same result;
 anything else is `INVALID_PARAMS`; capability `soul_character_intensity_v1`)
 scale how much of whichever Soul is in effect shows; default `balanced`.
+Plan 0.4.0 #87: `soul.export {id, folder}` writes `<folder>/<id>/{soul.toml,identity.md}`
+(`<id>-2`… never over an existing folder) and `soul.import {paths}` takes that
+folder, or the `.toml` and its `.md` (a lone `.toml` finds `identity.md` or
+`<name>.md` beside it), saved as a new custom soul with a free id. A soul's
+text may be empty: it then speaks only with the character level.
 Slice 9 adds the ecosystem surface: `mcp.list/get/create/remove/enable/disable/test`
 (remote servers, `mcp.update` and `mcp.probe`: see `mcp_remote_v1` below)
 (plain secrets rejected, test failures reported not raised), `plugin.list/get/enable/disable/diagnostics`
@@ -1043,8 +1048,8 @@ delete/runs/run_now/grant`, events `schedule.changed`,
 `schedule.run.started`, `schedule.run.needs_you` and
 `schedule.run.completed`. A task is a reminder or a prompt for an agent turn
 (project or chat, mode, model, skills) on a local-time schedule (`once`,
-`interval` of 5 min or more, `daily`, `weekly`). The serving Engine checks
-every 20 s; a run due while it was down still runs within 12 h and is
+`interval` in minutes or seconds, from 5 s, `daily`, `weekly`). The serving
+Engine checks every 5 s; a run due while it was down still runs within 12 h and is
 recorded `skipped` after that, as is one whose previous run is still active.
 An agent run is a turn in its own session ("⏰ name · date") with
 `origin.kind = "schedule"`. The task's `grants` ({capability, target?}) are
@@ -1057,6 +1062,90 @@ the task at once when the owner asked in their own turn (`origin_kind` user)
 and only proposes it otherwise (another pane, another task); either way it
 carries no grants, so a run asks for what it needs. The desktop receives it
 whole as a `schedule.proposed` event (`created`, and `task` when created).
+Its result gives `next_run_local` (the machine's local time) with
+`next_run_at`.
+Time from now and «Repetir aquí» (`schedule_target_v1`): a one-time schedule
+may be `{kind: once, after: {minutes, hours, days}}` (1 minute to 366 days),
+turned on create into the `at` it means, rounded up to the minute: what is
+stored is always `at`. Every turn, whoever started it, gets a harness note
+(`origin.source = "clock"`) with the local time right after its message; the
+system prompt keeps the day only. An agent task with `target:
+"this_conversation"` and its `session_id` (`schedule.propose`
+`in_this_conversation: true` sets both to the conversation it was asked in)
+runs as one more message there, with its history and the conversation's own
+model, mode and permissions. It carries no grants and nothing of the task is
+applied to the conversation (model, mode, permission mode and skills are
+cleared), and its turn is not the owner's (`memory_origin` automation,
+`origin {kind: schedule, task_id, run_id, target, task_name}`). With a turn
+running or messages waiting, the run is `queued` in the conversation's queue,
+whose entries carry their `origin` and `display_message`; it starts when the
+queue reaches it, a queue lost with the Engine is filled again on the next
+start (within the 12 h window), and `session.queue.clear` ends it `cancelled`
+(`cancelled_by_owner`). An archived conversation is used as it is and stays
+archived; a deleted one fails the run (`conversation_deleted`) and switches
+the task off. A conversation left out of memory still runs.
+Rinari Agency audit (`agency_audit_v1`, 2026-10-21). A chain of work stops
+at 8 hops (D-31; 5 mentions per message, 20 deliveries per chain). Whatever
+stops it (`too_many_hops`, `too_many_mentions`, `too_many_deliveries`,
+`too_many_returns`, `no_chief`, `could_not_start`, `wait_expired`,
+`wait_cancelled`) leaves one office message per chain and reason
+(`system: true`, `author_kind: "system"`, `notice {kind: "stopped", reason,
+detail?, chain_id}`) and `agency.chain.stopped` carries `team_id`,
+`chain_id`, `reason`, `detail?` and its `message_id`. `agency.chain.dismiss
+{team_id, message_id? | chain_id?}` → `{dismissed: [ids]}` marks it seen
+(`notice.dismissed_at`); it stays in the office. An agent leaving a team
+(also by archive) posts `notice {kind: "left", agent, chief}` (`chief` null:
+no chief left). The post tool `office.say` answers `{posted, team, hop,
+mentions, woken: [names], not_woken: [{name, reason, candidates?}], note?}`
+with reasons `too_many_hops`, `too_many_mentions`, `too_many_deliveries`,
+`already_woken`, `stopped_by_owner`, `not_in_team`, `unknown_name` and
+`ambiguous_name`; `note` tells the model plainly which mentions were not
+delivered and the exact names to use. A mention is a teammate's full name
+or, when it is unambiguous, the first whole words of one («@Operator» →
+«Operator de MetaTrader»). A delivered errand wakes only the agent that
+asked: in its post a review turn (`origin.kind: "agency_delivery"`) whose
+answer stays in the post; the owner's own errands wake no agent. The office
+message of a delivery mentions only the asker. `agency.status` adds
+`session_ids {working, needs_you}`, `stopped` (the profile, or the active
+one, is halted) and `waiting_for_owner {errands, chains}` (delivered errands
+only the owner will review and stopped chains not dismissed); `needs_you` is
+the agents waiting for an approval plus those two. `agency.resume` →
+`{resumed, restored_errands, resumed_rules}`: errands «Detener a todos»
+blocked go back as they were (in progress → pending) and the rules it paused
+(`paused_by: "agency_stop"`) are switched on again; errands a cut turn left
+during the stop, and rules the owner switched off, stay. While halted, the
+owner's own message in an agent's chat runs; nothing else wakes.
+`agency.agent.archive` → `{agent, left_teams, paused_rules}`: it leaves every
+team (as `agency.team.leave`: turn cut, errands to the chief, next member as
+chief), its rules are paused (`paused_by: "agent_archived"`) and its running
+turns cancelled. `agency.agent.unarchive {agent_id}` brings it back without
+teams, rules still off. `agency.agent.list {archived: true}` lists only the
+archived ones. `agency.agent.get {agent_id, limit?}` sessions carry `agency
+{kind: "direct" | "post" | "former_post" | "rule_run" | "child" | "other",
+team_id?, team_name?, task_id?, run_id?, parent_session_id?}`. The agent card
+has `soul_id` (a saved Soul, `soul.list`; unknown → INVALID_PARAMS): an
+agent never gets Rinari's active Soul, her character intensity nor the
+constitution's «Yourself»; its card is its identity and, with `soul_id`,
+that Soul is its character (D-34). In a post an agent sees its own
+connectors and accounts plus the team's (D-33). A task of an agent takes
+`deliver_to {kind: "office", team}` (one of its teams) or `{kind: "agent",
+agent, team?}` (a teammate), by id or name, stored as `{kind: "office",
+team_id}` / `{kind: "agent", agent_id, team_id}`: a completed run's result
+(the final answer, the reminder or the connector's result) is posted in that
+office as the agent, mentioning only the teammate for `agent`; a failed
+delivery is the run's `reason` (`not delivered: …`). `schedule.propose`
+takes `deliver_to` with names. An agent's direct chat has `office.say {team,
+text}` for the offices of its teams, and `teams.list` says which are `yours`.
+`agency.templates.list {language?}` → `{templates: [{id, language,
+languages, team {name, purpose}, agents [{name, role, instructions,
+permission_profile}]}]}` (English when the language is missing) and
+`agency.team.from_template {template_id, language?, model?, name?,
+rinari_profile_id?}` → `{team, agents}` creates them (no connectors,
+accounts nor budget). Every conversation of an agent is refused, in every
+mode, any `fs.*` path or shell command (its folder or a path in its text,
+quoted, relative, `~` or a variable) inside the Engine's home, except its own
+workspace and outputs and, for reading, installed skills (policy rule
+`engine_home`); a path a command builds at run time is not seen.
 Remote MCP (`mcp_remote_v1`): servers are `transport: "stdio"` (a
 `command` array) or `"http"` (a `url`, http/https, no userinfo) speaking the
 Streamable HTTP transport of MCP 2025-03-26: one POST per JSON-RPC message
@@ -1097,14 +1186,227 @@ name), `MCP_UNREACHABLE`, `MCP_TLS`, `MCP_TIMEOUT`, `MCP_PROTOCOL`,
 `MCP_HTTP_ERROR`, `MCP_TRANSPORT_UNSUPPORTED`, `MCP_SESSION_EXPIRED`,
 `MCP_SPAWN_FAILED`, `MCP_SECRET_MISSING`, `MCP_NOT_CONNECTED`,
 `MCP_DEPENDENCY` (a stdio server that exited). Hint keys: `check_credentials`,
-`oauth_required` (401 with an OAuth `resource_metadata` challenge and no
-token; OAuth is not implemented), `check_url_or_network`,
+`oauth_required` (a 401 and no OAuth sign-in: sign in, see `mcp_oauth_v1`),
+`reauth_required` (the OAuth sign-in expired and could not be renewed),
+`protocol_version_unsupported`, `check_url_or_network`,
 `check_tls_certificate`, `server_slow_or_unresponsive`, `check_endpoint_path`,
 `server_not_registered`, `not_an_mcp_endpoint`, `initialize_rejected`,
 `server_error`, `request_rejected`, `legacy_sse_unsupported`,
 `session_expired`, `check_command_installed`, `server_exited`,
 `secret_missing`, `server_disabled`, `project_not_trusted`. Messages carry no
 header values, tokens or query strings.
+Background connections (`mcp_background_connect_v1`, connectors plan C2):
+the Engine connects every enabled global server when it starts, in parallel,
+each on its own thread; a project server connects when a session of a
+trusted project builds its runtime. No turn waits for any server: a server
+that arrives later joins the running turn's registry (`capability.search`,
+`tool.call`) and the turn note's index of what is connected, never the
+model's tool list (F42). The connection, its client and its `tools/list`
+live in the Engine process and are shared by every session; `tools/list` is
+read again only when the server sends `notifications/tools/list_changed`
+(over Streamable HTTP, only when it arrives on a POST's event stream: the
+standalone GET stream is not opened). Views add `status` (`idle` before any
+attempt, `connecting`, `connected`, `reauth_required`, `error`, `disabled`)
+and `connection {code, hint, message, tools, resources, attempts,
+retry_in_s, changed_at}`; `mcp.status.changed {name, status, connection}`
+is emitted on every change, and `engine.diagnostics` carries the same per
+server. A failed server is retried with a growing wait (2 s, 4 s, 8 s… up to
+5 min; six timer retries in a serving Engine), by a call to one of its tools
+once the wait is over, or at once with `mcp.reconnect {name}` (returns
+`{server}`, usually `connecting`; the outcome arrives as the event). A call
+inside the wait fails at once with the stored reason instead of waiting for
+a timeout. `reauth_required` (renewing a sign-in failed) and failures the
+owner must fix (`check_credentials`, `secret_missing`, …) are never retried
+on a timer. Connected servers that offer resources add two on-demand reads
+for the model, `mcp.resources.list {server?}` and `mcp.resources.read
+{server, uri}` (`mcp.read`); binary contents are described, not inlined.
+
+OAuth for remote MCP (`mcp_oauth_v1`, plan de conectores C1): `initialize`
+asks for MCP `2025-06-18` and follows the server down to `2025-03-26` or
+`2024-11-05` (any other answer: `MCP_PROTOCOL`, hint
+`protocol_version_unsupported`). `auth = {kind: "oauth", client_id?,
+client_secret?, scopes?, redirect_port?, client_metadata_url?,
+authorize_params?}` on `mcp.create`/`mcp.update` (merged over the stored one;
+`null` clears a key): `client_id` is the owner's own OAuth client (public, kept
+in the row), `client_secret` a secret like any other (credential store, slot
+`oauth-client-secret`), `scopes` a list or a space-separated string,
+`redirect_port` 1024..65535 for clients that need an exact redirect,
+`client_metadata_url` an https URL with a path (a client ID metadata
+document; the process default is `RINARI_MCP_CLIENT_METADATA_URL`), and
+`authorize_params` extra authorization-request parameters (never
+`response_type`, `client_id`, `redirect_uri`, `state`, `code_challenge*`,
+`resource` or `scope`). Views add `client_id`, `client_secret` (state),
+`scopes`, `redirect_port`, `client_metadata_url` and `authorize_params`.
+`mcp.auth.start {name, open_browser?: true, timeout_s?: 300}` (oauth servers
+only, otherwise `INVALID_PARAMS` with `details.hint` `oauth_not_configured`)
+discovers the authorization server — protected resource metadata (RFC 9728)
+at `/.well-known/oauth-protected-resource<path>` even without a 401, else the
+`resource_metadata` of an anonymous `initialize`'s 401, else the authorization
+server on the MCP origin (RFC 8414 / OpenID discovery) — picks the client
+(the configured `client_id`; else dynamic registration, RFC 7591, kept per
+server and reused on its port; else the client metadata document when the
+server accepts them; else `MCP_AUTH_FAILED` with `details.hint`
+`oauth_client_required`), opens a listener on
+`http://127.0.0.1:<free or redirect_port>/callback` for that sign-in only, and
+returns at once `{name, flow_id, authorize_url, redirect_uri, browser_opened,
+expires_at, client, issuer, resource, resource_metadata, registration,
+client_metadata_document, revocation}`; the URL carries PKCE S256, `state` and
+`resource` (RFC 8707), plus `access_type=offline` (and `prompt=consent` while
+no refresh token is kept) for Google. Errors before the browser step are
+`MCP_AUTH_FAILED` with `details {code, message, hint}` (`OAUTH_DISCOVERY_FAILED`
+`oauth_metadata_missing` / `oauth_metadata_invalid` / `oauth_pkce_unsupported`,
+`OAUTH_CLIENT_REQUIRED`, `OAUTH_REGISTRATION_FAILED`
+`oauth_registration_rejected`, `OAUTH_PORT_IN_USE` `redirect_port_busy`,
+`OAUTH_UNREACHABLE`, `OAUTH_INSECURE_URL` `https_required`: OAuth needs an
+https URL, http only on a loopback host, and `mcp.add`/`mcp.update` refuse
+it too; `OAUTH_CANCELLED` `oauth_cancelled` when `mcp.auth.cancel` arrives
+while it still discovers or registers: the browser never opens). A callback
+with another `state` is refused (400) and the sign-in keeps waiting. Events: `mcp.auth.progress {name, flow_id, stage}`
+(`discovering`, `registering`, `waiting_for_browser`, `exchanging_code`) and
+`mcp.auth.finished {name, flow_id, outcome, finished_at, error?}` with
+`outcome` `signed_in`, `failed` (`OAUTH_DENIED`, `OAUTH_TOKEN_REJECTED`…),
+`cancelled` or `timed_out`. `mcp.auth.status {name}` → `{name, kind,
+signed_in, reauth_required, expires_at, has_refresh_token, scopes, issuer,
+client, pending {flow_id, authorize_url, started_at, expires_at} | null, last
+{flow_id, outcome, finished_at, error?} | null}`; `mcp.auth.cancel {name}` →
+`{name, cancelled}`; `mcp.auth.signout {name}` revokes the tokens when the
+server has a revocation endpoint (RFC 7009), deletes them and drops the cached
+connection → `{name, revoked, removed, cancelled}`. Tokens (access, refresh,
+expiry, scopes) live only in the credential store under `mcp/<server
+id>/oauth` (a registered client under `mcp/<server id>/oauth-client`); the
+transport refreshes a token about to expire and, after a 401, refreshes and
+retries once; a refresh answered 408, 429 or 5xx keeps the refresh token and
+is retried later. When that is impossible the error is `MCP_AUTH_REJECTED` with
+hint `reauth_required` (`oauth_required` if never signed in). `mcp.remove`
+revokes and deletes them too. `mcp.test`/`mcp.probe` add `oauth` for http
+servers with auth `none` or `oauth`: `{available, client: configured |
+registration | metadata_document | required, issuer, resource,
+resource_metadata, registration, client_metadata_document, revocation}` or
+null. No token, code, verifier or client secret is ever in a view, an event,
+a log line or an error message.
+
+Permissions per connector and per tool (`mcp_tool_permissions_v1`, plan de
+conectores C5), on top of the three modes. The server's annotations count:
+`readOnlyHint: true` is a read (`mcp.read`), `destructiveHint: true` on a
+tool that writes asks in project mode (risk high, with «always»), and a tool
+that writes without `openWorldHint: false` may send data outside. They are
+hints, not guarantees: only an explicit `true`/`false` counts, and the owner
+can correct them per tool. Allow / Ask / Block per tool wins over the
+server's default, which wins over the mode's rule. Block (`deny`) holds in
+every mode; read-only calls no MCP tool; full access asks for nothing else
+(Ask included). «Always» on an MCP tool's card (`allow_project`, also in a
+loose chat; `approval.requested` says `grant_scope: "mcp_tool"`) saves Allow
+for that tool instead of a project grant. Same connector, same destination:
+after external content, a call that may send data out asks in project mode
+(once or for this session, rule `external_content_send`) only when the
+content came from somewhere else (a page, another connector); results of a
+connector going back to that connector ask nothing, and Allow does not lift
+this guard. Settings live in the server's `config_json` (`permissions
+{default?, tools {<tool> {decision?, annotations?}}}`), survive `mcp.update`
+and never hold a secret; changing them re-classifies the live tools without
+reconnecting.
+- `mcp.tools.list {name, scope?}` → `{server {name, scope, status, default,
+  tools[]}}` from the server's last `tools/list` (nothing connects). Each
+  tool: `{name, tool, title, description, listed, annotations {server, owner,
+  effective}, kind (read | write | destructive), sends_out, setting, decision,
+  decision_source (tool | server | mode), by_mode {read-only, workspace,
+  full-access}}`; `by_mode` is what each mode does before any external
+  content, and a saved setting for a tool the server no longer lists comes
+  with `listed: false`.
+- `mcp.tools.set {name, tool, decision?, annotations?, scope?}`: `decision`
+  `allow` | `ask` | `deny` | `null` (back to the server's default);
+  `annotations {readOnlyHint?, destructiveHint?, openWorldHint?}` with `true`,
+  `false` or `null` (back to the server's hint) per key, or `null` to drop
+  every correction. Marking a tool destructive also makes it a write. →
+  `{server, tool}`. Anything else is `INVALID_PARAMS`; an unknown server is
+  `NOT_FOUND`.
+- `mcp.tools.set_default {name, decision, scope?}`: the server's Allow / Ask /
+  Block for tools without their own setting (`null`: the mode decides) →
+  `{server}`.
+
+Connector catalog and imports (`mcp_catalog_v1`, plan de conectores C4).
+The catalog is data shipped with the Engine (`src/rinari/mcp/catalog.json`,
+validated against `catalog.schema.json`). `mcp.catalog.list` → `{version,
+verified_at, entries}`; each entry: `id`, `name`, `logo` (an identifier: the
+Engine ships no images), `category` (`google`, `work`, `dev`, `design`,
+`files`, `crm`, `media`, `data`), `group?`, `preview?`, `description {es,
+en}`, `notes? {es, en}`, `docs_url`, `tools?` (expected names, when known),
+`server` (`{transport: "http", url, auth {kind: oauth | bearer, scopes?,
+authorize_params?}}` or `{transport: "stdio", command, env [{name, label,
+secret, required, default?}], connection_string? {schemes, env}}`), `setup
+{kind, fields [{name, required}], console_url?, help {es, en},
+alternatives?}` and `added` plus `servers [{name, scope, enabled, status}]`
+(saved servers with the same URL — scheme, host and path — or the same
+command, however they were added). `setup.kind`: `registration` (dynamic
+client registration: nothing to type), `client_metadata` (Rinari's client
+metadata document; alternative: an own `client_id`), `own_client`
+(`client_id`, often `client_secret`, and `redirect_port` when the app needs
+an exact redirect; Google, Slack, Asana, HubSpot), `token` (sent as Bearer;
+GitHub, alternative: an own OAuth app) or `secrets` (a local server's
+environment). `mcp.catalog.add {id, name?, client_id?, client_secret?,
+redirect_port?, token?, secrets? {ENV: value}, connection_string?}` creates
+the global server the entry describes (`name` defaults to the id, with `-2`,
+`-3`… when taken; a taken `name` is `INVALID_PARAMS` with `details.hint`
+`name_taken`, never a replacement) and returns `{server, entry_id, next}`:
+`sign_in` (call `mcp.auth.start`) or `connect` (already connecting). A
+missing required field, or one the entry does not use, is `INVALID_PARAMS`
+naming the field, never its value. `connection_string` is split into the
+entry's env names (`postgresql://user:password@host:port/db?query` →
+`POSTGRES_*`; a path, `sqlite:///relative.db`, `sqlite:////absolute.db` or
+`file:///C:/x.db` → `SQLITE_DATABASE`); every env value goes to the
+credential store like any other.
+`mcp.import.scan {sources?, json?}` lists, without creating anything, the
+servers other apps on this PC declare — `claude_desktop`
+(`%APPDATA%\Claude\claude_desktop_config.json` and the Microsoft Store
+package, `~/Library/Application Support/Claude/…`,
+`$XDG_CONFIG_HOME/Claude/…`), `claude_code` (`~/.claude.json` or
+`$CLAUDE_CONFIG_DIR/.claude.json`: user servers and per-project ones),
+`cursor` (`~/.cursor/mcp.json`), `vscode` (`Code` and `Code - Insiders`
+`User/mcp.json` and `User/settings.json` → `mcp.servers`, JSON with
+comments) and `codex` (`$CODEX_HOME/config.toml` or `~/.codex/config.toml`,
+`[mcp_servers.*]`; with `RINARI_IMPORT_HOME`, for tests and sandboxes, that
+folder stands in for `~` and `APPDATA`, `LOCALAPPDATA` and `XDG_CONFIG_HOME`
+are ignored, so nothing of the owner's is read) — or the servers of a pasted `json` (`{"mcpServers":
+…}`, `{"servers": …}` or a bare map). → `{sources [{source, label, path,
+found, servers, error}], candidates [{key, name, source, source_label, path,
+project_root, transport, command, url, secrets [{where: env | header | url,
+name, kind: value | env_ref, variable? (the owner's environment variable an
+env_ref reads: its name, never its value)}], warnings, importable, reason, existing,
+suggested_name}]}`. Only names of secrets: values never leave the Engine.
+`${VAR}` and `${env:VAR}` become `env://VAR`; `Authorization: Bearer
+${VAR}` and Codex's `bearer_token_env_var` become bearer auth from that
+variable; a URL's user and password become a Basic `Authorization` header;
+secret-looking query values (`api_key`, `token`, …) keep the whole URL in the
+credential store (`url_secret` in the view, `***` in `url`). Every imported
+header value is stored as a secret. Not importable (`reason`):
+`legacy_sse_unsupported`, `secret_in_command` (a secret on the command line
+would stay in the row and the views: move it to `env`), `unresolved_variable`
+(a variable in the URL), `invalid_url`, `invalid_definition`. Warnings:
+`disabled_in_source`, `unresolved_variable:<field>` (that value is left
+out: `${input:…}`, `${workspaceFolder}`…), `invalid_env_name`,
+`cwd_ignored`, `env_file_ignored`. `existing` names a saved server with the
+same definition. `mcp.import.apply {keys, names? {key: name}, sources?,
+json?}` scans again (secrets never travel to the client and back) and
+creates only the marked `keys`, each on its own, never replacing a server:
+`{created [{key, server}], failed [{key, code, message}]}`. Claude Code's
+per-project servers are created with project scope tied to their folder.
+`mcp.project_offers.list {path}` → `{project, trusted, offers, answered,
+files}`: the servers a trusted folder brings in `.mcp.json`,
+`.rinari/mcp.json`, `.vscode/mcp.json` or `.cursor/mcp.json` (a name repeated
+in a later file is skipped) that the owner has not answered, as candidates
+(`key` is the name) with `changed` and `previous_decision`. An untrusted
+folder offers nothing (`trusted: false`). `mcp.project_offers.decide {path,
+decisions [{key, accept, name?}]}` records each answer for that folder
+(`mcp_project_offers`, migration 0061), so each server is asked about once;
+an accepted one is created with project scope tied to the folder
+(`mcpServer.project_root`; it never runs in another project, even a trusted
+one) and its secrets in the credential store. A definition that changes
+later (command, URL without its query values, env or header names) is
+offered again. → `{project, created [{key, server}], rejected, failed}`; an
+untrusted folder is `INVALID_PARAMS` with `details.hint`
+`project_not_trusted`, a key the folder no longer declares `NOT_FOUND`.
+Project servers saved before 0061 (`project_root` null) stay visible in every
+trusted project.
 The envelope contract is unchanged across slices.
 
 ---
@@ -1198,6 +1500,8 @@ providers list
 providers add
 providers login
 providers logout
+providers disable
+providers enable
 providers auth
 providers show
 providers test
@@ -1321,6 +1625,25 @@ authentication becomes disconnected
 ```
 
 This is intentionally different from `providers remove`.
+
+---
+
+## `providers disable` / `providers enable`
+
+```bash
+rinari providers disable opencode-go
+rinari providers enable opencode-go
+```
+
+Semantics:
+
+```text
+provider, models and credential remain saved
+its models leave every picker (model.list hides them unless include_disabled)
+no discovery, no usage reads and no model calls reach it
+a turn that still asks for one of its models fails with PROVIDER_DISABLED
+turning off the active provider leaves Rinari without one until another is used
+```
 
 ---
 
@@ -2017,8 +2340,8 @@ config reset
 Examples:
 
 ```bash
-rinari config get agent.max_turns
-rinari config set agent.max_turns 200
+rinari config get agents.max_total
+rinari config set agents.max_total 12
 rinari config unset context.compact_at_percent
 rinari config edit --global
 rinari config edit --project
@@ -2147,7 +2470,12 @@ rinari project current
 rinari project instructions
 rinari project instructions --show
 rinari project instructions --explain
+rinari project permission [read-only|workspace|full-access|none] [--path DIR]
 ```
+
+`project permission` shows or sets the mode new conversations of the project
+start in (none: Proyecto/workspace). A conversation keeps the mode it has;
+asking for one when creating it wins over the default.
 
 Instruction chain example:
 
@@ -2252,6 +2580,11 @@ rinari session new --name auth-refactor
 rinari session resume ses_123
 rinari session fork ses_123 --name alternate-approach
 ```
+
+`session fork` (and `session.fork`) refuses a Rinari Agency conversation (an agent's
+direct chat, a post or anything with `agent_id`): an agent works in its direct chat and
+its posts. Its children can still start from a copy of it (`child.create` with
+`context: fork`).
 
 `session pin|unpin` marca una conversación como fijada (la sección «Fijados» del
 escritorio). Es estado del Engine: el CLI y el escritorio ven la misma lista, y
@@ -2721,7 +3054,8 @@ skill; an installed skill is never removed by it. Secrets are refused.
 ```bash
 rinari schedule list
 rinari schedule add NAME --prompt TEXT (--at YYYY-MM-DDTHH:MM | --every MIN | --daily HH:MM | --weekly DAYS@HH:MM)
-                    [--reminder] [--project ID] [--mode plan|build|review] [--model ALIAS] [--allow CAPABILITY]...
+                    [--reminder] [--project ID] [--mode plan|build|review]
+                    [--permission read-only|workspace|full-access] [--model ALIAS] [--allow CAPABILITY]...
 rinari schedule enable|disable|remove ID
 rinari schedule runs ID [--limit N]
 ```
@@ -2730,6 +3064,7 @@ Tasks run in the desktop app's Engine (open or in the system tray), not in
 this command. `--allow` approves a capability in advance for every run;
 anything else a run needs asks in the app. Days of `--weekly` are 0 (Monday)
 to 6. Switching a task back on counts from now: missed runs are not caught up.
+Without `--permission` a run starts in its project's default mode.
 
 ---
 
@@ -2801,11 +3136,14 @@ mcp resources
 mcp prompts
 mcp test
 mcp logs
+mcp login
+mcp logout
 ```
 
 Project-local MCP definitions require project trust.
 
-Transports: `stdio` (a command) and `http` (Streamable HTTP, MCP 2025-03-26):
+Transports: `stdio` (a command) and `http` (Streamable HTTP; MCP 2025-06-18,
+following the server down to 2025-03-26 or 2024-11-05):
 
 ```text
 rinari mcp add github --url https://example.com/mcp --bearer          # token asked hidden
@@ -2813,6 +3151,11 @@ rinari mcp add github --url https://example.com/mcp --bearer-env GH_MCP_TOKEN
 rinari mcp add api --url https://example.com/mcp \
     --header "X-Team: core" --secret-header X-Api-Key                   # value asked hidden
 rinari mcp add local -- npx -y some-mcp-server
+rinari mcp add notion --url https://mcp.example.com/mcp --oauth        # registers itself
+rinari mcp add work --url https://mcp.example.com/mcp --oauth \
+    --client-id <your client id> --client-secret --oauth-scope read    # your own OAuth app
+rinari mcp login notion                 # signs in in your default browser
+rinari mcp logout notion                # revokes (if the server can) and deletes the tokens
 ```
 
 Tokens, secret headers and stdio env values never reach the database or the
@@ -2820,7 +3163,19 @@ config file: they are stored in the OS credential store (file fallback) or
 kept as `env://NAME` references. `rinari mcp show` reports whether each one is
 configured, never its value. `rinari mcp test` reports the failure code, the
 HTTP status and a hint key (see the `engine` section, `mcp_remote_v1`). The
-legacy HTTP+SSE transport and OAuth authorization are not supported.
+legacy HTTP+SSE transport is not supported.
+
+OAuth (`--oauth`, see the `engine` section, `mcp_oauth_v1`): `--client-id`,
+`--client-secret` (asked hidden) or `--client-secret-env VAR`, `--oauth-scope`
+(repeatable), `--redirect-port` (a fixed loopback port, for OAuth clients that
+need an exact redirect such as a Google "web" client) and
+`--client-metadata-url` (a client ID metadata document). Without a client ID,
+Rinari registers itself when the server allows it. `rinari mcp login <name>
+[--no-browser] [--timeout 300]` prints the authorization URL on stderr, opens
+the default browser and waits for the redirect to
+`http://127.0.0.1:<port>/callback`; the tokens go to the credential store and
+renew themselves. `rinari mcp show` says whether the server is signed in and
+until when, never a token. `rinari mcp logout <name>` revokes and deletes them.
 
 All MCP calls should still pass through Rinari policy, tracing, schema validation, and result normalization where possible.
 
@@ -3382,24 +3737,41 @@ completion       Completion Gate
 Interactive aliases:
 
 ```text
-/usage
+/usage [session|today|project|all]
 /tokens
 ```
 
-They display normalized current-context and cumulative session usage:
+`/usage` prints the same usage report the desktop paints in the chat
+(`usage.report`, plan 0.4.0 #78), built from what the Engine stored — no model
+call:
 
 ```text
-Usage
-  context      31,204 / 128,000   24.4%
-  turn         in 4,231  out 817  cached 2,044  reasoning 602
-  session      in 42,812 out 8,731 cached 18,304 reasoning 6,104
-  model calls  17
-  tool calls   38
-  elapsed      2m 17s
-  cost         ~$0.184
+Usage report · session · 2026-10-17T18:02:11Z
+Engine 0.4.0 · profile Default · anthropic / sonnet
+
+Plan limits:
+  claude-sub · 5 h: 42% used · resets 2026-10-17T20:00:00+00:00
+  openrouter · Credits: 12.40 USD
+
+Context:
+  31,204 of 200,000 tokens (16%) · 1 compactions
+
+Session:
+  sonnet: 17 calls · 412,812 input · 8,731 output · 318,304 cache read · 12,040 cache write · $0.4120
+  Total: 17 calls · 412,812 input · 8,731 output · $0.4120
+
+Tools: 38 (36 ok, 2 failed) · fs.read 14, shell.exec 9
+Compactions: 1
+Active time: 137 s
 ```
 
-Unsupported categories render as `—`.
+Plan limits come from the conversation's provider first (with why it reports
+nothing, when it does not) and then from every other connected provider that
+reports them; Claude Subscription's are the ones Claude Code gave with its last
+answer. Input counts everything the model read, cached tokens included. Cost
+uses the model's own prices, else the public catalog's (models.dev); a cache
+rate it does not know is charged at the input rate. `/tokens` shows the
+current context.
 
 ## `/model`
 
@@ -4649,6 +5021,13 @@ the machine.
 - The CLI binary ships with the packaged Engine (`<engine>/speech/whisper-cli`,
   pinned in the Agent repo's `speech-manifest.json`, ~12 MB). `RINARI_WHISPER_BIN`
   overrides it with an absolute path to a file named `whisper-cli(.exe)`.
+  Without either, the first `whisper-cli(.exe)` in an absolute `PATH` entry is
+  used (never the current directory or a relative entry).
+- A build from source has no bundled binary: set `RINARI_WHISPER_BIN`, put
+  `whisper-cli` on the `PATH`, or run the Agent repo's
+  `python scripts/package-speech.py` and point `RINARI_WHISPER_BIN` at
+  `engine-dist\speech\whisper-cli.exe`. `speech.status` reports
+  `binary_found: false` until one is found.
 - Models are downloaded on first use into `~/.rinari/models/speech/`, checked
   against a pinned size and SHA-256 (`rinari.speech.catalog`): `base` (~60 MB),
   `small` (default, ~190 MB), `large-v3-turbo` (~575 MB).

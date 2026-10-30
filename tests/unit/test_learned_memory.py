@@ -123,6 +123,8 @@ def test_auto_mode_saves_with_learned_provenance_and_emits_remembered(app_ctx, t
                 "text": "Saturno is at 10.0.0.7",
                 "kind": "environment",
                 "scope": "user",
+                "place": "general",
+                "place_ref": None,
             },
         )
     ]

@@ -89,6 +89,34 @@ def _file_kind(path: Path, head: bytes) -> tuple[str, str]:
     return "text", guessed or "text/plain"
 
 
+def _presented_original(record: Any) -> Path | None:
+    """The file a presented artifact was copied from, while it still holds the same bytes.
+
+    What a post presents reaches its team's office as a copy (its URI); opening
+    or showing it from there should land on the file the agent made, as it does
+    in the post (owner, 28-oct), not on a temporary copy.
+    """
+    provenance = getattr(record, "provenance", "") or ""
+    if not provenance.startswith("file.present:"):
+        return None
+    path = Path(provenance.removeprefix("file.present:"))
+    try:
+        if (
+            not path.is_absolute()
+            or path.is_symlink()
+            or not path.is_file()
+            or path.stat().st_size != record.byte_count
+        ):
+            return None
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return path if digest.hexdigest() == record.sha256 else None
+
+
 def _same_path(left: Path, right: Path) -> bool:
     """Compare stored provenance with the currently resolved target.
 
@@ -326,7 +354,7 @@ class DesktopWorkspace:
         )
         return {"session": session_to_dict(result)}
 
-    def resolve_file(self, params) -> ResolvedFile:
+    def resolve_file(self, params, *, folders: bool = False) -> ResolvedFile:
         session_id = params.get("session_id")
         if not isinstance(session_id, str) or not session_id:
             raise EngineProtocolError(INVALID_PARAMS, "session_id is required.")
@@ -394,6 +422,11 @@ class DesktopWorkspace:
                 # changeset only exists once the turn ends, so «View file» on a
                 # file outside the workspace failed while the turn was going.
                 changed = self._live_change(record.id, path)
+            if changed is None and (turn_found or changeset is not None):
+                # …and one it handed to the owner with file.present, which read
+                # it under the session's permissions: a song a shell command
+                # downloaded to Downloads showed its card but would not play.
+                changed = self._presented(record.id, path)
             if changed is None:
                 message = (
                     "Unknown turn provenance."
@@ -411,6 +444,8 @@ class DesktopWorkspace:
                 sensitive=bool(changed.get("sensitive")),
             )
 
+        if folders and resolved.provenance == "workspace" and path.is_dir():
+            return resolved
         if not path.is_file():
             raise EngineProtocolError("NOT_FOUND", "File no longer exists.")
         return resolved
@@ -434,6 +469,16 @@ class DesktopWorkspace:
             raise EngineProtocolError("NOT_FOUND", "Unknown artifact.") from exc
         if owner != session_id:
             raise EngineProtocolError("PERMISSION_DENIED", "The artifact is from another session.")
+        original = _presented_original(record)
+        if original is not None:
+            return ResolvedFile(
+                path=original,
+                observed_path=original,
+                workspace=original.parent,
+                provenance="artifact",
+                after_hash=record.sha256,
+                sensitive=is_sensitive_file(original),
+            )
         source = self.services.artifacts._storage_path(record.storage_path)
         if not source.is_file():
             raise EngineProtocolError("NOT_FOUND", "File no longer exists.")
@@ -484,6 +529,15 @@ class DesktopWorkspace:
                     latest = row
         return self._external_change({"files": [latest]}, path) if latest else None
 
+    def _presented(self, session_id: str, path: Path) -> dict[str, Any] | None:
+        """The file, if this session presented it to the owner (file.present)."""
+        for row in self.services.ctx.event_repo.list(session_id, types=["file.presented"]):
+            for item in row.payload.get("items") or []:
+                presented = item.get("path") if isinstance(item, dict) else None
+                if isinstance(presented, str) and _same_path(Path(presented), path):
+                    return {"after_hash": None, "sensitive": is_sensitive_file(path)}
+        return None
+
     def _live_change(self, session_id: str, path: Path) -> dict[str, Any] | None:
         """What a running turn of this session has done to ``path`` so far."""
         with self.server._turns._lock:
@@ -509,7 +563,21 @@ class DesktopWorkspace:
         with the system app from the approved path, at any size. `kind` comes
         from the file's first bytes when they identify a format.
         """
-        resolved = self.resolve_file(params)
+        # A folder of the workspace too, to show it in the file manager: the
+        # tree offered «Abrir en el Explorador» on folders and it said the file
+        # no longer existed (28-oct). Reading and watching stay for files.
+        resolved = self.resolve_file(params, folders=True)
+        if resolved.path.is_dir():
+            return {
+                "path": str(resolved.path),
+                "name": resolved.path.name,
+                "size": 0,
+                "kind": "folder",
+                "mime": None,
+                "provenance": resolved.provenance,
+                "sensitive": False,
+                "preview_limit": PREVIEW_LIMIT,
+            }
         try:
             size = resolved.path.stat().st_size
             with resolved.path.open("rb") as stream:

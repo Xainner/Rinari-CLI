@@ -27,7 +27,8 @@ from rinari.evals.spec import AssertionOutcome, AssertionResult, EvalCase
 # request when tools are added: with 40k, two new tools left Linux without
 # room for the heavy last turn, and checklist.update + followup.suggest moved
 # it to 44k (each case measures continuity, not how tight the budget is).
-WINDOW = 44_000
+# 48k since the first-person examples and memory notes of 0.4.0 #95.
+WINDOW = 48_000
 GOAL = "implementar la exportación CSV de informes"
 RULE = "Nunca cambies el esquema de la base de datos."
 NEW_GOAL = "migrar los informes a PDF"

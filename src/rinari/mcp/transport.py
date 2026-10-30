@@ -1,27 +1,38 @@
 """MCP transports: the channel under the wire.
 
 - `StdioTransport`: spawns the server as a subprocess and speaks
-  newline-delimited JSON-RPC 2.0 on its stdin/stdout. A reader thread pumps
-  stdout frames into a queue; requests are matched by JSON-RPC id.
+  newline-delimited JSON-RPC 2.0 on its stdin/stdout. A reader thread routes
+  each response to the request waiting for its JSON-RPC id, so two sessions
+  can call the same server at once, and hands the notifications the server
+  sends on its own (`notifications/tools/list_changed`…) to `on_notification`.
 - `InProcessTransport`: an in-memory channel around a synchronous handler
   callable. Used by tests (and future embedded servers) so the protocol,
   client and adapter are testable without spawning processes.
 
-All satisfy the `McpTransport` contract: start / send / close. The remote
+All satisfy the `McpTransport` contract: start / send / notify / close, plus
+the optional `on_notification` callback the client sets. The remote
 Streamable HTTP transport lives in `http_transport.py`.
 """
 
 from __future__ import annotations
 
+import contextlib
+import json
 import os
 import queue
-import re
 import subprocess
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from .protocol import McpMessage, parse_message
+
+# A call that keeps reporting progress may wait this long in all.
+MAX_PROGRESS_WAIT_S = 30 * 60.0
+# Put in a waiting request's box when another frame arrives: renews the wait.
+_TICK = object()
 
 
 class TransportError(Exception):
@@ -49,6 +60,10 @@ class TransportError(Exception):
 class McpTransport:
     """Channel contract for the MCP client."""
 
+    #: Called with each notification the server sends on its own (no id). The
+    #: client sets it; it runs on the transport's thread and must not block.
+    on_notification: Callable[[McpMessage], None] | None = None
+
     def start(self) -> None: ...
 
     def send(self, payload: str, timeout_s: float) -> McpMessage: ...
@@ -70,10 +85,14 @@ class StdioTransport(McpTransport):
         self._cwd = cwd
         self._env = env
         self._process: subprocess.Popen | None = None
-        self._queue: queue.Queue[str] = queue.Queue()
         self._reader: threading.Thread | None = None
         self._lock = threading.Lock()
         self._closed = False
+        # Requests waiting for their answer, by JSON-RPC id. The reader puts
+        # the response there, a tick for any other frame and None at EOF.
+        self._pending: dict[Any, queue.Queue] = {}
+        self._pending_lock = threading.Lock()
+        self._eof = False
 
     def start(self) -> None:
         if self._process is not None:
@@ -103,45 +122,100 @@ class StdioTransport(McpTransport):
         assert self._process is not None and self._process.stdout is not None
         try:
             for line in self._process.stdout:
-                self._queue.put(line)
+                self._route(line)
         except (OSError, ValueError):
             pass
         finally:
-            self._queue.put("")  # EOF sentinel
+            with self._pending_lock:
+                self._eof = True
+                waiting = list(self._pending.values())
+            for box in waiting:
+                box.put(None)  # the server went away
+
+    def _route(self, line: str) -> None:
+        message = parse_message(line)
+        if message is None:
+            return
+        if message.is_response:
+            with self._pending_lock:
+                box = self._pending.get(message.id)
+            if box is not None:
+                box.put(message)
+            return
+        # Every other frame renews the waits, so progress notifications keep
+        # a long call alive (the ceiling still bounds it).
+        self._tick()
+        if message.method and message.id is not None:
+            self._answer_server_request(message)
+            return
+        callback = self.on_notification
+        if message.method and callback is not None:
+            with contextlib.suppress(Exception):  # a listener never breaks the reader
+                callback(message)
+
+    def _tick(self) -> None:
+        with self._pending_lock:
+            waiting = list(self._pending.values())
+        for box in waiting:
+            box.put(_TICK)
+
+    def _answer_server_request(self, message: McpMessage) -> None:
+        """`ping` gets an empty result; anything else was never advertised."""
+        if message.method == "ping":
+            reply: dict[str, Any] = {"jsonrpc": "2.0", "id": message.id, "result": {}}
+        else:
+            reply = {
+                "jsonrpc": "2.0",
+                "id": message.id,
+                "error": {"code": -32601, "message": "method not supported by client"},
+            }
+        self.notify(json.dumps(reply, separators=(",", ":")))
 
     def send(self, payload: str, timeout_s: float) -> McpMessage:
         if self._closed:
             raise TransportError("TRANSPORT_CLOSED", "transport is closed")
-        with self._lock:
-            assert self._process is not None and self._process.stdin is not None
-            try:
-                self._process.stdin.write(payload + "\n")
-                self._process.stdin.flush()
-            except (OSError, ValueError) as exc:
-                raise TransportError("TRANSPORT_IO", f"write failed: {exc}") from exc
-        return self._wait_for_response(payload, timeout_s)
+        try:
+            expected = json.loads(payload).get("id")
+        except (ValueError, AttributeError) as exc:
+            raise TransportError("TRANSPORT_IO", "invalid outgoing frame") from exc
+        box: queue.Queue = queue.Queue()
+        with self._pending_lock:
+            if self._eof:
+                raise TransportError("TRANSPORT_IO", "server closed the connection")
+            self._pending[expected] = box
+        try:
+            with self._lock:
+                assert self._process is not None and self._process.stdin is not None
+                try:
+                    self._process.stdin.write(payload + "\n")
+                    self._process.stdin.flush()
+                except (OSError, ValueError) as exc:
+                    raise TransportError("TRANSPORT_IO", f"write failed: {exc}") from exc
+            return self._wait_for_response(box, timeout_s)
+        finally:
+            with self._pending_lock:
+                self._pending.pop(expected, None)
 
-    def _wait_for_response(self, payload: str, timeout_s: float) -> McpMessage:
-        match = re.search(r'"id"\s*:\s*(\d+)', payload)
-        expected = int(match.group(1)) if match else None
+    def _wait_for_response(self, box: queue.Queue, timeout_s: float) -> McpMessage:
+        # Every frame from the server restarts the wait, so progress
+        # notifications keep a long call alive; the ceiling bounds it in all.
+        ceiling = time.monotonic() + max(timeout_s, MAX_PROGRESS_WAIT_S)
         while True:
+            if time.monotonic() > ceiling:
+                raise TransportError(
+                    "TRANSPORT_TIMEOUT", f"server did not answer within {MAX_PROGRESS_WAIT_S:g}s"
+                )
             try:
-                line = self._queue.get(timeout=timeout_s)
+                item = box.get(timeout=timeout_s)
             except queue.Empty as exc:
                 raise TransportError(
                     "TRANSPORT_TIMEOUT", f"server did not answer within {timeout_s}s"
                 ) from exc
-            if line == "":  # EOF: server went away
+            if item is None:
                 raise TransportError("TRANSPORT_IO", "server closed the connection")
-            message = parse_message(line)
-            if message is None:
+            if item is _TICK:
                 continue
-            if expected is None:
-                # No id in request (should not happen for requests): accept first frame.
-                return message
-            if message.is_response and message.id == expected:
-                return message
-            # Otherwise: notification/event from the server -- ignore.
+            return item
 
     def notify(self, payload: str) -> None:
         if self._closed:
@@ -197,6 +271,13 @@ class InProcessTransport(McpTransport):
         if self._closed:
             return
         self._handler(payload)
+
+    def push(self, frame: str) -> None:
+        """Deliver a notification from the server (tests, embedded servers)."""
+        message = parse_message(frame)
+        callback = self.on_notification
+        if message is not None and callback is not None and not self._closed:
+            callback(message)
 
     def close(self) -> None:
         self._closed = True

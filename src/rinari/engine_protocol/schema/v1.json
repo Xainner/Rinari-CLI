@@ -36,9 +36,6 @@
     "contextActivity",
     "toolResultDelivery",
     "messageOrigin",
-    "peerGroupMember",
-    "peerGroup",
-    "peerMessage",
     "queuedPromptEntry",
     "browserTarget",
     "browserContext",
@@ -64,14 +61,46 @@
     "turnTokenUsage",
     "mcpSecretState",
     "mcpServer",
+    "mcpConnectionStatus",
+    "mcpConnection",
     "mcpTestResult",
+    "mcpAuthError",
+    "mcpOAuthSupport",
+    "mcpAuthStart",
+    "mcpAuthOutcome",
+    "mcpAuthStatus",
+    "mcpAuthSignout",
+    "mcpToolHints",
+    "mcpToolPermission",
+    "mcpToolPermissions",
     "soulSettings",
+    "networkSettings",
+    "networkEffective",
+    "networkTestResult",
+    "networkTest",
     "rinariProfileCounts",
     "rinariProfile",
     "checklistItem",
     "checklistCounts",
     "checklist",
-    "followupSuggestion"
+    "sessionResume",
+    "goal",
+    "goalAssessment",
+    "goalBudget",
+    "followupSuggestion",
+    "conversationSummary",
+    "repoPullRequest",
+    "repoStatus",
+    "imageCreationSettings",
+    "imageConnector",
+    "mcpCatalogText",
+    "mcpCatalogEntry",
+    "mcpCatalogAdd",
+    "mcpImportSecret",
+    "mcpImportCandidate",
+    "mcpImportSource",
+    "mcpImportResult",
+    "mcpProjectOffers"
   ],
   "$defs": {
     "webPreview": {
@@ -197,6 +226,29 @@
           "additionalProperties": {
             "type": "string"
           }
+        },
+        "offer": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "prompt": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "context": {
+              "type": "string"
+            },
+            "isolation": {
+              "type": "string"
+            },
+            "done_when": {
+              "type": "string"
+            }
+          }
         }
       }
     },
@@ -291,6 +343,21 @@
         "session.model.set",
         "session.permission.get",
         "session.checklist.clear",
+        "session.checklist.complete",
+        "session.goal.get",
+        "session.goal.set",
+        "session.goal.pause",
+        "session.goal.resume",
+        "session.goal.clear",
+        "session.goal.budget",
+        "resume.settings.set",
+        "models.roles.set",
+        "models.roles.get",
+        "resume.settings.get",
+        "session.resume.now",
+        "session.resume.cancel",
+        "session.resume.arm",
+        "session.resume.get",
         "session.checklist.get",
         "session.permission.set",
         "session.turn.start",
@@ -304,6 +371,7 @@
         "session.turn.steer",
         "session.events",
         "session.timeline",
+        "session.tool.output",
         "approval.resolve",
         "turn.changes.get",
         "turn.changes.review",
@@ -339,6 +407,8 @@
         "model.discover",
         "model.discovery.start",
         "model.refresh",
+        "model.hidden.list",
+        "model.unhide",
         "model.test",
         "model.capabilities",
         "agent.list",
@@ -350,11 +420,14 @@
         "soul.update",
         "soul.remove",
         "soul.activate",
+        "soul.export",
+        "soul.import",
         "soul.get_effective",
         "soul.settings.get",
         "soul.settings.set",
         "session.soul.set",
         "session.soul.clear",
+        "mcp.reconnect",
         "mcp.list",
         "mcp.get",
         "mcp.create",
@@ -364,6 +437,13 @@
         "mcp.disable",
         "mcp.test",
         "mcp.probe",
+        "mcp.auth.start",
+        "mcp.auth.status",
+        "mcp.auth.cancel",
+        "mcp.auth.signout",
+        "mcp.tools.list",
+        "mcp.tools.set",
+        "mcp.tools.set_default",
         "plugin.list",
         "plugin.get",
         "plugin.enable",
@@ -423,14 +503,9 @@
         "session.queue.list",
         "session.queue.clear",
         "session.queue.resume",
-        "session.peer_group.set",
-        "session.peer_group.get",
-        "session.peer_group.revoke",
-        "session.peer_message.list",
-        "session.peer_message.cancel",
-        "session.peer_message.forward",
         "session.branch",
         "workspace.file.search",
+        "workspace.dir.list",
         "artifact.list",
         "artifact.read",
         "artifact.export",
@@ -481,6 +556,8 @@
         "browser.context.get",
         "browser.context.prepare",
         "browser.control.set",
+        "browser.external.open",
+        "workspace.preview.list",
         "host.browser.register",
         "host.browser.unregister",
         "host.browser.reply",
@@ -490,18 +567,50 @@
         "workspace.process.stop",
         "vision.settings.get",
         "vision.settings.set",
+        "images.settings.get",
+        "images.settings.set",
+        "images.connector.test",
+        "vision.model.reset",
         "context.settings.get",
         "context.settings.set",
         "context.compact",
         "context.status",
         "context.models",
         "flow.get",
+        "project.init.start",
+        "session.tool.background",
+        "session.turn.steer_now",
+        "session.children.list",
+        "session.child.integrate",
+        "session.child.discard",
+        "session.children.isolation",
+        "execution.settings.get",
+        "execution.settings.set",
+        "advanced.settings.get",
+        "advanced.settings.set",
+        "storage.clean",
+        "memory.move",
+        "memory.about.get",
+        "memory.about.set",
+        "usage.report",
+        "usage.report.list",
+        "session.review.export",
+        "storage.usage",
+        "session.child.start",
+        "process.orphans.list",
+        "process.orphan.stop",
+        "process.persistent.list",
+        "process.persistent.stop",
+        "project.instructions.resolve",
         "provider.catalog.get",
         "provider.usage.get",
         "provider.diagnostics.get",
         "provider.runtime.probe",
         "provider.settings.get",
         "provider.settings.set",
+        "network.settings.get",
+        "network.settings.set",
+        "network.test",
         "provider.auth.start",
         "provider.auth.get",
         "provider.auth.cancel",
@@ -514,6 +623,55 @@
         "schedule.runs",
         "schedule.run_now",
         "schedule.grant",
+        "schedule.rehearse",
+        "agency.agent.list",
+        "agency.agent.get",
+        "agency.agent.create",
+        "agency.agent.update",
+        "agency.agent.archive",
+        "agency.status",
+        "agency.agent.draft",
+        "agency.stop_all",
+        "agency.agent.memory.list",
+        "agency.agent.memory.add",
+        "agency.team.list",
+        "agency.team.get",
+        "agency.team.create",
+        "agency.team.update",
+        "agency.team.archive",
+        "agency.team.join",
+        "agency.team.leave",
+        "agency.office.list",
+        "agency.office.post",
+        "agency.errand.create",
+        "agency.errand.list",
+        "agency.errand.review",
+        "agency.errand.cancel",
+        "agency.errand.retry",
+        "agency.team.template",
+        "agency.team.duplicate",
+        "agency.team.memory.list",
+        "agency.team.memory.add",
+        "agency.resume",
+        "agency.chain.dismiss",
+        "agency.agent.unarchive",
+        "agency.templates.list",
+        "agency.team.from_template",
+        "agency.settings.get",
+        "agency.settings.set",
+        "agency.team.unarchive",
+        "agency.team.delete",
+        "agency.team.stop",
+        "agency.team.resume",
+        "agency.agent.delete",
+        "agency.team.overview",
+        "agency.routine.list",
+        "agency.routine.create",
+        "agency.flow.list",
+        "agency.flow.save",
+        "agency.flow.delete",
+        "agency.flow.start",
+        "agency.flow.run.cancel",
         "project.move_profile",
         "session.move_profile",
         "followup.list",
@@ -522,7 +680,19 @@
         "project.folders.validate",
         "project.create",
         "project.folder.add",
-        "project.folder.remove"
+        "project.folder.remove",
+        "repo.status",
+        "repo.pr.create",
+        "session.summary",
+        "session.turn.steer.update",
+        "session.turn.steer.cancel",
+        "session.turn.steer.promote",
+        "mcp.catalog.list",
+        "mcp.catalog.add",
+        "mcp.import.scan",
+        "mcp.import.apply",
+        "mcp.project_offers.list",
+        "mcp.project_offers.decide"
       ]
     },
     "event": {
@@ -534,6 +704,10 @@
         "turn.cancelled",
         "host.browser.request",
         "browser.control.changed",
+        "browser.external.changed",
+        "project.trust.changed",
+        "instructions.proposed",
+        "instructions.proposal.resolved",
         "turn.stopped",
         "document.job.updated",
         "model.started",
@@ -542,8 +716,10 @@
         "model.completed",
         "model.failed",
         "model.retrying",
+        "model.tool_input",
         "model.changed",
         "session.renamed",
+        "mcp.status.changed",
         "tool.requested",
         "tool.started",
         "tool.output.delta",
@@ -583,13 +759,13 @@
         "vision.completed",
         "vision.failed",
         "vision.cancelled",
-        "session.peer.group.updated",
-        "session.peer.message",
-        "session.peer.message.updated",
         "flow.invalidated",
         "provider.usage.updated",
         "provider.auth.updated",
         "provider.reasoning.dropped",
+        "provider.max_tokens.reduced",
+        "model.fallback",
+        "provider.protocol.learned",
         "skill.job.completed",
         "skill.job.failed",
         "skill.learned",
@@ -601,11 +777,22 @@
         "skill.proposed",
         "skill.proposal.resolved",
         "schedule.changed",
+        "agency.agent.changed",
+        "agency.draft.ready",
+        "agency.draft.failed",
+        "agency.stopped",
+        "agency.secret_pasted",
+        "agency.team.changed",
+        "agency.office.message",
+        "agency.chain.stopped",
+        "schedule.rehearsed",
         "schedule.run.started",
         "schedule.run.needs_you",
         "schedule.run.completed",
         "schedule.proposed",
         "steer.applied",
+        "session.child.updated",
+        "models.changed",
         "steer.returned",
         "memory.candidate.created",
         "memory.candidate.resolved",
@@ -614,8 +801,22 @@
         "profile_bundle.changed",
         "project.moved",
         "checklist.updated",
+        "goal.updated",
+        "goal.reported",
+        "session.resume.updated",
         "followup.suggested",
-        "followup.resolved"
+        "followup.resolved",
+        "repo.status.updated",
+        "repo.pr.created",
+        "repo.pr.failed",
+        "session.summary.changed",
+        "file.presented",
+        "media.generated",
+        "speech.setup_needed",
+        "steer.updated",
+        "steer.cancelled",
+        "mcp.auth.progress",
+        "mcp.auth.finished"
       ]
     },
     "attachment": {
@@ -893,6 +1094,42 @@
         },
         "rinari_profile_id": {
           "type": "string"
+        },
+        "agent_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "team_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parent_session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lineage_kind": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "note",
+            "fork",
+            "schedule",
+            null
+          ]
+        },
+        "brief": {
+          "type": [
+            "object",
+            "null"
+          ]
         }
       },
       "additionalProperties": true
@@ -966,6 +1203,19 @@
           "items": {
             "$ref": "#/$defs/projectFolder"
           }
+        },
+        "permission_profile": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "read-only",
+            "workspace",
+            "full-access",
+            null
+          ],
+          "description": "Plan permisos v4 P-5: the mode a new conversation of the project starts in (null: Proyecto/workspace). Set with project.update permission_profile ('' clears it)."
         }
       },
       "additionalProperties": true
@@ -1311,6 +1561,12 @@
         "url": {
           "type": "string"
         },
+        "name": {
+          "type": "string"
+        },
+        "persist": {
+          "type": "boolean"
+        },
         "running": {
           "type": "boolean"
         },
@@ -1456,6 +1712,30 @@
           "type": "object",
           "additionalProperties": {
             "type": "boolean"
+          }
+        },
+        "learned": {
+          "type": "object",
+          "description": "What Rinari learned by itself about a model's vision (plan 0.4.0 #14); below the owner and the endpoint.",
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "vision"
+            ],
+            "properties": {
+              "vision": {
+                "type": "boolean"
+              },
+              "source": {
+                "type": "string"
+              },
+              "at": {
+                "type": "string"
+              },
+              "error": {
+                "type": "string"
+              }
+            }
           }
         },
         "execution": {
@@ -2028,7 +2308,10 @@
             "peer",
             "automation",
             "schedule",
-            "harness"
+            "harness",
+            "agency_office",
+            "agency_errand",
+            "agency_delivery"
           ]
         },
         "message_id": {
@@ -2121,151 +2404,121 @@
             "string",
             "null"
           ]
-        }
-      }
-    },
-    "peerGroupMember": {
-      "type": "object",
-      "required": [
-        "session_id",
-        "label",
-        "send",
-        "receive"
-      ],
-      "properties": {
-        "session_id": {
-          "type": "string"
         },
-        "label": {
-          "type": "string"
+        "goal_id": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
-        "send": {
-          "type": "boolean"
-        },
-        "receive": {
-          "type": "boolean"
-        }
-      }
-    },
-    "peerGroup": {
-      "type": "object",
-      "required": [
-        "group_id",
-        "board_id",
-        "revision",
-        "authorization_epoch",
-        "enabled",
-        "members"
-      ],
-      "properties": {
-        "group_id": {
-          "type": "string"
-        },
-        "board_id": {
-          "type": "string"
-        },
-        "revision": {
-          "type": "integer",
+        "iteration": {
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0
         },
-        "authorization_epoch": {
-          "type": "integer",
+        "plan_turn_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The PLAN turn a plan_implement / plan_adjust turn acts on (plan 0.4.0 #55)."
+        },
+        "plan_title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "plan_steps": {
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0
         },
-        "enabled": {
-          "type": "boolean"
+        "comment": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "What the owner asked to change in a plan_adjust turn."
         },
-        "members": {
-          "type": "array",
+        "parent_session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "child_origin": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "children": {
+          "type": [
+            "array",
+            "null"
+          ],
           "items": {
-            "$ref": "#/$defs/peerGroupMember"
+            "type": "string"
           }
-        }
-      }
-    },
-    "peerMessage": {
-      "type": "object",
-      "required": [
-        "message_id",
-        "to_session_id",
-        "state",
-        "hop",
-        "origin"
-      ],
-      "properties": {
-        "message_id": {
-          "type": "string"
         },
-        "from_session_id": {
+        "team_id": {
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "description": "Rinari Agency: the team of an office, errand or delivery turn."
         },
-        "to_session_id": {
-          "type": "string"
-        },
-        "group_id": {
+        "errand_id": {
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "description": "Rinari Agency: the errand this turn does or reviews."
         },
-        "chain_id": {
+        "from_label": {
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "description": "Rinari Agency: who it comes from (the agent that mentioned or asked, or the team that delivered), as the Engine names them."
         },
-        "hop": {
-          "type": "integer",
-          "minimum": 0
+        "external_content": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "The turn starts with the external-content guard on: what it got came from outside the machine."
         },
-        "state": {
+        "external_source": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Where that external content came through."
+        },
+        "target": {
+          "type": [
+            "string",
+            "null"
+          ],
           "enum": [
-            "queued",
-            "dispatching",
-            "running",
-            "completed",
-            "failed",
-            "cancelled",
-            "stopped",
-            "paused",
-            "uncertain"
-          ]
+            "new_session",
+            "this_conversation",
+            null
+          ],
+          "description": "A scheduled run: this_conversation when it runs in the conversation it was asked in («Repetir aquí»)."
         },
-        "turn_id": {
+        "task_name": {
           "type": [
             "string",
             "null"
-          ]
-        },
-        "display_message": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "origin": {
-          "$ref": "#/$defs/messageOrigin"
-        },
-        "error": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "created_at": {
-          "type": [
-            "number",
-            "null"
-          ]
-        },
-        "updated_at": {
-          "type": [
-            "number",
-            "null"
-          ]
+          ],
+          "description": "A scheduled run in its conversation: the task's name, to show with the message."
         }
       }
     },
@@ -2296,6 +2549,12 @@
         },
         "origin": {
           "$ref": "#/$defs/messageOrigin"
+        },
+        "display_message": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "error": {
           "type": [
@@ -3348,7 +3607,8 @@
             "stale",
             "unsupported",
             "needs_auth",
-            "error"
+            "error",
+            "disabled"
           ]
         },
         "windows": {
@@ -3621,7 +3881,7 @@
     },
     "mcpServer": {
       "type": "object",
-      "description": "mcp.list/get/create/update/enable/disable view. Secrets appear only as mcpSecretState (configured/source/env_var), never as values.",
+      "description": "mcp.list/get/create/update/enable/disable/reconnect view. Secrets appear only as mcpSecretState (configured/source/env_var), never as values. `status` and `connection` come from the Engine's live connection (mcp_background_connect_v1).",
       "properties": {
         "name": {
           "type": "string"
@@ -3645,12 +3905,30 @@
         "url": {
           "type": "string"
         },
+        "url_secret": {
+          "$ref": "#/$defs/mcpSecretState",
+          "description": "Present when the URL's query carried a secret: the whole URL is in the credential store and `url` shows those values as ***."
+        },
         "scope": {
           "type": "string",
           "enum": [
             "global",
             "project"
           ]
+        },
+        "project_root": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The folder a project-scope server belongs to (mcp_catalog_v1); null: visible in every trusted project."
+        },
+        "owner": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "agency_agents_v1: \"agent:ID\" when the account belongs to an agent, seen only by that agent; null: everyone's."
         },
         "enabled": {
           "type": "boolean"
@@ -3678,16 +3956,51 @@
               "enum": [
                 "none",
                 "bearer",
-                "headers"
+                "headers",
+                "oauth"
               ]
             },
             "token": {
               "$ref": "#/$defs/mcpSecretState"
+            },
+            "client_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "client_secret": {
+              "$ref": "#/$defs/mcpSecretState"
+            },
+            "scopes": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "redirect_port": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "client_metadata_url": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "authorize_params": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
             }
           },
           "required": [
             "kind"
-          ]
+          ],
+          "description": "kind oauth adds client_id (public), client_secret (state only), scopes, redirect_port, client_metadata_url and authorize_params; tokens are never part of the view (mcp.auth.status)."
         },
         "headers": {
           "type": "array",
@@ -3758,6 +4071,12 @@
               "plain_http_remote"
             ]
           }
+        },
+        "status": {
+          "$ref": "#/$defs/mcpConnectionStatus"
+        },
+        "connection": {
+          "$ref": "#/$defs/mcpConnection"
         }
       },
       "required": [
@@ -3766,6 +4085,68 @@
         "scope",
         "enabled",
         "connected"
+      ]
+    },
+    "mcpConnectionStatus": {
+      "type": "string",
+      "description": "idle: enabled, not tried yet (a project server waits for its trusted project). reauth_required: renewing the sign-in failed; the owner reconnects it.",
+      "enum": [
+        "idle",
+        "connecting",
+        "connected",
+        "reauth_required",
+        "error",
+        "disabled"
+      ]
+    },
+    "mcpConnection": {
+      "type": "object",
+      "description": "Why a server is in its state. Also the payload of mcp.status.changed, with `name` and `status`. `message` never carries a secret.",
+      "properties": {
+        "code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tools": {
+          "type": "integer"
+        },
+        "resources": {
+          "type": "boolean"
+        },
+        "attempts": {
+          "type": "integer"
+        },
+        "retry_in_s": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "changed_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "tools",
+        "resources",
+        "attempts"
       ]
     },
     "mcpTestResult": {
@@ -3896,11 +4277,261 @@
         },
         "retryable": {
           "type": "boolean"
+        },
+        "oauth": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/mcpOAuthSupport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "http servers with auth none/oauth: OAuth found even without a 401 (null: none)."
         }
       },
       "required": [
         "ok",
         "tools"
+      ]
+    },
+    "networkSettings": {
+      "type": "object",
+      "description": "network.settings.get/set (plan 0.4.0 #96, «Red»): proxy and certificates of every outgoing HTTP client, saved in ~/.rinari/network.json. set takes `proxy` and/or `certificates` (each replaces its saved object; a missing one is kept) and returns the same shape as get.",
+      "properties": {
+        "proxy": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "system",
+                "manual",
+                "none"
+              ],
+              "description": "system: environment variables and the OS proxy (default); manual: `url`; none: direct."
+            },
+            "url": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "http(s)://host:port; required for manual."
+            },
+            "bypass": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Hosts that skip a manual proxy (localhost is always direct)."
+            }
+          },
+          "required": [
+            "mode",
+            "url",
+            "bypass"
+          ]
+        },
+        "certificates": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "system",
+                "certifi",
+                "file"
+              ],
+              "description": "system: the OS store via truststore (default); certifi: the bundled store; file: only the PEM at `path`."
+            },
+            "path": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "mode",
+            "path"
+          ]
+        },
+        "effective": {
+          "$ref": "#/$defs/networkEffective"
+        }
+      },
+      "required": [
+        "proxy",
+        "certificates"
+      ]
+    },
+    "networkTestResult": {
+      "type": "object",
+      "description": "One row of network.test: one GET without credentials to an enabled provider's base URL through the network settings. Any answer below 500 (except 407) is ok; the whole test ends within ~10 s.",
+      "properties": {
+        "provider_id": {
+          "type": "string"
+        },
+        "alias": {
+          "type": "string"
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "status": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "latency_ms": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error_kind": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "proxy",
+            "tls",
+            "timeout",
+            "connect",
+            "network",
+            "http",
+            "config",
+            null
+          ]
+        }
+      },
+      "required": [
+        "provider_id",
+        "alias",
+        "ok",
+        "status",
+        "latency_ms",
+        "error"
+      ]
+    },
+    "networkEffective": {
+      "type": "object",
+      "description": "What the clients use now. Proxy credentials are redacted. `error`: why a broken network.json fell back to the defaults.",
+      "properties": {
+        "proxy": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string"
+            },
+            "http": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "https": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "source": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "environment",
+                "os",
+                "settings",
+                null
+              ]
+            },
+            "bypass": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "mode",
+            "http",
+            "https",
+            "source",
+            "bypass"
+          ]
+        },
+        "certificates": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string"
+            },
+            "source": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "extra": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "SSL_CERT_FILE/SSL_CERT_DIR also trusted with the system store."
+            }
+          },
+          "required": [
+            "mode",
+            "source"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "proxy",
+        "certificates",
+        "error"
+      ]
+    },
+    "networkTest": {
+      "type": "object",
+      "description": "network.test result: one row per enabled provider with an HTTP endpoint (params: optional `provider_ids`), and the network settings in use.",
+      "properties": {
+        "results": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/networkTestResult"
+          }
+        },
+        "effective": {
+          "$ref": "#/$defs/networkEffective"
+        }
+      },
+      "required": [
+        "results",
+        "effective"
       ]
     },
     "soulSettings": {
@@ -4224,6 +4855,31 @@
             "string",
             "null"
           ]
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "note",
+            "plan_step"
+          ]
+        },
+        "context": {
+          "type": "string",
+          "enum": [
+            "brief",
+            "fork"
+          ]
+        },
+        "isolation": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "worktree",
+            "same"
+          ]
+        },
+        "done_when": {
+          "type": "string"
         }
       },
       "additionalProperties": false
@@ -4343,9 +4999,1796 @@
               "type": "null"
             }
           ]
+        },
+        "has_hooks": {
+          "type": "boolean"
+        },
+        "has_mcp": {
+          "type": "boolean"
         }
       },
       "additionalProperties": false
+    },
+    "goal": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "goal_id",
+        "objective",
+        "state",
+        "budget",
+        "iteration",
+        "tokens_used",
+        "active_seconds",
+        "assessment",
+        "reason",
+        "revision",
+        "started_at",
+        "updated_at"
+      ],
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "goal_id": {
+          "type": "string"
+        },
+        "objective": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "pursuing",
+            "paused",
+            "waiting_limits",
+            "achieved",
+            "blocked",
+            "stalled",
+            "budget_limited",
+            "cleared"
+          ]
+        },
+        "budget": {
+          "$ref": "#/$defs/goalBudget"
+        },
+        "iteration": {
+          "type": "integer"
+        },
+        "tokens_used": {
+          "type": "integer"
+        },
+        "active_seconds": {
+          "type": "number"
+        },
+        "assessment": {
+          "$ref": "#/$defs/goalAssessment"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "started_at": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "goalBudget": {
+      "type": "object",
+      "properties": {
+        "turns": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "minutes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "tokens": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "goalAssessment": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "progress",
+            "achieved",
+            "blocked"
+          ]
+        },
+        "summary": {
+          "type": "string"
+        },
+        "evidence": {
+          "type": "string"
+        },
+        "remaining": {
+          "type": "string"
+        },
+        "iteration": {
+          "type": "integer"
+        },
+        "gate": {
+          "type": "object"
+        },
+        "_signature": {
+          "type": "array"
+        }
+      },
+      "additionalProperties": false
+    },
+    "sessionResume": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "provider_id",
+        "mode",
+        "resume_at",
+        "state",
+        "attempts",
+        "goal_id",
+        "reason",
+        "revision",
+        "updated_at"
+      ],
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "provider_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "at",
+            "poll"
+          ]
+        },
+        "resume_at": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "waiting",
+            "done",
+            "cancelled",
+            "failed",
+            "expired"
+          ]
+        },
+        "attempts": {
+          "type": "integer"
+        },
+        "goal_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "repoPullRequest": {
+      "type": "object",
+      "required": [
+        "number",
+        "title",
+        "state",
+        "url"
+      ],
+      "properties": {
+        "number": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "title": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string",
+          "description": "open, merged or closed"
+        },
+        "url": {
+          "type": "string"
+        },
+        "checks": {
+          "enum": [
+            "success",
+            "failure",
+            "pending",
+            null
+          ]
+        }
+      }
+    },
+    "repoStatus": {
+      "type": "object",
+      "description": "The conversation's repository (plan 0.4.0 #82). Read-only.",
+      "required": [
+        "available"
+      ],
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "available": {
+          "type": "boolean"
+        },
+        "root": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "upstream": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ahead": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "behind": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dirty": {
+          "type": "boolean"
+        },
+        "changed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "remote_url": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Without credentials."
+        },
+        "github": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "owner": {
+              "type": "string"
+            },
+            "repo": {
+              "type": "string"
+            }
+          }
+        },
+        "gh": {
+          "enum": [
+            "missing",
+            "unauthenticated",
+            "ready",
+            null
+          ]
+        },
+        "prs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/repoPullRequest"
+          }
+        },
+        "remote_pending": {
+          "type": "boolean",
+          "description": "The GitHub part is being read; repo.status.updated follows."
+        }
+      }
+    },
+    "conversationSummary": {
+      "type": "object",
+      "description": "What «Resumen» cannot gather by itself (plan 0.4.0 #82).",
+      "required": [
+        "session_id",
+        "sources",
+        "results",
+        "connectors",
+        "background"
+      ],
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "sources": {
+          "type": "object",
+          "properties": {
+            "pages": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "url": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            },
+            "searches": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "query": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            },
+            "mcp": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "connector": {
+                    "type": "string"
+                  },
+                  "calls": {
+                    "type": "integer"
+                  },
+                  "tools": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "at": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            },
+            "total": {
+              "type": "integer"
+            }
+          }
+        },
+        "results": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "image",
+                  "video",
+                  "audio",
+                  "document",
+                  "file"
+                ]
+              },
+              "tool": {
+                "type": "string"
+              },
+              "turn_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "exists": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        "connectors": {
+          "type": "object",
+          "properties": {
+            "mcp": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "scope": {
+                    "type": "string"
+                  },
+                  "connected": {
+                    "type": "boolean"
+                  },
+                  "status": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/mcpConnectionStatus"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            "skills": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "version": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "background": {
+          "type": "object",
+          "properties": {
+            "processes": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "scheduled": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      }
+    },
+    "imageCreationSettings": {
+      "type": "object",
+      "description": "images.settings.get / images.settings.set (plan 0.4.0 #28). Connectors never carry a secret: set takes an optional `api_key` per OpenAI connector and keeps only its credential reference.",
+      "required": [
+        "connectors",
+        "default_connector",
+        "edit_connector",
+        "session_budget_usd"
+      ],
+      "properties": {
+        "connectors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/imageConnector"
+          }
+        },
+        "default_connector": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "edit_connector": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_budget_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "kinds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "subscriptions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "provider_id",
+              "name"
+            ],
+            "properties": {
+              "provider_id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "openrouter_providers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "provider_id",
+              "name"
+            ],
+            "properties": {
+              "provider_id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "mcp_servers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "imageConnector": {
+      "type": "object",
+      "required": [
+        "id",
+        "kind",
+        "label"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "chatgpt",
+            "openai",
+            "fal",
+            "google",
+            "openrouter",
+            "comfyui",
+            "mcp"
+          ]
+        },
+        "label": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "provider_id": {
+          "type": "string"
+        },
+        "api_key_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "api_key": {
+          "type": "string",
+          "description": "Write-only: stored in the credential store."
+        },
+        "endpoint": {
+          "type": "string"
+        },
+        "has_key": {
+          "type": "boolean"
+        },
+        "models": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "FAL: model id per operation."
+        },
+        "workflows": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object"
+          },
+          "description": "ComfyUI: workflow (API format) per operation; {{prompt}} and {{image}} are replaced."
+        },
+        "server": {
+          "type": "string",
+          "description": "MCP: the registered server name."
+        },
+        "tools": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "tool"
+            ],
+            "properties": {
+              "tool": {
+                "type": "string"
+              },
+              "prompt_arg": {
+                "type": "string"
+              },
+              "image_arg": {
+                "type": "string"
+              }
+            }
+          },
+          "description": "MCP: tool per operation and its argument names."
+        }
+      }
+    },
+    "mcpAuthError": {
+      "type": "object",
+      "description": "An OAuth failure: stable code and hint, never a token, code or secret.",
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "OAUTH_DISCOVERY_FAILED",
+            "OAUTH_CLIENT_REQUIRED",
+            "OAUTH_REGISTRATION_FAILED",
+            "OAUTH_PORT_IN_USE",
+            "OAUTH_DENIED",
+            "OAUTH_TOKEN_REJECTED",
+            "OAUTH_SERVER_ERROR",
+            "OAUTH_UNREACHABLE",
+            "OAUTH_TIMEOUT",
+            "OAUTH_CANCELLED",
+            "OAUTH_REAUTH_REQUIRED",
+            "OAUTH_SECRET_MISSING",
+            "OAUTH_STORE_FAILED"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "hint": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "hint"
+      ]
+    },
+    "mcpOAuthSupport": {
+      "type": "object",
+      "description": "What OAuth discovery found for a remote MCP server (mcp.test/mcp.probe `oauth`, mcp.auth.start). `client` says what signing in needs: configured (the owner's client is set), registration (RFC 7591), metadata_document (CIMD) or required (the owner must add a client ID).",
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "client": {
+          "type": "string",
+          "enum": [
+            "configured",
+            "registration",
+            "metadata_document",
+            "required"
+          ]
+        },
+        "issuer": {
+          "type": "string"
+        },
+        "resource": {
+          "type": "string"
+        },
+        "resource_metadata": {
+          "type": "boolean"
+        },
+        "registration": {
+          "type": "boolean"
+        },
+        "client_metadata_document": {
+          "type": "boolean"
+        },
+        "revocation": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "available",
+        "client",
+        "issuer",
+        "resource"
+      ]
+    },
+    "mcpAuthStart": {
+      "type": "object",
+      "description": "mcp.auth.start result. The sign-in goes on in the browser; it ends with mcp.auth.finished.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "flow_id": {
+          "type": "string"
+        },
+        "authorize_url": {
+          "type": "string"
+        },
+        "redirect_uri": {
+          "type": "string"
+        },
+        "browser_opened": {
+          "type": "boolean"
+        },
+        "expires_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "client": {
+          "type": "string",
+          "enum": [
+            "configured",
+            "registered",
+            "metadata_document"
+          ]
+        },
+        "issuer": {
+          "type": "string"
+        },
+        "resource": {
+          "type": "string"
+        },
+        "resource_metadata": {
+          "type": "boolean"
+        },
+        "registration": {
+          "type": "boolean"
+        },
+        "client_metadata_document": {
+          "type": "boolean"
+        },
+        "revocation": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "flow_id",
+        "authorize_url",
+        "redirect_uri",
+        "browser_opened",
+        "client"
+      ]
+    },
+    "mcpAuthOutcome": {
+      "type": "object",
+      "description": "How a sign-in ended (mcp.auth.finished payload without `name`; mcp.auth.status `last`).",
+      "properties": {
+        "flow_id": {
+          "type": "string"
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "signed_in",
+            "failed",
+            "cancelled",
+            "timed_out"
+          ]
+        },
+        "finished_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "$ref": "#/$defs/mcpAuthError"
+        }
+      },
+      "required": [
+        "flow_id",
+        "outcome"
+      ]
+    },
+    "mcpAuthStatus": {
+      "type": "object",
+      "description": "mcp.auth.status: sign-in flags, expiry and scopes; never a token.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "none",
+            "bearer",
+            "headers",
+            "oauth"
+          ]
+        },
+        "signed_in": {
+          "type": "boolean"
+        },
+        "reauth_required": {
+          "type": "boolean"
+        },
+        "expires_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "has_refresh_token": {
+          "type": "boolean"
+        },
+        "scopes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "issuer": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "client": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "configured",
+            "registered",
+            "metadata_document",
+            null
+          ]
+        },
+        "pending": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "flow_id": {
+              "type": "string"
+            },
+            "authorize_url": {
+              "type": "string"
+            },
+            "started_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "expires_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "last": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/mcpAuthOutcome"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "signed_in",
+        "reauth_required",
+        "has_refresh_token",
+        "scopes"
+      ]
+    },
+    "mcpAuthSignout": {
+      "type": "object",
+      "description": "mcp.auth.signout: tokens revoked (when the server can) and deleted.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "revoked": {
+          "type": "boolean"
+        },
+        "removed": {
+          "type": "boolean"
+        },
+        "cancelled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "revoked",
+        "removed",
+        "cancelled"
+      ]
+    },
+    "mcpToolHints": {
+      "type": "object",
+      "description": "MCP tool annotations that the policy reads (connectors plan C5). null: not declared (in `owner`, the key is simply absent).",
+      "properties": {
+        "readOnlyHint": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "destructiveHint": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "openWorldHint": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      }
+    },
+    "mcpToolPermission": {
+      "type": "object",
+      "description": "mcp.tools.list/set: one tool of an MCP server with its permissions (mcp_tool_permissions_v1). `annotations.server` are the server's hints, `owner` the owner's corrections and `effective` what counts. `setting` is the owner's choice for this tool; `decision` and `decision_source` say what applies (tool, server default, or the mode's rule when null). `by_mode` is what each mode does before any external content; full-access only blocks what the owner blocked. `listed`: false for a saved setting of a tool the server no longer lists (or before it connected).",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The server's own tool name."
+        },
+        "tool": {
+          "type": "string",
+          "description": "Rinari's name: mcp.<server>.<tool>."
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": "string"
+        },
+        "listed": {
+          "type": "boolean"
+        },
+        "annotations": {
+          "type": "object",
+          "properties": {
+            "server": {
+              "$ref": "#/$defs/mcpToolHints"
+            },
+            "owner": {
+              "$ref": "#/$defs/mcpToolHints"
+            },
+            "effective": {
+              "$ref": "#/$defs/mcpToolHints"
+            }
+          },
+          "required": [
+            "server",
+            "owner",
+            "effective"
+          ]
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "destructive"
+          ]
+        },
+        "sends_out": {
+          "type": "boolean",
+          "description": "A call may send data outside (not a read and openWorldHint is not false): after external content from another source it asks in workspace."
+        },
+        "setting": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "allow",
+            "ask",
+            "deny",
+            null
+          ]
+        },
+        "decision": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "allow",
+            "ask",
+            "deny",
+            null
+          ]
+        },
+        "decision_source": {
+          "type": "string",
+          "enum": [
+            "tool",
+            "server",
+            "mode"
+          ]
+        },
+        "by_mode": {
+          "type": "object",
+          "properties": {
+            "read-only": {
+              "type": "string",
+              "enum": [
+                "allow",
+                "ask",
+                "deny"
+              ]
+            },
+            "workspace": {
+              "type": "string",
+              "enum": [
+                "allow",
+                "ask",
+                "deny"
+              ]
+            },
+            "full-access": {
+              "type": "string",
+              "enum": [
+                "allow",
+                "ask",
+                "deny"
+              ]
+            }
+          },
+          "required": [
+            "read-only",
+            "workspace",
+            "full-access"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "tool",
+        "title",
+        "description",
+        "listed",
+        "annotations",
+        "kind",
+        "sends_out",
+        "setting",
+        "decision",
+        "decision_source",
+        "by_mode"
+      ]
+    },
+    "mcpToolPermissions": {
+      "type": "object",
+      "description": "mcp.tools.list/set/set_default `server`: the server's default (Allow / Ask / Block for tools without their own setting; null: the mode decides) and its tools from the last tools/list (nothing connects to answer).",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "global",
+            "project"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/mcpConnectionStatus"
+        },
+        "default": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "allow",
+            "ask",
+            "deny",
+            null
+          ]
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/mcpToolPermission"
+          }
+        }
+      },
+      "required": [
+        "name",
+        "scope",
+        "status",
+        "default",
+        "tools"
+      ]
+    },
+    "mcpCatalogText": {
+      "type": "object",
+      "required": [
+        "es",
+        "en"
+      ],
+      "properties": {
+        "es": {
+          "type": "string"
+        },
+        "en": {
+          "type": "string"
+        }
+      },
+      "description": "A catalog text in Spanish and English."
+    },
+    "mcpCatalogEntry": {
+      "type": "object",
+      "description": "mcp.catalog.list entry: a connector the Engine ships (src/rinari/mcp/catalog.json, schema catalog.schema.json). `added` and `servers` say which saved servers match it (same URL or command).",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "logo": {
+          "type": "string",
+          "description": "An identifier for the client's own artwork; the Engine ships no images."
+        },
+        "category": {
+          "type": "string",
+          "enum": [
+            "google",
+            "work",
+            "dev",
+            "design",
+            "files",
+            "crm",
+            "media",
+            "data"
+          ]
+        },
+        "group": {
+          "type": "string"
+        },
+        "preview": {
+          "type": "boolean"
+        },
+        "description": {
+          "$ref": "#/$defs/mcpCatalogText"
+        },
+        "notes": {
+          "$ref": "#/$defs/mcpCatalogText"
+        },
+        "docs_url": {
+          "type": "string"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "server": {
+          "type": "object",
+          "properties": {
+            "transport": {
+              "type": "string",
+              "enum": [
+                "http",
+                "stdio"
+              ]
+            },
+            "url": {
+              "type": "string"
+            },
+            "auth": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "oauth",
+                    "bearer",
+                    "none"
+                  ]
+                },
+                "scopes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "authorize_params": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "command": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "env": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "label",
+                  "secret",
+                  "required"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "$ref": "#/$defs/mcpCatalogText"
+                  },
+                  "secret": {
+                    "type": "boolean"
+                  },
+                  "required": {
+                    "type": "boolean"
+                  },
+                  "default": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "connection_string": {
+              "type": "object",
+              "properties": {
+                "schemes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "env": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "required": [
+            "transport"
+          ]
+        },
+        "setup": {
+          "type": "object",
+          "required": [
+            "kind",
+            "help"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "registration",
+                "client_metadata",
+                "own_client",
+                "token",
+                "secrets"
+              ]
+            },
+            "fields": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "required"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "enum": [
+                      "client_id",
+                      "client_secret",
+                      "redirect_port",
+                      "token",
+                      "connection_string"
+                    ]
+                  },
+                  "required": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            },
+            "console_url": {
+              "type": "string"
+            },
+            "help": {
+              "$ref": "#/$defs/mcpCatalogText"
+            },
+            "alternatives": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "kind",
+                  "help"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "registration",
+                      "client_metadata",
+                      "own_client",
+                      "token",
+                      "secrets"
+                    ]
+                  },
+                  "fields": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "name",
+                        "required"
+                      ],
+                      "properties": {
+                        "name": {
+                          "type": "string",
+                          "enum": [
+                            "client_id",
+                            "client_secret",
+                            "redirect_port",
+                            "token",
+                            "connection_string"
+                          ]
+                        },
+                        "required": {
+                          "type": "boolean"
+                        }
+                      }
+                    }
+                  },
+                  "console_url": {
+                    "type": "string"
+                  },
+                  "help": {
+                    "$ref": "#/$defs/mcpCatalogText"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "added": {
+          "type": "boolean"
+        },
+        "servers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "scope": {
+                "type": "string",
+                "enum": [
+                  "global",
+                  "project"
+                ]
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "status": {
+                "$ref": "#/$defs/mcpConnectionStatus"
+              }
+            }
+          }
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "logo",
+        "category",
+        "description",
+        "docs_url",
+        "server",
+        "setup",
+        "added",
+        "servers"
+      ]
+    },
+    "mcpCatalogAdd": {
+      "type": "object",
+      "description": "mcp.catalog.add result. `next`: sign_in (call mcp.auth.start) or connect (already connecting in the background).",
+      "properties": {
+        "server": {
+          "$ref": "#/$defs/mcpServer"
+        },
+        "entry_id": {
+          "type": "string"
+        },
+        "next": {
+          "type": "string",
+          "enum": [
+            "sign_in",
+            "connect"
+          ]
+        }
+      },
+      "required": [
+        "server",
+        "entry_id",
+        "next"
+      ]
+    },
+    "mcpImportSecret": {
+      "type": "object",
+      "description": "A secret an imported definition brings: where and its name, never its value. `kind` env_ref is an env://NAME reference (from ${VAR}).",
+      "properties": {
+        "where": {
+          "type": "string",
+          "enum": [
+            "env",
+            "header",
+            "url"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "value",
+            "env_ref"
+          ]
+        },
+        "variable": {
+          "type": "string",
+          "description": "For env_ref: the owner's environment variable it reads (its name, never its value)."
+        }
+      },
+      "required": [
+        "where",
+        "name",
+        "kind"
+      ]
+    },
+    "mcpImportCandidate": {
+      "type": "object",
+      "description": "A server found by mcp.import.scan or offered by mcp.project_offers.list. Shape and secret names only. `reason` (not importable): legacy_sse_unsupported, secret_in_command, unresolved_variable, invalid_url, invalid_definition. `warnings`: disabled_in_source, unresolved_variable:<field>, invalid_env_name, cwd_ignored, env_file_ignored.",
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "claude_desktop",
+            "claude_code",
+            "cursor",
+            "vscode",
+            "codex",
+            "pasted",
+            "project"
+          ]
+        },
+        "source_label": {
+          "type": "string"
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project_root": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "transport": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "stdio",
+            "http",
+            null
+          ]
+        },
+        "command": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "url": {
+          "type": "string"
+        },
+        "secrets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/mcpImportSecret"
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "importable": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "suggested_name": {
+          "type": "string"
+        },
+        "existing": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "A saved server with the same definition, if any."
+        },
+        "changed": {
+          "type": "boolean",
+          "description": "Project offers: the definition changed since the owner answered."
+        },
+        "previous_decision": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "accepted",
+            "rejected",
+            null
+          ]
+        }
+      },
+      "required": [
+        "key",
+        "name",
+        "source",
+        "transport",
+        "command",
+        "url",
+        "secrets",
+        "warnings",
+        "importable"
+      ]
+    },
+    "mcpImportSource": {
+      "type": "object",
+      "description": "A config file mcp.import.scan looked at (Windows, macOS or Linux paths of each app).",
+      "properties": {
+        "source": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "found": {
+          "type": "boolean"
+        },
+        "servers": {
+          "type": "integer"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "unreadable",
+            "file_too_large",
+            null
+          ]
+        }
+      },
+      "required": [
+        "source",
+        "path",
+        "found",
+        "servers"
+      ]
+    },
+    "mcpImportResult": {
+      "type": "object",
+      "description": "mcp.import.apply and mcp.project_offers.decide: what was created and what failed (each server on its own).",
+      "properties": {
+        "created": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "server": {
+                "$ref": "#/$defs/mcpServer"
+              }
+            },
+            "required": [
+              "key",
+              "server"
+            ]
+          }
+        },
+        "failed": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "key",
+              "message"
+            ]
+          }
+        },
+        "rejected": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "project": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "created",
+        "failed"
+      ]
+    },
+    "mcpProjectOffers": {
+      "type": "object",
+      "description": "mcp.project_offers.list: servers a trusted folder brings that the owner has not answered (once per server). Untrusted: trusted false and no offers.",
+      "properties": {
+        "project": {
+          "type": "string"
+        },
+        "trusted": {
+          "type": "boolean"
+        },
+        "offers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/mcpImportCandidate"
+          }
+        },
+        "answered": {
+          "type": "integer"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/mcpImportSource"
+          }
+        }
+      },
+      "required": [
+        "project",
+        "trusted",
+        "offers",
+        "answered"
+      ]
     }
   }
 }

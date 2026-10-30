@@ -34,6 +34,18 @@ def git_state(root: Path) -> GitState:
     return GitState(available=True, branch=branch or None, head=head, dirty=bool(status))
 
 
+def current_branch(root: Path) -> str | None:
+    """The checked-out branch, without `git status`.
+
+    A turn's preparation only needs the name: on a large repository the status
+    took seconds, and it ran again right after for the worktree baseline.
+    """
+    if not (root / ".git").exists():
+        return None
+    output = _run(root, ["rev-parse", "--abbrev-ref", "HEAD"])
+    return (output or "").strip() or None
+
+
 def git_fingerprint(root: Path) -> str | None:
     state = git_state(root)
     if not state.available or state.head is None:

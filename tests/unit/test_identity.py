@@ -36,6 +36,8 @@ def test_packaged_constitution_loads(app_ctx):
         assert section in asset.text
     # The constitution carries no persona content.
     assert "20-year-old" not in asset.text
+    # What is left untouched outside the request becomes a note, not a mention.
+    assert "record it with `followup.suggest`" in asset.text
 
 
 def test_user_soul_override_wins(app_ctx):

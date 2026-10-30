@@ -166,3 +166,228 @@ def test_effective_timeout_respects_the_tool_deadline(project) -> None:
     capped = effective_timeout(900, 60.0, near)
     assert capped["source"] == "deadline" and capped["effective_s"] <= 5
     assert capped["requested_s"] == 900
+
+
+# -- empty optionals and text lists (plan 0.4.0 v2, V2-8) ---------------------
+
+
+def test_patch_with_empty_single_file_form_beside_files_uses_files(project) -> None:
+    """GPT sends every key: path/old_string/new_string empty next to files (F1)."""
+    tmp_path, root, _ = project
+    ctx = _ctx(tmp_path, root, profile="full-access")
+    runtime, _ = _runtime(ctx, tmp_path, answer="y")
+    target = root / "facturas.py"
+    target.write_text("total = 1\n", encoding="utf-8")
+
+    result = runtime.execute(
+        "fs.patch",
+        {
+            "path": "",
+            "old_string": "",
+            "new_string": "",
+            "replace_all": False,
+            "expected_hash": "",
+            "files": [
+                {
+                    "path": str(target),
+                    "expected_hash": "",
+                    "edits": [{"old_string": "total = 1", "new_string": "total = 2"}],
+                }
+            ],
+        },
+        ctx,
+    )
+
+    assert result.ok, result.error
+    assert target.read_text(encoding="utf-8") == "total = 2\n"
+    assert any("ignored empty optional" in note for note in result.notes)
+
+
+def test_new_file_with_empty_expected_hash_is_created(project) -> None:
+    """`expected_hash: ""` on a new file read as a hash and failed (F8)."""
+    tmp_path, root, _ = project
+    ctx = _ctx(tmp_path, root, profile="full-access")
+    runtime, _ = _runtime(ctx, tmp_path, answer="y")
+    target = root / "nuevo.py"
+
+    result = runtime.execute(
+        "fs.write", {"path": str(target), "content": "x = 1\n", "expected_hash": ""}, ctx
+    )
+
+    assert result.ok, result.error
+    assert target.read_text(encoding="utf-8") == "x = 1\n"
+
+
+def test_patch_edits_sent_as_json_text_are_read_as_a_list(project) -> None:
+    """DeepSeek sent `edits` as serialized JSON next to path (F12)."""
+    import json
+
+    tmp_path, root, _ = project
+    ctx = _ctx(tmp_path, root, profile="full-access")
+    runtime, _ = _runtime(ctx, tmp_path, answer="y")
+    target = root / "a.py"
+    target.write_text("a = 1\n", encoding="utf-8")
+
+    result = runtime.execute(
+        "fs.patch",
+        {
+            "path": str(target),
+            "edits": json.dumps([{"old_string": "a = 1", "new_string": "a = 3"}]),
+        },
+        ctx,
+    )
+
+    assert result.ok, result.error
+    assert target.read_text(encoding="utf-8") == "a = 3\n"
+
+
+def test_empty_new_string_still_deletes_in_the_single_file_form(project) -> None:
+    tmp_path, root, _ = project
+    ctx = _ctx(tmp_path, root, profile="full-access")
+    runtime, _ = _runtime(ctx, tmp_path, answer="y")
+    target = root / "b.py"
+    target.write_bytes(b"keep drop")
+
+    result = runtime.execute(
+        "fs.patch", {"path": str(target), "old_string": " drop", "new_string": ""}, ctx
+    )
+
+    assert result.ok, result.error
+    assert target.read_bytes() == b"keep"
+
+
+def test_a_rejected_call_does_not_use_up_its_request_id(project) -> None:
+    """Correcting the arguments after INVALID_ARGUMENT kept the same request_id
+    and hit «already used with different arguments» (F24)."""
+    tmp_path, root, _ = project
+    ctx = _ctx(tmp_path, root)
+    runtime, _ = _runtime(ctx, tmp_path, answer="y")
+    tool, calls = _counting_tool(
+        "fs.receipted",
+        {"type": "object", "properties": {"n": {"type": "integer"}}, "required": ["n"]},
+    )
+    runtime.registry.register(dataclasses.replace(tool, manifest={"supports_request_id": True}))
+
+    bad = runtime.execute("fs.receipted", {"request_id": "r1", "n": "x"}, ctx)
+    good = runtime.execute("fs.receipted", {"request_id": "r1", "n": 2}, ctx)
+    again = runtime.execute("fs.receipted", {"request_id": "r1", "n": 3}, ctx)
+
+    assert bad.error.code is ToolErrorCode.INVALID_ARGUMENT
+    assert good.ok, good.error
+    assert again.error.code is ToolErrorCode.CONFLICT
+    assert calls == [{"n": 2}]
+
+
+def test_required_and_nullable_keys_are_never_dropped() -> None:
+    from rinari.tools.schema import drop_empty_optionals
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "content": {"type": "string"},
+            "note": {"type": ["string", "null"]},
+            "tags": {"type": "array"},
+            "cwd": {"type": "string"},
+        },
+        "required": ["content"],
+    }
+    value, notes = drop_empty_optionals(
+        schema, {"content": "", "note": None, "tags": [], "cwd": ""}
+    )
+    assert value == {"content": "", "note": None, "tags": []}
+    assert notes == ["ignored empty optional cwd"]
+
+
+def test_patching_a_missing_file_outside_says_so_before_asking(project) -> None:
+    """A stray fs.patch on a path that does not exist asked «write outside the
+    project» first and failed only after approval (F36, plan 0.4.0 v2, V2-13)."""
+    tmp_path, root, _ = project
+    ctx = _ctx(tmp_path, root)
+    runtime, events = _runtime(ctx, tmp_path, answer="y")
+    missing = tmp_path / "elsewhere" / "proyectos"
+
+    result = runtime.execute(
+        "fs.patch", {"path": str(missing), "old_string": "x", "new_string": "y"}, ctx
+    )
+
+    assert result.error.code is ToolErrorCode.NOT_FOUND
+    assert "does not exist" in result.error.message
+    assert not [kind for kind, _ in events if "Approval" in kind or kind == "PolicyDecision"]
+
+
+def test_git_status_and_diff_outside_a_repository_answer_instead_of_failing(project) -> None:
+    """Models call git.status to look around; a folder without git counted as a
+    failed tool (F2, plan 0.4.0 v2, V2-14)."""
+    tmp_path, _root, _ = project
+    plain = tmp_path / "sin-git"
+    plain.mkdir()
+    ctx = dataclasses.replace(_ctx(tmp_path, plain), project_root=None)
+    runtime, _ = _runtime(ctx, tmp_path, answer="y")
+
+    status = runtime.execute("git.status", {}, ctx)
+    diff = runtime.execute("git.diff", {}, ctx)
+
+    assert status.ok, status.error
+    assert status.data["is_repo"] is False and status.data["files"] == []
+    assert diff.ok, diff.error
+    assert diff.data == {"is_repo": False, "diff": "", "truncated": False}
+
+
+def test_an_expected_red_exit_is_not_a_failed_command(project) -> None:
+    """pytest red before a fix and negative checks counted as failed tools and
+    incidents (F4, F27, plan 0.4.0 v2, V2-14)."""
+    from rinari.runtime.agent import _tool_activity_presentation
+
+    tmp_path, root, _ = project
+    ctx = _ctx(tmp_path, root, profile="full-access")
+    runtime, _ = _runtime(ctx, tmp_path, answer="y")
+    argv = [sys.executable, "-c", "raise SystemExit(1)"]
+
+    expected = runtime.execute("shell.exec", {"argv": argv, "expect_exit": 1}, ctx)
+    plain = runtime.execute("shell.exec", {"argv": argv}, ctx)
+    listed = runtime.execute("shell.exec", {"argv": argv, "expect_exit": [2, 3]}, ctx)
+
+    assert expected.data["as_expected"] is True
+    assert _tool_activity_presentation("shell.exec", {}, expected)["status"] == "success"
+    assert "exited_as_expected" in expected.to_model_text("shell.exec")
+    assert _tool_activity_presentation("shell.exec", {}, plain)["status"] == "failed"
+    assert "as_expected" not in listed.data
+
+
+def test_limits_are_said_in_words_in_the_wire_schema() -> None:
+    """memory.episodic's maxLength and memory.propose's kinds were skipped by the
+    model (F20, F39): the wire schema repeats them in the description."""
+    from rinari.tools.schema import wire_input_schema
+
+    wire = wire_input_schema(
+        {
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string", "maxLength": 400, "description": "What was done."},
+                "kind": {"type": "string", "enum": ["fact", "workflow"]},
+            },
+        }
+    )
+    assert wire["properties"]["summary"]["description"] == "What was done. At most 400 characters."
+    assert wire["properties"]["summary"]["maxLength"] == 400
+    assert wire["properties"]["kind"]["description"] == "One of: fact, workflow."
+    again = wire_input_schema(wire)
+    assert again["properties"]["summary"]["description"].count("At most") == 1
+
+
+def test_a_document_spec_can_be_a_workspace_file(project, monkeypatch) -> None:
+    """documents.create refused a spec the model wrote in the project: «spec_uri
+    must be of this session» (F13, plan 0.4.0 v2, V2-14)."""
+    import json
+    from types import SimpleNamespace
+
+    from rinari.tools.native import documents
+
+    tmp_path, root, _ = project
+    ctx = _ctx(tmp_path, root)
+    monkeypatch.setattr(documents, "_service", lambda ctx: SimpleNamespace(session_id="s1"))
+    spec_file = root / "ventas-spec.json"
+    spec_file.write_text(json.dumps({"title": "Ventas"}), encoding="utf-8")
+
+    assert documents._spec({"spec_uri": "ventas-spec.json"}, ctx) == {"title": "Ventas"}
+    assert documents._spec({"spec_uri": str(spec_file)}, ctx) == {"title": "Ventas"}
