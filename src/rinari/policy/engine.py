@@ -382,6 +382,8 @@ def engine_home_targets(command: str, scope: SessionScope) -> list[Path]:
     first and run after) cannot be seen in its text: this check stops a
     direct reach and is no substitute for an operating-system sandbox.
     """
+    import os
+
     home = scope.engine_home
     if home is None:
         return []
@@ -406,6 +408,10 @@ def engine_home_targets(command: str, scope: SessionScope) -> list[Path]:
         piece = piece.strip()
         if piece and _looks_path(piece):
             note(_expand(piece))
+            if "\\" in piece and os.sep == "/":
+                # A Windows-style path names the same place wherever the
+                # command ends up running (Git Bash, WSL, a script).
+                note(_expand(piece.replace("\\", "/")))
     return found
 
 
