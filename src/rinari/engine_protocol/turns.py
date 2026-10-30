@@ -967,9 +967,11 @@ class TurnManager:
             args=(turn_id, record, message, reasoning_effort),
             daemon=True,
         )
+        # Registered and started together: close() joins every registered
+        # thread, and one not started yet cannot be joined (Windows CI).
         with self._lock:
             self._threads[turn_id] = thread
-        thread.start()
+            thread.start()
         return {"status": "started", "turn_id": turn_id, "session_id": record.id}
 
     def start_operation(
@@ -1591,7 +1593,7 @@ class TurnManager:
         )
         with self._lock:
             self._preparation_threads.add(thread)
-        thread.start()
+            thread.start()
         # The limit is for a stage that does not move, not for the whole
         # preparation: on a slow machine each stage took a few seconds and their
         # sum passed the limit while every one of them was progressing (SOIN,
