@@ -95,6 +95,10 @@ class FakeCdpServer:
 
     def drop(self) -> None:
         for conn in list(self._conns):
+            # On Linux a bare close() does not reach the peer while another
+            # thread is blocked reading the socket: shut it down first.
+            with suppress(OSError):
+                conn.shutdown(socket.SHUT_RDWR)
             with suppress(OSError):
                 conn.close()
 
