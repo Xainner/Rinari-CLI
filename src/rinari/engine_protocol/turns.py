@@ -43,6 +43,9 @@ from rinari.shared.errors import CancelledError, RinariError
 from rinari.shared.redaction import redact_value
 from rinari.storage.records import SessionEventRecord
 
+#: Turns the Engine may start in one conversation per hour for finished work.
+MAX_WAKES_PER_HOUR = 6
+
 logger = logging.getLogger(__name__)
 
 APPROVAL_TIMEOUT_S = 600.0
@@ -287,6 +290,8 @@ class TurnManager:
         # waiting there ends cancelled, set by the schedule runner.
         self.queue_cleared: Any = None
         self._closed_approvals: dict[str, str] = {}
+        # session_id -> when the Engine woke it for finished work (a cap per hour).
+        self._wakes: dict[str, collections.deque[float]] = {}
         self._queue: dict[str, collections.deque[_QueuedPrompt]] = {}
         self._lock = threading.RLock()
         self._local = threading.local()
@@ -375,6 +380,66 @@ class TurnManager:
             external = bool((turn.origin or {}).get("external_content"))
         with self._lock:
             self._last_external[turn.session_id] = external
+
+    def wake(self, session_id: str, message: str, origin: dict[str, Any], display: str) -> str:
+        """Start a turn for work that finished while nobody was waiting.
+
+        "started", "busy" (a turn runs: try again later) or "refused" (the
+        conversation is closed, or it was woken too often this hour).
+        """
+        if self.has_active_turn(session_id):
+            return "busy"
+        now = time.monotonic()
+        with self._lock:
+            recent = self._wakes.setdefault(session_id, collections.deque())
+            while recent and now - recent[0] > 3600:
+                recent.popleft()
+            if len(recent) >= MAX_WAKES_PER_HOUR:
+                logger.warning("Not waking %s: %s wakes this hour", session_id, len(recent))
+                return "refused"
+            recent.append(now)
+        try:
+            self.start_turn(
+                session_id,
+                message,
+                origin=origin,
+                display_message=display,
+                memory_origin="automation",
+            )
+        except EngineProtocolError as exc:
+            with self._lock, contextlib.suppress(ValueError):
+                self._wakes[session_id].remove(now)
+            return "busy" if exc.code == errors.TURN_RUNNING else "refused"
+        return "started"
+
+    def _wake_after_exit(self, session_id: str, processes: Any) -> None:
+        """A process started with notify=wake ended after its turn: a new turn.
+
+        Its exit code and the end of its output reach the model through the
+        process note the new turn's watch builds.
+        """
+        pending = processes.pending_wakes()
+        if not pending:
+            return
+        names = ", ".join(handle.name or handle.id for handle in pending)
+        codes = sorted({handle.exit_code for handle in pending if handle.exit_code is not None})
+        message = (
+            f"[Rinari] Background work you asked to be woken for ended: {names} "
+            f"(exit code {', '.join(str(code) for code in codes) or 'unknown'}). "
+            "Its output is in the process note. Continue with what you were waiting for, "
+            "or tell the owner the result."
+        )
+        self.wake(
+            session_id,
+            message,
+            {
+                "kind": "automation",
+                "source": "process_exit",
+                "label": names[:200],
+                "exit_code": codes[0] if len(codes) == 1 else None,
+            },
+            message,
+        )
 
     def has_active_turn(self, session_id: str) -> bool:
         with self._lock:
@@ -1359,7 +1424,10 @@ class TurnManager:
             self._checklist_end(turn)
             watched = getattr(turn, "process_watch", None)
             if watched is not None:
-                watched.on_exit = None
+                # What the model left running with notify=wake starts a new turn
+                # when it ends; the next turn's watch takes over meanwhile.
+                session_id = turn.session_id
+                watched.on_exit = lambda: self._wake_after_exit(session_id, watched)
             self._trust_after_turn(record, trusted_before)
             # The child's report first: a queued or goal turn that starts next
             # must not be overwritten as finished (#100).

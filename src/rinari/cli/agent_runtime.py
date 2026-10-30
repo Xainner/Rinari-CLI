@@ -218,6 +218,13 @@ def _runtime_facts(services: ServiceContainer, record: SessionRecord) -> dict[st
             "schedule.propose (in_this_conversation repeats it here; load it with "
             "capability.search); never wait for time inside a turn"
         )
+    # Long work: launch it, end the turn, be woken (Ideas-2, 23-oct).
+    facts["long_work"] = (
+        "work that takes minutes need not hold your turn: process.start (or a background "
+        "shell.exec) with notify=wake, or job.watch on a connector job's read-only status "
+        "tool (load it with capability.search), then end your turn; a new turn starts "
+        "here when it ends"
+    )
     try:
         provider = services.providers.get(record.provider_id)
         model = services.models.resolve(record.model_id, record.provider_id)
@@ -1704,6 +1711,12 @@ def _build_tools(
             from rinari.tools.native.rinari_state import RinariStateHost, rinari_state_tools
 
             registry.register_all(rinari_state_tools(RinariStateHost(services, root)))
+        if getattr(services, "job_watches", None) is not None:
+            with registry.loading("jobs"):
+                # Watch a connector job and be woken when it is done (Ideas-2).
+                from rinari.tools.native.job_watch import JobWatchHost, job_watch_tools
+
+                registry.register_all(job_watch_tools(JobWatchHost(services, record.id)))
         with registry.loading("images"):
             # Create and edit images with the owner's connector (plan 0.4.0 #28);
             # found with capability.search, like the other optional packs.

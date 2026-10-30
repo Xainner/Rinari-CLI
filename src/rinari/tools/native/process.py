@@ -49,7 +49,9 @@ MAX_PROCESS_OUTPUT_BYTES = 512 * 1024
 TAIL_OUTPUT_BYTES = 512 * 1024
 MAX_LIVE_PROCESSES = 8
 DEFAULT_READY_TIMEOUT_S = 30.0
-NOTIFY_MODES = ("exit", "failure", "never")
+#: «wake» is «exit» that also starts a new turn here when the process ends
+#: after the turn that started it (Ideas-2, 23-oct): launch, end the turn, be told.
+NOTIFY_MODES = ("exit", "failure", "never", "wake")
 DEFAULT_WAIT_TIMEOUT_S = 60.0
 MAX_WAIT_TIMEOUT_S = 1800.0
 POSIX_SIGNALS = {
@@ -199,6 +201,11 @@ class ProcessRegistry:
             if handle.exit_code is None and handle.port == port:
                 return handle
         return None
+
+    def pending_wakes(self) -> list[_Handle]:
+        """Ended processes that asked to wake the conversation, not told yet."""
+        with self._lock:
+            return [handle for handle in self._exits if handle.notify == "wake"]
 
     def take_exit_notices(self) -> list[_Handle]:
         """Processes that ended since the last call and asked to be told (once)."""
@@ -850,7 +857,11 @@ def process_tools() -> list[ToolDefinition]:
                     "notify": {
                         "type": "string",
                         "enum": list(NOTIFY_MODES),
-                        "description": "When to be told it ended (default: failure).",
+                        "description": (
+                            "When to be told it ended (default: failure). wake: also start a "
+                            "new turn here when it ends after your turn did, so you can end "
+                            "your turn instead of waiting for long work."
+                        ),
                     },
                     "persist": {"type": "boolean"},
                 },

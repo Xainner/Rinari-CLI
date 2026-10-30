@@ -328,6 +328,9 @@ class EngineServer:
         from rinari.engine_protocol.schedule import ScheduleRunner
 
         self._schedule = ScheduleRunner(self)
+        # A watched connector job wakes its conversation when it is done (Ideas-2).
+        if self._services.job_watches is not None:
+            self._services.job_watches.wake = self._turns.wake
         from rinari.engine_protocol.agency import AgencyMethods
 
         self._agency = AgencyMethods(self)
@@ -758,6 +761,8 @@ class EngineServer:
             self._mcp_auth.close()
         self._schedule.close()
         self._resume.close()
+        if self._services.job_watches is not None:
+            self._services.job_watches.close()
         self._services.mcp.stop_background()
         if hasattr(self, "_provider_auth_service"):
             self._provider_auth_service.close()

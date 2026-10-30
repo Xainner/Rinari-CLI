@@ -564,6 +564,14 @@ def shell_tools() -> list[ToolDefinition]:
                         "maxItems": 256,
                     },
                     "background": {"type": "boolean", "default": False},
+                    "notify": {
+                        "type": "string",
+                        "enum": ["exit", "failure", "never", "wake"],
+                        "description": (
+                            "With background: when to be told it ended (default: failure); "
+                            "wake also starts a new turn here when it ends after your turn."
+                        ),
+                    },
                     "cwd": {"type": "string"},
                     "timeout_s": {
                         "type": "number",

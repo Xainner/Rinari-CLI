@@ -14,6 +14,7 @@ from rinari.agents.config import AgentConfigStore
 from rinari.agents.registry import AgentRegistry
 from rinari.application.context import AppContext
 from rinari.application.credentials import CredentialStore
+from rinari.application.job_watches import JobWatchService
 from rinari.application.model_service import ModelService
 from rinari.application.network_service import NetworkService
 from rinari.application.project_service import ProjectService
@@ -76,6 +77,7 @@ class ServiceContainer:
     followups: FollowupService = None
     agency: AgencyService = None
     teams: TeamService = None
+    job_watches: JobWatchService = None
 
 
 def build_services(
@@ -178,6 +180,7 @@ def build_services(
         schedules=schedules,
         rinari_profiles=rinari_profiles,
         checklist=ChecklistService(ctx),
+        job_watches=JobWatchService(mcp),
         goals=GoalService(ctx),
         resumes=ResumeService(ctx),
         followups=FollowupService(ctx),
