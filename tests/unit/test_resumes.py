@@ -142,7 +142,9 @@ class _Limited:
                 retryable=False,
             )
             error.details["limit_kind"] = "rate"
-            error.details["resets_at"] = (datetime.now(UTC) + timedelta(seconds=1)).isoformat()
+            # Far enough that the real scheduler never fires before the test's
+            # own tick on a slow machine (the Windows CI).
+            error.details["resets_at"] = (datetime.now(UTC) + timedelta(seconds=10)).isoformat()
             raise error
         return ModelResponse(content=self.answers.pop(0), stop_reason=StopReason.END_TURN)
 
@@ -167,7 +169,12 @@ def test_always_arms_holds_the_queue_and_continues_when_due(server, tmp_path, mo
     monkeypatch.setattr(agent_runtime, "_caller_for", lambda services, rec: model)
     _call(server, "session.turn.start", {"session_id": session_id, "message": "haz algo"})
     _wait(server, lambda seen: any(e.get("event") == "turn.failed" for e in seen))
-    resume = _call(server, "session.resume.get", {"session_id": session_id})["result"]["resume"]
+    # The resume is armed as the turn ends: the event can arrive first.
+    deadline = time.time() + 10
+    resume = None
+    while resume is None and time.time() < deadline:
+        resume = _call(server, "session.resume.get", {"session_id": session_id})["result"]["resume"]
+        time.sleep(0.05)
     assert resume["state"] == "waiting" and resume["mode"] == "at"
 
     # A queued message waits with the resume instead of hitting the same limit.
