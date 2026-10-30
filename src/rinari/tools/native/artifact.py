@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import codecs
+import contextlib
 import hashlib
 import mimetypes
 import shutil
@@ -197,6 +198,8 @@ def artifact_export(input: dict, ctx: ToolContext) -> ToolResult:
     path, error = _path_for(input.get("uri"), ctx)
     if error is not None:
         return error
+    if input.get("extract") is True:
+        return _export_extracted(input, path, ctx)
     target = input.get("path") or _plain_name(path)
     if not isinstance(target, str):
         return _error(ToolErrorCode.INVALID_ARGUMENT, "path must be a string")
@@ -235,6 +238,55 @@ def artifact_export(input: dict, ctx: ToolContext) -> ToolResult:
             "size_bytes": dest.stat().st_size,
             "mime_type": mimetypes.guess_type(dest.name)[0] or "application/octet-stream",
             "sha256": actual,
+        },
+    )
+
+
+def _export_extracted(input: dict, path: Path, ctx: ToolContext) -> ToolResult:
+    """Unpack an archive artifact into a new folder (never into an existing one)."""
+    from rinari.artifacts.archives import ArchiveError, archive_type, extract
+
+    name = _plain_name(path)
+    store = ctx.artifact_store
+    if store is not None:
+        with contextlib.suppress(Exception):
+            name = store.meta(input["uri"]).name or name
+    shown = _plain_name(Path(name))
+    if archive_type(shown) is None:
+        return _error(
+            ToolErrorCode.INVALID_ARGUMENT,
+            "extract=true is for .zip, .tar, .tar.gz and .tgz artifacts.",
+        )
+    stem = shown
+    for suffix in (".tar.gz", ".tgz", ".tar", ".zip"):
+        if stem.lower().endswith(suffix):
+            stem = stem[: -len(suffix)] or "archive"
+            break
+    target = input.get("path") or stem
+    if not isinstance(target, str):
+        return _error(ToolErrorCode.INVALID_ARGUMENT, "path must be a string")
+    try:
+        dest = ctx.sandbox.resolve(target, base=ctx.cwd)
+        if dest.is_dir():
+            dest = dest / stem
+        dest = _free_path(dest)
+        ctx.sandbox.assert_writable(dest)
+    except Exception as exc:  # SandboxViolationError, FileExistsError
+        return _error(ToolErrorCode.SANDBOX_VIOLATION, getattr(exc, "message", str(exc)))
+    try:
+        written = extract(path, dest, shown)
+    except ArchiveError as exc:
+        return _error(ToolErrorCode.INVALID_ARGUMENT, f"Not extracted: {exc}")
+    except OSError as exc:
+        return _error(ToolErrorCode.PERMISSION_DENIED, f"Extract failed: {exc.__class__.__name__}")
+    return ToolResult(
+        ok=True,
+        data={
+            "uri": input["uri"],
+            "path": str(dest),
+            "files": len(written),
+            "size_bytes": sum(item.stat().st_size for item in written),
+            "first": [str(item.relative_to(dest)) for item in written[:20]],
         },
     )
 
@@ -291,6 +343,7 @@ def artifact_tools() -> list[ToolDefinition]:
             description=(
                 "Copy an artifact:// original of this session (e.g. an attachment) to a file "
                 "for programs or uploads. path: file or folder (default: working directory). "
+                "extract=true unpacks a .zip/.tar/.tar.gz/.tgz into a new folder instead. "
                 "Never overwrites."
             ),
             input_schema={
@@ -298,6 +351,7 @@ def artifact_tools() -> list[ToolDefinition]:
                 "properties": {
                     "uri": {"type": "string"},
                     "path": {"type": "string"},
+                    "extract": {"type": "boolean"},
                 },
                 "required": ["uri"],
             },

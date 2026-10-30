@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from rinari.artifacts.archives import ArchiveError, archive_index, archive_type
 from rinari.artifacts.limits import limit
 from rinari.artifacts.ocr import OcrUnavailableError, run_ocr
 from rinari.artifacts.store import ArtifactRecord
@@ -36,6 +37,9 @@ MAX_DOCUMENT_BYTES = 25 * 1024 * 1024
 #: they get the download cap instead of the document one (plan 0.4.0 #57).
 MAX_MEDIA_BYTES = 1024 * 1024 * 1024
 MEDIA_KINDS = ("audio", "video")
+#: Kept as files like media, never read into the context: the model gets an
+#: index of the members and extracts with artifact.export (Ideas-2, 24-oct).
+ARCHIVE_KIND = "archive"
 MAX_PDF_PAGES = 20
 MAX_OCR_PAGES = 20
 MAX_OCR_TOTAL_SECONDS = 120.0
@@ -365,14 +369,15 @@ def prepare_attachments(
         shown = original_name or path.name
         try:
             size = path.stat().st_size
-            kind, content_type = classify(path)
+            kind, content_type = classify(path, shown)
             if kind == "unsupported":
                 raise ValueError(f"Unsupported attachment type: {shown}")
             media = kind in MEDIA_KINDS
-            cap = MAX_MEDIA_BYTES if media else MAX_DOCUMENT_BYTES
+            kept = media or kind == ARCHIVE_KIND
+            cap = MAX_MEDIA_BYTES if kept else MAX_DOCUMENT_BYTES
             if size > cap:
                 raise ValueError(f"Attachment exceeds {cap // (1024 * 1024)} MiB: {shown}")
-            if not media and total + size > MAX_TOTAL_BYTES:
+            if not kept and total + size > MAX_TOTAL_BYTES:
                 raise ValueError("Attachment total exceeds 50 MiB")
             if kind == "image" and size > limit("image_bytes", 10 * 1024 * 1024):
                 raise ValueError(
@@ -475,6 +480,11 @@ def prepare_attachments(
                     extracted, warning = _extract_xlsx(path, cancellation=cancellation)
                 elif kind == "pptx":
                     extracted, warning = _extract_pptx(path, budget=MAX_CONTEXT_CHARS)
+                elif kind == ARCHIVE_KIND:
+                    try:
+                        extracted = archive_index(path, shown)
+                    except ArchiveError as exc:
+                        raise ValueError(f"{exc}: {shown}") from exc
                 if extracted:
                     provenance = f"{EXTRACTOR_VERSION}:{'ocr' if ocr else 'parser'}"
                     if warning:
@@ -524,7 +534,7 @@ def prepare_attachments(
                     coverage=coverage,
                 )
             )
-            if not media:
+            if not kept:
                 total += size
         finally:
             if temporary_input is not None:
@@ -560,6 +570,11 @@ def attachment_manifest(prepared: list[PreparedAttachment]) -> str:
             sent += (f"; {duration:.1f} s" if isinstance(duration, (int, float)) else "") + (
                 "; kept as a file (not in the context): audio.transcribe listens to it, "
                 "artifact.export copies it for other programs"
+            )
+        if item.kind == ARCHIVE_KIND:
+            sent += (
+                "; kept as a file, its member list below: artifact.export with extract=true "
+                "unpacks it into a new folder"
             )
         lines.append(
             f"{index}. {json.dumps(item.name, ensure_ascii=False)} - {item.content_type}, "
@@ -649,7 +664,9 @@ def media_duration(path: Path) -> float | None:
     return None
 
 
-def classify(path: Path) -> tuple[str, str]:
+def classify(path: Path, name: str | None = None) -> tuple[str, str]:
+    """(kind, MIME) of an attachment; `name`, the one the owner sees, tells
+    archives apart (a stored copy or a pasted file may lose «.tar.gz»)."""
     with path.open("rb") as stream:
         header = stream.read(16)
     suffix = path.suffix.lower()
@@ -674,6 +691,9 @@ def classify(path: Path) -> tuple[str, str]:
         return "xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     if suffix == ".pptx":
         return "pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    archive = archive_type(name or path.name) or archive_type(path.name)
+    if archive is not None:
+        return ARCHIVE_KIND, archive[1]
     if suffix in TEXT_EXTENSIONS or path.name.lower() in {
         "dockerfile",
         "makefile",
