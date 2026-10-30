@@ -39,13 +39,17 @@ class TrustStatus:
     reidentified: str | None = None
 
 
-def fingerprint_for(root: Path) -> str:
+def fingerprint_for(root: Path, *, version: int = 3) -> str:
     """Stable identity digest for a project directory.
 
     Git repositories use their directory identity and sorted remotes. Commits
     and branch switches are normal work, not changes of project identity.
     Marker-only projects fingerprint the marker file; plain directories
     fall back to their canonical path.
+
+    The directory identity is its device and inode and (v3) when the
+    repository was made: Linux hands a deleted `.git`'s inode to the next one,
+    so a repository replaced in place kept the identity of the old one.
     """
     root = Path(root).expanduser().resolve()
     if (root / ".git").exists():
@@ -53,8 +57,10 @@ def fingerprint_for(root: Path) -> str:
         git_dir = Path(directory) if directory else root / ".git"
         info = git_dir.stat()
         identity = f"{git_dir.resolve()}:{info.st_dev}:{info.st_ino}"
+        if version >= 3:
+            identity += f":{_made_at(git_dir)}"
         remotes = "\n".join(sorted(_git(root, ["remote", "-v"]).strip().splitlines()))
-        return "git-v2:" + _sha256(f"directory={identity}\nremotes={remotes}")
+        return f"git-v{version}:" + _sha256(f"directory={identity}\nremotes={remotes}")
     marker = root / ".rinari" / "project.toml"
     if marker.is_file():
         try:
@@ -64,6 +70,16 @@ def fingerprint_for(root: Path) -> str:
     return _sha256(f"dir:{root}")
 
 
+def _made_at(git_dir: Path) -> str:
+    """When the repository was made: `git init` and `git clone` write
+    `description` from the templates and Git never touches it again. Empty
+    when there is none (no templates, a linked worktree's directory)."""
+    try:
+        return str((git_dir / "description").stat().st_mtime_ns)
+    except OSError:
+        return ""
+
+
 def _fresh_local_repo(root: Path, previous: str | None, current: str) -> bool:
     """A trusted plain folder (or marker project) that just became a local repo.
 
@@ -71,7 +87,7 @@ def _fresh_local_repo(root: Path, previous: str | None, current: str) -> bool:
     `.git` is a directory inside the folder (not a file pointing elsewhere)
     and the repository has no remotes.
     """
-    if not previous or not current.startswith("git-v2:"):
+    if not previous or not current.startswith("git-v3:"):
         return False
     root = Path(root).expanduser().resolve()
     if not (root / ".git").is_dir():
@@ -147,7 +163,14 @@ class TrustService:
         current = fingerprint_for(raw)
         # Upgrade old grants only when their original identity still matches.
         # An already-invalid grant must still be confirmed by the user.
-        if current.startswith("git-v2:") and not (entry.fingerprint or "").startswith("git-v2:"):
+        if (
+            current.startswith("git-v3:")
+            and (entry.fingerprint or "").startswith("git-v2:")
+            and entry.fingerprint == fingerprint_for(raw, version=2)
+        ):
+            entry.fingerprint = current
+            self._ctx.trust_repo.upsert(entry)
+        if current.startswith("git-v3:") and not (entry.fingerprint or "").startswith("git-v"):
             head = _git(raw, ["rev-parse", "HEAD"]).strip()
             remotes = _git(raw, ["remote", "-v"]).strip()
             if entry.fingerprint == _sha256(f"head={head}\nremotes={remotes}"):

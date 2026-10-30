@@ -117,7 +117,7 @@ def test_legacy_grant_upgrades_only_if_still_valid(services, tmp_path):
     entry.fingerprint = trust_store._sha256(f"head={head}\nremotes=")
     services.ctx.trust_repo.upsert(entry)
     assert services.trust.status(repo).state == STATE_TRUSTED
-    assert services.ctx.trust_repo.get(str(repo.resolve())).fingerprint.startswith("git-v2:")
+    assert services.ctx.trust_repo.get(str(repo.resolve())).fingerprint.startswith("git-v3:")
     entry.fingerprint = "old-invalid-fingerprint"
     services.ctx.trust_repo.upsert(entry)
     assert services.trust.status(repo).state == STATE_REVALIDATION
@@ -274,6 +274,16 @@ def test_a_git_file_pointing_elsewhere_still_asks(services, tmp_path) -> None:
     services.trust.add(folder)
     (folder / ".git").write_text(f"gitdir: {elsewhere / '.git'}\n", encoding="utf-8")
     assert services.trust.status(folder).state == STATE_REVALIDATION
+
+
+def test_a_v2_grant_upgrades_while_the_repository_is_the_same(services, tmp_path) -> None:
+    # Grants made before 0.4.0 keep working: same directory, same remotes.
+    repo = _git_repo(tmp_path)
+    entry = services.trust.add(repo)
+    entry.fingerprint = trust_store.fingerprint_for(repo, version=2)
+    services.ctx.trust_repo.upsert(entry)
+    assert services.trust.status(repo).state == STATE_TRUSTED
+    assert services.ctx.trust_repo.get(str(repo.resolve())).fingerprint.startswith("git-v3:")
 
 
 def test_a_trusted_repo_that_is_replaced_still_asks(services, tmp_path) -> None:
