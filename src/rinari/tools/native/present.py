@@ -201,23 +201,31 @@ def _artifact_uri(ctx: ToolContext, resolved: Path) -> str | None:
     return record.uri()
 
 
-def _delivery_key(item: dict[str, Any]) -> str | None:
-    """What makes two cards the same picture: its URI, else its content."""
+def _delivery_keys(item: dict[str, Any]) -> set[str]:
+    """What makes two cards the same file: its URI or URL, and its content.
+
+    Both count: a made image's dated copy (by URI) and the copy the model saved
+    in the project (by path) are one picture, not two cards (owner's demo,
+    2026-11-02).
+    """
+    keys: set[str] = set()
     if item.get("uri"):
-        return str(item["uri"])
+        keys.add(str(item["uri"]))
     if item.get("url"):
-        return str(item["url"])
+        keys.add(str(item["url"]))
     path = item.get("path")
     if not path or item.get("kind") == "folder":
-        return None
+        return keys
     import hashlib
 
     try:
         if Path(path).stat().st_size > 64 * 1024 * 1024:
-            return f"path:{path}"
-        return "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()
+            keys.add(f"path:{path}")
+        else:
+            keys.add("sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest())
     except OSError:
-        return None
+        pass
+    return keys
 
 
 def present_items(
@@ -228,11 +236,11 @@ def present_items(
     seen = getattr(turn_state, "presented", None)
     fresh: list[dict[str, Any]] = []
     for item in items:
-        key = _delivery_key(item)
-        if seen is not None and key is not None:
-            if key in seen:
+        keys = _delivery_keys(item)
+        if seen is not None and keys:
+            if keys & seen:
                 continue
-            seen.add(key)
+            seen.update(keys)
         fresh.append(item)
     sink = getattr(ctx, "activity_sink", None)
     if fresh and callable(sink):

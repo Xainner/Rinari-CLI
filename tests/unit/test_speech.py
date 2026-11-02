@@ -331,3 +331,17 @@ def test_transcription_is_a_job_over_the_protocol(services, fake_binary, tmp_pat
         assert call("speech.transcribe", {"audio": "%%%"})["ok"] is False
     finally:
         server.close()
+
+
+def test_what_whisper_writes_over_silence_never_reaches_the_message() -> None:
+    from rinari.speech.service import _clean_text
+
+    assert _clean_text("(Rinari Agent)") == ""
+    assert _clean_text(" Rinari, Rinari Agent.") == ""
+    assert _clean_text("[Música]\n♪ ♪") == ""
+    assert _clean_text("Subtítulos realizados por la comunidad de Amara.org") == ""
+    # Real speech stays, the assistant's name included.
+    assert _clean_text("Rinari, abre el menú (el de la cafetería)") == (
+        "Rinari, abre el menú (el de la cafetería)"
+    )
+    assert _clean_text("Hola Rinari Agent, revisa esto") == "Hola Rinari Agent, revisa esto"

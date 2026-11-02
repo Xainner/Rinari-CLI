@@ -469,15 +469,30 @@ def _decode(raw: bytes | str | None) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
+#: A whole line Whisper wrapped in brackets is a sound it describes, not speech.
+_ANNOTATION = re.compile(r"^[\(\[♪*].*[\)\]♪*]$")
+#: Credits Whisper learned from subtitles and writes over silence.
+_CREDITS = re.compile(r"subt[ií]tulos realizados por la comunidad de amara\.org", re.IGNORECASE)
+
+
+def _is_hint_echo(text: str) -> bool:
+    """Over silence Whisper repeats its own hint («Rinari Agent»)."""
+    words = re.sub(r"[^\w]+", " ", text.lower()).split()
+    hint = set(re.sub(r"[^\w]+", " ", ALWAYS_VOCABULARY.lower()).split())
+    return bool(words) and set(words) <= hint
+
+
 def _clean_text(text: str) -> str:
     lines = []
     for line in text.splitlines():
         line = line.strip()
         for noise in _NOISE:
             line = line.replace(noise, "")
-        if line.strip():
-            lines.append(line.strip())
-    return " ".join(lines).strip()
+        line = _CREDITS.sub("", line).strip()
+        if line and not _ANNOTATION.match(line):
+            lines.append(line)
+    joined = " ".join(lines).strip()
+    return "" if _is_hint_echo(joined) else joined
 
 
 def _clean_vocabulary(text: str) -> str:

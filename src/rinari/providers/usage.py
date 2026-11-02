@@ -66,6 +66,19 @@ def window(key, value, *, scope="account", label=None):
     }
 
 
+def span_label(seconds: Any) -> str | None:
+    """A window's length as people say it: «5 h», «weekly», «30 d»."""
+    if type(seconds) is not int or seconds <= 0:
+        return None
+    if seconds == 7 * 86400:
+        return "weekly"
+    if seconds % 86400 == 0:
+        return f"{seconds // 86400} d"
+    if seconds % 3600 == 0:
+        return f"{seconds // 3600} h"
+    return f"{round(seconds / 60)} min"
+
+
 def window_reset_passed(snapshot, now: float, fetched: float) -> bool:
     """Whether a window in `snapshot` reset between `fetched` and `now`."""
     for item in (snapshot or {}).get("windows") or []:
@@ -373,12 +386,17 @@ class ProviderUsageService:
                             for name_window in ("primary_window", "secondary_window"):
                                 value = group.get(name_window)
                                 if isinstance(value, dict):
+                                    # «5 h» / «weekly», not the API's key; the
+                                    # plan's own limit needs no «default ·».
+                                    span = span_label(value.get("limit_window_seconds"))
+                                    span = span or name_window.replace("_window", "")
+                                    label = span if name == "default" else f"{name} · {span}"
                                     result["windows"].append(
                                         window(
                                             name + ":" + name_window,
                                             value,
                                             scope=name,
-                                            label=name + " · " + name_window,
+                                            label=label,
                                         )
                                     )
                     credits = data.get("credits")

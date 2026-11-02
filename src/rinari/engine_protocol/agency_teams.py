@@ -1222,6 +1222,16 @@ class AgencyTeams:
         self._repo.save_wait(waiting)
         if already:
             self._release(team, already[-1])
+        # The same wait said again with nothing new in the office (the model
+        # repeating the tool, or woken and waiting again) is not posted again.
+        latest = self._repo.messages(team["id"], limit=1)
+        last_notice = (latest[-1].get("notice") or {}) if latest else {}
+        if (
+            last_notice.get("kind") == "wait"
+            and last_notice.get("for") == for_name
+            and latest[-1].get("agent_id") == post["agent_id"]
+        ):
+            return waiting
         # Seen in the office, never hidden; a notice, so it wakes and releases nobody.
         self.post_message(
             team,

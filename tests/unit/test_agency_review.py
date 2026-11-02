@@ -90,6 +90,20 @@ def test_a_mutual_wait_is_refused_and_an_engine_notice_wakes_nobody(server, turn
     assert [m["system"] for m in office] == [False, True]
 
 
+def test_waiting_again_for_the_same_teammate_is_said_once(server, turns) -> None:
+    ana, beto = _agent(server, "Ana"), _agent(server, "Beto")
+    team = _team(server, "Canal", [ana, beto])
+    pa = _post(team, ana)
+    _ok(_call(server, "agency.office.post", {"team_id": team["id"], "text": "@Ana hazlo con Beto"}))
+    wait = _tools(server, pa)["office.wait"].handler
+    assert wait({"for": "Beto"}, None).ok
+    assert wait({"for": "Beto"}, None).ok
+    assert wait({"for": "@beto"}, None).ok
+    office = _ok(_call(server, "agency.office.list", {"team_id": team["id"]}))["messages"]
+    notices = [m for m in office if (m.get("notice") or {}).get("kind") == "wait"]
+    assert len(notices) == 1
+
+
 # -- B3: an errand sent back again and again -------------------------------------------------------
 
 
