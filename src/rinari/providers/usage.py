@@ -66,7 +66,7 @@ def window(key, value, *, scope="account", label=None):
     }
 
 
-def span_label(seconds: Any) -> str | None:
+def span_label(seconds: object) -> str | None:
     """A window's length as people say it: «5 h», «weekly», «30 d»."""
     if type(seconds) is not int or seconds <= 0:
         return None
