@@ -340,3 +340,8 @@ def test_the_chief_stops_a_teammates_routine_and_no_one_else_can(server) -> None
     # Outside its post (its own chat), the chief reaches only its own.
     direct = SimpleNamespace(session_id=writer["session_id"], origin_kind="user")
     assert chief_tools["schedule.list"].handler({}, direct).data["tasks"] == []
+
+
+def test_a_post_without_a_project_knows_to_ask_for_full_paths(server) -> None:
+    team, writer, _image, _video = _studio(server)
+    assert "ask in the office for their full path" in _place(server, team, writer)
