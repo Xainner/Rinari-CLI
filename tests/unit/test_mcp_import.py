@@ -612,3 +612,27 @@ def test_rinari_import_home_reads_nothing_of_the_owner(services, fake_pc, tmp_pa
     scanned = methods.import_scan({})
     assert [c["key"] for c in scanned["candidates"]] == ["cursor:own"]
     assert all(str(home) not in report["path"] for report in scanned["sources"])
+
+
+def test_each_place_of_an_app_says_which_one_it_is_and_why_it_could_not_be_read(
+    tmp_path,
+) -> None:
+    home = tmp_path / "someone"
+    appdata = tmp_path / "roaming"
+    local = tmp_path / "local"
+    store = local / "Packages" / "Claude_abc123" / "LocalCache" / "Roaming" / "Claude"
+    store.mkdir(parents=True)
+    (store / "claude_desktop_config.json").write_text("{ not json", encoding="utf-8")
+    env = {"APPDATA": str(appdata), "LOCALAPPDATA": str(local)}
+    _candidates, reports = scan_apps(home, env, platform="win32")
+    views = [r.view() for r in reports]
+    desktop = [v for v in views if v["source"] == "claude_desktop"]
+    assert [v["variant"] for v in desktop] == [None, "Microsoft Store"]
+    assert desktop[1]["error"] == "invalid"
+    vscode = {v["variant"] for v in views if v["source"] == "vscode"}
+    assert vscode == {
+        "mcp.json",
+        "settings.json",
+        "Insiders · mcp.json",
+        "Insiders · settings.json",
+    }

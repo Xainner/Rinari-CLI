@@ -150,11 +150,40 @@ class SourceReport:
         return {
             "source": self.source,
             "label": SOURCE_LABELS.get(self.source, self.source),
+            "variant": _variant(self.source, self.path),
             "path": self.path,
             "found": self.found,
             "servers": self.servers,
             "error": self.error,
         }
+
+
+def _variant(source: str, path: str) -> str | None:
+    """Which of an app's places this is, when it has several (no content read).
+
+    «Claude Desktop» twice and «VS Code» four times said nothing about which
+    install or file each row was (owner's demo, 2026-11-02).
+    """
+    parts = Path(path).parts
+    names: list[str] = []
+    if source == SOURCE_CLAUDE_DESKTOP and "Packages" in parts:
+        names.append("Microsoft Store")
+    if source == SOURCE_VSCODE:
+        if "Code - Insiders" in parts:
+            names.append("Insiders")
+        names.append(Path(path).name)
+    return " · ".join(names) or None
+
+
+def _read_error(exc: BaseException) -> str:
+    """Why a found file could not be read, as a code the app words."""
+    if str(exc) == "file_too_large":
+        return "file_too_large"
+    if isinstance(exc, PermissionError):
+        return "denied"
+    if isinstance(exc, (ValueError, tomllib.TOMLDecodeError)):
+        return "invalid"
+    return "unreadable"
 
 
 # -- where other apps keep their configuration --------------------------------------
@@ -590,7 +619,7 @@ def scan_apps(
         try:
             document = _read(path, flavor)
         except (OSError, ValueError, tomllib.TOMLDecodeError) as exc:
-            report.error = "file_too_large" if str(exc) == "file_too_large" else "unreadable"
+            report.error = _read_error(exc)
             continue
         for name, spec, project in _servers_in(document, flavor):
             key = _key(source, name, project)
@@ -652,7 +681,7 @@ def scan_project(root: Path) -> tuple[list[ImportCandidate], list[SourceReport]]
         try:
             document = _read(path, flavor)
         except (OSError, ValueError) as exc:
-            report.error = "file_too_large" if str(exc) == "file_too_large" else "unreadable"
+            report.error = _read_error(exc)
             continue
         if flavor == "vscode_mcp" and not (
             isinstance(document, dict) and isinstance(document.get("servers"), dict)
