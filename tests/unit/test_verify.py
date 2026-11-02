@@ -257,7 +257,7 @@ def test_verify_plan_and_evaluate_tools(app_ctx, tmp_path):
 
 def test_verify_capabilities(app_ctx, tmp_path):
     ctx = _tool_ctx(app_ctx, tmp_path)
-    assert _handler("verify.record").classify({}).capability == CAPABILITY_STATE_WRITE
+    assert _handler("verify.record").classify({}).capability == "state.evidence"
     assert _handler("verify.plan").classify({}).capability == CAPABILITY_STATE_READ
     assert _handler("verify.evaluate").classify({}).capability == CAPABILITY_STATE_READ
     from rinari.policy.engine import PolicyEngine
@@ -274,6 +274,11 @@ def test_verify_capabilities(app_ctx, tmp_path):
         kind="PROJECT", root=ctx.cwd, cwd=ctx.cwd, profile=PermissionProfile.READ_ONLY
     )
     assert engine.decide(CAPABILITY_STATE_WRITE, readonly).action.value == "deny"
+    # Validation evidence is Rinari's own record, not the workspace: a read-only
+    # REVIEW can record what it ran (owner's demo, 2026-11-01).
+    evidence = _handler("verify.record").classify({}).capability
+    assert evidence == "state.evidence"
+    assert engine.decide(evidence, readonly).action.value == "allow"
 
 
 # -- pty -------------------------------------------------------------------------

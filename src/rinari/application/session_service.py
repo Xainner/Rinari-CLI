@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -53,6 +54,11 @@ TITLE_SOURCE_MANUAL = "manual"
 TITLE_SOURCE_GENERATED = "generated"
 TITLE_SOURCE_FALLBACK = "fallback"
 TITLE_ATTEMPTS = 3
+# A title call cut by the network gets one more try after this pause: a
+# conversation of a single turn has no later turn to retry it (owner's demo,
+# 2026-11-02, STREAM_INTERRUPTED beside the turn's first call).
+TITLE_RETRY_DELAY_S = 2.0
+_TITLE_TRANSIENT = frozenset({"STREAM_INTERRUPTED", "TIMEOUT", "SERVER_ERROR"})
 EVENT_SESSION_ARCHIVED = "SessionArchived"
 EVENT_SESSION_RESTORED = "SessionRestored"
 EVENT_SESSION_PINNED = "SessionPinned"
@@ -140,6 +146,19 @@ class StartedSession:
     created: bool
     warnings: tuple[str, ...] = ()
     findings: tuple[Finding, ...] = ()
+
+
+def _ask_title(title_factory: Any, text: str) -> Any:
+    """The title call, once more after a transient provider failure."""
+    try:
+        return title_factory(text)
+    except Exception as exc:
+        # `code` is the exit code; the provider taxonomy is `error_code`.
+        code = str(getattr(exc, "error_code", "") or "")
+        if code not in _TITLE_TRANSIENT or getattr(exc, "title_failure", None):
+            raise
+        time.sleep(TITLE_RETRY_DELAY_S)
+        return title_factory(text)
 
 
 class SessionService:
@@ -772,7 +791,7 @@ class SessionService:
             failure = "unavailable"
         else:
             try:
-                generated = title_factory(source_text)
+                generated = _ask_title(title_factory, source_text)
                 generated = (
                     generated.strip().strip('"').strip() if isinstance(generated, str) else ""
                 )

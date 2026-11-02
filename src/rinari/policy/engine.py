@@ -735,9 +735,15 @@ class PolicyEngine:
             return self._network_decision(scope, host, network_mode, risk, risk_class)
         if capability in (CAPABILITY_FS_READ, CAPABILITY_GIT_LOCAL):
             return self._fs_read(scope, path, risk, risk_class, capability)
-        if capability in (CAPABILITY_PROCESS_LOCAL, CAPABILITY_STATE_READ, "state.mutate"):
-            # Managing an approved process, reading harness state, or loading
-            # tools into this session's exposure: no outside effect.
+        if capability in (
+            CAPABILITY_PROCESS_LOCAL,
+            CAPABILITY_STATE_READ,
+            "state.mutate",
+            "state.evidence",
+        ):
+            # Managing an approved process, reading harness state, loading
+            # tools into this session's exposure, or recording validation
+            # evidence in Rinari's own records: no outside effect.
             return self._allow(capability, "local harness bookkeeping", risk, risk_class)
         if capability == "agent.delegate":
             # Subagents (#5): the child inherits this profile and can only
