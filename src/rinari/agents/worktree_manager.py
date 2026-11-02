@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import contextlib
 import re
-import subprocess
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
+
+from rinari.projects._git_process import run_git
 
 WORKTREE_PARENT = ".rinari-worktrees"
 BRANCH_PREFIX = "rinari/"
@@ -23,8 +25,8 @@ BRANCH_PREFIX = "rinari/"
 class WorktreeError(Exception):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
-        # NOT_A_REPO | WORKTREE_FAILED | MERGE_CONFLICT | WORKTREE_NOT_FOUND
-        # | MERGE_FAILED
+        # NOT_A_REPO | GIT_TIMEOUT | WORKTREE_FAILED | MERGE_CONFLICT
+        # | WORKTREE_NOT_FOUND | MERGE_FAILED
         self.code = code
         self.message = message
 
@@ -35,19 +37,34 @@ class WorktreeInfo:
     branch: str
 
 
+# The exit code `_run_git` reports when git did not answer in time.
+TIMED_OUT = 124
+
+
 def _run_git(root: Path, args: list[str], timeout: float = 60) -> tuple[int, str, str]:
+    """One bounded git call: no inherited stdin, the whole tree killed on timeout.
+
+    A plain `subprocess.run` here once hung a child's creation for 60 s on
+    Windows (the owner's demo, 2026-11-01).
+    """
     try:
-        proc = subprocess.run(
-            ["git", *args], cwd=root, capture_output=True, text=True, timeout=timeout, check=False
-        )
-        return proc.returncode, proc.stdout, proc.stderr
-    except (OSError, subprocess.SubprocessError) as exc:
+        result = run_git(root, args, timeout_s=timeout)
+    except OSError as exc:
         return 1, "", str(exc)
+    if result.timed_out:
+        return TIMED_OUT, "", result.error or "git timed out"
+    code = result.returncode if result.returncode is not None else 1
+    return code, result.stdout, result.stderr or (result.error or "" if code else "")
 
 
 def _slugify(text: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
-    return slug[:32] or "agent"
+    # «menú» → «menu», not «men»: accents go before the rest is replaced.
+    ascii_text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
+    slug = re.sub(r"[^a-z0-9]+", "-", ascii_text.lower()).strip("-")
+    if len(slug) > 32:
+        cut = slug[:32]
+        slug = cut.rsplit("-", 1)[0] if "-" in cut[12:] else cut
+    return slug.strip("-") or "agent"
 
 
 class WorktreeManager:
@@ -56,10 +73,14 @@ class WorktreeManager:
 
     # -- lifecycle -------------------------------------------------------------
 
-    def create(self, agent: str) -> WorktreeInfo:
-        code, out, err = _run_git(self.root, ["rev-parse", "--is-inside-work-tree"])
-        if code != 0 or not out.strip() == "true":
-            raise WorktreeError("NOT_A_REPO", f"not a git repository: {self.root}")
+    def create(self, agent: str, *, checked: bool = False) -> WorktreeInfo:
+        """`checked`: the caller already knows `root` is a work tree."""
+        if not checked:
+            code, out, err = _run_git(self.root, ["rev-parse", "--is-inside-work-tree"], timeout=15)
+            if code == TIMED_OUT:
+                raise WorktreeError("GIT_TIMEOUT", f"git did not answer in {self.root}: {err}")
+            if code != 0 or not out.strip() == "true":
+                raise WorktreeError("NOT_A_REPO", f"not a git repository: {self.root}")
         branch = self._next_branch(agent)
         wt_path = self.root / WORKTREE_PARENT / branch
         parent = wt_path.parent
@@ -68,6 +89,8 @@ class WorktreeManager:
             self.root,
             ["worktree", "add", "-b", branch, str(wt_path)],
         )
+        if code == TIMED_OUT:
+            raise WorktreeError("GIT_TIMEOUT", f"worktree add did not finish: {err}")
         if code != 0:
             raise WorktreeError("WORKTREE_FAILED", f"worktree add failed: {err or out}")
         return WorktreeInfo(path=wt_path, branch=branch)
@@ -153,11 +176,41 @@ class WorktreeManager:
         code2, out2, _ = _run_git(self.root, ["diff", "--name-only", "--diff-filter=U"])
         if code2 == 0:
             conflicts = sorted({line.strip() for line in out2.splitlines() if line.strip()})
+        # Git's own chatter (line-ending warnings, hints) is not the reason.
+        reason = "\n".join(
+            line
+            for line in (err or out).splitlines()
+            if line.strip() and not line.lower().startswith(("warning:", "hint:"))
+        )
         return {
             "merged": False,
             "conflicts": conflicts,
-            "message": (err or out).strip() or "merge failed",
+            "message": reason.strip() or "merge failed",
         }
+
+    def uncommitted_files(self) -> list[str]:
+        """Files with changes not committed in the main worktree (its own worktrees aside)."""
+        code, out, _ = _run_git(self.root, ["status", "--porcelain", "--untracked-files=all"])
+        if code != 0:
+            return []
+        files: set[str] = set()
+        for line in out.splitlines():
+            if len(line) <= 3:
+                continue
+            path = line[3:].strip().strip('"')
+            if " -> " in path:
+                path = path.split(" -> ", 1)[1].strip('"')
+            if not path.startswith(f"{WORKTREE_PARENT}/"):
+                files.add(path)
+        return sorted(files)
+
+    def branch_files(self, branch: str, base: str | None) -> list[str]:
+        """What the branch changes since it left `base` (or since it forked)."""
+        spec = f"{base}..{branch}" if base else f"HEAD...{branch}"
+        code, out, _ = _run_git(self.root, ["diff", "--name-only", "--no-color", spec])
+        if code != 0:
+            return []
+        return sorted({line.strip() for line in out.splitlines() if line.strip()})
 
     def abort_merge(self) -> bool:
         code, _, _ = _run_git(self.root, ["merge", "--abort"])
@@ -165,14 +218,20 @@ class WorktreeManager:
 
     def _next_branch(self, agent: str) -> str:
         slug = _slugify(agent)
+        # One listing instead of a `show-ref` per candidate.
+        code, out, err = _run_git(
+            self.root,
+            ["for-each-ref", "--format=%(refname:short)", f"refs/heads/{BRANCH_PREFIX}{slug}*"],
+            timeout=15,
+        )
+        if code == TIMED_OUT:
+            raise WorktreeError("GIT_TIMEOUT", f"git did not list branches: {err}")
+        taken = {line.strip() for line in out.splitlines() if line.strip()}
         candidates = [f"{BRANCH_PREFIX}{slug}"]
         for n in range(2, 100):
             candidates.append(f"{BRANCH_PREFIX}{slug}-{n}")
         for candidate in candidates:
-            code, _, _ = _run_git(
-                self.root, ["show-ref", "--verify", "--quiet", f"refs/heads/{candidate}"]
-            )
-            if code != 0:
+            if candidate not in taken:
                 return candidate
         raise WorktreeError("WORKTREE_FAILED", f"cannot allocate a branch for {slug!r}")
 

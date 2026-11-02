@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import subprocess
 import threading
 from pathlib import Path
 from typing import Any
@@ -51,14 +50,12 @@ def isolation_key(root: Path) -> str:
     return f"children.isolation.{Path(root).resolve().as_posix()}"
 
 
-def _git(root: Path, *args: str) -> tuple[int, str]:
-    try:
-        proc = subprocess.run(
-            ["git", *args], cwd=root, capture_output=True, text=True, timeout=30, check=False
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        return 1, str(exc)
-    return proc.returncode, proc.stdout.strip()
+def _git(root: Path, *args: str, timeout: float = 15) -> tuple[int, str]:
+    """A bounded git probe that cannot hang the request thread (see `_run_git`)."""
+    from rinari.agents.worktree_manager import _run_git
+
+    code, out, err = _run_git(root, list(args), timeout=timeout)
+    return code, (out if code == 0 else err).strip()
 
 
 class ChildSessions:
@@ -136,7 +133,7 @@ class ChildSessions:
 
                 # An agent's child works for the same agent and team.
                 inherit_agency(self._services.ctx, parent, record)
-            worktree = self._worktree_for(root, isolation, title, working)
+            worktree, same_folder_reason = self._worktree_for(root, isolation, title, working)
             if worktree is not None:
                 record = sessions.show(record.id)
                 record.current_cwd = str(worktree["path"])
@@ -156,6 +153,7 @@ class ChildSessions:
                     branch=worktree["branch"] if worktree else None,
                     base_commit=worktree["base"] if worktree else None,
                     external_content=external_content,
+                    same_folder_reason=same_folder_reason,
                 )
             )
         message = self._brief_message(parent, prompt, done_when, worktree)
@@ -180,15 +178,31 @@ class ChildSessions:
 
     def _worktree_for(
         self, root: Path | None, isolation: str, title: str, working: list[ChildRecord]
-    ) -> dict[str, Any] | None:
-        """Its own worktree in a git project, unless asked otherwise (A-5)."""
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """Its own worktree in a git project, unless asked otherwise (A-5).
+
+        Returns the worktree, or why the child works in the project folder
+        when it could have had one (shown on its card): `not_repo`,
+        `project_prefers_same`, `git_timeout` or `worktree_failed`.
+        """
         if root is None or isolation == "same":
-            return None
+            return None, None
+        from rinari.agents.worktree_manager import (
+            TIMED_OUT,
+            WORKTREE_PARENT,
+            WorktreeError,
+            WorktreeManager,
+        )
+
         code, inside = _git(root, "rev-parse", "--is-inside-work-tree")
         if code != 0 or inside != "true":
             if isolation == "worktree":
-                raise ConflictError("The project is not a git repository.")
-            return None
+                raise ConflictError(
+                    "Git did not answer in the project folder."
+                    if code == TIMED_OUT
+                    else "The project is not a git repository."
+                )
+            return None, "git_timeout" if code == TIMED_OUT else "not_repo"
         # The owner chose the same folder for this project; still never two
         # writers in it at once.
         if (
@@ -196,19 +210,17 @@ class ChildSessions:
             and self._project_prefers_same(root)
             and not any(child.worktree_path is None for child in working)
         ):
-            return None
-        from rinari.agents.worktree_manager import WORKTREE_PARENT, WorktreeError, WorktreeManager
-
+            return None, "project_prefers_same"
         try:
-            info = WorktreeManager(root).create(f"child-{title}")
+            info = WorktreeManager(root).create(f"child-{title}", checked=True)
         except WorktreeError as exc:
             if isolation == "worktree":
                 raise ConflictError(exc.message) from exc
             logger.warning("child worktree unavailable: %s", exc.message)
-            return None
+            return None, "git_timeout" if exc.code == "GIT_TIMEOUT" else "worktree_failed"
         self._exclude(root, f"{WORKTREE_PARENT}/")
         _code, base = _git(info.path, "rev-parse", "HEAD")
-        return {"path": info.path, "branch": info.branch, "base": base or None}
+        return {"path": info.path, "branch": info.branch, "base": base or None}, None
 
     def _project_prefers_same(self, root: Path) -> bool:
         with contextlib.suppress(Exception):
@@ -684,12 +696,28 @@ class ChildSessions:
         manager = WorktreeManager(root)
         info = WorktreeInfo(path=Path(child.worktree_path), branch=child.branch)
         commit = manager.commit_result(info, f"Rinari: {record.title}")
-        merged = manager.try_merge(info)
-        if not merged["merged"]:
-            manager.abort_merge()
+        # The usual case: the mother's own work is not committed yet. Git would
+        # refuse; say which files and why instead of its raw output.
+        touched = set(manager.branch_files(child.branch, child.base_commit))
+        dirty = [path for path in manager.uncommitted_files() if path in touched]
+        if dirty:
             return {
                 "child_session_id": child_session_id,
                 "integrated": False,
+                "reason": "dirty_worktree",
+                "conflicts": [],
+                "files": dirty,
+                "message": "The project folder has uncommitted changes in files the branch "
+                "also changes. Commit or stash them first, then integrate again.",
+            }
+        merged = manager.try_merge(info)
+        if not merged["merged"]:
+            if merged["conflicts"]:
+                manager.abort_merge()
+            return {
+                "child_session_id": child_session_id,
+                "integrated": False,
+                "reason": "conflicts" if merged["conflicts"] else "merge_failed",
                 "conflicts": merged["conflicts"],
                 "message": merged["message"],
             }
