@@ -43,7 +43,7 @@ reading from a connector and calling the same connector again does not.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -487,6 +487,25 @@ def _local_part(command: str) -> str:
     return match.group(0) if match else command
 
 
+# Git verbs that only read the repository, for read-only sessions. No
+# `branch`/`remote` (they also create), nothing that writes a file
+# (`--output`) or runs a configured external program (`--ext-diff`,
+# `--textconv`), one command without chaining or redirection.
+_GIT_READ = re.compile(
+    r"^\s*git\s+(?:status|log|diff|show|rev-parse|ls-files|blame|shortlog)(?:\s|$)",
+    re.IGNORECASE,
+)
+_GIT_READ_UNSAFE = re.compile(r"--(?:output|ext-diff|textconv)", re.IGNORECASE)
+
+
+def _git_reads_only(command: str) -> bool:
+    return (
+        bool(_GIT_READ.match(command))
+        and not _CHAINING.search(command)
+        and not _GIT_READ_UNSAFE.search(command)
+    )
+
+
 def _is_inspection(command: str) -> bool:
     command = _local_part(command)
     return bool(_INSPECTION_SHELL.match(command)) and not _CHAINING.search(command)
@@ -711,9 +730,28 @@ class PolicyEngine:
             return guarded
         read_only = scope.profile is PermissionProfile.READ_ONLY
         if read_only and capability == CAPABILITY_SHELL:
-            # A review re-runs the tests; a command can also change files, so
-            # read-only asks for each one and never keeps the answer (as
-            # Codex's read-only sandbox does).
+            # Git's own read verbs in the workspace change nothing: a review
+            # with subagents asked the owner 12 times for `git status` and the
+            # like (owner's demo, 2026-11-02).
+            if _git_reads_only(command or "") and self._command_cwd_outside(scope) is None:
+                return self._allow(
+                    capability, "read-only: git only reads", risk, risk_class, command
+                )
+            # Anything else could change files, so it is asked. The answer can
+            # hold for this exact command in this session, unless the command
+            # is one that is asked every time anyway (hard list, deletes).
+            usual = self.decide(
+                capability,
+                replace(scope, profile=PermissionProfile.WORKSPACE),
+                path=path,
+                command=command,
+                risk=risk,
+                risk_class=risk_class,
+                target=target,
+            )
+            hard = usual.action is PolicyAction.DENY or (
+                usual.action is PolicyAction.ASK and not usual.reusable
+            )
             return self._ask(
                 capability,
                 "read-only mode: a command could change files, so each one is asked",
@@ -721,7 +759,8 @@ class PolicyEngine:
                 risk=risk,
                 risk_class=risk_class,
                 rule_id="read_only_command",
-                choices=CHOICES_HARD,
+                choices=CHOICES_HARD if hard else CHOICES_SESSION,
+                binding_mode="exact",
             )
         if read_only and capability == CAPABILITY_FS_WRITE:
             return self._deny(
