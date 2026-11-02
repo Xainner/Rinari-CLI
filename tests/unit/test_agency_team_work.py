@@ -345,3 +345,46 @@ def test_the_chief_stops_a_teammates_routine_and_no_one_else_can(server) -> None
 def test_a_post_without_a_project_knows_to_ask_for_full_paths(server) -> None:
     team, writer, _image, _video = _studio(server)
     assert "ask in the office for their full path" in _place(server, team, writer)
+
+
+def test_a_team_works_in_its_project_and_moves_with_it(server, tmp_path) -> None:
+    """Owner's choice 2A (2026-11-02): a team's posts work in its project's folder."""
+    cafe = tmp_path / "nebula-cafe"
+    cafe.mkdir()
+    project_id = server._services.projects.upsert(cafe).id
+    writer, tester = _agent(server, "Writer"), _agent(server, "Tester")
+    team = _team(server, "Café", [writer], project_id=project_id)
+    services = server._services
+    post = services.sessions.show(_post(team, writer))
+    assert post.project_id == project_id and post.current_cwd == str(cafe.resolve())
+    assert "a relative path in an errand" in _place(server, team, writer)
+    # Without a project, the posts go back to a folder of their own.
+    plain = _ok(
+        _call(server, "agency.team.update", {"team_id": team["id"], "patch": {"project_id": None}})
+    )["team"]
+    moved = services.sessions.show(_post(plain, writer))
+    assert moved.project_id is None and moved.kind == "CHAT"
+    assert moved.current_cwd != str(cafe.resolve())
+    # Back in the project, a newcomer's post opens there too.
+    _ok(
+        _call(
+            server,
+            "agency.team.update",
+            {"team_id": team["id"], "patch": {"project_id": project_id}},
+        )
+    )
+    joined = _ok(
+        _call(server, "agency.team.join", {"team_id": team["id"], "agent_id": tester["id"]})
+    )
+    newcomer = services.sessions.show(_post(joined["team"], tester))
+    assert newcomer.project_id == project_id
+    assert services.sessions.show(_post(joined["team"], writer)).project_id == project_id
+
+
+def test_a_team_cannot_take_a_project_of_another_profile_or_an_unknown_one(server) -> None:
+    writer = _agent(server, "Writer")
+    team = _team(server, "Café", [writer])
+    unknown = _call(
+        server, "agency.team.update", {"team_id": team["id"], "patch": {"project_id": "prj_nope"}}
+    )
+    assert unknown["ok"] is False

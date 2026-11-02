@@ -127,6 +127,7 @@ _TEAM_COLUMNS = (
     "updated_at",
     "archived_at",
     "manual",
+    "project_id",
 )
 _ERRAND_COLUMNS = (
     "team_id",
@@ -233,6 +234,7 @@ class TeamRepository:
             "updated_at": team["updated_at"],
             "archived_at": team.get("archived_at"),
             "manual": team.get("manual") or "",
+            "project_id": team.get("project_id") or None,
         }
         self._db.execute(
             f"""

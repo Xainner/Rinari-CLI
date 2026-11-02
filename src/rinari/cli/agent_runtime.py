@@ -488,6 +488,11 @@ def _agency_place(services: ServiceContainer, record: SessionRecord, agent: dict
             "data folder is off limits. When a task names files or folders by a relative path, "
             "ask in the office for their full path instead of searching for them."
         )
+    elif record.project_root_snapshot:
+        lines.append(
+            f"Your team works in the project folder {record.project_root_snapshot}: a relative "
+            "path in an errand or in the office is inside it."
+        )
     lines.append(
         "When you finish something for the owner (a file, an image, a video), show it to them "
         "with file.present, besides saying it in the office. A connector's link or URI is not "

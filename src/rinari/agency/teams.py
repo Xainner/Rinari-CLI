@@ -38,7 +38,15 @@ OPEN_STATUSES = ("pending", "in_progress", "returned", "blocked")
 #: What a free post takes from the board, in order.
 READY_STATUSES = ("pending", "returned")
 
-TEAM_EDITABLE = ("name", "purpose", "chief_agent_id", "connectors", "budget", "manual")
+TEAM_EDITABLE = (
+    "name",
+    "purpose",
+    "chief_agent_id",
+    "connectors",
+    "budget",
+    "manual",
+    "project_id",
+)
 #: The team's manual (its procedure, every post reads it): as long as an office message.
 MAX_MANUAL = 20000
 #: Where an agent's rule can deliver its result besides its run.
@@ -59,6 +67,14 @@ def normalize_done_when(raw: Any) -> list[str]:
         if text not in checks:
             checks.append(text)
     return checks
+
+
+def _project_id(value: Any) -> str | None:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise AgencyError("project_id must be a project id or null.")
+    return value
 
 
 class TeamService:
@@ -132,6 +148,8 @@ class TeamService:
             "connectors": seen,
             "budget": normalize_budget(merged.get("budget")),
             "manual": _text(merged.get("manual"), "The manual", MAX_MANUAL),
+            # Checked against the projects by the protocol layer, which knows them.
+            "project_id": _project_id(merged.get("project_id")),
         }
 
     def create(self, raw: dict[str, Any], rinari_profile_id: str = "default") -> dict[str, Any]:
