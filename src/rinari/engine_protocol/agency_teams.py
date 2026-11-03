@@ -344,15 +344,21 @@ class AgencyTeams:
     # -- wiring ----------------------------------------------------------------------
 
     def _open_post(self, team: dict[str, Any], agent: dict[str, Any]) -> str:
-        """A post: the agent's conversation in this team (marked by the repository)."""
-        created = self._server._session_create(
-            {
-                "chat": True,
-                "title": f"{agent['name']} · {team['name']}",
-                "permission_profile": agent["permission_profile"],
-                "rinari_profile_id": team["rinari_profile_id"],
-            }
-        )
+        """A post: the agent's conversation in this team (marked by the repository).
+
+        In the team's project when it has one: its errands name that folder's files.
+        """
+        params: dict[str, Any] = {
+            "title": f"{agent['name']} · {team['name']}",
+            "permission_profile": agent["permission_profile"],
+            "rinari_profile_id": team["rinari_profile_id"],
+        }
+        project = self._team_project(team)
+        if project is not None:
+            params["project_id"] = project.id
+        else:
+            params["chat"] = True
+        created = self._server._session_create(params)
         session_id = created["session"]["id"]
         if agent.get("model"):
             self._services.sessions.set_model(session_id, agent["model"], None)
@@ -698,6 +704,7 @@ class AgencyTeams:
         if not isinstance(raw, dict):
             raise EngineProtocolError(INVALID_PARAMS, "Param 'team' must be an object.")
         profile = self._server._profile_param(params) or self._services.rinari_profiles.active_id()
+        self._check_project(raw.get("project_id"), profile)
         return {"team": self._guard(lambda: self.teams.create(raw, profile))}
 
     def update(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -705,9 +712,68 @@ class AgencyTeams:
         patch = params.get("patch")
         if not isinstance(patch, dict):
             raise EngineProtocolError(INVALID_PARAMS, "Param 'patch' must be an object.")
+        if "project_id" in patch:
+            self._check_project(patch.get("project_id"), team["rinari_profile_id"])
         updated = self._guard(lambda: self.teams.update(team["id"], patch))
+        if (updated.get("project_id") or None) != (team.get("project_id") or None):
+            self._rehome_posts(updated)
         self.tick()  # a new chief takes the errands left to nobody
         return {"team": updated}
+
+    def _check_project(self, project_id: Any, profile: str) -> None:
+        """A team works only in a live project of its own profile."""
+        if project_id in (None, ""):
+            return
+        if not isinstance(project_id, str):
+            raise EngineProtocolError(INVALID_PARAMS, "project_id must be a project id or null.")
+        try:
+            project = self._services.projects.get(project_id)
+        except NotFoundError:
+            raise NotFoundError(f"Unknown project: {project_id}") from None
+        if project.archived:
+            raise EngineProtocolError(INVALID_PARAMS, "Restore the project first.")
+        if (project.rinari_profile_id or "default") != profile:
+            raise EngineProtocolError(INVALID_PARAMS, "The project belongs to another profile.")
+
+    def _team_project(self, team: dict[str, Any]) -> Any:
+        """The team's project when it can still be worked in, else None."""
+        project_id = team.get("project_id")
+        if not project_id:
+            return None
+        try:
+            project = self._services.projects.get(project_id)
+        except NotFoundError:
+            return None
+        return None if project.archived else project
+
+    def _rehome_posts(self, team: dict[str, Any]) -> None:
+        """The team changed project: each post works in the new folder from its next turn."""
+        from pathlib import Path
+
+        project = self._team_project(team)
+        sessions = self._services.sessions
+        repo = self._services.ctx.session_repo
+        for post in self._repo.posts(team["id"]):
+            try:
+                record = sessions.show(post["session_id"])
+            except Exception:
+                continue
+            if project is not None:
+                if record.kind == "CHAT":
+                    sessions.promote(record.id, Path(project.canonical_root))
+                    continue
+                record.project_id = project.id
+                record.project_root_snapshot = str(project.canonical_root)
+                record.current_cwd = str(project.canonical_root)
+            else:
+                # Back to a folder of its own, empty, like a post opened without a project.
+                cwd = self._services.ctx.home / "workspaces" / self._services.ctx.ids.new("chat")
+                cwd.mkdir(parents=True, exist_ok=True)
+                record.kind = "CHAT"
+                record.project_id = None
+                record.project_root_snapshot = None
+                record.current_cwd = str(cwd)
+            repo.update(record)
 
     def list_archived(self, params: dict[str, Any]) -> list[dict[str, Any]]:
         profile = self._server._profile_filter(params)
@@ -1222,6 +1288,16 @@ class AgencyTeams:
         self._repo.save_wait(waiting)
         if already:
             self._release(team, already[-1])
+        # The same wait said again with nothing new in the office (the model
+        # repeating the tool, or woken and waiting again) is not posted again.
+        latest = self._repo.messages(team["id"], limit=1)
+        last_notice = (latest[-1].get("notice") or {}) if latest else {}
+        if (
+            last_notice.get("kind") == "wait"
+            and last_notice.get("for") == for_name
+            and latest[-1].get("agent_id") == post["agent_id"]
+        ):
+            return waiting
         # Seen in the office, never hidden; a notice, so it wakes and releases nobody.
         self.post_message(
             team,

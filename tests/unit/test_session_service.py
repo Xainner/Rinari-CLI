@@ -260,6 +260,28 @@ def test_title_generation_failure_keeps_fallback(services, home):
     assert result.title == "Revisar el proyecto"
 
 
+def test_a_title_cut_by_the_network_is_asked_once_more(services, home, monkeypatch):
+    """A single-turn conversation has no later turn to retry its title."""
+    from rinari.application import session_service
+    from rinari.providers.errors import ProviderError, ProviderErrorCode
+
+    monkeypatch.setattr(session_service, "TITLE_RETRY_DELAY_S", 0)
+    _configure(services, home)
+    record = services.sessions.start(home).session
+    calls = []
+
+    def flaky(_):
+        calls.append(1)
+        if len(calls) == 1:
+            raise ProviderError("stream failure", code=ProviderErrorCode.STREAM_INTERRUPTED)
+        return "Imagen del latte para el menú"
+
+    result = services.sessions.name_from_first_message(
+        record.id, "Crea una imagen cuadrada para el menú: un latte", title_factory=flaky
+    )
+    assert result.title == "Imagen del latte para el menú" and len(calls) == 2
+
+
 def test_title_failure_logs_what_the_provider_said(services, home, caplog) -> None:
     """A bare "error:ProviderError" hid why titles failed: the log carries the
     provider's code, model and message, never the user's message."""

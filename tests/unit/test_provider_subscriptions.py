@@ -706,7 +706,22 @@ def test_chatgpt_multiple_quota_groups_and_missing_monthly(app_ctx):
     result = ProviderUsageService(s.providers).get(p.id)
     assert [w["scope"] for w in result["windows"]] == ["default", "review"]
     assert [w["remaining_percent"] for w in result["windows"]] == [100, 0]
+    # Readable labels, not the API's keys: «5 h» for the plan, the group's name otherwise.
+    assert [w["label"] for w in result["windows"]] == ["5 h", "review · secondary"]
     assert result["balances"][0]["remaining"] == "-0.01"
+
+
+def test_window_spans_read_as_people_say_them():
+    from rinari.providers.usage import span_label
+
+    assert [span_label(s) for s in (18000, 604800, 2592000, 5400, None, 0)] == [
+        "5 h",
+        "weekly",
+        "30 d",
+        "90 min",
+        None,
+        None,
+    ]
 
 
 def test_quota_exhaustion_invalidates_cached_snapshot(app_ctx):

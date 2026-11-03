@@ -175,3 +175,29 @@ def test_a_stored_file_is_named_by_its_own_uri(ctx, seen, app_ctx):
     assert result.ok, result.error
     assert seen[0][1]["items"][0]["uri"] == record.uri()
     assert len(store.list(session_id=ctx.session_id)) == 1  # nothing imported twice
+
+
+def test_a_made_image_saved_in_the_project_is_one_card_with_its_dated_copy(tmp_path) -> None:
+    """The model presents its project copy; the dated copy by URI is the same picture."""
+    import types
+
+    from rinari.tools.native.present import present_items
+
+    picture = b"\x89PNG\r\n\x1a\n" + b"latte" * 64
+    saved = tmp_path / "lunar-latte.png"
+    dated = tmp_path / "lunar-latte-20261102-003131.png"
+    saved.write_bytes(picture)
+    dated.write_bytes(picture)
+    events: list[dict] = []
+    ctx = types.SimpleNamespace(
+        turn_state=types.SimpleNamespace(presented=set()),
+        activity_sink=lambda name, payload: events.append(payload),
+    )
+    first = present_items(ctx, [{"path": str(saved), "name": saved.name, "kind": "image"}], "p1")
+    late = present_items(
+        ctx,
+        [{"path": str(dated), "name": dated.name, "kind": "image", "uri": "artifact://img/x.png"}],
+        "p2",
+    )
+    assert len(first) == 1 and late == []
+    assert len(events) == 1

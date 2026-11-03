@@ -9,12 +9,10 @@ PROTOCOL_VERSION = 1
 
 
 def engine_version() -> str:
-    try:
-        from importlib.metadata import version
+    """The Engine's version, which follows the app release it ships with."""
+    from rinari import __version__
 
-        return version("rinari")
-    except Exception:
-        return "0.1.0"
+    return __version__
 
 
 CAPABILITIES: dict[str, bool] = {

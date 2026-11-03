@@ -35,6 +35,8 @@ class ChildRecord:
     branch: str | None = None
     base_commit: str | None = None
     external_content: bool = False
+    # Why a child that could have had its own branch works in the project folder.
+    same_folder_reason: str | None = None
     state: str = "working"
     report: dict[str, Any] = field(default_factory=dict)
     reported: bool = True
@@ -51,6 +53,7 @@ class ChildRecord:
             "isolation": "worktree" if self.worktree_path else "same",
             "worktree_path": self.worktree_path,
             "branch": self.branch,
+            "same_folder_reason": self.same_folder_reason,
             "state": self.state,
             "report": self.report or None,
             "reported": self.reported,
@@ -80,6 +83,7 @@ def _from_row(row: Any) -> ChildRecord:
         branch=row["branch"],
         base_commit=row["base_commit"],
         external_content=bool(row["external_content"]),
+        same_folder_reason=row["same_folder_reason"],
         state=row["state"],
         report=report,
         reported=bool(row["reported"]),
@@ -98,8 +102,8 @@ class ChildStore:
         record.created_at = record.updated_at = now
         self._db.execute(
             "INSERT INTO session_children (child_session_id, parent_session_id, origin, context, "
-            "worktree_path, branch, base_commit, external_content, state, reported, "
-            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+            "worktree_path, branch, base_commit, external_content, same_folder_reason, state, "
+            "reported, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
             (
                 record.child_session_id,
                 record.parent_session_id,
@@ -109,6 +113,7 @@ class ChildStore:
                 record.branch,
                 record.base_commit,
                 int(record.external_content),
+                record.same_folder_reason,
                 record.state,
                 now,
                 now,

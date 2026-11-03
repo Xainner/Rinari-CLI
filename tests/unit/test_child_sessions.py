@@ -276,6 +276,57 @@ def test_a_child_in_a_repo_works_in_its_worktree_and_the_owner_merges(
     assert again["ok"] is False
 
 
+def test_integrating_over_the_mothers_uncommitted_work_names_the_files(
+    server, tmp_path, routed
+) -> None:
+    repo = tmp_path / "cafe"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "T")
+    (repo / "recibo.js").write_text("uno\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "base")
+    created = server.handle_line(_req("p", "session.create", {"cwd": str(repo)}))
+    mother = created["result"]["session"]["id"]
+    opened = server._turns.children.create(
+        mother,
+        title="Escapar el menú",
+        prompt="Escapa los nombres del menú en el recibo.",
+        origin="start",
+    )
+    child = opened["child_session_id"]
+    # Accents survive in the branch name: «menú» is «menu», not «men».
+    assert opened["branch"].startswith("rinari/child-escapar-el-menu")
+    assert _wait(lambda: _idle(server, child) and _idle(server, mother))
+    from pathlib import Path
+
+    (Path(opened["worktree_path"]) / "recibo.js").write_text("hija\n", encoding="utf-8")
+    (repo / "recibo.js").write_text("madre sin commit\n", encoding="utf-8")
+    refused = server.handle_line(_req("i", "session.child.integrate", {"child_session_id": child}))
+    result = refused["result"]
+    assert result["integrated"] is False and result["reason"] == "dirty_worktree", result
+    assert result["files"] == ["recibo.js"]
+    assert "warning" not in result["message"].lower()
+    # The mother's work is untouched; once she commits it, a real conflict is a conflict.
+    assert (repo / "recibo.js").read_text(encoding="utf-8") == "madre sin commit\n"
+    _git(repo, "commit", "-q", "-am", "madre")
+    merged = server.handle_line(_req("i2", "session.child.integrate", {"child_session_id": child}))
+    assert merged["result"]["integrated"] is False
+    assert merged["result"]["reason"] == "conflicts", merged
+
+
+def test_a_child_that_could_have_had_a_branch_says_why_it_shares_the_folder(
+    server, tmp_path
+) -> None:
+    folder = tmp_path / "plain"
+    folder.mkdir()
+    children = server._turns.children
+    assert children._worktree_for(folder, "auto", "Una nota", []) == (None, "not_repo")
+    # Asked for the same folder, nothing to explain.
+    assert children._worktree_for(folder, "same", "Una nota", []) == (None, None)
+
+
 def test_the_mother_opens_a_child_with_the_tool(server, tmp_path, routed) -> None:
     from rinari.models.types import ToolCall
 

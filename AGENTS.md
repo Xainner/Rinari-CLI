@@ -35,6 +35,13 @@ secciones de «TODO.md», a `roadmap-v1.md`.
   muestra (tokens, coste, contexto, estado) sale de lo que el Engine sabe y
   nunca se inventa.
 
+## Versión del Engine
+
+- `version` en `pyproject.toml` (y `uv.lock`) es la de la app que lo lleva:
+  se sube en el mismo cambio que fija el Engine para una versión de Rinari
+  Agent. `/usage` y `rinari --version` la muestran. Un checkout sin
+  metadatos dice `0+source`, nunca un número viejo.
+
 ## Migraciones
 
 - Son archivos `src/rinari/storage/migrations/NNNN_nombre.sql`, numerados en

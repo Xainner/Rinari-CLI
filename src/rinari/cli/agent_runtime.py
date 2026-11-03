@@ -480,6 +480,19 @@ def _agency_place(services: ServiceContainer, record: SessionRecord, agent: dict
         "Use the office, the board and team.members (who is free right now). If what you are "
         "asked depends on a teammate doing something first, call office.wait with their name."
     )
+    if not record.project_id:
+        # Agents of a team with no folder searched upward for a relative path
+        # and hit Rinari's own folder (owner's demo, 2026-11-02).
+        lines.append(
+            "Your post has no project folder: your work folder starts empty, and Rinari's own "
+            "data folder is off limits. When a task names files or folders by a relative path, "
+            "ask in the office for their full path instead of searching for them."
+        )
+    elif record.project_root_snapshot:
+        lines.append(
+            f"Your team works in the project folder {record.project_root_snapshot}: a relative "
+            "path in an errand or in the office is inside it."
+        )
     lines.append(
         "When you finish something for the owner (a file, an image, a video), show it to them "
         "with file.present, besides saying it in the office. A connector's link or URI is not "

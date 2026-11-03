@@ -176,11 +176,26 @@ def test_shell_project_workspace_allowed() -> None:
     assert d.action is PolicyAction.ALLOW
 
 
-def test_shell_read_only_asks_every_time() -> None:
-    """REVIEW re-runs tests with approval; the answer is never kept."""
-    d = PolicyEngine().decide(CAPABILITY_SHELL, _scope(profile="read-only"), command="ls")
+def test_shell_read_only_asks_and_the_answer_can_hold_for_that_exact_command() -> None:
+    """REVIEW re-runs tests with approval; «this session» covers only the same command."""
+    d = PolicyEngine().decide(CAPABILITY_SHELL, _scope(profile="read-only"), command="npm test")
     assert d.action is PolicyAction.ASK
-    assert d.choices == ("deny", "allow_once")
+    assert d.choices == ("deny", "allow_once", "allow_session")
+    assert d.binding_mode == "exact" and d.target == "npm test"
+
+
+def test_read_only_git_reads_run_and_what_is_always_asked_stays_so() -> None:
+    scope = _scope(profile="read-only")
+    for command in ("git status", "git log --oneline -5", "git diff HEAD~1", "git show HEAD:a.py"):
+        assert PolicyEngine().decide(CAPABILITY_SHELL, scope, command=command).action is (
+            PolicyAction.ALLOW
+        ), command
+    for command in ("git branch nueva", "git diff --output=x.txt", "git status; rm a.py"):
+        assert PolicyEngine().decide(CAPABILITY_SHELL, scope, command=command).action is (
+            PolicyAction.ASK
+        ), command
+    deletes = PolicyEngine().decide(CAPABILITY_SHELL, scope, command="rm -rf /home/xainner/Music")
+    assert deletes.action is PolicyAction.ASK and deletes.choices == ("deny", "allow_once")
 
 
 def test_read_only_still_denies_writes_and_allows_skill_activation() -> None:

@@ -46,8 +46,10 @@ def _root(ctx: ToolContext) -> Path | None:
     return Path(root).resolve()
 
 
-def _classify_state_write(input: dict) -> ClassifiedAction:
-    return ClassifiedAction("state.write", None)
+def _classify_evidence(input: dict) -> ClassifiedAction:
+    """Validation evidence goes to Rinari's own records, never the workspace:
+    a read-only REVIEW records what it ran like any other mode."""
+    return ClassifiedAction("state.evidence", None)
 
 
 def _classify_state_read(input: dict) -> ClassifiedAction:
@@ -233,7 +235,7 @@ def verify_tools() -> list[ToolDefinition]:
             idempotent=False,
             timeout_ms=30_000,
             handler=verify_record,
-            classify=_classify_state_write,
+            classify=_classify_evidence,
             namespace="verify",
         ),
         ToolDefinition(
