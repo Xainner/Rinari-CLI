@@ -556,12 +556,13 @@ def shell_tools() -> list[ToolDefinition]:
             input_schema={
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string"},
+                    "command": {"type": "string", "description": "The command line to run."},
                     "argv": {
                         "type": "array",
                         "items": {"type": "string"},
                         "minItems": 1,
                         "maxItems": 256,
+                        "description": "The program and its arguments, instead of command.",
                     },
                     "background": {"type": "boolean", "default": False},
                     "notify": {

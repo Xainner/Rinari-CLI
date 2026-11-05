@@ -436,6 +436,7 @@ class ToolRuntime:
                     error.message if error is not None else "precheck rejected the call",
                     details=dict(error.details or {}) if error is not None else None,
                 )
+        approved: list[str] = []
         for action in actions:
             scope = scope_from_context(ctx)
             if getattr(action, "cwd", None):
@@ -492,14 +493,23 @@ class ToolRuntime:
                 )
                 if not granted:
                     return self._error(ctx, ToolErrorCode.APPROVAL_DENIED, decision.reason)
+                approved.append(decision.reason)
+
+        # The result says the owner approved the call, so the turn's summary
+        # cannot claim it needed no extra permission.
+        approval_notes = tuple(f"approved_by_owner: {reason}" for reason in approved)
+
+        def run():
+            result = self._execute_authorized(tool, arguments, ctx, tool_call_id)
+            return self._with_notes(result, approval_notes) if approval_notes else result
 
         sources = [s for s in (_external_source(a, tool) for a in actions) if s]
         if not sources or ctx.turn_state is None:
-            return lambda: self._execute_authorized(tool, arguments, ctx, tool_call_id)
+            return run
 
         def run_and_mark():
             try:
-                return self._execute_authorized(tool, arguments, ctx, tool_call_id)
+                return run()
             finally:
                 # Whatever came back (even an error page) is outside content.
                 for source, origin in sources:

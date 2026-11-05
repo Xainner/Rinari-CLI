@@ -419,3 +419,17 @@ def test_service_redaction_never_stores_the_terms(store, sensitive_pdf):
     assert job["result"]["report"]["checks"]["redaction"]["evidence"]["terms_found"] == {
         "term_1": 1
     }
+
+
+def test_an_unknown_docx_op_is_named_in_the_error() -> None:
+    import pytest
+
+    from rinari.documents.adapters import docx_edit
+    from rinari.documents.contracts import DocumentError
+
+    with pytest.raises(DocumentError) as raised:
+        docx_edit.validate(
+            [{"op": "docx.replace_text", "find": "a", "replace": "b"}, {"op": "x.y"}]
+        )
+    assert "operation 2: unknown op 'x.y'" in str(raised.value)
+    assert "docx.replace_text" in str(raised.value)

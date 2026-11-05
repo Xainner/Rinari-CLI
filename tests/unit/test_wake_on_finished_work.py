@@ -208,3 +208,25 @@ def test_a_job_watch_waits_for_a_busy_turn_and_gives_up_after_errors() -> None:
         clock.now += 30
     assert woken and woken[0][2]["source"] == "job_failed"
     assert "RuntimeError: down" in woken[0][1]
+
+
+def test_a_watch_finds_its_connector_however_the_model_spells_it() -> None:
+    """A model wrote the tool-prefix form of a connector with a space (H-09)."""
+
+    class Named(_Mcp):
+        names = ("Sound Lab", "lab")
+
+        def show(self, name, scope="global"):
+            return {"name": name, "enabled": True} if name in self.names else None
+
+        def list(self, scope=None):
+            return [{"name": name, "enabled": True} for name in self.names]
+
+    service = JobWatchService(Named(_Client([_text("{}")])), clock=_Clock())
+    service._ensure_thread = lambda: None
+    for spelling in ("Sound Lab", "Sound_Lab", "sound_lab", "mcp.Sound_Lab", " SOUND LAB "):
+        watch = service.add("ses_n", server=spelling, tool="get_job", until={"text": "done"})
+        assert watch["server"] == "Sound Lab", spelling
+        service.cancel("ses_n", watch["watch_id"])
+    with pytest.raises(WatchError):
+        service.add("ses_n", server="Other_Lab", tool="get_job", until={"text": "done"})

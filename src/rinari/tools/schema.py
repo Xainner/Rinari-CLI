@@ -79,6 +79,7 @@ def _project(schema: Any, *, root: bool = False) -> Any:
         alternatives = _required_alternatives(clauses)
         if alternatives is not None:
             notes.append(f"{label}: " + "; ".join(alternatives) + ".")
+            _say_alternatives(wire, keyword, alternatives)
         else:
             notes.append(f"{label} the alternatives defined by Rinari validation.")
     if notes:
@@ -86,6 +87,32 @@ def _project(schema: Any, *, root: bool = False) -> Any:
         prefix = f"{existing.strip()} " if isinstance(existing, str) and existing.strip() else ""
         wire["description"] = prefix + " ".join(notes)
     return wire
+
+
+def _say_alternatives(wire: dict[str, Any], keyword: str, alternatives: list[str]) -> None:
+    """Alternatives of one key each (`command` or `argv`), said on each key.
+
+    A model reads the properties, not the schema's own description: with the
+    combinator gone it saw no key as needed and sent `{}`. Nothing is made
+    `required`, so a strict backend still accepts either alternative.
+    """
+    properties = wire.get("properties")
+    if keyword not in ("oneOf", "anyOf") or not isinstance(properties, dict):
+        return
+    if len(alternatives) < 2 or any(" + " in key or key not in properties for key in alternatives):
+        return
+    for key in alternatives:
+        others = " or ".join(other for other in alternatives if other != key)
+        hint = f"Required unless {others} is given" + (
+            "; never both." if keyword == "oneOf" else "."
+        )
+        sub = properties[key]
+        if not isinstance(sub, dict):
+            continue
+        existing = sub.get("description")
+        text = existing.strip() if isinstance(existing, str) else ""
+        if hint not in text:
+            properties[key] = {**sub, "description": " ".join([text, hint]).strip()}
 
 
 def _required_alternatives(clauses: list[Any]) -> list[str] | None:

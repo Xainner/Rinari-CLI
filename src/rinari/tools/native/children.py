@@ -28,7 +28,8 @@ START_DESCRIPTION = (
     "ideas use followup.suggest. prompt must be self-contained: what, where, how to check "
     "it is done. context: brief (default) or fork (copies this conversation, for a "
     "subtask of the same topic while it is short). isolation: auto (own git worktree "
-    "when the project is a repo), worktree or same."
+    "when the project is a repo), worktree or same. After starting it, end your turn: "
+    "the child's report wakes you here. Do not poll it with session.children or git."
 )
 OFFER_DESCRIPTION = (
     "Ask the user whether a task they asked for in this message should go to a new "

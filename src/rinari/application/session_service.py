@@ -133,6 +133,16 @@ def profile_for_mode(mode: str | None) -> PermissionProfile:
     return PermissionProfile.WORKSPACE
 
 
+def _inside_folder(path: str | None, root: Path) -> bool:
+    if not path:
+        return False
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return resolved == root or root in resolved.parents
+
+
 def profile_for_session(record: SessionRecord) -> PermissionProfile:
     """Effective profile: PLAN/REVIEW are immutable read-only boundaries."""
     if record.mode in (SESSION_MODE_PLAN, SESSION_MODE_REVIEW):
@@ -634,6 +644,11 @@ class SessionService:
             record.kind = SESSION_KIND_PROJECT
             record.project_id = project.id
             record.project_root_snapshot = str(root)
+            if not _inside_folder(record.current_cwd or record.created_cwd, root):
+                # A chat with a folder of its own (an Agency post's workspace
+                # under Rinari's home) works in the project from now on: its
+                # old folder would stay announced and then be refused.
+                record.current_cwd = str(root)
             record.updated_at = now
             record.last_active_at = now
             self._ctx.session_repo.update(record)

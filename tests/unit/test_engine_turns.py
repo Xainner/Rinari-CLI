@@ -631,11 +631,14 @@ def test_a_preparation_that_keeps_moving_is_not_cut(server, tmp_path, monkeypatc
         sink = kwargs.get("activity_sink")
         for stage in ("runtime", "model", "agents", "tools", "context"):
             sink("turn.preparing", {"stage": stage})
-            time.sleep(0.12)
+            time.sleep(0.3)
         return real_build(*args, **kwargs)
 
     monkeypatch.setattr(turns_module, "build_agent_session", slow_stages)
-    monkeypatch.setattr(turns_module, "PREPARATION_TIMEOUT_S", 0.3)
+    # Each fake stage takes 0.3 s and all five 1.5 s, past the limit. The limit
+    # also covers the real stages that follow, which on a busy CI runner took
+    # longer than the 0.3 s it used to be.
+    monkeypatch.setattr(turns_module, "PREPARATION_TIMEOUT_S", 1.0)
     started = server.handle_line(
         _req("prep-moving-t", "session.turn.start", {"session_id": session_id, "message": "hi"})
     )

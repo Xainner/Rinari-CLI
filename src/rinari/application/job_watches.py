@@ -18,6 +18,7 @@ import contextlib
 import itertools
 import json
 import logging
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -147,6 +148,7 @@ class JobWatchService:
         if arguments is not None and not isinstance(arguments, dict):
             raise WatchError("arguments must be an object")
         until_text, until_path, until_values = self._until(until)
+        server = self._server_name(server)
         row = self._mcp.show(server)
         if row is None or not row.get("enabled"):
             raise WatchError(f"No enabled connector named {server!r}")
@@ -183,6 +185,31 @@ class JobWatchService:
             self._watches[watch.id] = watch
         self._ensure_thread()
         return {**watch.view(), "max_minutes": minutes}
+
+    def _server_name(self, given: str) -> str:
+        """The connector a model named, however it spelled it: its visible
+        name, the form its tools carry (`My_Server`, spaces as `_`) or
+        `mcp.<name>`, in any case. An unknown or ambiguous name stays as given."""
+        if self._mcp.show(given) is not None:
+            return given
+
+        def key(name: str) -> str:
+            name = name.strip()
+            if name.lower().startswith("mcp."):
+                name = name[4:]
+            return re.sub(r"[^A-Za-z0-9.-]+", "_", name).casefold()
+
+        try:
+            rows = list(self._mcp.list() or ())
+        except Exception:
+            return given
+        wanted = key(given)
+        matches = {
+            row["name"]
+            for row in rows
+            if isinstance(row.get("name"), str) and key(row["name"]) == wanted
+        }
+        return matches.pop() if len(matches) == 1 else given
 
     def cancel(self, session_id: str, watch_id: str) -> bool:
         with self._lock:

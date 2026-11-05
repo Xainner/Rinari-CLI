@@ -1282,14 +1282,28 @@ class AgencyTeams:
             and item["created_at"] > live.get("message_at", 0)
         ]
         with self._lock:
+            # The same wait said again while it is still open (same teammate,
+            # same errand or chain) is one wait: the office shows it once,
+            # whatever was posted in between.
+            prior = self._waits.get(session_id)
+            repeated = (
+                prior is not None
+                and prior["for_agent_id"] == for_id
+                and (prior.get("errand_id") or prior["chain_id"])
+                == (waiting.get("errand_id") or waiting["chain_id"])
+            )
+            if repeated:
+                waiting["since"] = prior.get("since", waiting["since"])
             self._waits[session_id] = waiting
             if session_id in self._live:
                 self._live[session_id] = {**self._live[session_id], "waiting": True}
         self._repo.save_wait(waiting)
         if already:
             self._release(team, already[-1])
-        # The same wait said again with nothing new in the office (the model
-        # repeating the tool, or woken and waiting again) is not posted again.
+        if repeated:
+            return waiting
+        # Woken and waiting again with nothing new in the office is not posted
+        # again either.
         latest = self._repo.messages(team["id"], limit=1)
         last_notice = (latest[-1].get("notice") or {}) if latest else {}
         if (

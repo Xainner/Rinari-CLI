@@ -108,6 +108,8 @@ class _ActiveTurn:
     session_id: str
     session: Any | None
     done: threading.Event
+    # The effort this turn runs with: a child it opens runs with it too.
+    reasoning_effort: str | None = None
     # Procedencia del mensaje que inició el turno; `None` = petición del
     # propietario. Un origen `peer` limita el runtime (techo de procedencia)
     # y alimenta la cadena/hop de cualquier envío posterior.
@@ -951,6 +953,7 @@ class TurnManager:
                     )
             self._turns[turn_id] = turn
             turn.mode = record.mode
+            turn.reasoning_effort = reasoning_effort
         self._activity_cb(turn)(
             "turn.started",
             {

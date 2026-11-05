@@ -2,7 +2,8 @@
 
 Project lists show each project's branch, and they are refreshed often: one
 `git` subprocess per project per refresh is too much. HEAD is a tiny file,
-so reading it (and caching by mtime) costs two `stat` calls per project.
+so reading it (and caching by mtime) costs a few `stat` calls per project:
+HEAD, the branch's loose ref and `packed-refs`, so a commit is seen too.
 
 Handles a project nested in a repository (walks up), worktrees and
 submodules (`.git` is a file with `gitdir: <path>`), a detached HEAD and a
@@ -106,7 +107,9 @@ def _parse_head(git_dir: Path) -> GitHead:
     if not content:
         return GitHead()
     if content.startswith(_REF):
-        return GitHead(branch=_branch_name(content[len("ref: ") :]))
+        branch = _branch_name(content[len("ref: ") :])
+        sha = _resolve_ref(git_dir, f"refs/heads/{branch}") if branch else None
+        return GitHead(branch=branch, sha_short=sha[:7] if sha else None)
     if not _SHA.fullmatch(content):
         return GitHead()
     for marker in ("rebase-merge/head-name", "rebase-apply/head-name"):
@@ -121,43 +124,93 @@ def _parse_head(git_dir: Path) -> GitHead:
     return GitHead(detached=True, sha_short=content[:7])
 
 
+_MAX_PACKED_BYTES = 8 * 1024 * 1024
+
+
+def _common_dir(git_dir: Path) -> Path:
+    """Where a worktree's refs live: the main repository's git directory."""
+    text = _read_small(git_dir / "commondir")
+    if not text:
+        return git_dir
+    target = Path(text)
+    if not target.is_absolute():
+        target = git_dir / target
+    try:
+        return target.resolve()
+    except (OSError, RuntimeError):
+        return git_dir
+
+
+def _ref_files(git_dir: Path, ref: str) -> list[Path]:
+    """The loose ref files to look at, then `packed-refs`."""
+    common = _common_dir(git_dir)
+    bases = [git_dir] if common == git_dir else [git_dir, common]
+    return [*(base / ref for base in bases), common / "packed-refs"]
+
+
+def _resolve_ref(git_dir: Path, ref: str) -> str | None:
+    """The commit a branch points at: its loose ref, else `packed-refs`."""
+    *loose, packed = _ref_files(git_dir, ref)
+    for path in loose:
+        value = _read_small(path)
+        if value and _SHA.fullmatch(value):
+            return value
+    try:
+        with packed.open("rb") as handle:
+            text = handle.read(_MAX_PACKED_BYTES).decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        sha, _, name = line.partition(" ")
+        if name.strip() == ref and _SHA.fullmatch(sha):
+            return sha
+    return None
+
+
 class HeadCache:
     """Per-root HEAD, revalidated by the HEAD file's mtime and size."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._entries: dict[str, tuple[Path | None, int, int, GitHead]] = {}
+        self._entries: dict[str, tuple[Path | None, tuple[int, ...], GitHead]] = {}
 
     def get(self, root: str | Path) -> GitHead:
         key = str(root)
         with self._lock:
             entry = self._entries.get(key)
         if entry is not None:
-            git_dir, mtime, size, head = entry
+            git_dir, stamp, head = entry
             if git_dir is None:
                 # Not a repository last time: look again only if `.git` appeared.
                 if not (Path(key) / ".git").exists():
                     return head
-            else:
-                stamp = _stamp(git_dir)
-                if stamp == (mtime, size):
-                    return head
+            elif _stamp(git_dir) == stamp:
+                return head
         git_dir = find_git_dir(Path(key))
         head = _parse_head(git_dir) if git_dir is not None else GitHead()
-        mtime, size = _stamp(git_dir) if git_dir is not None else (0, 0)
+        stamp = _stamp(git_dir) if git_dir is not None else ()
         with self._lock:
-            self._entries[key] = (git_dir, mtime, size, head)
+            self._entries[key] = (git_dir, stamp, head)
         return head
 
 
-def _stamp(git_dir: Path) -> tuple[int, int]:
-    """HEAD's mtime and size, plus a rebase marker so starting one is seen."""
+def _stamp(git_dir: Path) -> tuple[int, ...]:
+    """HEAD's mtime and size, a rebase marker so starting one is seen, and
+    the mtimes of the branch's ref files so a commit is seen too."""
     try:
         stat = (git_dir / "HEAD").stat()
     except OSError:
         return (0, 0)
     rebasing = (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists()
-    return (stat.st_mtime_ns, stat.st_size + (1 << 40 if rebasing else 0))
+    stamp = [stat.st_mtime_ns, stat.st_size + (1 << 40 if rebasing else 0)]
+    content = _read_small(git_dir / "HEAD") or ""
+    if content.startswith(_REF):
+        for path in _ref_files(git_dir, content[len("ref: ") :].strip()):
+            try:
+                stamp.append(path.stat().st_mtime_ns)
+            except OSError:
+                stamp.append(0)
+    return tuple(stamp)
 
 
 #: Shared by the project views of one Engine process.

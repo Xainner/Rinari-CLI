@@ -511,6 +511,87 @@ def _is_inspection(command: str) -> bool:
     return bool(_INSPECTION_SHELL.match(command)) and not _CHAINING.search(command)
 
 
+_DELETE_VERBS = frozenset({"rm", "del", "erase", "rd", "rmdir", "remove-item", "ri"})
+# rm's own one-letter options: `-rf`, `-fr`, `-Rv` are clusters of them, while
+# a PowerShell parameter (`-Force`) is a word.
+_RM_FLAGS = frozenset("rRfivdI")
+
+
+def _recursive_delete(command: str) -> bool:
+    """A delete that takes a whole folder with it: `rm -r`, `rmdir /s`,
+    `rd /s`, `del /s`, `Remove-Item -Recurse` (and its `rm`/`ri` aliases)."""
+    try:
+        segments = _segments(_local_part(command or ""))
+    except ValueError:
+        return bool(_DESTRUCTIVE_SHELL.search(command or "")) and bool(
+            re.search(r"\s(?:-[a-z]*r[a-z]*|--recursive|/s|-rec\w*)(?:\s|$)", command or "", re.I)
+        )
+    for tokens in segments:
+        while tokens and _program(tokens[0]) in {"sudo", "env", "nohup", "time"}:
+            tokens = tokens[1:]
+        if not tokens or _program(tokens[0]) not in _DELETE_VERBS:
+            continue
+        for token in tokens[1:]:
+            lowered = token.lower()
+            if lowered in ("/s", "--recursive", "-r") or lowered.startswith("-rec"):
+                return True
+            if (
+                re.fullmatch(r"-[A-Za-z]{2,5}", token)
+                and set(token[1:]) <= _RM_FLAGS
+                and set(token[1:]) & {"r", "R"}
+            ):
+                return True
+    return False
+
+
+# Test runners whose runs a read-only session can allow for the session as a
+# whole (one answer per runner, not per exact command line).
+_PYTHONS = frozenset({"python", "python3", "py"})
+_PACKAGE_MANAGERS = frozenset({"npm", "yarn", "pnpm"})
+_BUILD_TOOLS = frozenset({"mvn", "mvnw", "gradle", "gradlew"})
+
+
+def detect_test_runner(command: str) -> str | None:
+    """The test runner a single, unchained command runs (`pytest`,
+    `npm test`, `cargo test`...), or None."""
+    text = re.sub(r"\s+2>&1\s*$", "", (command or "").strip())
+    if not text or _CHAINING.search(text):
+        return None
+    try:
+        segments = _segments(text)
+    except ValueError:
+        return None
+    if len(segments) != 1:
+        return None
+    tokens = segments[0]
+    while tokens and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[0]):
+        tokens = tokens[1:]  # FOO=1 pytest
+    if not tokens:
+        return None
+    program, rest = _program(tokens[0]), [token.lower() for token in tokens[1:]]
+    words = [token for token in rest if not token.startswith("-")]
+    runner = None
+    if program in _PYTHONS:
+        if "-m" in rest and rest.index("-m") + 1 < len(rest):
+            runner = "pytest" if rest[rest.index("-m") + 1] == "pytest" else None
+    elif program == "pytest" or (program == "uv" and words[:2] == ["run", "pytest"]):
+        runner = "pytest"
+    elif program in _PACKAGE_MANAGERS and (words[:1] == ["test"] or words[:2] == ["run", "test"]):
+        runner = f"{program} test"
+    elif (program == "npx" and words[:2] == ["vitest", "run"]) or (
+        program == "vitest" and words[:1] == ["run"]
+    ):
+        runner = "vitest"
+    elif program in {"cargo", "go", "dotnet"} and words[:1] == ["test"]:
+        runner = f"{program} test"
+    elif program in _BUILD_TOOLS and words[:1] == ["test"]:
+        runner = f"{program.removesuffix('w')} test"
+    # pytest deletes the folder given as --basetemp: that run is asked alone.
+    if runner == "pytest" and any(token.startswith("--basetemp") for token in rest):
+        return None
+    return runner
+
+
 # ssh options that take a value (`ssh -p 22 -i key host cmd`): the host is the
 # first token that is neither an option nor the value of one.
 _SSH_VALUE_OPTIONS = frozenset("BbcDEeFIiJLlmOoPpQRSWw")
@@ -752,6 +833,24 @@ class PolicyEngine:
             hard = usual.action is PolicyAction.DENY or (
                 usual.action is PolicyAction.ASK and not usual.reusable
             )
+            runner = detect_test_runner(command or "")
+            if (
+                runner is not None
+                and usual.action is PolicyAction.ALLOW
+                and self._command_cwd_outside(scope) is None
+            ):
+                # A review runs the project's tests again and again with other
+                # arguments: the session answer covers this runner's runs, not
+                # only this exact line. The first run is still asked.
+                return self._ask(
+                    capability,
+                    f"read-only mode: running the tests ({runner}) could change files",
+                    target=command,
+                    risk=risk,
+                    risk_class=risk_class,
+                    rule_id=f"read_only_tests:{runner}",
+                    choices=CHOICES_SESSION,
+                )
             return self._ask(
                 capability,
                 "read-only mode: a command could change files, so each one is asked",
@@ -1516,6 +1615,20 @@ class PolicyEngine:
                 risk=risk,
                 risk_class=risk_class,
                 rule_id="shell_cwd_outside",
+            )
+        if shell_risk.destructive and _recursive_delete(command or ""):
+            # A folder and everything in it, inside the project: asked in
+            # project mode (full access does not ask). The session answer
+            # holds for this exact command only.
+            return self._ask(
+                CAPABILITY_SHELL,
+                "deletes a folder and everything in it",
+                target=command,
+                risk="high",
+                risk_class="local-destructive",
+                rule_id="delete_recursive",
+                choices=CHOICES_SESSION,
+                binding_mode="exact",
             )
         return self._allow(CAPABILITY_SHELL, "local command in the workspace", risk, risk_class)
 

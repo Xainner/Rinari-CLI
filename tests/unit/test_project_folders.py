@@ -168,8 +168,13 @@ def test_policy_writes_and_commands_in_extra_folders(tmp_path):
     assert (
         engine.decide(CAPABILITY_SHELL, in_web, command="npm install").action is PolicyAction.ALLOW
     )
+    # Inside a working folder: a recursive delete is asked as inside the
+    # project, never as a delete outside it.
     delete = engine.decide(CAPABILITY_SHELL, in_web, command="rm -r ./build")
-    assert delete.action is PolicyAction.ALLOW
+    assert delete.rule_id == "delete_recursive"
+    assert engine.decide(CAPABILITY_SHELL, in_web, command="rm ./a.txt").action is (
+        PolicyAction.ALLOW
+    )
     outside = engine.decide(CAPABILITY_SHELL, with_extra, command=f"rm -r {other / 'x'}")
     assert outside.rule_id == "delete_outside_root"
 
