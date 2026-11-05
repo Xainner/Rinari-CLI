@@ -360,6 +360,18 @@ def capability_search_tool(registry: ToolRegistry, skills=None) -> ToolDefinitio
     )
 
 
+def _with_suggestions(registry: ToolRegistry, unknown: list[str]) -> str:
+    """Each unknown name, with the closest tool name when one is close."""
+    import difflib
+
+    names = registry.names()
+    shown = []
+    for name in unknown:
+        close = difflib.get_close_matches(name, names, n=1, cutoff=0.75)
+        shown.append(f"{name} (did you mean {close[0]}?)" if close else name)
+    return ", ".join(shown)
+
+
 def capability_activation_tools(registry: ToolRegistry) -> list[ToolDefinition]:
     """capability.activate / capability.deactivate, kept for what names them.
 
@@ -387,17 +399,21 @@ def capability_activation_tools(registry: ToolRegistry) -> list[ToolDefinition]:
                 origin="capability",
             )
         unknown = [n for n in names if registry.get(n) is None]
-        if unknown:
+        known = [n for n in names if n not in unknown]
+        if not known:
             return ToolResult(
                 ok=False,
                 error=ToolErrorInfo(
                     ToolErrorCode.INVALID_ARGUMENT,
-                    f"unknown tools: {', '.join(unknown)}; search with capability.search",
+                    f"unknown tools: {_with_suggestions(registry, unknown)}; "
+                    "search with capability.search",
                 ),
                 origin="capability",
             )
-        in_list = [n for n in names if not _outside_list(ctx, registry, n)]
-        outside = [how_to_call(registry.get(n)) for n in names if n not in in_list]
+        # One wrong name among several no longer fails the whole call: the
+        # valid ones are activated and the others reported.
+        in_list = [n for n in known if not _outside_list(ctx, registry, n)]
+        outside = [how_to_call(registry.get(n)) for n in known if n not in in_list]
         data: dict = {"in_list": in_list, "outside_list": outside}
         data["note"] = (
             "Your tool list does not change. Call the in_list tools directly; run the others "
@@ -405,6 +421,12 @@ def capability_activation_tools(registry: ToolRegistry) -> list[ToolDefinition]:
             if outside
             else "These tools are already in your list: call them directly."
         )
+        if unknown:
+            data["unknown"] = unknown
+            data["note"] += (
+                f" Unknown, not activated: {_with_suggestions(registry, unknown)}; "
+                "search with capability.search."
+            )
         return ToolResult(ok=True, data=data, origin="capability")
 
     def deactivate_handler(arguments: dict, ctx) -> object:

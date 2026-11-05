@@ -198,6 +198,13 @@ def test_activation_tools_give_the_call_and_leave_the_list(registry: ToolRegistr
 
     bad = tools["capability.activate"].handler({"names": ["nope.missing"]}, Ctx())
     assert not bad.ok
+    # One wrong name among valid ones: the valid ones are activated (H-09).
+    mixed = tools["capability.activate"].handler(
+        {"names": ["fs.read", "browser.opne", "nope.missing"]}, Ctx()
+    )
+    assert mixed.ok and mixed.data["in_list"] == ["fs.read"]
+    assert mixed.data["unknown"] == ["browser.opne", "nope.missing"]
+    assert "did you mean browser.open?" in mixed.data["note"]
     gone = tools["capability.deactivate"].handler({"names": ["fs.read"]}, Ctx())
     assert gone.ok and gone.data["deactivated"] == []
 
