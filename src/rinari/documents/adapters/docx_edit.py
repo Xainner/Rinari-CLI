@@ -61,8 +61,14 @@ def validate(operations: Any) -> list[dict[str, Any]]:
     if len(operations) > 500:
         raise DocumentError(DocumentErrorCode.DOCUMENT_LIMIT_EXCEEDED, "At most 500 operations")
     for index, op in enumerate(operations, start=1):
-        if not isinstance(op, dict) or op.get("op") not in _FIELDS:
-            raise _invalid(f"operation {index}: unknown op", ops=list(OPERATIONS))
+        if not isinstance(op, dict):
+            raise _invalid(f"operation {index} must be an object", ops=list(OPERATIONS))
+        if op.get("op") not in _FIELDS:
+            raise _invalid(
+                f"operation {index}: unknown op {op.get('op')!r}; use one of "
+                + ", ".join(OPERATIONS),
+                ops=list(OPERATIONS),
+            )
         unknown = sorted(set(op) - {"op"} - _FIELDS[op["op"]])
         if unknown:
             raise _invalid(

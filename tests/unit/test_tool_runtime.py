@@ -189,6 +189,20 @@ def test_approval_write_outside_root_granted(project) -> None:
     assert "ToolApproved" in types
 
 
+def test_a_call_the_owner_approved_says_so_to_the_model(project) -> None:
+    """A summary claimed «no extra permissions» after an approval (H-02)."""
+    tmp_path, root, _ = project
+    (tmp_path / "grantme").mkdir()
+    ctx = _ctx(tmp_path, root)
+    runtime, _ = _runtime(ctx, tmp_path, answer="y")
+    result = runtime.execute("fs.write", {"path": "../grantme/file.txt", "content": "ok"}, ctx)
+    assert result.ok is True
+    assert any(note.startswith("approved_by_owner:") for note in result.notes)
+    assert "approved_by_owner" in result.to_model_text("fs.write")
+    plain = runtime.execute("fs.write", {"path": "src/new.py", "content": "x"}, ctx)
+    assert not any("approved_by_owner" in note for note in plain.notes)
+
+
 def test_approval_denied(project) -> None:
     tmp_path, root, _ = project
     ctx = _ctx(tmp_path, root)

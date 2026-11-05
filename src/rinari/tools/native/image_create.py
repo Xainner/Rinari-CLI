@@ -50,8 +50,8 @@ NO_CONNECTOR = (
 REVIEW_NOTE = (
     "The owner has not seen the image yet. Look at it first: if it does not match "
     "what was asked (wrong subject, text, hands, missing parts), say so and edit or "
-    "regenerate it, at most twice. Then show the one you keep with file.present "
-    "(path: its uri)."
+    "regenerate it, at most twice. Then show only the one you keep, once, with "
+    "file.present (path: its uri)."
 )
 _CODES = {code.value for code in ToolErrorCode}
 
