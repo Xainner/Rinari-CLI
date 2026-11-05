@@ -7,6 +7,7 @@ import base64
 import io
 import itertools
 import json
+import types
 from pathlib import Path
 
 import httpx
@@ -495,3 +496,25 @@ def test_the_service_builds_each_new_kind_from_the_settings(server, monkeypatch)
     assert isinstance(lab, McpImagesConnector)
     assert lab.run(ImageJob("generate", "luna")).images
     assert calls == [("make", {})]
+
+
+def test_an_optional_image_path_that_names_no_file_is_left_out() -> None:
+    """`mask: "auto"` (or "/", " ") was loaded as a file (H-04)."""
+    from rinari.tools.native.image_create import ImageHost, image_create_tools
+    from rinari.tools.normalize import path_not_given
+
+    for value in (None, "", "  ", "auto", "None", "null", "/", "\\", "C:\\", "c:/", "D:"):
+        assert path_not_given(value), value
+    for value in ("mask.png", "./a.png", r"C:\img\a.png", "artifact://x/y.png", "/tmp/a.png"):
+        assert not path_not_given(value), value
+
+    host = ImageHost.__new__(ImageHost)
+    host.service = types.SimpleNamespace(default_label=lambda: None)
+    edit = next(tool for tool in image_create_tools(host) if tool.name == "image.edit")
+    args, notes = edit.normalize({"image": "a.png", "prompt": "p", "mask": "auto"})
+    assert args == {"image": "a.png", "prompt": "p"} and notes
+    generate = next(tool for tool in image_create_tools(host) if tool.name == "image.generate")
+    args, _ = generate.normalize({"prompt": "p", "references": ["a.png", " ", "/"]})
+    assert args["references"] == ["a.png"]
+    args, notes = generate.normalize({"prompt": "p"})
+    assert args == {"prompt": "p"} and notes == []

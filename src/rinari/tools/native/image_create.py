@@ -38,6 +38,7 @@ from rinari.tools.definition import (
     ToolResult,
 )
 from rinari.tools.native.fs import _resolve_read
+from rinari.tools.normalize import unset_paths
 
 #: The capability policy decides on: asks with the cost, except in full access.
 CAPABILITY = "media.generate"
@@ -313,6 +314,9 @@ def _load(ctx: ToolContext, source: Any) -> tuple[InputImage | None, ToolResult 
     return InputImage(data, mime, path.name), None
 
 
+#: The arguments that name an input image: one that names no file is left out.
+_PATH_ARGS = ("image", "mask", "references")
+
 _IMAGE_REF = {
     "type": "string",
     "minLength": 1,
@@ -431,6 +435,8 @@ def image_create_tools(host: ImageHost) -> list[ToolDefinition]:
                 handler=lambda args, ctx, op=operation: host.run(op, args, ctx),
                 classify=lambda args, op=operation: host.classify(op, args),
                 precheck=lambda args, ctx, op=operation: host.precheck(op, args, ctx),
+                # `mask: "auto"` or `"/"` was read as a file (H-04).
+                normalize=lambda args: unset_paths(args, _PATH_ARGS),
                 namespace="image",
                 always_loaded=bool(label),
                 manifest={"source": "images", **({"configured_service": label} if label else {})},

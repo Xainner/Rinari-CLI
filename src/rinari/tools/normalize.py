@@ -15,6 +15,7 @@ and approvals always judge the canonical call.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 
@@ -222,3 +223,41 @@ __all__ = [
     "process_wait",
     "shell_exec",
 ]
+
+
+# Placeholders models send for an optional path they mean to leave out.
+_NO_PATH_WORDS = frozenset({"auto", "none", "null", "nil", "undefined", "n/a"})
+
+
+def path_not_given(value: Any) -> bool:
+    """An optional path argument that names no file: blank, a placeholder
+    (`auto`, `none`, `null`) or a bare filesystem root (`/`, a backslash, `C:`)."""
+    if value is None:
+        return True
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if not text or text.lower() in _NO_PATH_WORDS:
+        return True
+    return bool(re.fullmatch(r"[\\/]+|[A-Za-z]:[\\/]*", text))
+
+
+def unset_paths(arguments: dict, keys: tuple[str, ...]) -> tuple[dict, list[str]]:
+    """Drop the optional path arguments in `keys` that name no file (and the
+    such items of a list of paths), with a note per key for the model."""
+    rewritten, notes = dict(arguments), []
+    for key in keys:
+        if key not in rewritten:
+            continue
+        value = rewritten[key]
+        if isinstance(value, list):
+            kept = [item for item in value if not path_not_given(item)]
+            if len(kept) != len(value):
+                rewritten[key] = kept
+                notes.append(f"ignored {key} items that name no file")
+            if not kept:
+                del rewritten[key]
+        elif path_not_given(value):
+            del rewritten[key]
+            notes.append(f"ignored {key}={json.dumps(value)} (not a path: leave it out instead)")
+    return rewritten, notes
