@@ -381,6 +381,41 @@ def test_a_team_works_in_its_project_and_moves_with_it(server, tmp_path) -> None
     assert services.sessions.show(_post(joined["team"], writer)).project_id == project_id
 
 
+def test_a_team_without_a_project_moves_every_post_into_the_one_it_takes(server, tmp_path) -> None:
+    """Posts opened as chats kept their folder under Rinari's home as cwd once
+    the team took a project: announced in the prompt, then refused (H-03)."""
+    cafe = tmp_path / "nebula-cafe"
+    cafe.mkdir()
+    services = server._services
+    project_id = services.projects.upsert(cafe).id
+    writer, tester = _agent(server, "Writer"), _agent(server, "Tester")
+    team = _team(server, "Café", [writer, tester])
+    before = [services.sessions.show(_post(team, agent)) for agent in (writer, tester)]
+    assert all(post.kind == "CHAT" and post.project_id is None for post in before)
+    moved = _ok(
+        _call(
+            server,
+            "agency.team.update",
+            {"team_id": team["id"], "patch": {"project_id": project_id}},
+        )
+    )["team"]
+    root = str(cafe.resolve())
+    for agent in (writer, tester):
+        post = services.sessions.show(_post(moved, agent))
+        assert post.project_id == project_id
+        assert post.project_root_snapshot == root
+        assert post.current_cwd == root
+    assert "a relative path in an errand" in _place(server, moved, writer)
+
+
+def test_promoting_a_chat_keeps_a_cwd_inside_the_project(services, tmp_path) -> None:
+    root = tmp_path / "app"
+    (root / "src").mkdir(parents=True)
+    chat = services.sessions.new(root / "src", forced_chat=True)
+    promoted = services.sessions.promote(chat.id, root)
+    assert promoted.current_cwd == str((root / "src").resolve())
+
+
 def test_a_team_cannot_take_a_project_of_another_profile_or_an_unknown_one(server) -> None:
     writer = _agent(server, "Writer")
     team = _team(server, "Café", [writer])
@@ -388,3 +423,9 @@ def test_a_team_cannot_take_a_project_of_another_profile_or_an_unknown_one(serve
         server, "agency.team.update", {"team_id": team["id"], "patch": {"project_id": "prj_nope"}}
     )
     assert unknown["ok"] is False
+
+
+def test_the_chief_is_told_an_errand_it_passed_is_the_teammates_work(server) -> None:
+    team, writer, image, _ = _studio(server)
+    assert "do not edit the same files yourself" in _place(server, team, writer)
+    assert "do not edit the same files yourself" not in _place(server, team, image)

@@ -104,6 +104,25 @@ def test_waiting_again_for_the_same_teammate_is_said_once(server, turns) -> None
     assert len(notices) == 1
 
 
+def test_an_open_wait_said_again_after_other_messages_is_still_said_once(server, turns) -> None:
+    """The dedup only looked at the newest office message (H-14)."""
+    ana, beto, carla = _agent(server, "Ana"), _agent(server, "Beto"), _agent(server, "Carla")
+    team = _team(server, "Canal", [ana, beto, carla])
+    pa = _post(team, ana)
+    _ok(_call(server, "agency.office.post", {"team_id": team["id"], "text": "@Ana hazlo con Beto"}))
+    wait = _tools(server, pa)["office.wait"].handler
+    assert wait({"for": "Beto"}, None).ok
+    _ok(_call(server, "agency.office.post", {"team_id": team["id"], "text": "@Carla otra cosa"}))
+    assert wait({"for": "Beto"}, None).ok
+    office = _ok(_call(server, "agency.office.list", {"team_id": team["id"]}))["messages"]
+    notices = [m for m in office if (m.get("notice") or {}).get("kind") == "wait"]
+    assert len(notices) == 1
+    # Waiting for someone else is another wait, and is said.
+    assert wait({"for": "Carla"}, None).ok
+    office = _ok(_call(server, "agency.office.list", {"team_id": team["id"]}))["messages"]
+    assert len([m for m in office if (m.get("notice") or {}).get("kind") == "wait"]) == 2
+
+
 # -- B3: an errand sent back again and again -------------------------------------------------------
 
 
