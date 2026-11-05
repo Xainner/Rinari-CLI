@@ -177,11 +177,13 @@ def test_shell_project_workspace_allowed() -> None:
 
 
 def test_shell_read_only_asks_and_the_answer_can_hold_for_that_exact_command() -> None:
-    """REVIEW re-runs tests with approval; «this session» covers only the same command."""
-    d = PolicyEngine().decide(CAPABILITY_SHELL, _scope(profile="read-only"), command="npm test")
+    """Outside the test runners, «this session» covers only the same command."""
+    d = PolicyEngine().decide(
+        CAPABILITY_SHELL, _scope(profile="read-only"), command="npm run build"
+    )
     assert d.action is PolicyAction.ASK
     assert d.choices == ("deny", "allow_once", "allow_session")
-    assert d.binding_mode == "exact" and d.target == "npm test"
+    assert d.binding_mode == "exact" and d.target == "npm run build"
 
 
 def test_read_only_git_reads_run_and_what_is_always_asked_stays_so() -> None:
@@ -816,3 +818,128 @@ def test_curl_fail_flag_is_not_a_form_upload() -> None:
         assert not shell_sends_data(command), command
     for command in ("curl -F a=@x u", "curl -d x=1 u", "CURL.EXE -T f u", "curl --DATA x u"):
         assert shell_sends_data(command), command
+
+
+def test_recursive_delete_inside_the_project_asks_in_project_mode() -> None:
+    """`rmdir /s /q build` ran without asking: its switches were dropped and
+    the target was inside the project (H-01)."""
+    engine = PolicyEngine()
+    for command in (
+        "rmdir /s /q build",
+        "rd /S build",
+        "del /s /q build",
+        "rm -rf build",
+        "rm -r ./dist",
+        "rm --recursive dist",
+        "sudo rm -fR node_modules",
+        "Remove-Item -Recurse -Force build",
+        "Remove-Item build -Recurse",
+        "rm -rec build",
+        "cd web && rm -rf dist",
+    ):
+        d = engine.decide(CAPABILITY_SHELL, _scope(), command=command)
+        assert d.action is PolicyAction.ASK, command
+        assert d.rule_id == "delete_recursive", command
+        assert d.choices == ("deny", "allow_once", "allow_session"), command
+        assert d.binding_mode == "exact" and d.target == command
+        full = engine.decide(CAPABILITY_SHELL, _scope(profile="full-access"), command=command)
+        assert full.action is PolicyAction.ALLOW, command
+
+
+def test_plain_deletes_inside_the_project_keep_running() -> None:
+    engine = PolicyEngine()
+    for command in (
+        "rm file.txt",
+        "rm -f a.log",
+        "del a.txt",
+        "Remove-Item -Force a.txt",
+        "rmdir empty",
+    ):
+        assert engine.decide(CAPABILITY_SHELL, _scope(), command=command).action is (
+            PolicyAction.ALLOW
+        ), command
+
+
+def test_a_session_answer_for_a_recursive_delete_holds_for_that_command_only() -> None:
+    engine = PolicyEngine()
+    approvals = ApprovalEngine(prompt=lambda req: "s")
+
+    def request(command: str) -> ApprovalRequest:
+        d = engine.decide(CAPABILITY_SHELL, _scope(), command=command)
+        return ApprovalRequest(
+            capability=d.capability,
+            description=d.reason,
+            target=d.target,
+            session_id="s1",
+            rule_id=d.rule_id,
+            reusable=d.reusable,
+            choices=d.choices,
+            binding_mode=d.binding_mode,
+        )
+
+    assert approvals.check(request("rm -rf build")).granted
+    approvals._prompt = lambda req: "n"
+    assert approvals.check(request("rm -rf build")).granted
+    assert not approvals.check(request("rm -rf src")).granted
+
+
+def test_read_only_test_runs_can_be_allowed_for_the_session_per_runner() -> None:
+    """A review re-runs the tests with other arguments: one answer per runner
+    covers them, the first run is still asked (H-12)."""
+    from rinari.policy.engine import detect_test_runner
+
+    for command, runner in (
+        ("pytest -q", "pytest"),
+        ("python -m pytest tests/unit/test_a.py -q", "pytest"),
+        (".venv/Scripts/python.exe -X utf8 -m pytest -k slow", "pytest"),
+        ("uv run pytest -q 2>&1", "pytest"),
+        ("npm test", "npm test"),
+        ("npm run test -- --watch=false", "npm test"),
+        ("yarn test", "yarn test"),
+        ("pnpm test", "pnpm test"),
+        ("npx vitest run src/a.test.ts", "vitest"),
+        ("cargo test --all", "cargo test"),
+        ("go test ./...", "go test"),
+        ("dotnet test", "dotnet test"),
+        ("mvn -q test", "mvn test"),
+        ("./gradlew test", "gradle test"),
+    ):
+        assert detect_test_runner(command) == runner, command
+    for command in (
+        "pytest -q; rm -rf src",
+        "npm test > out.txt",
+        "npm run build",
+        "pytest --basetemp=/tmp/x",
+        "python script.py",
+        "npx vitest",
+    ):
+        assert detect_test_runner(command) is None, command
+
+    engine = PolicyEngine()
+    scope = _scope(profile="read-only")
+    approvals = ApprovalEngine(prompt=lambda req: "s")
+
+    def check(command: str):
+        d = engine.decide(CAPABILITY_SHELL, scope, command=command)
+        assert d.action is PolicyAction.ASK, command
+        return approvals.check(
+            ApprovalRequest(
+                capability=d.capability,
+                description=d.reason,
+                target=d.target,
+                session_id="s1",
+                rule_id=d.rule_id,
+                reusable=d.reusable,
+                choices=d.choices,
+                binding_mode=d.binding_mode,
+            )
+        )
+
+    first = engine.decide(CAPABILITY_SHELL, scope, command="pytest -q")
+    assert first.rule_id == "read_only_tests:pytest"
+    assert first.choices == ("deny", "allow_once", "allow_session")
+    assert check("pytest -q").granted
+    approvals._prompt = lambda req: "n"
+    assert check("python -m pytest tests/unit -x").granted
+    assert not check("npm test").granted  # another runner is asked again
+    assert not check("npm run build").granted  # anything else stays exact
