@@ -347,8 +347,14 @@ def test_the_mother_opens_a_child_with_the_tool(server, tmp_path, routed) -> Non
         ),
         ModelResponse(content="Abierta.", stop_reason=StopReason.END_TURN),
     ]
+    two = server._services.models.add("fake", "fake-model-2", "fake-two")
+    server._services.sessions.set_model(mother, two.id)
     started = server.handle_line(
-        _req("t", "session.turn.start", {"session_id": mother, "message": "hazlo en otra sesión"})
+        _req(
+            "t",
+            "session.turn.start",
+            {"session_id": mother, "message": "hazlo en otra sesión", "reasoning_effort": "high"},
+        )
     )
     assert started["ok"], started
     _collect_until(server, mother)
@@ -356,6 +362,11 @@ def test_the_mother_opens_a_child_with_the_tool(server, tmp_path, routed) -> Non
     assert len(rows) == 1 and rows[0].origin == "start"
     child = rows[0].child_session_id
     assert _wait(lambda: _idle(server, child) and _idle(server, mother))
+    # The child thinks as hard as the turn that opened it, with its mother's model
+    # (H-08), and the mother is told to end her turn instead of polling it.
+    assert routed.requests[child][0].reasoning_effort == "high"
+    assert server._services.sessions.show(child).model_id == two.id
+    assert "its report wakes you here" in _text(routed.requests[mother][1])
 
 
 def _offer_call(title="Migrar pagos", prompt="Migra el módulo de pagos a la API nueva."):

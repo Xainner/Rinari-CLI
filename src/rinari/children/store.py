@@ -192,7 +192,8 @@ class ChildStore:
         if not rows:
             return None
         lines = [
-            "Child sessions you opened (separate conversations; a report is a claim, check it):"
+            "Child sessions you opened (separate conversations; one working reports here on "
+            "its own, so do not poll it; a report is a claim, check it):"
         ]
         for child in rows[-6:]:
             title = titles.get(child.child_session_id) or child.child_session_id

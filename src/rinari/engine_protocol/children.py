@@ -86,8 +86,12 @@ class ChildSessions:
         isolation: str = "auto",
         done_when: str = "",
         external_content: bool = False,
+        reasoning_effort: str | None = None,
     ) -> dict[str, Any]:
-        """Open a child of `parent_session_id` and start its brief."""
+        """Open a child of `parent_session_id` and start its brief.
+
+        `reasoning_effort` is the mother's turn's: the child thinks as hard
+        as the turn that opened it, with the mother's model."""
         title = " ".join(str(title or "").split())[:80]
         prompt = str(prompt or "").strip()
         if len(title) < 3 or len(prompt) < 10:
@@ -133,6 +137,15 @@ class ChildSessions:
 
                 # An agent's child works for the same agent and team.
                 inherit_agency(self._services.ctx, parent, record)
+                if parent.model_id and (record.provider_id, record.model_id) != (
+                    parent.provider_id,
+                    parent.model_id,
+                ):
+                    # A new session takes the global selection: the child keeps
+                    # the model its mother uses.
+                    record = sessions.show(record.id)
+                    record.provider_id, record.model_id = parent.provider_id, parent.model_id
+                    repo.update(record)
             worktree, same_folder_reason = self._worktree_for(root, isolation, title, working)
             if worktree is not None:
                 record = sessions.show(record.id)
@@ -160,6 +173,7 @@ class ChildSessions:
         turn = self._turns.start_turn(
             record.id,
             message,
+            reasoning_effort,
             display_message=prompt,
             origin={
                 "kind": "user",
@@ -174,6 +188,11 @@ class ChildSessions:
             **child.as_dict(),
             "title": title,
             "turn_id": turn.get("turn_id") if isinstance(turn, dict) else None,
+            # Mothers polled their child with session.children and git (H-08).
+            "note": (
+                "The child is working. End your turn now unless you have other work: its "
+                "report wakes you here. Do not poll it with session.children or git."
+            ),
         }
 
     def _worktree_for(
@@ -339,6 +358,7 @@ class ChildSessions:
                 isolation=str(args.get("isolation") or "auto"),
                 done_when=str(args.get("done_when") or "").strip()[:500],
                 external_content=bool(getattr(turn_state, "external_content", False)),
+                reasoning_effort=getattr(turn, "reasoning_effort", None),
             )
         if tool == "session.offer":
             return self.offer(turn, args, ctx)
@@ -398,6 +418,7 @@ class ChildSessions:
                 isolation=isolation,
                 done_when=done_when,
                 external_content=bool(getattr(turn_state, "external_content", False)),
+                reasoning_effort=getattr(turn, "reasoning_effort", None),
             )
             return {"decision": "new_session", **child}
         if choice == "here":
