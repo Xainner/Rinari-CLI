@@ -391,3 +391,23 @@ def test_a_document_spec_can_be_a_workspace_file(project, monkeypatch) -> None:
 
     assert documents._spec({"spec_uri": "ventas-spec.json"}, ctx) == {"title": "Ventas"}
     assert documents._spec({"spec_uri": str(spec_file)}, ctx) == {"title": "Ventas"}
+
+
+def test_the_wire_schema_of_shell_exec_says_which_key_is_needed() -> None:
+    """The root oneOf is dropped on the wire, so models sent `{}` (H-15): each
+    alternative now says it is needed unless the other is given."""
+    from rinari.tools.native.shell import shell_tools
+    from rinari.tools.schema import validate_against, wire_input_schema
+
+    (tool,) = [t for t in shell_tools() if t.name == "shell.exec"]
+    wire = wire_input_schema(tool.input_schema)
+    assert "oneOf" not in wire and "required" not in wire
+    command = wire["properties"]["command"]["description"]
+    argv = wire["properties"]["argv"]["description"]
+    assert command.startswith("The command line to run.")
+    assert "Required unless argv is given; never both." in command
+    assert "Required unless command is given; never both." in argv
+    assert wire_input_schema(wire)["properties"]["command"]["description"] == command
+    # The original still validates the alternatives.
+    assert validate_against(tool.input_schema, {})
+    assert validate_against(tool.input_schema, {"command": "git status"}) == []
