@@ -102,3 +102,50 @@ def test_reading_heads_never_starts_a_process(tmp_path: Path, monkeypatch) -> No
     monkeypatch.setattr(subprocess, "Popen", refuse)
     _repo(tmp_path, "ref: refs/heads/main\n")
     assert git_head.HeadCache().get(tmp_path).branch == "main"
+
+
+def _git(cwd: Path, *args: str) -> str:
+    return subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+            *args,
+        ],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def test_a_branch_has_its_commit_from_loose_or_packed_refs(tmp_path: Path) -> None:
+    """sha_short was filled only for a detached HEAD (H-17)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    (repo / "a.txt").write_text("a", encoding="utf-8")
+    _git(repo, "add", "a.txt")
+    _git(repo, "commit", "-q", "-m", "first")
+    first = _git(repo, "rev-parse", "HEAD")
+    assert read_head(repo) == GitHead(branch="main", sha_short=first[:7])
+    cache = HeadCache()
+    assert cache.get(repo).sha_short == first[:7]
+    # A commit moves the branch without touching HEAD: the cache sees it.
+    (repo / "a.txt").write_text("b", encoding="utf-8")
+    _git(repo, "commit", "-q", "-am", "second")
+    second = _git(repo, "rev-parse", "HEAD")
+    assert cache.get(repo).sha_short == second[:7]
+    # Packed refs only (after gc or a clone).
+    _git(repo, "pack-refs", "--all")
+    assert not (repo / ".git" / "refs" / "heads" / "main").exists()
+    assert read_head(repo).sha_short == second[:7]
+    # A worktree's branch lives in the main repository.
+    _git(repo, "worktree", "add", "-q", "-b", "topic", str(tmp_path / "wt"))
+    assert read_head(tmp_path / "wt") == GitHead(branch="topic", sha_short=second[:7])
