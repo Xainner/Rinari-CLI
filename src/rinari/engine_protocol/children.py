@@ -173,7 +173,7 @@ class ChildSessions:
         turn = self._turns.start_turn(
             record.id,
             message,
-            reasoning_effort,
+            reasoning_effort=reasoning_effort,
             display_message=prompt,
             origin={
                 "kind": "user",
