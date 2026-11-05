@@ -633,3 +633,17 @@ def test_a_one_time_task_at_a_past_time_is_refused_and_points_to_cancel(services
         )
     # Switched off, a past time is no harm: nothing would run anyway.
     assert services.schedules.get(task["id"])["schedule"] == {"kind": "interval", "minutes": 30}
+
+
+def test_schedule_update_takes_its_fields_at_the_top_level_too(server) -> None:
+    """`{"task_id": ..., "enabled": false}` without `patch` was refused (H-21)."""
+    session_id = _ok(_call(server, "session.create", {"chat": True}))["session"]["id"]
+    task = _here(server, session_id, name="Plana")
+    flat = _ok(_call(server, "schedule.update", {"task_id": task["id"], "enabled": False}))
+    assert flat["task"]["enabled"] is False
+    canonical = _call(
+        server, "schedule.update", {"task_id": task["id"], "patch": {"name": "Anidada"}}
+    )
+    assert _ok(canonical)["task"]["name"] == "Anidada"
+    empty = _call(server, "schedule.update", {"task_id": task["id"]})
+    assert empty["ok"] is False and "patch" in empty["error"]["message"]

@@ -942,6 +942,10 @@ class ScheduleRunner:
     def update(self, params: dict[str, Any]) -> dict[str, Any]:
         task = self._task(params.get("task_id"))
         patch = params.get("patch")
+        if patch is None:
+            # `patch` is the canonical form; the editable fields at the top
+            # level (`{"task_id": ..., "enabled": false}`) mean the same.
+            patch = {key: value for key, value in params.items() if key != "task_id"} or None
         if not isinstance(patch, dict):
             raise EngineProtocolError(INVALID_PARAMS, "Param 'patch' must be an object.")
         try:
