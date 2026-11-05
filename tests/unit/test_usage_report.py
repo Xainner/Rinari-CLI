@@ -241,3 +241,24 @@ def test_large_outputs_still_in_the_context_are_a_warning(server, tmp_path) -> N
     _event(server, sid, "tool.completed", {"tool": "fs.read", "observation": "small"})
     report = _call(server, "usage.report", {"scope": "session", "ref": sid})["result"]["report"]
     assert {"kind": "large_outputs", "count": 1, "max": 30_002} in report["warnings"]
+
+
+def test_a_turn_with_an_outsized_number_of_tool_calls_is_a_warning(server, tmp_path) -> None:
+    from rinari.engine_protocol.usage_report import TOOL_HEAVY_CALLS
+
+    created = _call(server, "session.create", {"cwd": str(tmp_path), "chat": True})
+    sid = created["result"]["session"]["id"]
+    calls = itertools.count()
+    for turn, many in (("t1", TOOL_HEAVY_CALLS + 5), ("t2", TOOL_HEAVY_CALLS), ("t3", 3)):
+        for _ in range(many):
+            payload = {"tool": "fs.read", "ok": True, "tool_call_id": f"h{next(calls)}"}
+            _event(server, sid, "tool.completed", payload, turn)
+    report = _call(server, "usage.report", {"scope": "session", "ref": sid})["result"]["report"]
+    assert {"kind": "tool_heavy", "count": 2, "max": TOOL_HEAVY_CALLS + 5} in report["warnings"]
+    quiet = _call(server, "session.create", {"cwd": str(tmp_path), "chat": True})
+    other = quiet["result"]["session"]["id"]
+    _event(
+        server, other, "tool.completed", {"tool": "fs.read", "ok": True, "tool_call_id": "q"}, "q1"
+    )
+    report = _call(server, "usage.report", {"scope": "session", "ref": other})["result"]["report"]
+    assert all(warning["kind"] != "tool_heavy" for warning in report["warnings"])

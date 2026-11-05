@@ -24,6 +24,10 @@ SCOPES = ("session", "today", "project", "all", "agent", "team", "agency")
 REPORT_EVENT = "usage.reported"
 #: A conversation keeps its latest snapshots, not an unbounded list.
 MAX_SAVED = 50
+#: Tool calls in one turn from which the report warns (`tool_heavy`): a task
+#: that needs this many usually ran a verify chain or read file by file what
+#: one query or one search would answer, and each call resends the context.
+TOOL_HEAVY_CALLS = 40
 
 _TERMINAL = ("turn.completed", "turn.failed", "turn.cancelled", "turn.stopped")
 
@@ -189,14 +193,20 @@ def build_report(
 
     tools: Counter[str] = Counter()
     failed = 0
-    ended = [
-        (row["type"], payload)
-        for row, payload in _events(services, tool_events.ENDED, sessions, since)
-    ]
+    ended = []
+    turn_of: dict[str, tuple[str, str]] = {}
+    for row, payload in _events(services, tool_events.ENDED, sessions, since):
+        ended.append((row["type"], payload))
+        call = str(payload.get("tool_call_id") or "")
+        if call and row["turn_id"] and call not in turn_of:
+            turn_of[call] = (str(row["session_id"]), str(row["turn_id"]))
+    per_turn: Counter[tuple[str, str]] = Counter()
     for end in tool_events.ends(ended):
         tools[str(end["tool"])] += 1
         if not end["ok"]:
             failed += 1
+        if end["tool_call_id"] in turn_of:
+            per_turn[turn_of[end["tool_call_id"]]] += 1
     total_tools = sum(tools.values())
 
     image_counts: Counter[str] = Counter()
@@ -236,6 +246,9 @@ def build_report(
             )
     if loops:
         warnings.append({"kind": "loops", "count": loops})
+    heavy = [count for count in per_turn.values() if count >= TOOL_HEAVY_CALLS]
+    if heavy:
+        warnings.append({"kind": "tool_heavy", "count": len(heavy), "max": max(heavy)})
     if scope == "session" and sessions:
         large = _large_outputs_in_context(services, sessions[0])
         if large:
