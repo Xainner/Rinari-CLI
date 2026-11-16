@@ -74,6 +74,7 @@
     "mcpToolPermission",
     "mcpToolPermissions",
     "soulSettings",
+    "presenceState",
     "networkSettings",
     "networkEffective",
     "networkTestResult",
@@ -425,6 +426,8 @@
         "soul.get_effective",
         "soul.settings.get",
         "soul.settings.set",
+        "presence.get",
+        "presence.set",
         "session.soul.set",
         "session.soul.clear",
         "mcp.reconnect",
@@ -1122,6 +1125,7 @@
             "note",
             "fork",
             "schedule",
+            "presence",
             null
           ]
         },
@@ -4533,6 +4537,30 @@
         "results",
         "effective"
       ]
+    },
+    "presenceState": {
+      "type": "object",
+      "description": "presence.get/set: Presencia, the one continuous conversation. session is null while the mode is off.",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "session": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/sessionSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "enabled",
+        "session"
+      ],
+      "additionalProperties": false
     },
     "soulSettings": {
       "type": "object",

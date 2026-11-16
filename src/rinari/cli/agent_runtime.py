@@ -198,6 +198,18 @@ def _runtime_facts(services: ServiceContainer, record: SessionRecord) -> dict[st
         "timezone": f"{now.tzname() or 'local'} (UTC{offset[:3]}:{offset[3:]})",
         "os": f"{platform.system()} {platform.release()}".strip(),
     }
+    if getattr(record, "lineage_kind", None) == "presence":
+        # Presencia talks through the day: the part of it, not the minute, so the
+        # prompt (and the provider's cache) changes four times a day at most.
+        facts["time_of_day"] = (
+            "night"
+            if now.hour < 6
+            else "morning"
+            if now.hour < 12
+            else "afternoon"
+            if now.hour < 19
+            else "evening"
+        )
     if os.name == "nt":
         facts["shell"] = (
             "shell.exec `command` runs in cmd.exe: chain with &&, not a semicolon; "
@@ -293,7 +305,11 @@ def _voice_for(services: ServiceContainer, record: SessionRecord) -> str:
     agent = _agency_agent(services, record)
     if agent is not None and not _agent_soul(services, agent, record):
         return ""
-    return _voice_text(services)
+    from rinari import presence
+
+    # Presencia: the human register sits with the level, and holds at every one.
+    parts = (_voice_text(services), presence.register_text(record))
+    return "\n\n".join(part for part in parts if part)
 
 
 def _agent_identity(services: ServiceContainer, record: SessionRecord) -> str | None:
@@ -307,7 +323,10 @@ def _agent_identity(services: ServiceContainer, record: SessionRecord) -> str | 
     """
     agent = _agency_agent(services, record)
     if agent is None:
-        return None
+        from rinari import presence
+
+        # Presencia: what this conversation is among the owner's chats.
+        return presence.identity_text(record)
     lines = [
         "## Who you are",
         f"You are «{agent['name']}», an agent of the owner's Rinari Agency. You are not "

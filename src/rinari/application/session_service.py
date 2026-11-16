@@ -687,6 +687,7 @@ class SessionService:
         rinari_profile_id: str | None = None,
         agent_id: str | None = None,
         exclude_agents: bool = False,
+        exclude_lineage: str | None = None,
     ) -> list[SessionRecord]:
         records = self._ctx.session_repo.list(
             kind=kind,
@@ -696,6 +697,7 @@ class SessionService:
             rinari_profile_id=rinari_profile_id,
             agent_id=agent_id,
             exclude_agents=exclude_agents,
+            exclude_lineage=exclude_lineage,
         )
         # Older Windows transports decoded UTF-8 titles with the ANSI locale.
         # Repair only the known generated title; never guess at user-authored text.
