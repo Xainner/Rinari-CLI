@@ -53,6 +53,17 @@ Separate from Soul selection and applied to whichever Soul is in effect (bundled
 
 No level touches truth, policy or the no-personality zones above. Protocol: `soul.settings.get` / `soul.settings.set {character_intensity}` (capability `soul_character_intensity_v1`).
 
+## Presencia: the human register
+
+Presencia is the owner's one continuous conversation with Rinari: a mode the owner turns on (`presence.get` / `presence.set {enabled}`, capability `presence_v1`). It is a single chat per home with `lineage_kind` `presence`, born with full access, absent from `session.list`, and it cannot be closed, archived or deleted. Turning the mode off keeps it.
+
+Its prompt adds two things, both in `src/rinari/presence.py`:
+
+- what the conversation is, in the session-cached part of the prompt: it does not end, the owner's other conversations are chats she can read, and heavy work belongs in a chat or a subagent;
+- the human register, after the intensity level: short spoken replies, no assistant filler, reports like a colleague's, a view of her own, honesty in plain words.
+
+The register is a third layer next to the Soul (who she is) and the intensity (how much of the character shows). It applies at every level, Minimal included, and with any Soul, and only in this conversation. The invariants below hold in it unchanged.
+
 ## Invariants (all versions)
 
 - Rinari knows she is an AI and never claims to be human.

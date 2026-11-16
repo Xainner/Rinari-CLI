@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from rinari import presence
 from rinari.application.project_service import default_permission
 from rinari.application.provider_service import AddProviderInput
 from rinari.application.services import ServiceContainer
@@ -542,6 +543,8 @@ class EngineServer:
         self._dispatcher.register("soul.settings.get", self._soul_settings_get)
         self._dispatcher.register("soul.settings.set", self._soul_settings_set)
         self._dispatcher.register("session.soul.set", self._session_soul_set)
+        self._dispatcher.register("presence.get", self._presence_get)
+        self._dispatcher.register("presence.set", self._presence_set)
         self._dispatcher.register("session.soul.clear", self._session_soul_clear)
         # MCP connections (connectors plan, C2): the Engine connects servers in
         # the background; each change of state reaches the clients as an event.
@@ -958,6 +961,8 @@ class EngineServer:
             rinari_profile_id=self._profile_filter(params),
             agent_id=agent_id,
             exclude_agents=agent_id is None,
+            # Presencia is not one of the chats: clients reach it with presence.get.
+            exclude_lineage=presence.LINEAGE_PRESENCE,
         )
         if not params.get("include_closed", False) and state is None:
             records = [
@@ -979,6 +984,7 @@ class EngineServer:
     def _session_archive(self, params: dict[str, Any]) -> dict[str, Any]:
         ref = self._need_str(params, "ref")
         record = self._services.sessions.show(ref)
+        self._keep_presence(record)
         if self._turns.has_active_turn(record.id):
             raise EngineProtocolError(
                 TURN_RUNNING,
@@ -1008,6 +1014,7 @@ class EngineServer:
         if not isinstance(ref, str) or not ref:
             raise EngineProtocolError(INVALID_PARAMS, "Param 'ref' must be a non-empty string.")
         record = self._services.sessions.show(ref)
+        self._keep_presence(record)
         if self._turns.has_active_turn(record.id):
             raise EngineProtocolError(
                 TURN_RUNNING,
@@ -1036,6 +1043,7 @@ class EngineServer:
         if not isinstance(cascade, bool):
             raise EngineProtocolError(INVALID_PARAMS, "Param 'cascade' must be a boolean.")
         record = self._services.sessions.show(ref)
+        self._keep_presence(record)
         if self._turns.has_active_turn(record.id):
             raise EngineProtocolError(
                 TURN_RUNNING,
@@ -1841,7 +1849,7 @@ class EngineServer:
         # attempting to recreate or re-delete the missing conversation.
         control = self._services.memory.conversation_control(session_id)
         try:
-            self._services.sessions.show(session_id)
+            self._keep_presence(self._services.sessions.show(session_id))
         except NotFoundError:
             if control.get("mode") == "deleted":
                 return {
@@ -3437,6 +3445,58 @@ class EngineServer:
             for row in rows
         ]
         return {"session_id": record.id, "events": events, "has_more": len(events) == limit}
+
+    # -- Presencia: the one conversation that never ends -------------------------
+
+    @staticmethod
+    def _keep_presence(record: Any) -> None:
+        if presence.is_presence(record):
+            raise EngineProtocolError(
+                "CONFLICT",
+                "Presencia's conversation cannot be closed, archived or deleted; "
+                "turn the mode off instead.",
+                details={"session_id": record.id},
+            )
+
+    def _presence_session(self) -> Any:
+        """The conversation, created the first time the mode is on."""
+        ctx = self._services.ctx
+        known = presence.session_id(ctx)
+        if known is not None:
+            try:
+                record = self._services.sessions.show(known)
+            except NotFoundError:
+                record = None
+            if record is not None and presence.is_presence(record):
+                return record
+        created = self._session_create(
+            {
+                "chat": True,
+                "title": presence.TITLE,
+                "permission_profile": presence.PERMISSION_PROFILE,
+            }
+        )["session"]["id"]
+        ctx.session_repo.set_lineage(created, None, presence.LINEAGE_PRESENCE, None)
+        presence.remember_session(ctx, created)
+        return self._services.sessions.show(created)
+
+    def _presence_view(self) -> dict[str, Any]:
+        on = presence.enabled(self._services.ctx)
+        return {
+            "enabled": on,
+            "session": session_to_dict(self._presence_session()) if on else None,
+        }
+
+    def _presence_get(self, params: dict[str, Any]) -> dict[str, Any]:
+        _ = params
+        return {"presence": self._presence_view()}
+
+    def _presence_set(self, params: dict[str, Any]) -> dict[str, Any]:
+        value = (params or {}).get("enabled")
+        if not isinstance(value, bool):
+            raise EngineProtocolError(INVALID_PARAMS, "Param 'enabled' must be a boolean.")
+        presence.set_enabled(self._services.ctx, value)
+        return {"presence": self._presence_view()}
 
     # -- souls ----------------------------------------------------------------
 

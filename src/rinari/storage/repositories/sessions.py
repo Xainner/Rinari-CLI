@@ -117,6 +117,7 @@ class SessionRepository:
         rinari_profile_id: str | None = None,
         agent_id: str | None = None,
         exclude_agents: bool = False,
+        exclude_lineage: str | None = None,
     ) -> list[SessionRecord]:
         sql = "SELECT * FROM sessions WHERE 1=1"
         params: list[object] = []
@@ -128,6 +129,9 @@ class SessionRepository:
             params.append(agent_id)
         elif exclude_agents:
             sql += " AND agent_id IS NULL"
+        if exclude_lineage is not None:
+            sql += " AND (lineage_kind IS NULL OR lineage_kind != ?)"
+            params.append(exclude_lineage)
         if kind is not None:
             sql += " AND kind = ?"
             params.append(kind)

@@ -327,6 +327,10 @@ CAPABILITIES: dict[str, bool] = {
     # soul.settings.get/set: character intensity (minimal | balanced | full),
     # separate from Soul selection; bundled default Soul 4.0.
     "soul_character_intensity_v1": True,
+    # presence.get/set: Presencia, the one continuous conversation with Rinari.
+    # It is a chat with lineage_kind "presence", absent from session.list, that
+    # cannot be closed, archived or deleted.
+    "presence_v1": True,
 }
 
 
