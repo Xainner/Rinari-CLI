@@ -333,6 +333,9 @@ class ScheduleRunner:
             ).start()
             self._emit("schedule.run.started", task, run_id)
             return run_id
+        if task["kind"] == "flow":
+            self._run_flow(task, run_id)
+            return run_id
         if task["kind"] == "command":
             threading.Thread(
                 target=self._run_command,
@@ -472,6 +475,35 @@ class ScheduleRunner:
             summary=summary,
             reason=reason,
             quiet=True if quiet else None,
+        )
+
+    def _run_flow(self, task: dict[str, Any], run_id: str) -> None:
+        """A «flow» task (Rinari Agency): start a team's flow, no model.
+
+        The flow's steps are the work; this only leaves its first errands on
+        the board, the same as the owner pressing «Run». A run that cannot
+        start (the team or flow is gone, archived or still missing a piece)
+        fails with the reason, never silently.
+        """
+        from rinari.agency import AgencyError
+
+        spec = task.get("flow") or {}
+        board = getattr(self._services.teams, "board", None)
+        try:
+            if board is None:
+                raise AgencyError("The Agency is not running.")
+            team = self._services.teams.get(spec.get("team_id"))
+            run = board.work.start(team, spec.get("flow_id"), spec.get("input") or "")
+        except (AgencyError, LookupError) as exc:
+            self._finish(task, run_id, "failed", reason=str(exc)[:500])
+            return
+        except Exception as exc:  # never a silent failure
+            message = getattr(exc, "message", None) or str(exc)
+            self._finish(task, run_id, "failed", reason=message[:500])
+            return
+        flow = board.work.flow_name(run.get("flow_id"))
+        self._finish(
+            task, run_id, "completed", summary=f"Started the flow «{flow}» (run {run['id']})."
         )
 
     def _run_tool(self, task: dict[str, Any], run_id: str, started: float) -> None:

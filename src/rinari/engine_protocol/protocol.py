@@ -331,6 +331,15 @@ CAPABILITIES: dict[str, bool] = {
     # It is a chat with lineage_kind "presence", absent from session.list, that
     # cannot be closed, archived or deleted.
     "presence_v1": True,
+    # «Arma tu equipo con Rinari»: agency.team.draft turns a description into a
+    # proposal (or up to three questions) with the default or a chosen model,
+    # answered by agency.team_draft.ready / .failed; agency.team.check
+    # normalizes an edited proposal; agency.team.apply creates it all at once
+    # (agents, reuse of the owner's own, team, chief, project, trusted work
+    # folders, flow, routines) and undoes it on failure; agency.team.setup.get
+    # / .resolve keep its «To get started» list. Routines of kind "flow" start
+    # a flow with no model.
+    "agency_team_builder_v1": True,
 }
 
 

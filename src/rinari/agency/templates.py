@@ -2,9 +2,12 @@
 
 A template is data shipped with the Engine (`assets/agency_templates/*.json`):
 a team's name and purpose and its agents' names, jobs, instructions and
-permission mode, in every language it is written in. Never connectors,
-accounts, budgets nor models: those are the owner's to give once the team
-exists. `agency.team.from_template` turns one into agents and a team.
+permission mode, in every language it is written in; and (v2) its manual and
+its flow. Never connectors, accounts, budgets nor models: those are the
+owner's to give once the team exists. Each template is also rendered as a
+proposal (`plan`, the format of «Arma tu equipo con Rinari»), which the owner
+reviews and creates with `agency.team.apply`; `agency.team.from_template`
+still turns one into agents and a team directly.
 """
 
 from __future__ import annotations
@@ -61,6 +64,14 @@ def _check(data: dict[str, Any], source: str) -> None:
                 raise ValueError(f"{source}: an agent's role is too long")
             if len(card.get("instructions") or "") > MAX_INSTRUCTIONS:
                 raise ValueError(f"{source}: an agent's instructions are too long")
+        steps = data.get("flow") or []
+        texts_steps = (text.get("flow") or {}).get("steps") or []
+        if len(texts_steps) != len(steps):
+            raise ValueError(f"{source}: the {language} flow does not match its steps")
+    for step in data.get("flow") or []:
+        who = step.get("agents")
+        if not who or not all(isinstance(i, int) and 0 <= i < len(agents) for i in who):
+            raise ValueError(f"{source}: a flow step names an agent that is not there")
 
 
 def _language(raw: Any, texts: dict[str, Any]) -> str:
@@ -92,6 +103,57 @@ def _render(data: dict[str, Any], language: Any) -> dict[str, Any]:
         "languages": sorted(texts),
         "team": {"name": text["name"], "purpose": text.get("purpose") or ""},
         "agents": agents,
+        "plan": _plan(data, text, agents),
+    }
+
+
+def _plan(data: dict[str, Any], text: dict[str, Any], agents: list[dict[str, Any]]) -> dict:
+    """The template as a proposal: what the owner reviews before creating it. The
+    first agent leads (each template's first agent is written as its lead)."""
+    keys = [f"agent-{index + 1}" for index in range(len(agents))]
+    flow_text = text.get("flow") or {}
+    steps = [
+        {
+            "name": words.get("name") or str(index + 1),
+            "agents": [keys[i] for i in base["agents"]],
+            "instructions": words.get("instructions") or "",
+            "approval": base.get("approval") or "auto",
+        }
+        for index, (base, words) in enumerate(
+            zip(data.get("flow") or [], flow_text.get("steps") or [], strict=True)
+        )
+    ]
+    return {
+        "team": {
+            "name": text["name"],
+            "purpose": text.get("purpose") or "",
+            "manual": text.get("manual") or "",
+            "chief": keys[0],
+            "project_folder": None,
+            "work_folders": [],
+        },
+        "agents": [
+            {
+                "key": key,
+                "name": agent["name"],
+                "role": agent["role"],
+                "instructions": agent["instructions"],
+                "permission_profile": agent["permission_profile"],
+                "uses": [],
+            }
+            for key, agent in zip(keys, agents, strict=True)
+        ],
+        "flow": (
+            {
+                "name": flow_text.get("name") or text["name"],
+                "description": flow_text.get("description") or "",
+                "steps": steps,
+            }
+            if steps
+            else None
+        ),
+        "routines": [],
+        "assumptions": [],
     }
 
 

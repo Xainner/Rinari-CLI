@@ -705,6 +705,8 @@ class AgencyTeams:
             raise EngineProtocolError(INVALID_PARAMS, "Param 'team' must be an object.")
         profile = self._server._profile_param(params) or self._services.rinari_profiles.active_id()
         self._check_project(raw.get("project_id"), profile)
+        if raw.get("folders"):
+            raw = {**raw, "folders": self.trust_folders(raw.get("folders"))}
         return {"team": self._guard(lambda: self.teams.create(raw, profile))}
 
     def update(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -714,11 +716,57 @@ class AgencyTeams:
             raise EngineProtocolError(INVALID_PARAMS, "Param 'patch' must be an object.")
         if "project_id" in patch:
             self._check_project(patch.get("project_id"), team["rinari_profile_id"])
+        if patch.get("folders"):
+            patch = {**patch, "folders": self.trust_folders(patch.get("folders"))}
         updated = self._guard(lambda: self.teams.update(team["id"], patch))
         if (updated.get("project_id") or None) != (team.get("project_id") or None):
             self._rehome_posts(updated)
         self.tick()  # a new chief takes the errands left to nobody
         return {"team": updated}
+
+    def trust_folders(self, folders: Any, *, create: bool = False) -> list[str]:
+        """A team's work folders, trusted: the owner naming them is the consent.
+
+        Each must be a full path to a folder (made first with `create`), never
+        the user's home, a drive's root or Rinari's own data folder. Returns the
+        canonical paths; the team's posts may write in them without asking
+        while they stay trusted.
+        """
+        from pathlib import Path
+
+        if not isinstance(folders, list) or not all(isinstance(item, str) for item in folders):
+            raise EngineProtocolError(INVALID_PARAMS, "folders must be a list of folder paths.")
+        user_home = Path(self._server._user_home or Path.home()).expanduser().resolve()
+        rinari_home = Path(self._services.ctx.home).expanduser().resolve()
+        out: list[str] = []
+        for raw in folders:
+            path = Path(raw.strip()).expanduser()
+            if not path.is_absolute():
+                raise EngineProtocolError(
+                    INVALID_PARAMS, f"A work folder must be a full path: {raw}"
+                )
+            if create:
+                try:
+                    path.mkdir(parents=True, exist_ok=True)
+                except OSError as exc:
+                    raise EngineProtocolError(
+                        INVALID_PARAMS, f"Cannot create the folder {path}: {exc.strerror or exc}"
+                    ) from None
+            if not path.is_dir():
+                raise EngineProtocolError(INVALID_PARAMS, f"Not a folder: {path}")
+            resolved = path.resolve()
+            if resolved == user_home or resolved.parent == resolved:
+                raise EngineProtocolError(
+                    INVALID_PARAMS, f"{resolved} is too broad to be a work folder."
+                )
+            if resolved == rinari_home or rinari_home in resolved.parents:
+                raise EngineProtocolError(
+                    INVALID_PARAMS, "Rinari's own data folder cannot be a work folder."
+                )
+            self._services.trust.add(resolved)
+            if str(resolved) not in out:
+                out.append(str(resolved))
+        return out
 
     def _check_project(self, project_id: Any, profile: str) -> None:
         """A team works only in a live project of its own profile."""
@@ -792,7 +840,12 @@ class AgencyTeams:
         tied = []
         for task in self._services.ctx.schedule_repo.list():
             deliver = task.get("deliver_to") or {}
-            if task.get("session_id") in posts or deliver.get("team_id") == team_id:
+            starts = task.get("flow") or {}
+            if (
+                task.get("session_id") in posts
+                or deliver.get("team_id") == team_id
+                or starts.get("team_id") == team_id
+            ):
                 tied.append(task)
         return tied
 

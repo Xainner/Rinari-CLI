@@ -514,6 +514,13 @@ def _agency_place(services: ServiceContainer, record: SessionRecord, agent: dict
             f"Your team works in the project folder {record.project_root_snapshot}: a relative "
             "path in an errand or in the office is inside it."
         )
+    folders = _team_folders(services, record)
+    if folders:
+        lines.append(
+            "Your team's work folders, where you can write without asking: "
+            + ", ".join(str(folder) for folder in folders)
+            + ". Leave there what the manual or an errand says goes there."
+        )
     lines.append(
         "When you produce something new for the owner (a file, an image, a video), show it to "
         "them with file.present, besides saying it in the office; work that made no new file "
@@ -1151,6 +1158,7 @@ def _sandbox_for(
     # Subdirectories of home are fine candidate workspaces (normal project
     # locations); only $HOME itself is locked (AGENTS.md 13).
     write_roots: tuple[Path, ...] = () if cwd == home else (cwd,)
+    write_roots += tuple(root for root in extra_roots if root.resolve() != home)
     return FilesystemSandbox(read_root=user_home, write_roots=write_roots, unrestricted_reads=True)
 
 
@@ -1159,6 +1167,45 @@ def _extra_roots(services: ServiceContainer, record: SessionRecord) -> tuple[Pat
     if record.kind != "PROJECT" or not record.project_id:
         return ()
     return trusted_extra_folders(services, record.project_id)
+
+
+def _team_folders(services: ServiceContainer, record: SessionRecord) -> tuple[Path, ...]:
+    """A post's team work folders («Arma tu equipo») that exist and are trusted.
+
+    Only a post has them (a conversation of an agent in a team). Like a
+    project's extra folders, each one answers to its own trust: a folder the
+    owner stops trusting is no longer writable.
+    """
+    team_id = getattr(record, "team_id", None)
+    if not team_id or getattr(record, "agent_id", None) is None:
+        return ()
+    try:
+        repo = getattr(services.ctx, "team_repo", None)
+        team = repo.get(team_id) if repo is not None else None
+    except Exception:
+        return ()
+    roots: list[Path] = []
+    for raw in (team or {}).get("folders") or []:
+        path = Path(raw)
+        if not path.is_dir():
+            continue
+        try:
+            trusted = services.trust.status(path).state == "trusted"
+        except Exception:
+            trusted = False
+        if trusted:
+            roots.append(path)
+    return tuple(roots)
+
+
+def _work_roots(services: ServiceContainer, record: SessionRecord) -> tuple[Path, ...]:
+    """Where a conversation can write besides its own folder: its project's trusted
+    extra folders and, for a post, its team's trusted work folders."""
+    seen: list[Path] = []
+    for path in (*_extra_roots(services, record), *_team_folders(services, record)):
+        if path not in seen:
+            seen.append(path)
+    return tuple(seen)
 
 
 def trusted_extra_folders(services: ServiceContainer, project_id: str) -> tuple[Path, ...]:
@@ -1272,14 +1319,16 @@ def build_agent_session(
     root = Path(record.project_root_snapshot) if record.project_root_snapshot else None
     cwd = Path(record.current_cwd)
     home = user_home if user_home is not None else Path.home()
-    extra_roots = _extra_roots(services, record)
+    extra_roots = _work_roots(services, record)
     sandbox = _sandbox_for(record, home, profile, extra_roots)
     if (
         record.kind == "CHAT"
         and cwd.resolve().is_relative_to((services.ctx.home / "workspaces").resolve())
         and profile is not PermissionProfile.FULL_ACCESS
     ):
-        sandbox = FilesystemSandbox(read_root=cwd, write_roots=(cwd,), unrestricted_reads=True)
+        sandbox = FilesystemSandbox(
+            read_root=cwd, write_roots=(cwd, *extra_roots), unrestricted_reads=True
+        )
     read_profile = _read_profile(record, profile)
     if profile is PermissionProfile.READ_ONLY:
         sandbox = FilesystemSandbox(
@@ -2478,9 +2527,9 @@ def _apply_promotion(session: AgentSession, record: SessionRecord, marker: str) 
         cwd=root,
         project_root=root,
         sandbox=_sandbox_for(
-            record, home, session.context.tool_ctx.profile, _extra_roots(services, record)
+            record, home, session.context.tool_ctx.profile, _work_roots(services, record)
         ),
-        extra_project_roots=_extra_roots(services, record),
+        extra_project_roots=_work_roots(services, record),
         worktree=_ensure_worktree_baseline(services, record),
         lsp=_build_lsp_manager(root),
         validation=services.verification,

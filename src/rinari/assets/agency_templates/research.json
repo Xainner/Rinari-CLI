@@ -1,9 +1,15 @@
 {
   "id": "research",
   "agents": [
-    {"permission_profile": "read-only"},
-    {"permission_profile": "read-only"},
-    {"permission_profile": "workspace"}
+    {
+      "permission_profile": "read-only"
+    },
+    {
+      "permission_profile": "read-only"
+    },
+    {
+      "permission_profile": "workspace"
+    }
   ],
   "texts": {
     "en": {
@@ -25,7 +31,26 @@
           "role": "Compares the findings and writes the report",
           "instructions": "Compare what the sources say, point out where they agree and where they contradict each other, and write a clear report with its sources. Keep facts, estimates and open questions apart. Save the report as a file in your workspace when it is long, and say where."
         }
-      ]
+      ],
+      "manual": "The Lead researcher receives every question, frames it and splits the research. The Scout finds and reads the sources; the Analyst compares the findings and writes the report, citing each source.",
+      "flow": {
+        "name": "Research",
+        "description": "From a question to a report with its sources.",
+        "steps": [
+          {
+            "name": "Question",
+            "instructions": "Frame the question: what must be answered, the scope and what counts as a good source."
+          },
+          {
+            "name": "Sources",
+            "instructions": "Find and read the sources, and note what each says and where."
+          },
+          {
+            "name": "Report",
+            "instructions": "Compare the findings and write the report, citing each source and saying what is still unsure."
+          }
+        ]
+      }
     },
     "es": {
       "name": "Investigación",
@@ -46,7 +71,46 @@
           "role": "Compara los hallazgos y escribe el informe",
           "instructions": "Compara lo que dicen las fuentes, señala dónde coinciden y dónde se contradicen, y escribe un informe claro con sus fuentes. Separa hechos, estimaciones y preguntas abiertas. Si el informe es largo, guárdalo como archivo en tu espacio de trabajo y di dónde."
         }
-      ]
+      ],
+      "manual": "La Investigadora principal recibe cada pregunta, la plantea y reparte la investigación. El Explorador encuentra y lee las fuentes; la Analista compara los hallazgos y escribe el informe citando cada fuente.",
+      "flow": {
+        "name": "Investigación",
+        "description": "De una pregunta a un informe con sus fuentes.",
+        "steps": [
+          {
+            "name": "Pregunta",
+            "instructions": "Plantea la pregunta: qué hay que responder, el alcance y qué cuenta como buena fuente."
+          },
+          {
+            "name": "Fuentes",
+            "instructions": "Encuentra y lee las fuentes, y anota qué dice cada una y dónde."
+          },
+          {
+            "name": "Informe",
+            "instructions": "Compara los hallazgos y escribe el informe citando cada fuente y diciendo qué sigue sin estar claro."
+          }
+        ]
+      }
     }
-  }
+  },
+  "flow": [
+    {
+      "agents": [
+        0
+      ],
+      "approval": "auto"
+    },
+    {
+      "agents": [
+        1
+      ],
+      "approval": "auto"
+    },
+    {
+      "agents": [
+        2
+      ],
+      "approval": "auto"
+    }
+  ]
 }

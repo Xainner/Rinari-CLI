@@ -441,6 +441,8 @@ class AgencyMethods:
                             ChatMessage.user(description.strip()),
                         ),
                         max_tokens=DRAFT_MAX_TOKENS,
+                        # Providers that route by session (OpenCode Go) refuse a call without one.
+                        session_id=job_id,
                     )
                 )
                 draft = parse_draft(response.content or "")

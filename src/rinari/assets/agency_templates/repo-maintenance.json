@@ -1,9 +1,15 @@
 {
   "id": "repo-maintenance",
   "agents": [
-    {"permission_profile": "workspace"},
-    {"permission_profile": "workspace"},
-    {"permission_profile": "read-only"}
+    {
+      "permission_profile": "workspace"
+    },
+    {
+      "permission_profile": "workspace"
+    },
+    {
+      "permission_profile": "read-only"
+    }
   ],
   "texts": {
     "en": {
@@ -25,7 +31,26 @@
           "role": "Reviews changes before they are delivered",
           "instructions": "Review the change you are asked about: correctness first, then tests, then style. Read the diff and the code around it, and say plainly what must change and why. Do not rewrite the change yourself. End with a clear verdict: ready, or what is missing."
         }
-      ]
+      ],
+      "manual": "Triage receives every request and decides what to fix first. The Fixer makes each fix small and runs the project's checks; the Reviewer reviews the change before it is delivered. Work in the team's project.",
+      "flow": {
+        "name": "Fix",
+        "description": "From a problem to a reviewed fix.",
+        "steps": [
+          {
+            "name": "Triage",
+            "instructions": "Find what is broken, how to reproduce it and what to fix first."
+          },
+          {
+            "name": "Fix",
+            "instructions": "Make the smallest fix that solves it and run the project's checks."
+          },
+          {
+            "name": "Review",
+            "instructions": "Review the change: does it fix the problem, break nothing and pass the checks?"
+          }
+        ]
+      }
     },
     "es": {
       "name": "Mantenimiento de repo",
@@ -46,7 +71,46 @@
           "role": "Revisa los cambios antes de entregarlos",
           "instructions": "Revisa el cambio que te piden: primero que sea correcto, luego las pruebas, luego el estilo. Lee el diff y el código de alrededor y di con claridad qué debe cambiar y por qué. No reescribas tú el cambio. Termina con un veredicto claro: listo, o lo que falta."
         }
-      ]
+      ],
+      "manual": "Triaje recibe cada encargo y decide qué arreglar primero. El Arreglador hace cada arreglo pequeño y corre las comprobaciones del proyecto; el Revisor revisa el cambio antes de entregarlo. Se trabaja en el proyecto del equipo.",
+      "flow": {
+        "name": "Arreglo",
+        "description": "De un problema a un arreglo revisado.",
+        "steps": [
+          {
+            "name": "Triaje",
+            "instructions": "Encuentra qué está roto, cómo reproducirlo y qué arreglar primero."
+          },
+          {
+            "name": "Arreglo",
+            "instructions": "Haz el arreglo más pequeño que lo resuelva y corre las comprobaciones del proyecto."
+          },
+          {
+            "name": "Revisión",
+            "instructions": "Revisa el cambio: ¿arregla el problema, no rompe nada y pasa las comprobaciones?"
+          }
+        ]
+      }
     }
-  }
+  },
+  "flow": [
+    {
+      "agents": [
+        0
+      ],
+      "approval": "auto"
+    },
+    {
+      "agents": [
+        1
+      ],
+      "approval": "auto"
+    },
+    {
+      "agents": [
+        2
+      ],
+      "approval": "auto"
+    }
+  ]
 }
