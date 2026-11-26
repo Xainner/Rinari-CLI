@@ -13,6 +13,7 @@ a time per post, in order (the first way, D-28).
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any
 
 from rinari.agency.service import EDITABLE, AgencyError, _text, normalize_budget
@@ -46,7 +47,10 @@ TEAM_EDITABLE = (
     "budget",
     "manual",
     "project_id",
+    "folders",
 )
+#: Work folders a team can have outside its project («Arma tu equipo»).
+MAX_FOLDERS = 20
 #: The team's manual (its procedure, every post reads it): as long as an office message.
 MAX_MANUAL = 20000
 #: Where an agent's rule can deliver its result besides its run.
@@ -67,6 +71,27 @@ def normalize_done_when(raw: Any) -> list[str]:
         if text not in checks:
             checks.append(text)
     return checks
+
+
+def _folders(value: Any) -> list[str]:
+    """Absolute folder paths, without repeats. That they exist and are trusted is
+    the protocol layer's to check: it knows the owner's machine."""
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise AgencyError("folders must be a list of folder paths.")
+    seen: list[str] = []
+    for raw in value:
+        path = raw.strip()
+        if not path:
+            continue
+        if not (PurePosixPath(path).is_absolute() or PureWindowsPath(path).is_absolute()):
+            raise AgencyError(f"A work folder must be a full path: {path}")
+        if path not in seen:
+            seen.append(path)
+    if len(seen) > MAX_FOLDERS:
+        raise AgencyError(f"A team can have at most {MAX_FOLDERS} work folders.")
+    return seen
 
 
 def _project_id(value: Any) -> str | None:
@@ -150,6 +175,8 @@ class TeamService:
             "manual": _text(merged.get("manual"), "The manual", MAX_MANUAL),
             # Checked against the projects by the protocol layer, which knows them.
             "project_id": _project_id(merged.get("project_id")),
+            "folders": _folders(merged.get("folders")),
+            "setup": list(merged.get("setup") or []),
         }
 
     def create(self, raw: dict[str, Any], rinari_profile_id: str = "default") -> dict[str, Any]:
@@ -200,6 +227,16 @@ class TeamService:
             raise AgencyError("The chief must be one of the team's agents.")
         saved = self._repo.save(current["id"], {**current, **team, "updated_at": self._clock.now()})
         self._assign_orphans(saved)
+        self._changed(current["id"], "updated")
+        return self.view(saved)
+
+    def set_setup(self, team_id: Any, items: list[dict[str, Any]]) -> dict[str, Any]:
+        """What the team still needs to work as it was planned (`setup`). Set by the
+        Engine (made with «Arma tu equipo», then each piece resolved), never by a model."""
+        current = self.get(team_id)
+        saved = self._repo.save(
+            current["id"], {**current, "setup": list(items), "updated_at": self._clock.now()}
+        )
         self._changed(current["id"], "updated")
         return self.view(saved)
 

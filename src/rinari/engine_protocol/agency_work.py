@@ -121,10 +121,19 @@ class TeamWork:
                 when = describe(parse_schedule(task["schedule"]))
             except (ScheduleError, KeyError, TypeError):
                 when = ""
+            starts = task.get("flow") or {}
+            flow = self._repo.flow(starts.get("flow_id") or "") if starts else None
             out.append(
                 {
                     "id": task["id"],
                     "name": task["name"],
+                    "kind": task.get("kind") or "agent",
+                    # A «flow» routine starts this flow with no model (its agent is none).
+                    "flow": (
+                        {"id": flow["id"], "name": flow["name"], "input": starts.get("input") or ""}
+                        if flow is not None
+                        else None
+                    ),
                     "agent_id": task.get("agent_id"),
                     "agent": (agent or {}).get("name") or names.get(task.get("agent_id") or ""),
                     "schedule": task["schedule"],
@@ -200,6 +209,62 @@ class TeamWork:
         self._board._changed(team["id"], "routine")
         return task
 
+    def create_flow_routine(
+        self,
+        team: dict[str, Any],
+        name: Any,
+        schedule: Any,
+        flow: Any,
+        input_text: Any,
+        *,
+        enabled: bool = True,
+        paused_by: str | None = None,
+    ) -> dict[str, Any]:
+        """A routine that starts one of the team's flows with a fixed input, no model.
+
+        It is cheaper and steadier than a routine whose agent is asked to start
+        the flow: the steps are the work, nothing has to read an order first.
+        The same name again updates it.
+        """
+        if team.get("archived_at") is not None:
+            raise AgencyError("An archived team takes no routines.")
+        chosen = self._flow_named(team, flow)
+        raw = {
+            "name": _text(name, "The routine's name", 80, required=True),
+            "kind": "flow",
+            "schedule": schedule,
+            "prompt": "",
+            "flow": {
+                "team_id": team["id"],
+                "flow_id": chosen["id"],
+                "input": _text(input_text, "The input", MAX_STEP_TEXT),
+            },
+            "enabled": enabled,
+        }
+        same = [
+            task
+            for task in self._board._team_rules(team["id"])
+            if task.get("kind") == "flow"
+            and (task.get("name") or "").lower() == raw["name"].lower()
+        ]
+        schedules = self._services.schedules
+        if same:
+            patch = {key: raw[key] for key in ("schedule", "flow")}
+            task = schedules.update(same[0]["id"], patch)
+            change = "updated"
+        else:
+            task = schedules.create(raw)
+            change = "created"
+        if not enabled and paused_by:
+            self._services.ctx.schedule_repo.set_enabled(
+                task["id"], False, self._clock.now(), paused_by=paused_by
+            )
+        self._turns.emit_external(
+            event("schedule.changed", {"task_id": task["id"], "change": change})
+        )
+        self._board._changed(team["id"], "routine")
+        return task
+
     def routines_list(self, params: dict[str, Any]) -> dict[str, Any]:
         team = self._team(params.get("team_id"))
         return {"routines": self.routines(team["id"])}
@@ -210,13 +275,22 @@ class TeamWork:
 
         team = self._team(params.get("team_id"))
         try:
-            task = self.create_routine(
-                team,
-                params.get("agent_id"),
-                params.get("name"),
-                params.get("schedule"),
-                params.get("prompt"),
-            )
+            if params.get("flow_id") is not None:
+                task = self.create_flow_routine(
+                    team,
+                    params.get("name"),
+                    params.get("schedule"),
+                    params.get("flow_id"),
+                    params.get("input"),
+                )
+            else:
+                task = self.create_routine(
+                    team,
+                    params.get("agent_id"),
+                    params.get("name"),
+                    params.get("schedule"),
+                    params.get("prompt"),
+                )
         except (AgencyError, ScheduleError, ScheduledTaskError) as exc:
             raise EngineProtocolError(INVALID_PARAMS, str(exc)) from None
         return {"routine": next(r for r in self.routines(team["id"]) if r["id"] == task["id"])}
@@ -296,13 +370,34 @@ class TeamWork:
                     return flow
         raise AgencyError(f"No flow named {which} in the team «{team['name']}».")
 
+    def flow_name(self, flow_id: Any) -> str:
+        flow = self._repo.flow(flow_id) if isinstance(flow_id, str) else None
+        return flow["name"] if flow is not None else ""
+
     def start(
         self, team: dict[str, Any], which: Any, input_text: Any, *, started_by: str | None = None
     ) -> dict[str, Any]:
-        """Start a run of a flow: its first step's errands go on the board."""
+        """Start a run of a flow: its first step's errands go on the board.
+
+        Not while an agent of its steps still misses a piece the team was made
+        with (`setup`): it would fail at that step anyway, so the owner is told
+        what is left instead.
+        """
         if team.get("archived_at") is not None:
             raise AgencyError("An archived team runs no flows.")
         flow = self._flow_named(team, which)
+        doers = {agent_id for step in flow["steps"] for agent_id in step["agents"]}
+        missing = [
+            item
+            for item in team.get("setup") or []
+            if item.get("status") == "pending" and item.get("agent_id") in doers
+        ]
+        if missing:
+            names = sorted({self._board._author(item["agent_id"]) for item in missing})
+            raise AgencyError(
+                f"The flow «{flow['name']}» waits for what {', '.join(names)} still need "
+                "(the team's «To get started» list)."
+            )
         now = self._clock.now()
         run_id = self._services.ctx.ids.new("flowrun")
         run = self._repo.save_flow_run(

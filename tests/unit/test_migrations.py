@@ -170,6 +170,7 @@ def test_migrate_fresh_database_applies_all(db):
         70,
         71,
         72,
+        73,
     ]
     assert _table_names(db) == TABLES_AFTER_MIGRATIONS
 
@@ -178,7 +179,7 @@ def test_migrate_is_idempotent(db):
     runner = MigrationRunner(db, FakeClock())
     runner.migrate()
     assert runner.migrate() == []
-    assert runner.current_version() == 72
+    assert runner.current_version() == 73
 
 
 def _previous_home_migrations(tmp_path: Path, upto: int) -> Path:
@@ -367,6 +368,7 @@ def test_a_home_migrated_by_the_voice_branch_gets_the_missing_migrations(db, tmp
         70,
         71,
         72,
+        73,
     ]
     columns = {row["name"] for row in db.query("PRAGMA table_info(sessions)")}
     assert "pinned_at" in columns
@@ -418,6 +420,7 @@ def test_a_home_that_applied_the_old_numbers_is_not_migrated_twice(db, tmp_path)
         70,
         71,
         72,
+        73,
     ]
     recorded = {row["version"]: row["name"] for row in db.query("SELECT * FROM schema_migrations")}
     assert recorded[38] == "0038_session_pins" and recorded[40] == "0040_scheduled_tasks"
@@ -491,6 +494,7 @@ def test_stored_runtime_notes_are_marked_as_harness_not_as_the_owner(db, tmp_pat
         70,
         71,
         72,
+        73,
     ]
     origins = {m.id: m.origin for m in SessionMessageRepository(db).list("ses_h")}
     assert origins == {
@@ -654,7 +658,7 @@ def test_lineage_is_filled_for_forks_notes_and_scheduled_runs(db, tmp_path):
         "VALUES ('run_1', 'tsk_1', 'done', 'schedule', 'ses_run')"
     )
 
-    assert MigrationRunner(db, FakeClock()).migrate() == list(range(53, 73))
+    assert MigrationRunner(db, FakeClock()).migrate() == list(range(53, 74))
     repo = SessionRepository(db)
     fork, note, run, plain = (repo.get(i) for i in ("ses_fork", "ses_note", "ses_run", "ses_plain"))
     assert (fork.parent_session_id, fork.lineage_kind) == ("ses_mother", "fork")

@@ -23,11 +23,14 @@ from rinari.schedule.rules import (
     resolve_after,
 )
 
-KINDS = ("agent", "reminder", "command", "tool")
+KINDS = ("agent", "reminder", "command", "tool", "flow")
 # A «command» task (plan 0.4.0 #50) runs without the model: zero tokens.
 # A «tool» task (Rinari Agency, permanent rules) calls a connector tool with
 # fixed arguments, also without the model, and drops the result somewhere.
 TOOL_ON_RESULT = ("nothing", "notify", "agent", "deliver")
+# A «flow» task (Rinari Agency, «Arma tu equipo») starts one of a team's flows
+# with a fixed input, also without the model: the flow's steps do the work.
+MAX_FLOW_INPUT = 8000
 MAX_TOOL_ARGUMENTS = 8000
 MAX_PER_DAY = 1000
 #: In a delivery's arguments, replaced by the text the first tool returned.
@@ -125,6 +128,22 @@ def _tool_call(raw: Any, what: str) -> dict[str, Any]:
             f"{what}: arguments must be under {MAX_TOOL_ARGUMENTS} characters."
         )
     return {"server": server.strip(), "tool": tool.strip(), "arguments": arguments}
+
+
+def _flow(raw: Any) -> dict[str, Any]:
+    """What a «flow» task starts: `{team_id, flow_id, input}`."""
+    if not isinstance(raw, dict):
+        raise ScheduledTaskError("A flow task needs its team and flow.")
+    team_id = raw.get("team_id")
+    flow_id = raw.get("flow_id")
+    if not isinstance(team_id, str) or not team_id.strip():
+        raise ScheduledTaskError("A flow task needs its team (team_id).")
+    if not isinstance(flow_id, str) or not flow_id.strip():
+        raise ScheduledTaskError("A flow task needs its flow (flow_id).")
+    text = raw.get("input") or ""
+    if not isinstance(text, str) or len(text) > MAX_FLOW_INPUT:
+        raise ScheduledTaskError(f"A flow's input must be text up to {MAX_FLOW_INPUT} characters.")
+    return {"team_id": team_id.strip(), "flow_id": flow_id.strip(), "input": text.strip()}
 
 
 def _tool(raw: Any) -> dict[str, Any]:
@@ -233,7 +252,7 @@ class ScheduleService:
             raise ScheduledTaskError(f"The name must be 1..{MAX_NAME} characters.")
         kind = merged.get("kind", "agent")
         if kind not in KINDS:
-            raise ScheduledTaskError("Kind must be agent, reminder, command or tool.")
+            raise ScheduledTaskError("Kind must be agent, reminder, command, tool or flow.")
         try:
             # Relative to now only when the schedule itself is being set.
             if "schedule" in raw:
@@ -246,12 +265,13 @@ class ScheduleService:
             raise ScheduledTaskError(f"The prompt must be text up to {MAX_PROMPT} characters.")
         command = _command(merged.get("command")) if kind == "command" else None
         tool = _tool(merged.get("tool")) if kind == "tool" else None
+        flow = _flow(merged.get("flow")) if kind == "flow" else None
         watch = _watch(merged.get("watch"))
         if watch is not None and kind == "reminder":
             raise ScheduledTaskError("A reminder cannot watch a folder.")
         # A command or tool task needs no prompt; with on_result=agent the
         # prompt is what to ask about the output.
-        if not prompt.strip() and kind not in ("command", "tool"):
+        if not prompt.strip() and kind not in ("command", "tool", "flow"):
             raise ScheduledTaskError("Say what to do (agent) or what to remind (reminder).")
         project_id = merged.get("project_id") or None
         if project_id is not None and (
@@ -323,6 +343,7 @@ class ScheduleService:
             "grants": grants,
             "command": command,
             "tool": tool,
+            "flow": flow,
             "watch": watch,
             "agent_id": agent_id,
             "target": target,

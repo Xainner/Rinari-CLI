@@ -1,9 +1,15 @@
 {
   "id": "content",
   "agents": [
-    {"permission_profile": "workspace"},
-    {"permission_profile": "workspace"},
-    {"permission_profile": "read-only"}
+    {
+      "permission_profile": "workspace"
+    },
+    {
+      "permission_profile": "workspace"
+    },
+    {
+      "permission_profile": "read-only"
+    }
   ],
   "texts": {
     "en": {
@@ -25,7 +31,30 @@
           "role": "Checks facts, names and figures",
           "instructions": "Check every fact, name, date and figure in the text you are given. Mark what is wrong, what you could not verify and where each correction comes from. Do not rewrite the style: only what is not true or not sure."
         }
-      ]
+      ],
+      "manual": "The Editor receives every request and turns it into a brief. The Writer drafts from the brief; the Fact checker checks every fact before the Editor delivers. Deliver the final text in the conversation unless the request says where it goes.",
+      "flow": {
+        "name": "Piece of content",
+        "description": "From a request to a text ready to publish.",
+        "steps": [
+          {
+            "name": "Brief",
+            "instructions": "Turn the request into a brief: audience, goal, format, length and tone."
+          },
+          {
+            "name": "Draft",
+            "instructions": "Write the draft the brief asks for."
+          },
+          {
+            "name": "Check",
+            "instructions": "Check every fact, name, date and figure in the draft and mark what is wrong or unsure."
+          },
+          {
+            "name": "Final text",
+            "instructions": "Apply the corrections and deliver the final text, saying what was assumed."
+          }
+        ]
+      }
     },
     "es": {
       "name": "Contenido",
@@ -46,7 +75,56 @@
           "role": "Comprueba datos, nombres y cifras",
           "instructions": "Comprueba cada dato, nombre, fecha y cifra del texto que te den. Marca lo que está mal, lo que no pudiste verificar y de dónde sale cada corrección. No reescribas el estilo: solo lo que no es cierto o no es seguro."
         }
-      ]
+      ],
+      "manual": "La Editora recibe cada encargo y lo convierte en un brief. El Redactor escribe el borrador a partir del brief; el Verificador comprueba cada dato antes de que la Editora entregue. Entrega el texto final en la conversación salvo que el encargo diga dónde va.",
+      "flow": {
+        "name": "Pieza de contenido",
+        "description": "De un encargo a un texto listo para publicar.",
+        "steps": [
+          {
+            "name": "Brief",
+            "instructions": "Convierte el encargo en un brief: público, objetivo, formato, extensión y tono."
+          },
+          {
+            "name": "Borrador",
+            "instructions": "Escribe el borrador que pide el brief."
+          },
+          {
+            "name": "Verificación",
+            "instructions": "Comprueba cada dato, nombre, fecha y cifra del borrador y marca lo que esté mal o no sea seguro."
+          },
+          {
+            "name": "Texto final",
+            "instructions": "Aplica las correcciones y entrega el texto final, diciendo qué se supuso."
+          }
+        ]
+      }
     }
-  }
+  },
+  "flow": [
+    {
+      "agents": [
+        0
+      ],
+      "approval": "auto"
+    },
+    {
+      "agents": [
+        1
+      ],
+      "approval": "auto"
+    },
+    {
+      "agents": [
+        2
+      ],
+      "approval": "auto"
+    },
+    {
+      "agents": [
+        0
+      ],
+      "approval": "auto"
+    }
+  ]
 }

@@ -128,6 +128,8 @@ _TEAM_COLUMNS = (
     "archived_at",
     "manual",
     "project_id",
+    "folders_json",
+    "setup_json",
 )
 _ERRAND_COLUMNS = (
     "team_id",
@@ -161,6 +163,8 @@ def _team(row: Any) -> dict[str, Any]:
     item = dict(row)
     item["connectors"] = json.loads(item.pop("connectors_json") or "[]")
     item["budget"] = json.loads(item.pop("budget_json") or "{}")
+    item["folders"] = json.loads(item.pop("folders_json", None) or "[]")
+    item["setup"] = json.loads(item.pop("setup_json", None) or "[]")
     return item
 
 
@@ -235,6 +239,8 @@ class TeamRepository:
             "archived_at": team.get("archived_at"),
             "manual": team.get("manual") or "",
             "project_id": team.get("project_id") or None,
+            "folders_json": json.dumps(list(team.get("folders") or [])),
+            "setup_json": json.dumps(list(team.get("setup") or []), sort_keys=True),
         }
         self._db.execute(
             f"""

@@ -385,6 +385,14 @@ class EngineServer:
         self._dispatcher.register("agency.flow.run.cancel", self._teams.work.flow_run_cancel)
         self._dispatcher.register("agency.resume", self._teams.resume_params)
         self._dispatcher.register("agency.chain.dismiss", self._teams.dismiss_stopped)
+        from rinari.engine_protocol.agency_plan import AgencyPlanner
+
+        self._planner = AgencyPlanner(self)
+        self._dispatcher.register("agency.team.draft", self._planner.draft)
+        self._dispatcher.register("agency.team.check", self._planner.check)
+        self._dispatcher.register("agency.team.apply", self._planner.apply)
+        self._dispatcher.register("agency.team.setup.get", self._planner.setup_get)
+        self._dispatcher.register("agency.team.setup.resolve", self._planner.setup_resolve)
         self._dispatcher.register("agency.settings.get", self._agency.settings_get)
         self._dispatcher.register("agency.settings.set", self._agency.settings_set)
         from rinari.engine_protocol.resume import ResumeRunner
