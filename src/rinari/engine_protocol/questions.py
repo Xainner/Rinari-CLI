@@ -8,6 +8,25 @@ from rinari.shared.clock import now_iso
 from rinari.shared.errors import CancelledError
 from rinari.storage.records import SessionEventRecord
 
+MAX_ANSWER_CHARS = 8000
+
+
+def _valid_text(answer):
+    return isinstance(answer, str) and bool(answer.strip()) and len(answer) <= MAX_ANSWER_CHARS
+
+
+def _valid_answer(question, answer):
+    """One text per question; a multi-select question answers a list of picks."""
+    if not question.get("multi_select"):
+        return _valid_text(answer)
+    return (
+        isinstance(answer, list)
+        and 0 < len(answer) <= len(question.get("options") or []) + 1
+        and all(_valid_text(pick) for pick in answer)
+        and len(set(answer)) == len(answer)
+        and sum(len(pick) for pick in answer) <= MAX_ANSWER_CHARS
+    )
+
 
 class QuestionBroker:
     def __init__(self, services, active):
@@ -77,15 +96,12 @@ class QuestionBroker:
                 raise EngineProtocolError(INVALID_PARAMS, "Question belongs to another session.")
             status = params.get("status", "answered")
             answers = params.get("answers", {})
-            ids = {q["id"] for q in request["questions"]}
+            questions = {q["id"]: q for q in request["questions"]}
             if status not in ("answered", "skipped") or not isinstance(answers, dict):
                 raise EngineProtocolError(INVALID_PARAMS, "Invalid answer.")
             if status == "answered" and (
-                set(answers) != ids
-                or any(
-                    not isinstance(a, str) or not a.strip() or len(a) > 8000
-                    for a in answers.values()
-                )
+                set(answers) != set(questions)
+                or not all(_valid_answer(questions[k], a) for k, a in answers.items())
             ):
                 raise EngineProtocolError(
                     INVALID_PARAMS, "Answer every question or skip explicitly."

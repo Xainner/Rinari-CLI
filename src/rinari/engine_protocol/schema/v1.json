@@ -180,6 +180,9 @@
         "title": {
           "type": "string"
         },
+        "multi_select": {
+          "type": "boolean"
+        },
         "options": {
           "type": "array",
           "items": {
@@ -225,7 +228,17 @@
         "answers": {
           "type": "object",
           "additionalProperties": {
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            ]
           }
         },
         "offer": {
