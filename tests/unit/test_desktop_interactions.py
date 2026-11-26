@@ -185,7 +185,7 @@ def test_preview_failures(desktop, case):
         desktop._desktop.read(params)
 
 
-def question_wait(desktop):
+def question_wait(desktop, question=None):
     session = create(desktop)
     turn = _ActiveTurn("question-turn", session["id"], None, threading.Event())
     desktop._turns._turns[turn.turn_id] = turn
@@ -199,7 +199,8 @@ def question_wait(desktop):
                 desktop._turns._activity_cb(turn),
                 {
                     "questions": [
-                        {
+                        question
+                        or {
                             "id": "choice",
                             "title": "Next?",
                             "options": [{"label": "Plan", "recommended": True}],
@@ -277,6 +278,72 @@ def test_question_cancellation_and_invalid_answers(desktop):
         token.cancel()
         thread.join(2)
         turn.done.set()
+
+
+MULTI = {
+    "id": "choice",
+    "title": "What should the video show?",
+    "multi_select": True,
+    "options": [{"label": "Cats"}, {"label": "Dogs, big ones"}, {"label": "Birds"}],
+}
+
+
+@pytest.mark.parametrize(
+    "answers",
+    [{"choice": ["Cats", "Dogs, big ones"]}, {"choice": ["Birds", "Turtles too"]}],
+)
+def test_multi_select_question_answers_a_list(desktop, answers):
+    session, turn, token, thread, result, request = question_wait(desktop, MULTI)
+    try:
+        assert request["questions"][0]["multi_select"] is True
+        desktop._turns.questions.resolve(
+            {"session_id": session["id"], "request_id": request["request_id"], "answers": answers}
+        )
+        thread.join(2)
+        assert result["value"]["answers"] == answers
+        assert desktop._turns.questions.list(session["id"])["questions"][0]["answers"] == answers
+    finally:
+        token.cancel()
+        thread.join(2)
+        turn.done.set()
+
+
+@pytest.mark.parametrize(
+    "question,answer",
+    [
+        (MULTI, "Cats"),  # a multi-select question answers a list
+        (MULTI, []),
+        (MULTI, ["Cats", "Cats"]),
+        (MULTI, ["Cats", " "]),
+        (MULTI, ["a", "b", "c", "d", "e"]),  # more picks than options plus Other
+        (None, ["Plan"]),  # a single-choice question answers one text
+    ],
+)
+def test_question_answer_shape_follows_the_question(desktop, question, answer):
+    session, turn, token, thread, _result, request = question_wait(desktop, question)
+    try:
+        with pytest.raises(EngineProtocolError):
+            desktop._turns.questions.resolve(
+                {
+                    "session_id": session["id"],
+                    "request_id": request["request_id"],
+                    "answers": {"choice": answer},
+                }
+            )
+        assert thread.is_alive()
+    finally:
+        token.cancel()
+        thread.join(2)
+        turn.done.set()
+
+
+def test_user_ask_offers_multi_select():
+    from rinari.tools.native.questions import question_tools
+
+    tool = question_tools()[0]
+    question = tool.input_schema["properties"]["questions"]["items"]
+    assert question["properties"]["multi_select"] == {"type": "boolean"}
+    assert "multi_select" in tool.description
 
 
 def test_plan_tool_asks_and_resumes_real_agent_loop(desktop, monkeypatch):

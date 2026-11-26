@@ -28,6 +28,8 @@ def question_tools():
             description=(
                 "Ask the user 1-3 necessary clarification questions, especially while planning. "
                 "Offer meaningful options and allow free text. Wait for an explicit response. "
+                "Set multi_select when the user may pick several options; saying so in the "
+                "title alone does not let them. "
                 "Skipped questions are not approval or consent. Do not use for tool permissions."
             ),
             input_schema={
@@ -44,6 +46,7 @@ def question_tools():
                             "properties": {
                                 "id": {"type": "string", "minLength": 1, "maxLength": 80},
                                 "title": {"type": "string", "minLength": 1, "maxLength": 1000},
+                                "multi_select": {"type": "boolean"},
                                 "options": {
                                     "type": "array",
                                     "maxItems": 6,
